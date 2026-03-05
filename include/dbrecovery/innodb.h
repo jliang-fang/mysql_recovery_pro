@@ -8,12 +8,8 @@
 namespace dbrecovery {
 namespace innodb {
 
-// Minimal stub for RecoveryCache (v2 dependency)
-class RecoveryCache {
-public:
-    void add_page(uint64_t page_id, const uint8_t* data) {}
-};
+// ✅ 已移除：RecoveryCache 现在统一定义于 recovery_cache.hpp
+// 此文件仅保留全局工具函数（如页大小常量、类型转换）
 
 } // namespace innodb
 } // namespace dbrecovery
-

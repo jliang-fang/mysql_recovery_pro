@@ -2,6 +2,8 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
+#include <optional>
 #include "dbrecovery/innodb/v2/types.hpp"
 
 namespace dbrecovery::innodb {
@@ -15,9 +17,61 @@ struct RecoveryCache {
     struct PageData {
         uint32_t page_offset;
         std::vector<uint8_t> data;
-        bool is_modified;
+        bool is_modified = false;
+        
+        PageData() : page_offset(0), data(), is_modified(false) {}
+        PageData(uint32_t offset, const std::vector<uint8_t>& buf)
+            : page_offset(offset), data(buf), is_modified(false) {}
     };
+    
     std::unordered_map<uint32_t, PageData> page_cache;
+    
+    // ✅ 新增：获取页数据（若不存在则返回空）
+    [[nodiscard]] std::optional<PageData> get_page(uint32_t page_offset) const {
+        auto it = page_cache.find(page_offset);
+        if (it != page_cache.end()) {
+            return it->second;
+        }
+        return std::nullopt;
+    }
+    
+    // ✅ 新增：添加或更新页数据
+    void add_page(uint32_t page_offset, const uint8_t* data, size_t size) {
+        if (!data || size == 0) return;
+        
+        PageData pd{page_offset, std::vector<uint8_t>(data, data + size)};
+        page_cache[page_offset] = std::move(pd);
+    }
+    
+    // ✅ 新增：标记页为已修改
+    void mark_modified(uint32_t page_offset) {
+        auto it = page_cache.find(page_offset);
+        if (it != page_cache.end()) {
+            it->second.is_modified = true;
+        }
+    }
+    
+    // ✅ 新增：刷新脏页（返回脏页列表）
+    [[nodiscard]] std::vector<std::pair<uint32_t, PageData>> flush_dirty_pages() {
+        std::vector<std::pair<uint32_t, PageData>> dirty;
+        for (auto it = page_cache.begin(); it != page_cache.end();) {
+            if (it->second.is_modified) {
+                dirty.emplace_back(it->first, std::move(it->second));
+                it = page_cache.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        return dirty;
+    }
+    
+    // ✅ 新增：应用 Redo 日志条目（占位实现）
+    void apply_redo_log_entry(uint64_t lsn, uint32_t space_id, uint32_t page_no,
+                              const uint8_t* log_data, size_t log_size) {
+        // TODO: 实现具体 redo 应用逻辑
+        (void)lsn; (void)space_id; (void)page_no;
+        (void)log_data; (void)log_size;
+    }
 };
 
 } // namespace dbrecovery::innodb
