@@ -1,0 +1,85 @@
+#pragma once
+
+#include <string>
+#include "mach_read.hpp"
+#include <vector>
+#include <optional>
+#include <zlib.h>
+
+namespace dbrecovery::innodb {
+
+
+class SDIManager {
+public:
+    struct SDIHeader {
+        uint32_t type;
+        uint64_t id;
+        uint32_t uncompressed_len;
+        uint32_t compressed_len;
+    };
+
+    static std::optional<std::string> extract_sdi_json(const uint8_t* payload, size_t payload_len) {
+        if (payload_len < 20) return std::nullopt;
+
+        // ✅ 正确读取 SDI 头部（小端序）
+        SDIHeader hdr{};
+        hdr.type             = dbrecovery::innodb::read_le<uint32_t>(payload);
+        hdr.id               = dbrecovery::innodb::read_le<uint64_t>(payload + 4);
+        hdr.uncompressed_len = dbrecovery::innodb::read_le<uint32_t>(payload + 12);
+        hdr.compressed_len   = dbrecovery::innodb::read_le<uint32_t>(payload + 16);
+
+        // ✅ 防御性长度校验
+        constexpr size_t MAX_SDI_SIZE = 16 * 1024 * 1024; // 16 MB
+        if (hdr.uncompressed_len == 0 || hdr.compressed_len > hdr.uncompressed_len ||
+            hdr.uncompressed_len > MAX_SDI_SIZE) {
+            return std::nullopt;
+        }
+
+        const uint8_t* raw_data = payload + 20;
+        size_t data_len = hdr.compressed_len > 0 ? hdr.compressed_len : hdr.uncompressed_len;
+
+        if (payload_len < 20 + data_len) return std::nullopt;
+
+        // ✅ 正确处理 raw deflate（MySQL SDI 使用 -15 window bits）
+        std::vector<uint8_t> decompressed(hdr.uncompressed_len);
+        
+        z_stream strm = {};
+        strm.next_in = const_cast<Bytef*>(raw_data);
+        strm.avail_in = static_cast<uInt>(data_len);
+        strm.next_out = decompressed.data();
+        strm.avail_out = static_cast<uInt>(decompressed.size());
+
+        // ✅ -15 表示 raw deflate（无 zlib 头）
+        int ret = inflateInit2(&strm, -15);
+        if (ret != Z_OK) return std::nullopt;
+
+        do {
+            ret = inflate(&strm, Z_NO_FLUSH);
+            if (ret == Z_BUF_ERROR) {
+                // ✅ 动态扩展缓冲区（防 DoS）
+                size_t new_size = std::min(decompressed.size() * 2, MAX_SDI_SIZE);
+                if (new_size <= decompressed.size()) break;
+                decompressed.resize(new_size);
+                strm.next_out = decompressed.data() + strm.total_out;
+                strm.avail_out = static_cast<uInt>(decompressed.size() - strm.total_out);
+            } else if (ret != Z_OK && ret != Z_STREAM_END) {
+                inflateEnd(&strm);
+                return std::nullopt;
+            }
+        } while (ret != Z_STREAM_END);
+
+        decompressed.resize(strm.total_out);
+        inflateEnd(&strm);
+
+        // ✅ 压缩比校验（防 DoS）
+        if (data_len > 0 && decompressed.size() / data_len > 20) {
+            return std::nullopt;
+        }
+
+        return std::string(reinterpret_cast<const char*>(decompressed.data()),
+                           decompressed.size());
+    }
+    static dbrecovery::catalog::TableSchema parse_sdi_record(const uint8_t* payload, size_t payload_len);
+};
+
+} // namespace dbrecovery::innodb

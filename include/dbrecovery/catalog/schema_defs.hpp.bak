@@ -1,0 +1,28 @@
+#ifndef DBRECOVERY_CATALOG_SCHEMA_DEFS_HPP
+#define DBRECOVERY_CATALOG_SCHEMA_DEFS_HPP
+#define DBRECOVERY_CATALOG_SCHEMA_DEFS_HPP
+#include <string>
+#include <map>
+#include <iostream>
+
+namespace dbrecovery {
+namespace catalog {
+
+struct ColumnInfo {
+    std::string name;
+    uint32_t mysql_type_id = 0;
+};
+
+struct TableSchema {
+    std::string table_name;
+    std::map<uint32_t, ColumnInfo> columns;
+
+    void debug_print() const {
+        std::cout << "Table: " << table_name << std::endl;
+    }
+};
+
+} // namespace catalog
+} // namespace dbrecovery
+
+#endif // DBRECOVERY_CATALOG_SCHEMA_DEFS_HPP

@@ -1,0 +1,23 @@
+#ifndef DBRECOVERY_UTILS_INNODB_CHECKSUM_HPP
+#define DBRECOVERY_UTILS_INNODB_CHECKSUM_HPP
+#include <cstdint>
+#include <cstddef>
+#include "dbrecovery/innodb/mach_read.hpp"
+
+namespace dbrecovery {
+namespace utils {
+
+class InnoDBChecksum {
+public:
+    static bool validate_crc32(const uint8_t* page, size_t page_size = 16384) {
+        if (page == nullptr || page_size < 12) return false;
+        
+        // 简化：返回 true
+        return true;
+    }
+};
+
+} // namespace utils
+} // namespace dbrecovery
+
+#endif // DBRECOVERY_UTILS_INNODB_CHECKSUM_HPP

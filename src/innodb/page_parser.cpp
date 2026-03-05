@@ -1,0 +1,136 @@
+#include "dbrecovery/innodb/page_parser.hpp"
+#include <cstring>
+#include <stdexcept>
+#include <iostream>
+
+namespace DBRecovery {
+namespace InnoDB {
+
+using namespace dbrecovery::innodb;
+
+PageParser::PageParser(const uint8_t* buffer, size_t size)
+    : buffer_(buffer), size_(size), page_type_(0), flags_(0), page_level_(0),
+      n_dir_slots_(0), heap_top_(0), n_heap_(0), free_offset_(0),
+      fil_prev_(0xFFFFFFFF), fil_next_(0xFFFFFFFF) {
+    if (!buffer_ || size_ < 38 + 16) { // 至少包含 FIL_HEADER + PAGE_HEADER 基础部分
+        throw std::runtime_error("Invalid page buffer: too small");
+    }
+}
+
+bool PageParser::parse_header() {
+    // ✅ Step 1: 解析 FIL_HEADER (offset 0–37)
+    fil_prev_ = read_le<uint32_t>(buffer_ + 0);
+    fil_next_ = read_le<uint32_t>(buffer_ + 4);
+    fil_lsn_  = read_le<uint64_t>(buffer_ + 8);   // LSN
+    page_type_ = read_le<uint16_t>(buffer_ + 12); // 注意：FIL_PAGE_TYPE 是 uint16_t！
+    space_id_ = read_le<uint32_t>(buffer_ + 16);
+    page_offset_ = read_le<uint32_t>(buffer_ + 20);
+
+    // ✅ Step 2: 校验页类型（仅支持索引页）
+    if (page_type_ != FIL_PAGE_INDEX && page_type_ != FIL_PAGE_UNDO_LOG) {
+        return false; // 非 B+ 树页，跳过
+    }
+
+    // ✅ Step 3: 解析 PAGE_HEADER (offset 38)
+    const uint8_t* header = buffer_ + 38;
+    n_dir_slots_ = read_le<uint16_t>(header + 0);
+    heap_top_    = read_le<uint16_t>(header + 2);
+    n_heap_      = read_le<uint16_t>(header + 4) & 0x7FFF; // 最高位为 REC_INFO_NEW_CHUNK_FLAG
+    free_offset_ = read_le<uint16_t>(header + 6);
+
+    // ✅ Step 4: 解析 flags (offset 24 in FIL_HEADER)
+    flags_ = read_le<uint16_t>(buffer_ + 24);
+    page_level_ = (flags_ >> 12) & 0x0F; // 实际仅占 4 bits
+
+    return true;
+}
+
+bool PageParser::validate_page_chain() const {
+    // ✅ 校验页链表闭环（B+ Tree 要求）
+    // 注意：实际闭环需跨页校验，此处仅验证当前页的 prev/next 是否指向有效范围
+    if (fil_prev_ != 0xFFFFFFFF && fil_next_ != 0xFFFFFFFF) {
+        // 非首尾页：prev < current < next（逻辑顺序）
+        if (fil_prev_ >= page_offset_ || fil_next_ <= page_offset_) {
+            std::cerr << "[WARN] Page chain broken: prev=" << fil_prev_
+                      << ", current=" << page_offset_
+                      << ", next=" << fil_next_ << "\n";
+            return false;
+        }
+    } else if (fil_prev_ != 0xFFFFFFFF) {
+        // 尾页：prev < current
+        if (fil_prev_ >= page_offset_) {
+            std::cerr << "[WARN] Tail page chain broken: prev=" << fil_prev_
+                      << ", current=" << page_offset_ << "\n";
+            return false;
+        }
+    } else if (fil_next_ != 0xFFFFFFFF) {
+        // 首页：current < next
+        if (page_offset_ >= fil_next_) {
+            std::cerr << "[WARN] Head page chain broken: current=" << page_offset_
+                      << ", next=" << fil_next_ << "\n";
+            return false;
+        }
+    }
+    return true;
+}
+
+std::vector<Record> PageParser::parse_records() const {
+    std::vector<Record> records;
+
+    if (!buffer_ || n_heap_ == 0 || heap_top_ < 38 + 16) {
+        return records; // 空页或无效堆
+    }
+
+    // ✅ Step 1: 定位记录起始点（INFIMUM 记录）
+    const uint8_t* rec = buffer_ + 38 + 16; // PAGE_HEADER 后第一个记录位置
+
+    bool found_infimum = false;
+    bool found_supremum = false;
+
+    // ✅ Step 2: 遍历记录链表
+    while (true) {
+        // 检查是否超出堆顶或页边界
+        if (rec >= buffer_ + heap_top_ || rec + 5 > buffer_ + size_) break;
+
+        uint16_t rec_offset = static_cast<uint16_t>(rec - buffer_);
+        uint8_t info_bits = *rec;
+        bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
+
+        // 提取 next_record 偏移（相对页起始）
+        uint16_t next_rec_offset = read_le<uint16_t>(rec + 1);
+        
+        // ✅ 检查是否为 SUPREMUM 标记
+        if (next_rec_offset == 0xFFFF) {
+            found_supremum = true;
+            break; // 结束遍历
+        }
+
+        // ✅ 检查是否为 INFIMUM 记录（固定偏移）
+        if (rec_offset == 38 + 16) {
+            found_infimum = true;
+        }
+
+        Record rec_info;
+        rec_info.offset = rec_offset;
+        rec_info.next_offset = next_rec_offset;
+        rec_info.is_deleted = is_deleted;
+
+        records.push_back(rec_info);
+
+        // 移动到下一条记录
+        rec = buffer_ + next_rec_offset;
+    }
+
+    // ✅ Step 3: 校验 infimum/supremum 完整性
+    if (!found_infimum) {
+        std::cerr << "[WARN] Missing INFIMUM record in page " << page_offset_ << "\n";
+    }
+    if (!found_supremum) {
+        std::cerr << "[WARN] Missing SUPREMUM record in page " << page_offset_ << "\n";
+    }
+
+    return records;
+}
+
+} // namespace InnoDB
+} // namespace DBRecovery

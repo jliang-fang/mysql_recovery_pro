@@ -1,0 +1,18 @@
+#ifndef DBRECOVERY_ENGINE_PARALLEL_SCANNER_HPP
+#define DBRECOVERY_ENGINE_PARALLEL_SCANNER_HPP
+#include <vector>
+#include <string>
+#include "dbrecovery/engine/row_decoder.hpp"
+
+namespace dbrecovery {
+namespace engine {
+
+class ParallelScanner {
+public:
+    std::string get_row_string(const std::vector<FieldValue>& row);
+};
+
+} // namespace engine
+} // namespace dbrecovery
+
+#endif // DBRECOVERY_ENGINE_PARALLEL_SCANNER_HPP

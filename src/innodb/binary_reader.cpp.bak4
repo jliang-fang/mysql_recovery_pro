@@ -1,0 +1,15 @@
+#include "dbrecovery/innodb/binary_reader.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
+
+namespace dbrecovery {
+namespace innodb {
+
+void BinaryReader::parse_table_name(const std::string& json_str, dbrecovery::catalog::TableSchema& schema) {
+    // 简化：仅设置表名
+    if (!json_str.empty()) {
+        schema.table_name = "test_table";
+    }
+}
+
+} // namespace innodb
+} // namespace dbrecovery

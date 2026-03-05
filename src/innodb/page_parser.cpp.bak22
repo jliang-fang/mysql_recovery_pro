@@ -1,0 +1,46 @@
+#include "dbrecovery/innodb/page_parser.hpp"
+
+namespace DBRecovery {
+namespace InnoDB {
+
+// ✅ MachRead 前置声明（避免循环依赖）
+struct MachRead {
+    template<typename T>
+    static inline T read_le(const uint8_t* ptr, size_t offset = 0) {
+        T val = 0;
+        for (size_t i = 0; i < sizeof(T); ++i)
+            reinterpret_cast<uint8_t*>(&val)[sizeof(T)-1-i] = *(ptr + offset + i);
+        return val;
+    }
+};
+
+PageParser::PageParser(const uint8_t* buffer, size_t size)
+    : buffer_(buffer), size_(size) {}
+
+bool PageParser::parse_header() {
+  if (!buffer_ || size_ < 38) return false;
+  
+  // 简化：仅读取页类型
+  page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_ + 0);
+  flags_ = dbrecovery::innodb::read_le<uint16_t>(buffer_ + 24);
+  page_level_ = (flags_ >> 12) & 0x0FFF;
+  
+  return true;
+}
+
+std::vector<Record> PageParser::parse_records() const {
+  std::vector<Record> records;
+  // 简化：返回空记录列表
+  return records;
+}
+
+const uint8_t* PageParser::data() const {
+  return buffer_;
+}
+
+size_t PageParser::size() const {
+  return size_;
+}
+
+} // namespace innodb
+} // namespace dbrecovery

@@ -1,0 +1,80 @@
+#ifndef DBRECOVERY_INNODB_PAGE_PARSER_HPP
+#define DBRECOVERY_INNODB_PAGE_PARSER_HPP
+
+#include <cstdint>
+#include <vector>
+#include <string>
+#include "innodb/constants.hpp"
+
+namespace DBRecovery {
+namespace InnoDB {
+
+struct PageHeader {
+    uint16_t page_type;          // ✅ 页类型（PageType）
+    uint16_t flags;         // ✅ 标志位
+    uint16_t page_level:12;      // ✅ B+树高度
+    uint32_t n_dir_slots:12;// ✅ 目录槽位数
+};
+struct Record {
+    uint32_t offset;  // ✅ 记录在页中的偏移
+    uint16_t len;     // ✅ 记录长度
+    std::vector<uint8_t> data; // ✅ 记录数据（简化版）
+};
+
+class PageParser {
+public:
+    // 构造函数：从原始页数据构造解析器
+    explicit PageParser(const std::vector<uint8_t>& data);
+
+    // 解析页头信息
+    bool parse_header();
+
+    // 解析记录（包括系统记录和用户记录）
+    bool parse_records();
+
+    // 获取页类型
+    uint16_t get_page_type() const { return page_type_; }
+
+    // 获取页偏移量（页号）
+    uint32_t get_page_number() const { return page_number_; }
+
+    // 获取记录数量（不含infimum/supremum）
+    size_t get_user_record_count() const { return user_records_.size(); }
+
+    // 获取所有用户记录的偏移列表
+    const std::vector<uint16_t>& get_user_record_offsets() const { return user_records_; }
+
+private:
+    // 页数据（原始字节）
+    std::vector<uint8_t> data_;
+
+    // 解析结果字段
+    uint16_t page_type_{0};           // 页类型（如FIL_PAGE_DATA, FIL_PAGE_INDEX等）
+    uint32_t page_number_{0};         // 当前页的物理页号（从页头偏移4字节读取）
+    std::vector<uint16_t> user_records_; // 用户记录偏移列表
+
+    // 辅助函数：读取小端整数
+    template<typename T>
+    T read_le(const uint8_t* ptr) const {
+        T val = 0;
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            val |= static_cast<T>(ptr[i]) << (8 * i);
+        }
+        return val;
+    }
+
+    // 辅助函数：检查页数据完整性（长度是否为16KB）
+    bool is_valid_page_size() const {
+        return data_.size() == INNODB_PAGE_SIZE;
+    }
+};
+struct Record {
+    uint32_t offset;  // ✅ 记录在页中的偏移
+    uint16_t len;     // ✅ 记录长度
+    std::vector<uint8_t> data; // ✅ 记录数据（简化版）
+};
+
+} // namespace innodb
+} // namespace dbrecovery
+
+#endif // DBRECOVERY_INNODB_PAGE_PARSER_HPP

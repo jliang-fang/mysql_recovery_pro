@@ -1,0 +1,117 @@
+#ifndef DBRECOVERY_RECOVERY_BLOB_RECONSTRUCTOR_HPP
+#define DBRECOVERY_RECOVERY_BLOB_RECONSTRUCTOR_HPP
+
+#include <cstdint>
+#include <vector>
+#include <string>
+#include <memory>
+#include "dbrecovery/recovery/common.hpp"
+
+namespace dbrecovery {
+namespace recovery {
+
+/**
+ * @brief BlobReconstructor 负责从 WAL 或检查点中重建大对象（BLOB）数据。
+ *
+ * 该类提供接口用于：
+ * - 注册 BLOB 片段（按 offset 和长度）
+ * - 合并片段生成完整 BLOB
+ * - 支持断点续传与校验
+ */
+class BlobReconstructor {
+public:
+    using BlobId = uint64_t;
+    using Offset = uint64_t;
+    using Length = uint32_t;
+    using DataChunk = std::vector<uint8_t>;
+
+    /**
+     * @brief 构造函数
+     */
+    explicit BlobReconstructor(BlobId blob_id);
+
+    /**
+     * @brief 析构函数
+     */
+    ~BlobReconstructor();
+
+    // 禁止拷贝
+    BlobReconstructor(const BlobReconstructor&) = delete;
+    BlobReconstructor& operator=(const BlobReconstructor&) = delete;
+
+    // 允许移动
+    BlobReconstructor(BlobReconstructor&&) noexcept;
+    BlobReconstructor& operator=(BlobReconstructor&&) noexcept;
+
+    /**
+     * @brief 添加一个 BLOB 片段（按 offset 和数据）
+     *
+     * @param offset 片段在完整 BLOB 中的起始偏移
+     * @param data   片段内容
+     * @return true  成功添加
+     * @return false 失败（如 offset 冲突、长度溢出等）
+     */
+    bool AddChunk(Offset offset, const DataChunk& data);
+
+    /**
+     * @brief 添加一个 BLOB 片段（按 offset 和指针+长度）
+     *
+     * @param offset 片段在完整 BLOB 中的起始偏移
+     * @param ptr    指向数据的指针（不拥有所有权，调用者需保证生命周期）
+     * @param len    数据长度
+     * @return true  成功添加
+     * @return false 失败
+     */
+    bool AddChunk(Offset offset, const uint8_t* ptr, Length len);
+
+    /**
+     * @brief 检查是否已收集完整 BLOB（即无空洞）
+     *
+     * @param expected_size 预期总大小（若为 0，则仅检查连续性）
+     * @return true 若当前数据构成完整且连续的 BLOB
+     */
+    bool IsComplete(Length expected_size = 0) const;
+
+    /**
+     * @brief 获取重建后的完整 BLOB 数据
+     *
+     * @return DataChunk 完整 BLOB；若未完成则为空
+     */
+    DataChunk GetBlob() const;
+    /**
+     * @brief 重构 BLOB 数据
+     *
+     * @param data   BLOB 原始数据指针
+     * @param len    BLOB 数据长度
+     * @return std::optional<std::vector<uint8_t>> 重构后的 BLOB 数据，失败返回空
+     */
+    std::optional<std::vector<uint8_t>> reconstruct(const uint8_t* data, size_t len);
+
+    /**
+     * @brief 获取当前已收集的总字节数
+     */
+    Length GetCurrentSize() const noexcept { return current_size_; }
+
+    /**
+     * @brief 获取 BLOB ID
+     */
+    BlobId GetBlobId() const noexcept { return blob_id_; }
+
+private:
+    struct ChunkInfo {
+        Offset offset;
+        Length length;
+        DataChunk data;
+    };
+
+    // 按 offset 排序的片段列表（内部使用）
+    std::vector<ChunkInfo> chunks_;
+
+    BlobId blob_id_;
+    Length current_size_ = 0;
+};
+
+} // namespace recovery
+} // namespace dbrecovery
+
+#endif // DBRECOVERY_RECOVERY_BLOB_RECONSTRUCTOR_HPP

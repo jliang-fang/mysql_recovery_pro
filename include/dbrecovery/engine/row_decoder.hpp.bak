@@ -1,0 +1,238 @@
+#pragma once
+#include "dbrecovery/innodb/page_defs.hpp"
+#include <vector>
+#include <stdexcept>
+#include <optional>
+#include <string>
+#include <iostream> // for logging (if needed)
+#include <algorithm> // for std::count_if
+#include "field_decoder.hpp"
+#include "schema.hpp"
+
+namespace DBRecovery::InnoDB {
+
+// ✅ 正确 REC_INFO_FLAG_BITS_OFFSET（相对于 Record Header）
+constexpr size_t REC_INFO_FLAG_BITS_OFFSET = 5; // REC_N_OLD_NULLS_OFFSET + 1
+
+// 辅助函数：获取列的默认值（用于 Instant Add 列缺失时填充）
+std::optional<FieldValue> get_default_value(const Column& col) {
+    if (col.is_nullable && !col.has_default_value()) {
+        return std::nullopt; // NULL
+    }
+
+    if (!col.has_default_value()) {
+        switch (col.type) {
+            case Catalog::FieldType::TINYINT:
+            case Catalog::FieldType::SMALLINT:
+            case Catalog::FieldType::MEDIUMINT:
+            case Catalog::FieldType::INT:
+            case Catalog::FieldType::BIGINT: {
+                bool is_unsigned = col.flags & Catalog::ColumnFlag::UNSIGNED;
+                if (is_unsigned) return FieldValue{0ULL};
+                else             return FieldValue{0LL};
+            }
+            case Catalog::FieldType::FLOAT:
+            case Catalog::FieldType::DOUBLE: return FieldValue{0.0f};
+            case Catalog::FieldType::CHAR:
+            case Catalog::FieldType::VARCHAR:
+            case Catalog::FieldType::BLOB:
+            case Catalog::FieldType::TEXT:   return FieldValue{std::string{}};
+            default:                         return std::nullopt;
+        }
+    }
+
+    // 实际解析默认值
+    if (col.default_value.has_value()) {
+        const auto& dv = *col.default_value;
+        switch (col.type) {
+            case Catalog::FieldType::TINYINT:
+            case Catalog::FieldType::SMALLINT:
+            case Catalog::FieldType::MEDIUMINT:
+            case Catalog::FieldType::INT:
+            case Catalog::FieldType::BIGINT: {
+                bool is_unsigned = col.flags & Catalog::ColumnFlag::UNSIGNED;
+                try {
+                    if (is_unsigned) return FieldValue{std::stoull(dv)};
+                    else             return FieldValue{std::stoll(dv)};
+                } catch (...) { 
+                    // ✅ 正确：记录日志后返回空
+                    std::cerr << "Default value parse failed: " << dv << std::endl;
+                    return std::nullopt;
+                }
+            }
+            case Catalog::FieldType::FLOAT:
+            case Catalog::FieldType::DOUBLE: {
+                try {
+                    return FieldValue{std::stod(dv)};
+                } catch (...) {
+                    std::cerr << "Default value parse failed: " << dv << std::endl;
+                    return std::nullopt;
+                }
+            }
+            case Catalog::FieldType::CHAR:
+            case Catalog::FieldType::VARCHAR:
+            case Catalog::FieldType::BLOB:
+            case Catalog::FieldType::TEXT:   return FieldValue{dv};
+            default:                         return std::nullopt;
+        }
+    }
+
+    // 若列非空但无默认值 → 应抛出错误或使用隐式默认值（如0）
+    // 此处保守处理：返回空，由调用方决定是否报错
+    if (!col.is_nullable) {
+        throw std::runtime_error("Column is NOT NULL but has no default value: " + col.name);
+    }
+    
+    return std::nullopt;
+}
+
+class RowDecoder {
+public:
+    RowDecoder(const Schema& schema, const uint8_t* page_base, size_t page_size)
+        : schema_(schema), page_base_(page_base), page_size_(page_size) {}
+
+    // 解码一条记录，返回字段值向量
+    std::vector<FieldValue> decode_record(size_t origin) const;
+
+private:
+    const Schema& schema_;
+    const uint8_t* page_base_;
+    size_t page_size_;
+};
+
+std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
+    std::vector<FieldValue> result(schema_.columns.size(), FieldValue{});
+
+    // 获取记录起始指针
+    const uint8_t* rec_ptr = page_base_ + origin;
+    
+    // 检查是否越界
+    if (rec_ptr >= page_base_ + page_size_) {
+        return result; // 空结果或抛异常（此处返回空）
+    }
+
+    // ✅ 修复：确保记录头完整后再继续解析
+    if (rec_ptr + 5 > page_base_ + page_size_) {
+        throw std::runtime_error("Record header truncated");
+    }
+
+    const uint8_t* field_data_start = rec_ptr + 5;
+
+    // ✅ 检查 Instant Add 标志位（REC_INFO_FLAG_BITS_OFFSET=5）
+    bool is_instant = (page_base_[origin + REC_INFO_FLAG_BITS_OFFSET] & RowFlags::INSTANT_ADD_COL_BIT) != 0;
+    
+    // ✅ 按物理列顺序解析 NULL 标志（仅可空列）
+    size_t nullable_count = std::count_if(schema_.columns.begin(), schema_.columns.end(),
+        [](const auto& p) { return p.second.is_nullable; });
+    
+    std::vector<bool> null_flags;
+    size_t null_bytes = (nullable_count + 7) / 8;
+
+    if (null_bytes > 0) {
+        if (field_data_start + null_bytes > page_base_ + page_size_) {
+            throw std::runtime_error("NULL bitmap out of bounds");
+        }
+        
+        const uint8_t* null_ptr = field_data_start;
+        // ✅ 按物理位置填充 null_flags
+        for (size_t i = 0, j = 0; i < schema_.columns.size(); ++i) {
+            if (schema_.columns.at(i).is_nullable) {
+                null_flags.push_back((null_ptr[j/8] >> (j%8)) & 1);
+                ++j;
+            }
+        }
+    }
+
+    const uint8_t* ptr = field_data_start + null_bytes;
+
+    // ✅ 按物理列顺序解析字段数据
+    for (size_t i = 0; i < schema_.columns.size(); ++i) {
+        const auto& [pos, col] = schema_.columns[i];
+
+        if (col.is_nullable && !null_flags.empty() && null_flags[pos]) {
+            result[pos] = FieldValue{}; // NULL
+            continue;
+        }
+
+        size_t actual_len = 0;
+
+        switch (col.type) {
+            case Catalog::FieldType::TINYINT:   actual_len = 1; break;
+            case Catalog::FieldType::SMALLINT:  actual_len = 2; break;
+            case Catalog::FieldType::MEDIUMINT: actual_len = 3; break;
+            case Catalog::FieldType::INT:       actual_len = 4; break;
+            case Catalog::FieldType::BIGINT:    actual_len = 8; break;
+            case Catalog::FieldType::FLOAT:     actual_len = 4; break;
+            case Catalog::FieldType::DOUBLE:    actual_len = 8; break;
+            case Catalog::FieldType::CHAR:
+            case Catalog::FieldType::VARCHAR:
+            case Catalog::FieldType::BLOB:
+            case Catalog::FieldType::TEXT: {
+                // 变长字段：先读长度
+                if (ptr + 1 > page_base_ + page_size_) {
+                    throw std::runtime_error("Field length out of bounds");
+                }
+                uint16_t len = 0;
+                if (col.type == Catalog::FieldType::CHAR || col.type == Catalog::FieldType::VARCHAR) {
+                    // VARCHAR: 1 or 2 bytes length prefix
+                    if (*ptr < 251) {
+                        actual_len = *ptr + 1;
+                        ++ptr;
+                    } else if (*ptr == 0xFC) {
+                        if (ptr + 3 > page_base_ + page_size_) throw std::runtime_error("VARCHAR length overflow");
+                        len = *(uint16_t*)(ptr+1);
+                        actual_len = len + 3;
+                        ptr += 3;
+                    } else if (*ptr == 0xFD) {
+                        if (ptr + 4 > page_base_ + page_size_) throw std::runtime_error("VARCHAR length overflow");
+                        len = *(uint32_t*)(ptr+1) & 0xFFFFFF;
+                        actual_len = len + 4;
+                        ptr += 4;
+                    } else { // 0xFE
+                        if (ptr + 9 > page_base_ + page_size_) throw std::runtime_error("VARCHAR length overflow");
+                        len = *(uint64_t*)(ptr+1);
+                        actual_len = len + 9;
+                        ptr += 9;
+                    }
+                } else {
+                    // BLOB/TEXT: 1-4 bytes prefix
+                    if (*ptr < 251) {
+                        actual_len = *ptr + 1;
+                        ++ptr;
+                    } else if (*ptr == 0xFB) {
+                        actual_len = 1; // NULL BLOB
+                        result[pos] = FieldValue{}; 
+                        continue;
+                    } else {
+                        throw std::runtime_error("Unsupported BLOB/TEXT length prefix");
+                    }
+                }
+                break;
+            }
+            default:
+                throw std::runtime_error("Unknown column type: " + std::to_string(static_cast<int>(col.type)));
+        }
+
+        if (ptr + actual_len > page_base_ + page_size_) {
+            throw std::runtime_error("Field data out of bounds");
+        }
+
+        FieldValue val = FieldDecoder::decode(ptr, col);
+        result[pos] = val;
+
+        ptr += actual_len;
+    }
+
+    // ✅ 处理 Instant Add 列缺失情况（仅当 is_instant 且 schema 中列数 > 实际物理列数）
+    if (is_instant) {
+        size_t physical_col_count = schema_.columns.size();
+        for (size_t i = physical_col_count; i < schema_.all_columns().size(); ++i) {
+            const auto& col = schema_.all_columns()[i];
+            result.push_back(get_default_value(col).value_or(FieldValue{}));
+        }
+    }
+
+    return result;
+}
+
+} // namespace DBRecovery::InnoDB

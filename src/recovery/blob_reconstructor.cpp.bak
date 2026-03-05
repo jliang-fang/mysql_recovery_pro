@@ -1,0 +1,13 @@
+#include "dbrecovery/recovery/blob_reconstructor.hpp"
+#include <cstring>
+
+namespace dbrecovery {
+namespace recovery {
+
+std::vector<uint8_t> BlobReconstructor::reconstruct(const uint8_t* data, size_t len) {
+    // 简化：返回原始数据
+    return std::vector<uint8_t>(data, data + len);
+}
+
+} // namespace recovery
+} // namespace dbrecovery
