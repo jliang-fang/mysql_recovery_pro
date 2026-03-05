@@ -1,2 +1,0 @@
-bool is_overflow_ = false;
-[[nodiscard]] bool is_overflow() const { return is_overflow_; }

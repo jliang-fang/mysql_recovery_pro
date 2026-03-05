@@ -1,1 +1,0 @@
-std::memcpy(&header_.n_dir_slots, header_ptr + 14, ...); // ❌ Wrong offset!
