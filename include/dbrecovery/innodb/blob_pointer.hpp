@@ -19,13 +19,12 @@ constexpr uint64_t MAX_BLOB_LENGTH = 4ULL * 1024 * 1024 * 1024; // 4GB
 struct BlobPointer {
   uint32_t space_id;
   uint32_t page_no;
-  uint32_t offset;      // ✅ 清除溢出标志后的偏移（bit31=overflow flag）
+  uint32_t offset;      // ✅ bit31=overflow flag — caller must check (offset & 0x80000000)
   uint64_t length;
-  bool is_overflow_ = false; // ✅ 新增：存储 overflow 标志
 
   static std::optional<BlobPointer> parse(const uint8_t* data);
 
-  [[nodiscard]] bool is_overflow() const { return is_overflow_; }
+  [[nodiscard]] bool is_overflow() const { return (offset & 0x80000000) != 0; }
   
   // ✅ 新增：清除 overflow 标志后的偏移
   [[nodiscard]] uint32_t clear_overflow_flag() const { return offset & 0x7FFFFFFF; }

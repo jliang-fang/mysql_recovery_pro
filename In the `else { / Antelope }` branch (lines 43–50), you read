@@ -1,0 +1,4 @@
+std::memcpy(&page_no,  data + 0, sizeof(page_no));
+std::memcpy(&offset,   data + 4, sizeof(offset));
+// ...
+std::memcpy(&len_low,   data + 8, sizeof(len_low));
