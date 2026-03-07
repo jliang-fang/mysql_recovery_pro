@@ -46,7 +46,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
 
     // 示例：解析第一个字段（INT）
     if (data_ptr + 8 <= page_base_ + size_) {
-        uint64_t int_val = *reinterpret_cast<const uint64_t*>(data_ptr);
+        uint64_t int_val = DBRecovery::InnoDB::MachRead::read_le<uint64_t>(data_ptr, 0);
         FieldValue fv;
         fv.value = std::to_string(int_val);
         fields.push_back(fv);
@@ -55,7 +55,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
 
     // 示例：解析第二个字段（VARCHAR）
     if (data_ptr + 2 <= page_base_ + size_) {
-        uint16_t len = *reinterpret_cast<const uint16_t*>(data_ptr);
+        uint16_t len = DBRecovery::InnoDB::MachRead::read_le<uint16_t>(data_ptr, 0);
         data_ptr += 2;
 
         if (len > 0 && data_ptr + len <= page_base_ + size_) {
