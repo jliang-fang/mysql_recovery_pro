@@ -1,4 +1,5 @@
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/utils/file_mapper.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -9,54 +10,55 @@ namespace dbrecovery {
 namespace innodb {
 
 PageReader::PageReader(const std::string& file_path) 
-    : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0) {
+    : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0), is_valid_(false) {
     
-    fd_ = open(file_path.c_str(), O_RDONLY);
-    if (fd_ < 0) return;
+    // 使用 FileMapper 进行跨平台文件映射
+    utils::FileMapper mapper(file_path);
+    if (!mapper.is_valid()) {
+        return;
+    }
+
+    file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
+    file_size_ = file_data_->size();
     
-    struct stat st;
-    if (fstat(fd_, &st) == 0) {
-        file_size_ = static_cast<uint64_t>(st.st_size);
+    // 尝试从第一页解析实际页大小（InnoDB 支持 4KB/8KB/16KB/32KB/64KB）
+    if (file_size_ >= 16384) {
+        uint32_t page_type = *reinterpret_cast<const uint32_t*>(file_data_->data() + 0);
         
-        // 尝试从第一页解析实际页大小（InnoDB 支持 4KB/8KB/16KB/32KB/64KB）
-        std::vector<uint8_t> first_page(16384);
-        if (pread(fd_, first_page.data(), 16384, 0) == 16384) {
-            uint32_t page_type = *reinterpret_cast<const uint32_t*>(first_page.data() + 0);
+        // 检查是否为有效页类型
+        if (page_type == FIL_PAGE_INDEX || 
+            page_type == FIL_PAGE_SDI ||
+            page_type == FIL_PAGE_TYPE_ALLOCATED) {
             
-            // 检查是否为有效页类型
-            if (page_type == FIL_PAGE_INDEX || 
-                page_type == FIL_PAGE_SDI ||
-                page_type == FIL_PAGE_TYPE_ALLOCATED) {
-                
-                // 尝试从 FIL_HEADER 中读取实际页大小（偏移 16-19）
-                uint32_t actual_page_size = *reinterpret_cast<const uint32_t*>(first_page.data() + 16);
-                if (actual_page_size >= 4096 && actual_page_size <= 65536 &&
-                    (actual_page_size & (actual_page_size - 1)) == 0) {
-                    page_size_ = actual_page_size;
-                }
+            // 尝试从 FIL_HEADER 中读取实际页大小（偏移 16-19）
+            uint32_t actual_page_size = *reinterpret_cast<const uint32_t*>(file_data_->data() + 16);
+            if (actual_page_size >= 4096 && actual_page_size <= 65536 &&
+                (actual_page_size & (actual_page_size - 1)) == 0) {
+                page_size_ = actual_page_size;
             }
         }
-        
-        total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
-    } else {
-        close(fd_);
-        fd_ = -1;
     }
+    
+    total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
+    is_valid_ = true;
 }
 
-PageReader::~PageReader() {
-    if (fd_ >= 0) close(fd_);
-}
+PageReader::~PageReader() {}
 
 std::vector<uint8_t> PageReader::read_page(uint32_t page_no) {
-    if (fd_ < 0 || page_no >= total_pages_) return {};
+    if (!is_valid_ || page_no >= total_pages_) return {};
     
     std::vector<uint8_t> buffer(page_size_);
     off_t offset = static_cast<off_t>(page_no) * page_size_;
     
-    if (pread(fd_, buffer.data(), page_size_, offset) != static_cast<ssize_t>(page_size_)) {
+    // 从内存映射中复制数据
+    if (offset + page_size_ > file_data_->size()) {
         return {};
     }
+    
+    std::copy(file_data_->begin() + offset, 
+              file_data_->begin() + offset + page_size_, 
+              buffer.begin());
     
     // 校验页校验和
     if (!validate_checksum(buffer)) {
