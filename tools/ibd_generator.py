@@ -1,3 +1,60 @@
+#!/usr/bin/env python3
+"""InnoDB .ibd 文件生成器，用于创建测试用的 InnoDB 页结构"""
+
+import json
+import zlib
+
+# ==================== 常量定义 ====================
+PAGE_SIZE = 16384  # 默认 InnoDB 页大小（16KB）
+
+# MySQL 类型常量（参考 MySQL 8.0 源码 include/mysql_com.h）
+MYSQL_TYPE_DECIMAL     = 0
+MYSQL_TYPE_TINY        = 1
+MYSQL_TYPE_SHORT       = 2
+MYSQL_TYPE_LONG        = 3
+MYSQL_TYPE_FLOAT       = 4
+MYSQL_TYPE_DOUBLE      = 5
+MYSQL_TYPE_NULL        = 6
+MYSQL_TYPE_TIMESTAMP   = 7
+MYSQL_TYPE_LONGLONG    = 8
+MYSQL_TYPE_INT24       = 9
+MYSQL_TYPE_DATE        = 10
+MYSQL_TYPE_TIME        = 11
+MYSQL_TYPE_DATETIME    = 12
+MYSQL_TYPE_YEAR        = 13
+MYSQL_TYPE_NEWDATE     = 14
+MYSQL_TYPE_VARCHAR     = 15
+MYSQL_TYPE_BIT         = 16
+MYSQL_TYPE_TIMESTAMP2  = 17
+MYSQL_TYPE_DATETIME2   = 18
+MYSQL_TYPE_TIME2       = 19
+MYSQL_TYPE_JSON        = 245
+
+# InnoDB 页类型常量（参考 MySQL 8.0 源码 include/fil0fil.h）
+FIL_PAGE_TYPE_ALLOCATED = 0
+FIL_PAGE_INDEX        = 9969   # B+Tree 索引页
+FIL_PAGE_UNDO_LOG     = 9970   # Undo 日志页
+FIL_PAGE_SDI          = 9971   # SDI 元数据页
+
+# ==================== 辅助函数 ====================
+def write_le_uint32(data, offset, value):
+    """在指定偏移处写入小端序的 32 位无符号整数"""
+    data[offset]     = (value >> 0) & 0xFF
+    data[offset + 1] = (value >> 8) & 0xFF
+    data[offset + 2] = (value >> 16) & 0xFF
+    data[offset + 3] = (value >> 24) & 0xFF
+
+def write_le_uint64(data, offset, value):
+    """在指定偏移处写入小端序的 64 位无符号整数"""
+    for i in range(8):
+        data[offset + i] = (value >> (i * 8)) & 0xFF
+
+def write_le_uint16(data, offset, value):
+    """在指定偏移处写入小端序的 16 位无符号整数"""
+    data[offset]     = (value >> 0) & 0xFF
+    data[offset + 1] = (value >> 8) & 0xFF
+
+# ==================== 页面生成函数 ====================
 def create_page_header(page_type):
     """Create a minimal InnoDB page header"""
     page = bytearray(PAGE_SIZE)
@@ -70,3 +127,20 @@ def generate_ibd(table_name="users"):
     pages.append(bytes(root_page))
     
     return b''.join(pages)
+
+# ==================== 主程序入口 ====================
+if __name__ == "__main__":
+    import sys
+    
+    if len(sys.argv) > 1:
+        table_name = sys.argv[1]
+    else:
+        table_name = "users"
+        
+    ibd_data = generate_ibd(table_name)
+    
+    output_file = f"{table_name}.ibd"
+    with open(output_file, 'wb') as f:
+        f.write(ibd_data)
+        
+    print(f"Generated {output_file} ({len(ibd_data)} bytes)")
