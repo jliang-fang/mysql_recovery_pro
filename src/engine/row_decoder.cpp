@@ -16,35 +16,40 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
 
     const uint8_t* record_ptr = page_base_ + origin;
 
-    // Step 1: 解析记录头（COMPACT 格式）
-    uint8_t info_bits = *record_ptr;
+    // Step 1: 解析记录头（COMPACT 格式，5 字节）
+    // REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT
+    if (origin + 5 > page_size_) {
+        return fields;
+    }
+    
+    uint8_t info_bits = record_ptr[0];
     bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
     
     if (is_deleted) {
         return fields; // 跳过已删除记录
     }
 
-    // Step 2: 解析 NULL 位图
-    size_t null_bytes = null_bytes_;
-    std::vector<bool> is_null(null_bytes * 8, false);
+    // Step 2: 解析 NULL 位图（从第 1 字节开始）
+    // InnoDB NULL 位图：每个 bit 对应一个可空列，bit=1 表示 NULL
+    // 位序：bit 0 对应第一个可空列，bit 1 对应第二个可空列，依此类推
+    std::vector<bool> is_null(null_bytes_ * 8, false);
     
-    for (size_t i = 0; i < null_bytes; ++i) {
-        uint8_t byte = *(record_ptr + 1 + i);
+    for (size_t i = 0; i < null_bytes_; ++i) {
+        uint8_t byte = record_ptr[1 + i];
         for (int j = 0; j < 8; ++j) {
-            if (byte & (1 << j)) {
-                is_null[i * 8 + j] = true;
-            }
+            // 正确的位序：bit 0 是最低有效位
+            is_null[i * 8 + j] = (byte >> j) & 1;
         }
     }
 
     // Step 3: 跳过记录头和 NULL 字节，开始解析字段
-    const uint8_t* data_ptr = record_ptr + 1 + null_bytes;
+    const uint8_t* data_ptr = record_ptr + 1 + null_bytes_;
 
     // TODO: 实际应用中应从 TableSchema 获取列定义
     // 此处为简化示例：假设前两列为 INT 和 VARCHAR
     // 实际需遍历 schema.columns 并按类型解码
 
-    // 示例：解析第一个字段（INT）
+    // 示例：解析第一个字段（INT，8 字节）
     if (data_ptr + 8 <= page_base_ + size_) {
         uint64_t int_val = DBRecovery::InnoDB::MachRead::read_le<uint64_t>(data_ptr, 0);
         FieldValue fv;
@@ -53,10 +58,10 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
         data_ptr += 8;
     }
 
-    // 示例：解析第二个字段（VARCHAR）
-    if (data_ptr + 2 <= page_base_ + size_) {
-        uint16_t len = DBRecovery::InnoDB::MachRead::read_le<uint16_t>(data_ptr, 0);
-        data_ptr += 2;
+    // 示例：解析第二个字段（VARCHAR，1 字节长度前缀）
+    if (data_ptr + 1 <= page_base_ + size_) {
+        uint8_t len = *data_ptr;
+        data_ptr += 1;
 
         if (len > 0 && data_ptr + len <= page_base_ + size_) {
             FieldValue fv;

@@ -39,7 +39,7 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     }
     
     chunks_.push_back({offset, static_cast<Length>(data.size()), data});
-    current_size_ = (current_size_ > offset + data.size()) ? current_size_ : (offset + data.size());
+    current_size_ = std::max(current_size_, offset + static_cast<Offset>(data.size()));
     std::sort(chunks_.begin(), chunks_.end(),
               [](const auto& a, const auto& b) { return a.offset < b.offset; });
     return true;
