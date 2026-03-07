@@ -139,6 +139,8 @@ private:
     uint64_t file_size_;
     uint32_t page_size_;
     uint32_t total_pages_;
+    std::unique_ptr<std::vector<uint8_t>> file_data_; // 修复：添加缺失的成员变量
+    bool is_valid_;
 };
 
 } // namespace innodb

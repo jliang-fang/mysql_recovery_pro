@@ -19,7 +19,11 @@ TEST(PageReader, ReadEmptyFile) {
     PageReader reader(tmp_path);
     EXPECT_EQ(reader.get_total_pages(), 0);
     
-    std::filesystem::remove(tmp_path);
+    std::error_code ec;
+    std::filesystem::remove(tmp_path, ec);
+    if (ec) {
+        std::cerr << "Warning: Failed to remove temp file: " << tmp_path << " - " << ec.message() << std::endl;
+    }
 }
 
 TEST(PageReader, ReadValidFile) {
@@ -39,7 +43,11 @@ TEST(PageReader, ReadValidFile) {
     EXPECT_FALSE(page.empty());
     EXPECT_EQ(page.size(), 16384);
     
-    std::filesystem::remove(tmp_path);
+    std::error_code ec;
+    std::filesystem::remove(tmp_path, ec);
+    if (ec) {
+        std::cerr << "Warning: Failed to remove temp file: " << tmp_path << " - " << ec.message() << std::endl;
+    }
 }
 
 } // namespace innodb

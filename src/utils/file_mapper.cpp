@@ -36,19 +36,21 @@ FileMapper::FileMapper(const std::string& path)
     }
 
     HANDLE hMapping = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
-    CloseHandle(hFile);
-    
     if (!hMapping) {
+        CloseHandle(hFile);
         return;
     }
 
     data_ = static_cast<uint8_t*>(MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0));
-    CloseHandle(hMapping);
+    CloseHandle(hMapping); // 映射成功后可关闭句柄
     
     if (!data_) {
+        CloseHandle(hFile);
         return;
     }
     
+    // 保存文件句柄用于后续清理
+    fd_ = reinterpret_cast<int>(hFile);
     is_valid_ = true;
 #else
     fd_ = open(path.c_str(), O_RDONLY);
@@ -86,6 +88,10 @@ FileMapper::~FileMapper() {
     if (data_) {
         UnmapViewOfFile(data_);
         data_ = nullptr;
+    }
+    if (fd_ != -1) {
+        CloseHandle(reinterpret_cast<HANDLE>(fd_));
+        fd_ = -1;
     }
 #else
     if (data_ && data_ != MAP_FAILED) {

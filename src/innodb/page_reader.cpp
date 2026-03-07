@@ -70,8 +70,9 @@ std::vector<uint8_t> PageReader::read_page(uint32_t page_no) {
 bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
     if (page_data.size() < 38) return false;
 
-    uint32_t stored_csum = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
-        page_data.data(), 24
+    // InnoDB 校验和位于 FIL_PAGE_END_LSN + 4 (即偏移 36)
+    uint32_t stored_csum = dbrecovery::innodb::MachRead::read_le<uint32_t>(
+        page_data.data(), 36
     );
     uint32_t new_csum = compute_crc32c(page_data);
 
