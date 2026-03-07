@@ -55,7 +55,8 @@ struct BlobPointer {
         if (is_barracuda) {
             std::memcpy(out + 0, &space_id, sizeof(space_id));
             std::memcpy(out + 4, &page_no,  sizeof(page_no));
-            std::memcpy(out + 8, &offset,   sizeof(offset));
+            uint32_t offset_for_write = offset;
+            std::memcpy(out + 8, &offset_for_write, sizeof(offset_for_write));
             uint32_t len_low = static_cast<uint32_t>(length & 0xFFFFFFFF);
             uint32_t len_high = static_cast<uint32_t>((length >> 32) & 0xFFFFFFFF);
             std::memcpy(out + 12, &len_low,   sizeof(len_low));
@@ -63,7 +64,8 @@ struct BlobPointer {
         } else {
             // Antelope: omit space_id
             std::memcpy(out + 0, &page_no,  sizeof(page_no));
-            std::memcpy(out + 4, &offset,   sizeof(offset));
+            uint32_t offset_for_write = offset;
+            std::memcpy(out + 4, &offset_for_write, sizeof(offset_for_write));
             uint32_t len_low = static_cast<uint32_t>(length & 0xFFFFFFFF);
             uint32_t len_high = static_cast<uint32_t>((length >> 32) & 0xFFFFFFFF);
             std::memcpy(out + 8,  &len_low,   sizeof(len_low));

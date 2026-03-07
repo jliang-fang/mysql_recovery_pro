@@ -30,15 +30,15 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
     }
 
     // Step 2: 解析 NULL 位图（从第 1 字节开始）
-    // InnoDB NULL 位图：每个 bit 对应一个可空列，bit=1 表示 NULL
-    // 位序：bit 0 对应第一个可空列，bit 1 对应第二个可空列，依此类推
+    // ✅ 修复：InnoDB 的 NULL 位图是高位在前（big-endian bit order）
+    // bit 7 对应第一个可空列，bit 6 对应第二个，依此类推
     std::vector<bool> is_null(null_bytes_ * 8, false);
     
     for (size_t i = 0; i < null_bytes_; ++i) {
         uint8_t byte = record_ptr[1 + i];
         for (int j = 0; j < 8; ++j) {
-            // 正确的位序：bit 0 是最低有效位
-            is_null[i * 8 + j] = (byte >> j) & 1;
+            // 正确的位序：bit 7 是第一个列
+            is_null[i * 8 + j] = (byte >> (7 - j)) & 1;
         }
     }
 
