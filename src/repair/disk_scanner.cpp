@@ -57,11 +57,11 @@ bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
     // 校验 CRC32
     uint32_t stored_crc = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
         std::span<const uint8_t>(page, page_size), 
-        0  // FIL_PAGE_SPACE_ID_OFFSET is 0, but we need FIL_PAGE_LSN_START which is 8
+        24  // FIL_PAGE_CHECKSUM is at offset 24
     );
     
     // 计算 CRC32C (Castagnoli)
-    uint32_t computed_crc = DBRecovery::InnoDB::PageReader::validate_checksum(
+    uint32_t computed_crc = DBRecovery::InnoDB::PageReader::compute_crc32c(
         std::vector<uint8_t>(page, page + page_size)
     );
 
