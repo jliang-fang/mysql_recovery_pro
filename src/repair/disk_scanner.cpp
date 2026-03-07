@@ -47,14 +47,25 @@ bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
     );
 
     // 已知的InnoDB页类型
-    if (type == static_cast<uint16_t>(DBRecovery::InnoDB::PageType::INDEX) ||
-        type == static_cast<uint16_t>(DBRecovery::InnoDB::PageType::SDI) ||
-        type == static_cast<uint16_t>(DBRecovery::InnoDB::PageType::FSP_HDR) ||
-        type == static_cast<uint16_t>(DBRecovery::InnoDB::PageType::BLOB)) {
-        return true;
+    if (type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::INDEX) &&
+        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::SDI) &&
+        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::FSP_HDR) &&
+        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::BLOB)) {
+        return false;
     }
 
-    return false;
+    // 校验 CRC32
+    uint32_t stored_crc = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
+        std::span<const uint8_t>(page, page_size), 
+        0  // FIL_PAGE_SPACE_ID_OFFSET is 0, but we need FIL_PAGE_LSN_START which is 8
+    );
+    
+    // 计算 CRC32C (Castagnoli)
+    uint32_t computed_crc = DBRecovery::InnoDB::PageReader::validate_checksum(
+        std::vector<uint8_t>(page, page + page_size)
+    );
+
+    return stored_crc == computed_crc;
 }
 
 bool DiskScanner::is_innodb_file(const std::string& file_path) {

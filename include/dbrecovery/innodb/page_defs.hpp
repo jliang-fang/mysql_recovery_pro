@@ -12,6 +12,7 @@ namespace innodb {
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
 
 constexpr uint16_t FIL_PAGE_TYPE        = 12;   // offset in FIL_HEADER
+constexpr uint16_t TYPE_OFFSET          = 12;   // alias for FIL_PAGE_TYPE
 constexpr uint16_t FIL_PAGE_OFFSET      = 20;   // offset of page number
 constexpr uint16_t FIL_PAGE_LSN         = 8;    // LSN of last change
 constexpr uint16_t FIL_PAGE_SPACE_ID    = 16;   // tablespace ID
@@ -20,6 +21,9 @@ constexpr uint16_t FIL_PAGE_SPACE_ID    = 16;   // tablespace ID
 constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x2041 — B+Tree index page
 constexpr uint16_t FIL_PAGE_UNDO_LOG    = 9970;  // 0x2042 — Undo log page
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
+
+// InnoDB 常量
+constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
 
 // ==================== Record Header Constants (COMPACT format) ====================
 // From MySQL 8.0.36: include/page0page.h
@@ -41,21 +45,42 @@ constexpr uint16_t PAGE_N_DIRECT_PAGES  = 14; // number of direct pages (non-lea
 
 // ==================== Record Header Structure (COMPACT format) ====================
 // Layout: [1 byte info_bits] + [4 bytes next_record_offset]
+// Note: Cannot use C++ bitfields directly due to implementation-defined layout.
+// Use explicit parsing functions instead.
+
 struct alignas(1) RecordHeader {
     uint8_t info_bits;
-    uint32_t next_record_offset : 15; // offset to next record (relative)
-    uint32_t deleted_flag       : 1;  // REC_INFO_DELETED_FLAG
-    uint32_t min_rec_flag       : 1;  // REC_INFO_MIN_REC_FLAG
-    uint32_t heap_no            : 13; // heap number in page heap
+    uint8_t next_rec_off_0;  // bits 0-7 of offset
+    uint8_t next_rec_off_1;  // bits 8-15 of offset
+    uint8_t heap_no_0;       // bits 0-7 of heap_no
+    uint8_t heap_no_1;       // bits 8-13 of heap_no (only 6 bits used)
+
+    static RecordHeader parse(const uint8_t* ptr) {
+        RecordHeader header;
+        header.info_bits = ptr[0];
+        header.next_rec_off_0 = ptr[1];
+        header.next_rec_off_1 = ptr[2];
+        header.heap_no_0 = ptr[3];
+        header.heap_no_1 = ptr[4];
+        return header;
+    }
+
+    uint16_t get_next_record_offset() const {
+        return static_cast<uint16_t>((next_rec_off_1 << 8) | next_rec_off_0);
+    }
 
     bool is_deleted() const { return (info_bits & REC_INFO_DELETED_FLAG) != 0; }
     bool is_min_rec() const { return (info_bits & REC_INFO_MIN_REC_FLAG) != 0; }
 
+    uint16_t get_heap_no() const {
+        return static_cast<uint16_t>((((uint16_t)(heap_no_1 & 0x3F)) << 8) | heap_no_0);
+    }
+
     std::string to_string() const {
-        return "RecordHeader{next=" + std::to_string(next_record_offset) +
+        return "RecordHeader{next=" + std::to_string(get_next_record_offset()) +
                ", deleted=" + std::to_string(is_deleted()) +
                ", min_rec=" + std::to_string(is_min_rec()) +
-               ", heap_no=" + std::to_string(heap_no) + "}";
+               ", heap_no=" + std::to_string(get_heap_no()) + "}";
     }
 };
 
