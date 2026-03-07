@@ -30,7 +30,16 @@ public:
     bool is_open() const;
 
 private:
-    class Impl;
+    class Impl {
+    public:
+        Impl() : fd_(-1), size_(0), is_open_(false) {}
+        
+        int fd_;
+        uint64_t size_;
+        bool is_open_;
+        std::unique_ptr<std::vector<uint8_t>> buffer_; // 用于缓存读取数据
+    };
+
     std::unique_ptr<Impl> impl_;
 };
 

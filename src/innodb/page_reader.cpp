@@ -9,10 +9,9 @@
 namespace dbrecovery {
 namespace innodb {
 
-PageReader::PageReader(const std::string& file_path) 
+PageReader::PageReader(const std::string& file_path)
     : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0), is_valid_(false) {
     
-    // 使用 FileMapper 进行跨平台文件映射
     utils::FileMapper mapper(file_path);
     if (!mapper.is_valid()) {
         return;
