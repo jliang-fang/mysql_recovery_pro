@@ -25,7 +25,7 @@ public:
     PageReader& operator=(const PageReader&) = delete;
 
     /**
-     * @brief 读取指定页号的数据
+     * @brief 读取指定页号的数据（带校验）
      *
      * @param page_no 页号（从0开始）
      * @return std::vector<uint8_t> 页数据，失败返回空
@@ -39,6 +39,14 @@ public:
      */
     uint32_t get_total_pages() const { return total_pages_; }
 
+    /**
+     * @brief 校验页校验和（支持 CRC32C / INNODB / NONE）
+     *
+     * @param page_data 页数据（包含 FIL_HEADER）
+     * @return true 校验通过
+     */
+    static bool validate_checksum(const std::vector<uint8_t>& page_data);
+
 private:
     int fd_;
     uint64_t file_size_;
@@ -48,3 +56,5 @@ private:
 
 } // namespace innodb
 } // namespace dbrecovery
+
+#endif // DBRECOVERY_INNODB_PAGE_READER_HPP

@@ -21,11 +21,13 @@ constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x2041 — B+Tree index page
 constexpr uint16_t FIL_PAGE_UNDO_LOG    = 9970;  // 0x2042 — Undo log page
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
 
-// ==================== Record Info Flags ====================
-// From MySQL 8.0.36: inlude/page0page.h
-constexpr uint8_t REC_INFO_BITS         = 0x07;   // info bits mask (lowest 3 bits)
-constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // deleted record flag
-constexpr uint8_t REC_INFO_NEW_CHUNK_FLAG = 0x08; // new chunk flag in n_heap
+// ==================== Record Header Constants (COMPACT format) ====================
+// From MySQL 8.0.36: include/page0page.h
+// REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT, extra_bytes = 5 + n_nullable * 1
+
+constexpr uint8_t REC_INFO_BITS_MASK    = 0x07;   // info bits mask (lowest 3 bits)
+constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // deleted record flag (bit 0 of info bits)
+constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // minimum record flag (bit 1 of info bits)
 
 // ==================== Page Header Offsets (relative to offset 38) ====================
 constexpr uint16_t PAGE_N_DIR_SLOTS     = 0;  // number of slots in page directory
@@ -37,22 +39,28 @@ constexpr uint16_t PAGE_LAST_INSERT     = 10; // last insert offset
 constexpr uint16_t PAGE_DIRECTION       = 12; // direction of inserts
 constexpr uint16_t PAGE_N_DIRECT_PAGES  = 14; // number of direct pages (non-leaf)
 
-// ==================== Record Structure (COMPACT format header) ====================
-struct RecordHeader {
+// ==================== Record Header Structure (COMPACT format) ====================
+// Layout: [1 byte info_bits] + [4 bytes next_record_offset]
+struct alignas(1) RecordHeader {
+    uint8_t info_bits;
     uint32_t next_record_offset : 15; // offset to next record (relative)
     uint32_t deleted_flag       : 1;  // REC_INFO_DELETED_FLAG
-    uint32_t min_rec_flag       : 1;  // minimum record flag (leaf page only)
+    uint32_t min_rec_flag       : 1;  // REC_INFO_MIN_REC_FLAG
     uint32_t heap_no            : 13; // heap number in page heap
+
+    bool is_deleted() const { return (info_bits & REC_INFO_DELETED_FLAG) != 0; }
+    bool is_min_rec() const { return (info_bits & REC_INFO_MIN_REC_FLAG) != 0; }
 
     std::string to_string() const {
         return "RecordHeader{next=" + std::to_string(next_record_offset) +
-               ", deleted=" + std::to_string(deleted_flag) +
+               ", deleted=" + std::to_string(is_deleted()) +
+               ", min_rec=" + std::to_string(is_min_rec()) +
                ", heap_no=" + std::to_string(heap_no) + "}";
     }
 };
 
 // ==================== Page Header Structure (for reference) ====================
-struct PageHeader {
+struct alignas(1) PageHeader {
     uint16_t n_dir_slots;   // PAGE_N_DIR_SLOTS
     uint16_t heap_top;      // PAGE_HEAP_TOP
     uint16_t n_heap;        // PAGE_N_HEAP & 0x7FFF
@@ -67,7 +75,7 @@ struct PageHeader {
 };
 
 // ==================== Record Info (parsed from record header) ====================
-struct Record {
+struct alignas(1) Record {
     uint16_t offset;          // absolute offset in page
     uint16_t next_offset;     // next record's absolute offset
     bool is_deleted;          // REC_INFO_DELETED_FLAG

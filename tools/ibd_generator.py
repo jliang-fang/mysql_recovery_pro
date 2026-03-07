@@ -1,28 +1,3 @@
-#!/usr/bin/env python3
-"""Generate a minimal MySQL 8.0 .ibd file with SDI and sample data"""
-import struct
-import zlib
-import json
-
-PAGE_SIZE = 16384
-
-# InnoDB constants
-FIL_PAGE_SDI = 0x4573
-FIL_PAGE_INDEX = 0x88BE
-MYSQL_TYPE_VARCHAR = 15
-MYSQL_TYPE_JSON = 245
-MYSQL_TYPE_DATETIME = 12
-MYSQL_TYPE_LONGLONG = 8
-
-def write_le_uint16(data, offset, val):
-    struct.pack_into('<H', data, offset, val)
-
-def write_le_uint32(data, offset, val):
-    struct.pack_into('<I', data, offset, val)
-
-def write_le_uint64(data, offset, val):
-    struct.pack_into('<Q', data, offset, val)
-
 def create_page_header(page_type):
     """Create a minimal InnoDB page header"""
     page = bytearray(PAGE_SIZE)
@@ -90,22 +65,8 @@ def generate_ibd(table_name="users"):
     # Page 1: Root page of clustered index (empty)
     root_page = create_page_header(FIL_PAGE_INDEX)
     write_le_uint32(root_page, 38, 0)   # PAGE_LEVEL = 0 (leaf)
-    write_le_uint16(root_page, 42, 0)   # PAGE_N_HEAP = 1 (only infimum)
+    write_le_uint16(root_page, 42, 2)   # PAGE_N_HEAP = 2 (infimum + supremum)
     
     pages.append(bytes(root_page))
     
     return b''.join(pages)
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python ibd_generator.py <output.ibd> [table_name]")
-        sys.exit(1)
-    
-    output_path = sys.argv[1]
-    table_name = sys.argv[2] if len(sys.argv) > 2 else "users"
-    
-    with open(output_path, 'wb') as f:
-        f.write(generate_ibd(table_name))
-    
-    print(f"✅ Generated {output_path} ({len(open(output_path,'rb').read())} bytes)")
