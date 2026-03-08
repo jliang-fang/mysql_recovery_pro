@@ -28,7 +28,7 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             break;
         case 15: // VARCHAR
             // ✅ 修复：处理 1 字节和 2 字节长度前缀
-            if (rec_ptr + 2 > page_base_ + size_) {
+            if (rec_ptr + 2 > page_base_ + 16384) {
                 return nullptr;
             }
             uint16_t len_prefix = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
@@ -41,7 +41,7 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             break;
         case 245: // JSON
             // ✅ 修复：JSON 使用小端 2 字节长度前缀
-            if (rec_ptr + 2 > page_base_ + size_) {
+            if (rec_ptr + 2 > page_base_ + 16384) {
                 return nullptr;
             }
             uint16_t json_len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
