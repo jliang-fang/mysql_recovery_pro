@@ -9,6 +9,50 @@ namespace dbrecovery {
 namespace innodb {
 
 /**
+ * @brief MachWrite: 机器字节序写入工具类
+ *
+ * 提供跨平台的 little-endian 整数写入功能。
+ */
+template<typename T>
+inline void write_le(uint8_t* ptr, size_t offset, T value) noexcept {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>);
+    uint8_t* p = ptr + offset;
+    if constexpr (sizeof(T) == 1) p[0] = static_cast<uint8_t>(value);
+    else if constexpr (sizeof(T) == 2) {
+        #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            *reinterpret_cast<uint16_t*>(p) = static_cast<uint16_t>(value);
+        #else
+            p[0] = static_cast<uint8_t>(value);
+            p[1] = static_cast<uint8_t>(value >> 8);
+        #endif
+    }
+    else if constexpr (sizeof(T) == 4) {
+        #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            *reinterpret_cast<uint32_t*>(p) = static_cast<uint32_t>(value);
+        #else
+            p[0] = static_cast<uint8_t>(value);
+            p[1] = static_cast<uint8_t>(value >> 8);
+            p[2] = static_cast<uint8_t>(value >> 16);
+            p[3] = static_cast<uint8_t>(value >> 24);
+        #endif
+    }
+    else if constexpr (sizeof(T) == 8) {
+        #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+            *reinterpret_cast<uint64_t*>(p) = static_cast<uint64_t>(value);
+        #else
+            p[0] = static_cast<uint8_t>(value);
+            p[1] = static_cast<uint8_t>(value >> 8);
+            p[2] = static_cast<uint8_t>(value >> 16);
+            p[3] = static_cast<uint8_t>(value >> 24);
+            p[4] = static_cast<uint8_t>(value >> 32);
+            p[5] = static_cast<uint8_t>(value >> 40);
+            p[6] = static_cast<uint8_t>(value >> 48);
+            p[7] = static_cast<uint8_t>(value >> 56);
+        #endif
+    }
+}
+
+/**
  * @brief MachRead: 机器字节序读取工具类
  *
  * 提供跨平台的 little-endian 和 big-endian 整数读取功能。

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cassert>
 
 namespace dbrecovery {
 namespace innodb {
@@ -16,7 +17,7 @@ constexpr uint32_t BLOB_POINTER_SIZE_80 = 24; // Barracuda (MySQL 8.0+)
 
 struct BlobPointer {
     // 字段含义参考 InnoDB 的 externally stored column pointer
-    // Layout (Barracuda, big-endian order in disk, but we store as native endian for parsing):
+    // Layout (Barracuda, little-endian on disk):
     // [0:3]   : space_id (4 bytes) — NEW in MySQL 8.0
     // [4:7]   : page_no of first BLOB page (4 bytes)
     // [8:11]  : offset within that page (4 bytes) — bit31 = overflow flag
@@ -32,44 +33,41 @@ struct BlobPointer {
     BlobPointer() : space_id(0), page_no(0), offset(0), length(0) {}
 
     explicit BlobPointer(const uint8_t* data, bool is_barracuda = true) {
+        assert(data != nullptr);
+        
         if (is_barracuda) {
-            std::memcpy(&space_id, data + 0, sizeof(space_id));
-            std::memcpy(&page_no,  data + 4, sizeof(page_no));
-            std::memcpy(&offset,   data + 8, sizeof(offset));
-            uint32_t len_low, len_high;
-            std::memcpy(&len_low,   data + 12, sizeof(len_low));
-            std::memcpy(&len_high,  data + 16, sizeof(len_high));
+            // 使用 MachRead 确保正确的字节序处理
+            space_id = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 0);
+            page_no  = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 4);
+            offset   = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 8);
+            uint32_t len_low  = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 12);
+            uint32_t len_high = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 16);
             length = (static_cast<uint64_t>(len_high) << 32) | len_low;
         } else {
             // Antelope: skip space_id
-            std::memcpy(&page_no,  data + 0, sizeof(page_no));
-            std::memcpy(&offset,   data + 4, sizeof(offset));
-            uint32_t len_low, len_high;
-            std::memcpy(&len_low,   data + 8, sizeof(len_low));
-            std::memcpy(&len_high,  data + 12, sizeof(len_high));
+            page_no  = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 0);
+            offset   = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 4);
+            uint32_t len_low  = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 8);
+            uint32_t len_high = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 12);
             length = (static_cast<uint64_t>(len_high) << 32) | len_low;
         }
     }
 
     void serialize(uint8_t* out, bool is_barracuda = true) const {
+        assert(out != nullptr);
+        
         if (is_barracuda) {
-            std::memcpy(out + 0, &space_id, sizeof(space_id));
-            std::memcpy(out + 4, &page_no,  sizeof(page_no));
-            uint32_t offset_for_write = offset;
-            std::memcpy(out + 8, &offset_for_write, sizeof(offset_for_write));
-            uint32_t len_low = static_cast<uint32_t>(length & 0xFFFFFFFF);
-            uint32_t len_high = static_cast<uint32_t>((length >> 32) & 0xFFFFFFFF);
-            std::memcpy(out + 12, &len_low,   sizeof(len_low));
-            std::memcpy(out + 16, &len_high,  sizeof(len_high));
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 0, space_id);
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 4, page_no);
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 8, offset);
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 12, static_cast<uint32_t>(length & 0xFFFFFFFF));
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 16, static_cast<uint32_t>((length >> 32) & 0xFFFFFFFF));
         } else {
             // Antelope: omit space_id
-            std::memcpy(out + 0, &page_no,  sizeof(page_no));
-            uint32_t offset_for_write = offset;
-            std::memcpy(out + 4, &offset_for_write, sizeof(offset_for_write));
-            uint32_t len_low = static_cast<uint32_t>(length & 0xFFFFFFFF);
-            uint32_t len_high = static_cast<uint32_t>((length >> 32) & 0xFFFFFFFF);
-            std::memcpy(out + 8,  &len_low,   sizeof(len_low));
-            std::memcpy(out + 12, &len_high,  sizeof(len_high));
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 0, page_no);
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 4, offset);
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 8, static_cast<uint32_t>(length & 0xFFFFFFFF));
+            dbrecovery::innodb::MachWrite::write_le<uint32_t>(out, 12, static_cast<uint32_t>((length >> 32) & 0xFFFFFFFF));
         }
         // [20:23] 留空或设为 0（实际中含类型信息，但 recovery 中通常忽略）
         std::memset(out + (is_barracuda ? 20 : 16), 0, 4);

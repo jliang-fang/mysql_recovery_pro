@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <utility>
+#include <set>
 
 // ✅ Reuse canonical definition from .h to avoid ODR violations
 #include "dbrecovery/innodb/blob_pointer.h"
