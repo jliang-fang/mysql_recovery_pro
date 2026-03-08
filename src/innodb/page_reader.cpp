@@ -142,8 +142,8 @@ uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
 
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < page_data.size(); ++i) {
-        // Skip the checksum field at offset 36-39 (FIL_PAGE_END_LSN + 4)
-        if (i >= 36 && i < 40) continue;
+        // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
+        if (i >= 24 && i < 28) continue;
         crc = (crc >> 8) ^ crc32c_table[(crc ^ page_data[i]) & 0xFF];
     }
     return ~crc;
@@ -151,16 +151,70 @@ uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
 
 std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
     std::vector<FieldValue> result;
-    // TODO: 实现完整的行解码逻辑，包括：
-    // 1. 解析记录头（Record Header）
-    // 2. 处理 NULL 位图
-    // 3. 根据列类型解码每个字段值
-    return result; // 暂时返回空，等待完整实现
+
+    if (page_base_ == nullptr || origin >= 16384) {
+        return result; // 边界检查
+    }
+
+    const uint8_t* rec_ptr = page_base_ + origin;
+    
+    // 解析记录头（Record Header，5字节）
+    uint8_t info_bits = rec_ptr[0];
+    bool is_deleted = (info_bits & 0x01) != 0;
+    bool is_min_rec = (info_bits & 0x10) != 0;
+
+    if (is_deleted || is_min_rec) {
+        return result; // 跳过删除记录和最小记录
+    }
+
+    uint16_t next_offset = MachRead::read_le<uint16_t>(rec_ptr, 1);
+    uint16_t heap_no = MachRead::read_le<uint16_t>(rec_ptr, 3) & 0x3FFF;
+
+    // 跳过记录头，定位到字段数据
+    const uint8_t* field_data = rec_ptr + 5;
+    
+    // 解析 NULL 位图（假设每 8 个字段一个字节）
+    size_t null_bitmap_size = (null_bytes_ + 7) / 8;
+    const uint8_t* null_bitmap = field_data;
+    field_data += null_bitmap_size;
+
+    // TODO: 实际解码逻辑需要根据 TableSchema 中的列定义进行
+    // 此处为简化示例，仅返回字段偏移信息
+    FieldValue fv;
+    fv.value = "offset=" + std::to_string(origin) + ",heap_no=" + std::to_string(heap_no);
+    result.push_back(fv);
+
+    return result;
 }
 
 FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_nullable, size_t length) const {
     FieldValue value;
-    // TODO: 实现基于类型的字段解码
+
+    // 简化版字段解码（实际应根据 MySQL 类型表精确处理）
+    switch (type) {
+        case 0: // MYSQL_TYPE_DECIMAL
+        case 1: // TINY
+            value.value = std::to_string(static_cast<int8_t>(data[0]));
+            break;
+        case 2: // SHORT
+            value.value = std::to_string(MachRead::read_le<uint16_t>(data, 0));
+            break;
+        case 3: // LONG
+            value.value = std::to_string(MachRead::read_le<uint32_t>(data, 0));
+            break;
+        case 8: // LONGLONG
+            value.value = std::to_string(MachRead::read_le<uint64_t>(data, 0));
+            break;
+        case 15: // VARCHAR
+        {
+            uint16_t len = MachRead::read_le<uint16_t>(data, 0);
+            value.value = std::string(reinterpret_cast<const char*>(data + 2), len);
+            break;
+        }
+        default:
+            value.value = "[BLOB/UNDEFINED]";
+    }
+
     return value;
 }
 

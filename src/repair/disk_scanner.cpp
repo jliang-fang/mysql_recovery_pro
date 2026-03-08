@@ -43,17 +43,17 @@ bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
     }
 
     // 检查页类型（偏移 0-3 是页类型，小端序）
-    uint16_t type = DBRecovery::InnoDB::MachRead::read_le<uint16_t>(
+    uint32_t type = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
         std::span<const uint8_t>(page, page_size), 
         0
-    );
+    ) & 0xFFFF; // InnoDB 页类型是 16-bit，位于前 16 位
     
     // 检查页类型是否有效（高 16 位应为 0 或特定标记）
-    if (type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::INDEX) &&
-        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::SDI) &&
-        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::FSP_HDR) &&
-        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::BLOB) &&
-        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::ALLOCATED)) {
+    if (type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::INDEX) &&
+        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::SDI) &&
+        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::FSP_HDR) &&
+        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::BLOB) &&
+        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::ALLOCATED)) {
         return false;
     }
 
