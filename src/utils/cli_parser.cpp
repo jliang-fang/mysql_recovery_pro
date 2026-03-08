@@ -10,9 +10,20 @@ CliParser::CliParser(int argc, char** argv) {
         if (arg.substr(0, 2) == "--") {
             auto pos = arg.find('=');
             if (pos != std::string::npos) {
-                options_[arg.substr(2, pos - 2)] = arg.substr(pos + 1);
+                std::string key = arg.substr(2, pos - 2);
+                std::string value = arg.substr(pos + 1);
+                
+                // 验证参数名不为空
+                if (!key.empty()) {
+                    options_[key] = value;
+                }
             } else {
-                options_[arg.substr(2)] = "";
+                std::string key = arg.substr(2);
+                
+                // 验证参数名不为空
+                if (!key.empty()) {
+                    options_[key] = "";
+                }
             }
         }
     }
