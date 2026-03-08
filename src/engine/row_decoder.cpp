@@ -35,7 +35,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
     for (size_t i = 0; i < null_bytes_; ++i) {
         uint8_t byte = record_ptr[1 + i];
         for (int j = 0; j < 8; ++j) {
-            // 正确的位序：bit 7 是第一个列
+            // COMPACT 格式：NULL 位图倒序存储，bit 7 是第一个列
             is_null[i * 8 + j] = (byte >> (7 - j)) & 1;
         }
     }

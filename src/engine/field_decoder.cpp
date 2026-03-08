@@ -55,7 +55,16 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
         case 253: // VARCHAR (newer MySQL)
         case 254: // VARSTRING
             // ✅ 新增：处理 BLOB/TEXT 类型（使用 BLOB 指针）
-            field_len = col_info.column_length >= 0x10000 ? 9 : 5; // BLOB 指针长度
+            // 根据列定义中的长度信息判断是 inline 还是 overflow
+            if (col_info.column_length >= 0x10000) {
+                field_len = 9; // LONGBLOB 指针长度（8 字节 + 1 字节长度前缀）
+            } else if (col_info.column_length >= 0x100) {
+                field_len = 5; // BLOB 指针长度（4 字节 + 1 字节长度前缀）
+            } else {
+                // 对于较小的 BLOB/TEXT，可能直接存储在记录中（inline）
+                // 需要根据实际记录格式动态判断
+                field_len = col_info.column_length;
+            }
             break;
         default:
             // 默认假设为固定长度字段

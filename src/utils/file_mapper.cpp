@@ -46,7 +46,9 @@ FileMapper::FileMapper(const std::string& path)
     }
 
     data_ = static_cast<uint8_t*>(MapViewOfFile(hMapping, FILE_MAP_READ, 0, 0, 0));
-    CloseHandle(hMapping); // 映射成功后可关闭句柄
+    
+    // 映射成功后关闭文件映射对象句柄（文件句柄需要保留）
+    CloseHandle(hMapping);
     
     if (!data_) {
         CloseHandle(hFile);

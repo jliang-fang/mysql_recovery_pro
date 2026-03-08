@@ -36,11 +36,29 @@ BlobReconstructor& BlobReconstructor::operator=(BlobReconstructor&& other) noexc
 bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     if (data.empty()) return false;
     
-    // Check for overlap
+    // Check for overlap and handle edge cases
     for (const auto& chunk : chunks_) {
-        if (offset < chunk.offset + chunk.length && 
-            chunk.offset < offset + data.size()) {
-            return false;  // Overlap detected
+        Offset new_start = offset;
+        Offset new_end = offset + data.size();
+        Offset old_start = chunk.offset;
+        Offset old_end = chunk.offset + chunk.length;
+        
+        // 完全包含：新块被旧块完全覆盖，拒绝添加
+        if (new_start >= old_start && new_end <= old_end) {
+            return false;  // 新数据完全在旧数据范围内，无需添加
+        }
+        
+        // 部分重叠：优先保留已有数据（假设旧数据更可靠）
+        if (new_start < old_end && old_start < new_end) {
+            // 如果新块的起始位置比旧块早，则允许追加到末尾
+            if (new_start < old_start) {
+                size_t overlap = old_start - new_start;
+                if (overlap >= data.size()) return false; // 完全重叠
+                // 只添加不重叠的部分
+                DataChunk new_data(data.begin() + overlap, data.end());
+                return AddChunk(new_start + overlap, new_data);
+            }
+            return false;  // 其他情况拒绝添加
         }
     }
     
