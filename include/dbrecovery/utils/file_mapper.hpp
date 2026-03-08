@@ -28,7 +28,9 @@ public:
     const uint8_t* data() const { return data_; }
     size_t size() const { return size_; }
 
-private:
+#ifdef _WIN32
+    HANDLE handle_;
+#endif
     int fd_;
     uint8_t* data_;
     size_t size_;

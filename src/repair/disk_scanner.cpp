@@ -36,29 +36,37 @@ struct TempFile {
 };
 
 bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
-    if (page_size < DBRecovery::InnoDB::UNIV_PAGE_SIZE) {
+    // 支持多种页大小：4KB/8KB/16KB/32KB/64KB
+    static constexpr std::array<size_t, 5> valid_page_sizes = {4096, 8192, 16384, 32768, 65536};
+    if (std::find(valid_page_sizes.begin(), valid_page_sizes.end(), page_size) == valid_page_sizes.end()) {
         return false;
     }
 
-    // 检查页类型
-    uint16_t type = DBRecovery::InnoDB::MachRead::read_be<uint16_t>(
+    // 检查页类型（偏移 0-3 是页类型，小端序）
+    uint16_t type = DBRecovery::InnoDB::MachRead::read_le<uint16_t>(
         std::span<const uint8_t>(page, page_size), 
-        DBRecovery::InnoDB::TYPE_OFFSET
+        0
     );
-
-    // 已知的InnoDB页类型
+    
+    // 检查页类型是否有效（高 16 位应为 0 或特定标记）
     if (type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::INDEX) &&
         type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::SDI) &&
         type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::FSP_HDR) &&
-        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::BLOB)) {
+        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::BLOB) &&
+        type != static_cast<uint16_t>(DBRecovery::InnoDB::PageType::ALLOCATED)) {
         return false;
     }
 
-    // 校验 CRC32
+    // 校验 CRC32C
     uint32_t stored_crc = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
         std::span<const uint8_t>(page, page_size), 
         24  // FIL_PAGE_CHECKSUM is at offset 24
     );
+    
+    if (stored_crc == 0) {
+        // 允许 NONE 校验和（未启用校验）
+        return true;
+    }
     
     // 计算 CRC32C (Castagnoli)
     uint32_t computed_crc = DBRecovery::InnoDB::PageReader::compute_crc32c(

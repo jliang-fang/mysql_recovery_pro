@@ -14,7 +14,11 @@ namespace dbrecovery {
 namespace utils {
 
 FileMapper::FileMapper(const std::string& path) 
-    : fd_(-1), data_(nullptr), size_(0), is_valid_(false) {
+    : fd_(-1), data_(nullptr), size_(0), is_valid_(false)
+#ifdef _WIN32
+    , handle_(INVALID_HANDLE_VALUE)
+#endif
+{
     
 #ifdef _WIN32
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
@@ -50,7 +54,7 @@ FileMapper::FileMapper(const std::string& path)
     }
     
     // 保存文件句柄用于后续清理
-    fd_ = reinterpret_cast<int>(hFile);
+    handle_ = hFile;
     is_valid_ = true;
 #else
     fd_ = open(path.c_str(), O_RDONLY);
@@ -89,9 +93,9 @@ FileMapper::~FileMapper() {
         UnmapViewOfFile(data_);
         data_ = nullptr;
     }
-    if (fd_ != -1) {
-        CloseHandle(reinterpret_cast<HANDLE>(fd_));
-        fd_ = -1;
+    if (handle_ != INVALID_HANDLE_VALUE) {
+        CloseHandle(handle_);
+        handle_ = INVALID_HANDLE_VALUE;
     }
 #else
     if (data_ && data_ != MAP_FAILED) {

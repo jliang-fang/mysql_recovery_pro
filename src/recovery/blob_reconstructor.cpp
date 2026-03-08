@@ -5,6 +5,12 @@
 namespace dbrecovery {
 namespace recovery {
 
+struct ChunkInfo {
+    Offset offset;
+    Length length;
+    DataChunk data;
+};
+
 BlobReconstructor::BlobReconstructor(BlobId blob_id)
     : blob_id_(blob_id), current_size_(0) {}
 
@@ -67,7 +73,7 @@ bool BlobReconstructor::IsComplete(Length expected_size) const {
 std::vector<uint8_t> BlobReconstructor::GetBlob() const {
     if (chunks_.empty()) return {};
     
-    DataChunk result(current_size_);
+    std::vector<uint8_t> result(current_size_);
     for (const auto& chunk : chunks_) {
         std::memcpy(result.data() + chunk.offset, chunk.data.data(), chunk.length);
     }
@@ -79,10 +85,10 @@ std::optional<std::vector<uint8_t>> BlobReconstructor::reconstruct(const uint8_t
     return std::vector<uint8_t>(data, data + len);
 }
 
-dbrecovery::recovery::BlobReconstructor::Length 
+BlobReconstructor::Length 
 BlobReconstructor::GetCurrentSize() const noexcept { return current_size_; }
 
-dbrecovery::recovery::BlobReconstructor::BlobId 
+BlobReconstructor::BlobId 
 BlobReconstructor::GetBlobId() const noexcept { return blob_id_; }
 
 } // namespace recovery

@@ -17,21 +17,18 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
     const uint8_t* record_ptr = page_base_ + origin;
 
     // Step 1: 解析记录头（COMPACT 格式，5 字节）
-    // REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT
     if (origin + 5 > page_size_) {
         return fields;
     }
     
-    uint8_t info_bits = record_ptr[0];
-    bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
+    RecordHeader header = RecordHeader::parse(record_ptr);
+    bool is_deleted = header.is_deleted();
     
     if (is_deleted) {
         return fields; // 跳过已删除记录
     }
 
     // Step 2: 解析 NULL 位图（从第 1 字节开始）
-    // ✅ 修复：InnoDB 的 NULL 位图是高位在前（big-endian bit order）
-    // bit 7 对应第一个可空列，bit 6 对应第二个，依此类推
     std::vector<bool> is_null(null_bytes_ * 8, false);
     
     for (size_t i = 0; i < null_bytes_; ++i) {
