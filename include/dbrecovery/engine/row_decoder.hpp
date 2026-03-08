@@ -22,6 +22,9 @@ public:
 private:
     const uint8_t* page_base_;
     size_t null_bytes_;
+
+    // 辅助方法：解码单个字段
+    FieldValue decode_field(const uint8_t* data, uint32_t type, bool is_nullable, size_t length) const;
 };
 
 } // namespace engine

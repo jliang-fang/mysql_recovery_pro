@@ -20,22 +20,11 @@ PageReader::PageReader(const std::string& file_path)
     file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
     file_size_ = file_data_->size();
     
-    // 尝试从第一页解析实际页大小（InnoDB 支持 4KB/8KB/16KB/32KB/64KB）
-    if (file_size_ >= 16384) {
-        uint32_t page_type = *reinterpret_cast<const uint32_t*>(file_data_->data() + 0);
-        
-        // 检查是否为有效页类型
-        if (page_type == FIL_PAGE_INDEX || 
-            page_type == FIL_PAGE_SDI ||
-            page_type == FIL_PAGE_TYPE_ALLOCATED) {
-            
-            // 尝试从 FIL_HEADER 中读取实际页大小（偏移 16-19）
-            uint32_t actual_page_size = *reinterpret_cast<const uint32_t*>(file_data_->data() + 16);
-            if (actual_page_size >= 4096 && actual_page_size <= 65536 &&
-                (actual_page_size & (actual_page_size - 1)) == 0) {
-                page_size_ = actual_page_size;
-            }
-        }
+    // InnoDB 默认页大小为 16KB (UNIV_PAGE_SIZE)
+    // 实际页大小需通过其他方式确定（如用户指定或从 SDI 页解析）
+    // 此处暂不尝试自动检测，避免错误推断
+    if (page_size_ == 0 || (page_size_ & (page_size_ - 1)) != 0) {
+        page_size_ = 16384; // fallback to default
     }
     
     total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
@@ -153,10 +142,26 @@ uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
 
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < page_data.size(); ++i) {
-        if (i >= 24 && i < 28) continue; // Skip checksum field
+        // Skip the checksum field at offset 36-39 (FIL_PAGE_END_LSN + 4)
+        if (i >= 36 && i < 40) continue;
         crc = (crc >> 8) ^ crc32c_table[(crc ^ page_data[i]) & 0xFF];
     }
     return ~crc;
+}
+
+std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
+    std::vector<FieldValue> result;
+    // TODO: 实现完整的行解码逻辑，包括：
+    // 1. 解析记录头（Record Header）
+    // 2. 处理 NULL 位图
+    // 3. 根据列类型解码每个字段值
+    return result; // 暂时返回空，等待完整实现
+}
+
+FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_nullable, size_t length) const {
+    FieldValue value;
+    // TODO: 实现基于类型的字段解码
+    return value;
 }
 
 } // namespace innodb
