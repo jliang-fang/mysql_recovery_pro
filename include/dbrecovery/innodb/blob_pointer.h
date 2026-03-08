@@ -5,6 +5,9 @@
 #include <cstring>
 #include <cassert>
 
+// 包含 MachRead 和 MachWrite 的定义
+#include "dbrecovery/innodb/page_reader.hpp"
+
 namespace dbrecovery {
 namespace innodb {
 
