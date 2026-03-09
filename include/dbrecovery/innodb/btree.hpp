@@ -37,13 +37,18 @@ public:
     [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
     
     /**
-     * @brief 解析记录数据
+     * @brief 解析记录数据（仅支持 COMPACT 格式）
      * 
      * @param schema 表结构定义
      * @return std::vector<std::map<std::string, std::string>> 解析后的记录
      */
     std::vector<std::map<std::string, std::string>> parse_records(
         const catalog::TableSchema& schema) const;
+    
+    // ✅ 新增：格式校验方法
+    bool is_compact_format() const {
+        return (flags_ & 0x80) == 0; // COMPACT 格式标志位为 0
+    }
 
 private:
     std::vector<uint8_t> page_data_;

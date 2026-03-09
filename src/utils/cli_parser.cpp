@@ -30,7 +30,7 @@ CliParser::CliParser(int argc, char** argv) {
                     // 布尔标志 --flag
                     std::string key = arg.substr(2);
                     if (!key.empty()) {
-                        options_[key] = "";
+                        options_[key] = "true";  // ✅ 修正：使用 "true" 而非空字符串
                     }
                 }
             }
@@ -45,6 +45,19 @@ bool CliParser::has_option(const std::string& name) const {
 std::string CliParser::get_option(const std::string& name, const std::string& default_val) const {
     auto it = options_.find(name);
     return (it != options_.end()) ? it->second : default_val;
+}
+
+void CliParser::require_options(const std::vector<std::string>& required) const {
+    for (const auto& opt : required) {
+        if (!has_option(opt)) {
+            throw std::runtime_error("Missing required option: --" + opt);
+        }
+    }
+}
+
+bool CliParser::validate() const {
+    // ✅ 新增：基本验证逻辑
+    return !options_.empty();
 }
 
 } // namespace utils

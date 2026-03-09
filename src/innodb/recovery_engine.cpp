@@ -20,19 +20,55 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
     std::cout << "[INFO] recover_table called: " << ibd_path << ", table_id=" << table_id << "\n";
     
     // Use PageReader to scan pages
-    PageReader reader(ibd_path);
-    if (reader.get_total_pages() == 0) {
-        std::cerr << "[ERROR] Failed to open .ibd file\n";
+    dbrecovery::innodb::PageReader reader(ibd_path);
+    if (!reader.is_valid()) {
+        std::cerr << "[ERROR] Failed to open .ibd file: " << ibd_path << "\n";
         return false;
     }
     
-    std::cout << "[INFO] Total pages: " << reader.get_total_pages() << "\n";
+    uint32_t total_pages = reader.get_total_pages();
+    std::cout << "[INFO] Total pages: " << total_pages << "\n";
     
-    // TODO: 实现表恢复逻辑
-    for (uint32_t page_no = 0; page_no < std::min(reader.get_total_pages(), 10u); ++page_no) {
+    // ✅ Step 1: 解析所有页并分类
+    std::map<uint16_t, std::vector<std::pair<uint32_t, std::vector<uint8_t>>>> pages_by_type;
+    
+    for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
         auto page_data = reader.read_page(page_no);
-        if (!page_data.empty()) {
-            std::cout << "[INFO] Page " << page_no << ": size=" << page_data.size() << "\n";
+        if (page_data.empty()) {
+            std::cerr << "[WARN] Failed to read page " << page_no << "\n";
+            continue;
+        }
+        
+        // 解析页类型
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 12);
+        pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
+    }
+    
+    // ✅ Step 2: 处理索引页（FIL_PAGE_INDEX = 9969）
+    if (pages_by_type.count(9969)) {
+        std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
+        
+        // TODO: 实现 B+树重建逻辑
+        for (const auto& [page_no, page_data] : pages_by_type[9969]) {
+            dbrecovery::innodb::PageParser parser(page_data.data(), page_data.size());
+            if (parser.parse_header()) {
+                std::cout << "[INFO] Page " << page_no << ": type=" << parser.page_type() 
+                          << ", level=" << parser.page_level() << "\n";
+                
+                // 解析记录
+                auto records = parser.parse_records();
+                std::cout << "[INFO] Page " << page_no << ": found " << records.size() << " records\n";
+            }
+        }
+    }
+    
+    // ✅ Step 3: 处理 SDI 页（FIL_PAGE_SDI = 9971）
+    if (pages_by_type.count(9971)) {
+        std::cout << "[INFO] Found " << pages_by_type[9971].size() << " SDI pages\n";
+        
+        // TODO: 解析 SDI 元数据
+        for (const auto& [page_no, page_data] : pages_by_type[9971]) {
+            std::cout << "[INFO] SDI Page " << page_no << ": size=" << page_data.size() << "\n";
         }
     }
     
