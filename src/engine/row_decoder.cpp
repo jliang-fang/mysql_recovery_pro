@@ -29,11 +29,11 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
         return fields; // 跳过已删除记录
     }
 
-    // Step 2: 解析 NULL 位图（从第 1 字节开始）
+    // Step 2: 解析 NULL 位图（从 extra_bytes[0] 开始）
     std::vector<bool> is_null(null_bytes_ * 8, false);
     
     for (size_t i = 0; i < null_bytes_; ++i) {
-        uint8_t byte = record_ptr[1 + i];
+        uint8_t byte = record_ptr[5 + i]; // 跳过 5 字节记录头
         for (int j = 0; j < 8; ++j) {
             // COMPACT 格式：NULL 位图倒序存储，bit 7 是第一个列
             is_null[i * 8 + j] = (byte >> (7 - j)) & 1;
@@ -41,7 +41,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
     }
 
     // Step 3: 跳过记录头和 NULL 字节，开始解析字段
-    const uint8_t* data_ptr = record_ptr + 1 + null_bytes_;
+    const uint8_t* data_ptr = record_ptr + 5 + null_bytes_;
 
     // TODO: 实际应用中应从 TableSchema 获取列定义
     // 此处为简化示例：假设前两列为 INT 和 VARCHAR

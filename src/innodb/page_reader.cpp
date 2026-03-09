@@ -20,11 +20,20 @@ PageReader::PageReader(const std::string& file_path)
     file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
     file_size_ = file_data_->size();
     
-    // InnoDB 默认页大小为 16KB (UNIV_PAGE_SIZE)
-    // 实际页大小需通过其他方式确定（如用户指定或从 SDI 页解析）
-    // 此处暂不尝试自动检测，避免错误推断
-    if (page_size_ == 0 || (page_size_ & (page_size_ - 1)) != 0) {
-        page_size_ = 16384; // fallback to default
+    // InnoDB 支持多种页大小：4KB/8KB/16KB/32KB/64KB
+    // 优先从文件大小推断页大小（假设文件是完整页的倍数）
+    static constexpr std::array<size_t, 5> valid_page_sizes = {4096, 8192, 16384, 32768, 65536};
+    
+    for (size_t ps : valid_page_sizes) {
+        if (file_size_ % ps == 0) {
+            page_size_ = static_cast<uint32_t>(ps);
+            break;
+        }
+    }
+    
+    // 如果无法推断，使用默认值
+    if (page_size_ == 16384 && file_size_ % 16384 != 0) {
+        std::cerr << "[WARN] Cannot determine page size, using default 16KB\n";
     }
     
     total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);

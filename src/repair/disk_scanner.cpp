@@ -57,6 +57,11 @@ bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
         return false;
     }
 
+    // FIL_PAGE_TYPE_ALLOCATED 类型页未启用校验和，跳过校验
+    if (type == static_cast<uint32_t>(DBRecovery::InnoDB::PageType::ALLOCATED)) {
+        return true;
+    }
+
     // 校验 CRC32C
     uint32_t stored_crc = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
         std::span<const uint8_t>(page, page_size), 

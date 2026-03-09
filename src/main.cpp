@@ -24,10 +24,18 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    // 检查文件是否存在
+    FILE* f = fopen(ibd_path.c_str(), "rb");
+    if (!f) {
+        std::cerr << "[ERROR] Cannot open file: " << ibd_path << "\n";
+        return 1;
+    }
+    fclose(f);
+    
     // Run recovery
     dbrecovery::innodb::RecoveryEngine engine;
     if (!engine.recover_table(ibd_path, table_id)) {
-        std::cout << "[ERROR] Table recovery failed\n";
+        std::cerr << "[ERROR] Table recovery failed\n";
         return 1;
     }
     
