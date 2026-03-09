@@ -108,10 +108,10 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue;
         }
         
-        uint8_t flags = page_data_[offset];
-        bool is_deleted = (flags & REC_INFO_DELETED_FLAG) != 0;
-        bool is_extern = (flags & 0x40) != 0; // 外部存储标志（BLOB）
-        uint16_t n_fields = ((flags & 0x07) << 8) | (page_data_[offset + 1] >> 4);
+        flags_ = page_data_[offset];
+        bool is_deleted = (flags_ & REC_INFO_DELETED_FLAG) != 0;
+        bool is_extern = (flags_ & 0x40) != 0; // 外部存储标志（BLOB）
+        uint16_t n_fields = ((flags_ & 0x07) << 8) | (page_data_[offset + 1] >> 4);
         
         if (is_deleted) {
             continue; // 跳过已删除记录
@@ -153,7 +153,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 uint32_t byte_idx = col_idx / 8;
                 uint32_t bit_idx = col_idx % 8;
                 // ✅ 修正：MySQL 使用小端序存储位图（低位在前）
-                is_null = (null_ptr[byte_idx] & (1 << bit_idx)) != 0;
+                is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
             }
             
             if (is_null) {
@@ -181,6 +181,15 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         if (data_pos + 1 <= page_data_.size()) {
                             uint8_t len = page_data_[data_pos];
                             data_pos++;
+                            
+                            // 检查是否为 1-byte 或 2-byte 长度前缀（MySQL 5.7+）
+                            if (len >= 0xFE) {
+                                // 2-byte length prefix
+                                if (data_pos + 2 <= page_data_.size()) {
+                                    len = MachRead::read_le<uint16_t>(page_data_.data(), data_pos - 1);
+                                    data_pos++; // 跳过额外的长度字节
+                                }
+                            }
                             
                             if (len > 0 && data_pos + len <= page_data_.size()) {
                                 field_value = std::string(

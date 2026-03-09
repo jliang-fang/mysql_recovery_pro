@@ -58,6 +58,7 @@ private:
     uint32_t prev_page_ = 0xFFFFFFFF;
     uint16_t n_records_ = 0;
     std::vector<uint16_t> record_offsets_;
+    uint8_t flags_ = 0;  // 记录头标志位
     
     bool parse_header() noexcept;
     bool parse_infimum_supremum() noexcept;
