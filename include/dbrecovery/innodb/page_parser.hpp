@@ -4,8 +4,8 @@
 #include <cstdint>
 #include <cstddef>
 
-namespace DBRecovery {
-namespace InnoDB {
+namespace dbrecovery {
+namespace innodb {
 
 // ✅ MySQL 8.0 记录头信息常量定义
 constexpr uint8_t REC_INFO_BITS_MASK = 0x07;      // 记录头最低3位是info bits
@@ -73,7 +73,7 @@ private:
     size_t size_;
 };
 
-} // namespace InnoDB
-} // namespace DBRecovery
+} // namespace innodb
+} // namespace dbrecovery
 
 #endif // DBRECOVERY_INNODB_PAGE_PARSER_HPP

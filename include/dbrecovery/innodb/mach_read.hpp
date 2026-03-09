@@ -3,7 +3,8 @@
 #include <type_traits>
 #include <cstring>
 
-namespace dbrecovery::innodb {
+namespace dbrecovery {
+namespace innodb {
 
 /**
  * @brief 安全读取 little-endian 整数（支持 uint24）
@@ -123,4 +124,5 @@ inline void write_le(uint8_t* ptr, T value) noexcept {
     }
 }
 
-} // namespace dbrecovery::innodb
+} // namespace innodb
+} // namespace dbrecovery

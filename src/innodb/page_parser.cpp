@@ -13,6 +13,14 @@ PageParser::PageParser(const uint8_t* buffer, size_t size)
     }
 }
 
+const uint8_t* PageParser::data() const {
+    return buffer_;
+}
+
+size_t PageParser::size() const {
+    return size_;
+}
+
 bool PageParser::parse_header() {
     // ✅ Step 1: 解析 FIL_HEADER (offset 0–37)
     if (size_ < 38) {

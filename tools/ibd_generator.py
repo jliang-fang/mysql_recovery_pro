@@ -35,6 +35,7 @@ FIL_PAGE_TYPE_ALLOCATED = 0
 FIL_PAGE_INDEX        = 9969   # B+Tree 索引页
 FIL_PAGE_UNDO_LOG     = 9970   # Undo 日志页
 FIL_PAGE_SDI          = 9971   # SDI 元数据页
+FIL_PAGE_TYPE_BLOB    = 9972   # BLOB页
 
 # ==================== 辅助函数 ====================
 def write_le_uint32(data, offset, value):

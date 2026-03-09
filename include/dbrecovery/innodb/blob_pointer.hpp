@@ -9,7 +9,8 @@
 // ✅ Reuse canonical definition from .h to avoid ODR violations
 #include "dbrecovery/innodb/blob_pointer.h"
 
-namespace dbrecovery::innodb {
+namespace dbrecovery {
+namespace innodb {
 
 // Helper types only (no struct redefinition)
 
@@ -46,4 +47,5 @@ struct BlobPageChain {
   }
 };
 
-} // namespace dbrecovery::innodb
+} // namespace innodb
+} // namespace dbrecovery

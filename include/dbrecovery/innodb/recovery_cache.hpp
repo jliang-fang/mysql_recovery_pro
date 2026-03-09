@@ -6,7 +6,8 @@
 #include <optional>
 #include "dbrecovery/innodb/v2/types.hpp"
 
-namespace dbrecovery::innodb {
+namespace dbrecovery {
+namespace innodb {
 
 // Redo 回放缓存（用于崩溃恢复）
 struct RecoveryCache {
@@ -74,4 +75,5 @@ struct RecoveryCache {
     }
 };
 
-} // namespace dbrecovery::innodb
+} // namespace innodb
+} // namespace dbrecovery
