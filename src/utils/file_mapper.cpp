@@ -14,9 +14,10 @@ namespace dbrecovery {
 namespace utils {
 
 FileMapper::FileMapper(const std::string& path) 
-    : fd_(-1), data_(nullptr), size_(0), is_valid_(false)
 #ifdef _WIN32
-    , handle_(INVALID_HANDLE_VALUE)
+    : fd_(-1), data_(nullptr), size_(0), is_valid_(false), handle_(INVALID_HANDLE_VALUE)
+#else
+    : fd_(-1), data_(nullptr), size_(0), is_valid_(false)
 #endif
 {
     
@@ -113,9 +114,10 @@ FileMapper::~FileMapper() {
 }
 
 FileMapper::FileMapper(FileMapper&& other) noexcept 
-    : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
 #ifdef _WIN32
-    , handle_(other.handle_)
+    : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_), handle_(other.handle_)
+#else
+    : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
 #endif
 {
     other.fd_ = -1;
@@ -130,26 +132,26 @@ FileMapper::FileMapper(FileMapper&& other) noexcept
 FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
     if (this != &other) {
         // 清理当前资源
-        #ifdef _WIN32
-            if (data_) {
-                UnmapViewOfFile(data_);
-                data_ = nullptr;
-            }
-            if (handle_ != INVALID_HANDLE_VALUE) {
-                CloseHandle(handle_);
-                handle_ = INVALID_HANDLE_VALUE;
-            }
-        #else
-            if (data_ && data_ != MAP_FAILED) {
-                munmap(data_, size_);
-                data_ = nullptr;
-            }
-            
-            if (fd_ >= 0) {
-                close(fd_);
-                fd_ = -1;
-            }
-        #endif
+#ifdef _WIN32
+        if (data_) {
+            UnmapViewOfFile(data_);
+            data_ = nullptr;
+        }
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+            handle_ = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (data_ && data_ != MAP_FAILED) {
+            munmap(data_, size_);
+            data_ = nullptr;
+        }
+        
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+#endif
         
         // 移动资源
         fd_ = other.fd_;
@@ -157,18 +159,18 @@ FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         size_ = other.size_;
         is_valid_ = other.is_valid_;
         
-        #ifdef _WIN32
-            handle_ = other.handle_;
-        #endif
+#ifdef _WIN32
+        handle_ = other.handle_;
+#endif
         
         // 清理源对象
         other.fd_ = -1;
         other.data_ = nullptr;
         other.size_ = 0;
         other.is_valid_ = false;
-        #ifdef _WIN32
-            other.handle_ = INVALID_HANDLE_VALUE;
-        #endif
+#ifdef _WIN32
+        other.handle_ = INVALID_HANDLE_VALUE;
+#endif
     }
     
     return *this;

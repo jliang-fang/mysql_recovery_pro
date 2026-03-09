@@ -33,13 +33,13 @@ public:
     size_t size() const { return size_; }
 
 private:
-#ifdef _WIN32
-    HANDLE handle_ = INVALID_HANDLE_VALUE;
-#endif
     int fd_ = -1;
     uint8_t* data_ = nullptr;
     size_t size_ = 0;
     bool is_valid_ = false;
+#ifdef _WIN32
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
+#endif
 };
 
 } // namespace utils
