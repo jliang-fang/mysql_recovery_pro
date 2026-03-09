@@ -32,10 +32,14 @@ public:
     // 辅助方法：检查字段是否为 NULL
     bool is_null(uint32_t col_idx) const {
         if (col_idx >= nullable_columns_) return false;
+        
         uint32_t byte_idx = col_idx / 8;
         uint32_t bit_idx = col_idx % 8;
-        // 注意：NULL位图在COMPACT格式中是倒序存储的
-        return (page_base_[null_bytes_ - 1 - byte_idx] & (1 << bit_idx)) != 0;
+        
+        // COMPACT 格式：NULL 位图从记录头后第一个字节开始，倒序存储
+        // 列0对应bit7，列1对应bit6...列7对应bit0，然后是下一个字节
+        const uint8_t* null_ptr = page_base_ + 1; // 跳过记录头
+        return (null_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
     }
 
 private:

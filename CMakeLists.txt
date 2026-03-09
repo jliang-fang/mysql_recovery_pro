@@ -20,6 +20,21 @@ add_library(dbrecovery_innodb STATIC
     src/innodb/page_reader.cpp
 )
 
+# 检查缺失的源文件并添加警告
+file(GLOB_RECURSE missing_sources 
+    LIST_DIRECTORIES false
+    "${CMAKE_SOURCE_DIR}/src/innodb/binary_reader.cpp"
+    "${CMAKE_SOURCE_DIR}/src/engine/field_decoder.cpp"
+    "${CMAKE_SOURCE_DIR}/src/recovery/blob_reconstructor.cpp"
+    "${CMAKE_SOURCE_DIR}/src/innodb/recovery_engine.cpp"
+)
+
+foreach(source ${missing_sources})
+    if(NOT EXISTS ${source})
+        message(WARNING "Missing source file: ${source}")
+    endif()
+endforeach()
+
 target_include_directories(dbrecovery_innodb PUBLIC
     include
     $<$<BOOL:${MYSQL_INCLUDE_DIR}>:${MYSQL_INCLUDE_DIR}>
