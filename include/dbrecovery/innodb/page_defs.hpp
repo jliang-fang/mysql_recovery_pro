@@ -1,4 +1,3 @@
-// /app/mysql8_recovery/include/dbrecovery/innodb/page_defs.hpp (REWRITE)
 #ifndef DBRECOVERY_INNODB_PAGE_DEFS_HPP
 #define DBRECOVERY_INNODB_PAGE_DEFS_HPP
 
