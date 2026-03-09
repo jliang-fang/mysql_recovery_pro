@@ -19,6 +19,10 @@ class FileMapper {
 public:
     explicit FileMapper(const std::string& path);
     ~FileMapper();
+    
+    // 支持移动语义
+    FileMapper(FileMapper&& other) noexcept;
+    FileMapper& operator=(FileMapper&& other) noexcept;
 
     // 禁止拷贝
     FileMapper(const FileMapper&) = delete;
@@ -28,13 +32,14 @@ public:
     const uint8_t* data() const { return data_; }
     size_t size() const { return size_; }
 
+private:
 #ifdef _WIN32
-    HANDLE handle_;
+    HANDLE handle_ = INVALID_HANDLE_VALUE;
 #endif
-    int fd_;
-    uint8_t* data_;
-    size_t size_;
-    bool is_valid_;
+    int fd_ = -1;
+    uint8_t* data_ = nullptr;
+    size_t size_ = 0;
+    bool is_valid_ = false;
 };
 
 } // namespace utils

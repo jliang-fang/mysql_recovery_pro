@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include <span>
+#include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
@@ -66,14 +67,20 @@ public:
         if constexpr (sizeof(T) == 1) return *p;
         else if constexpr (sizeof(T) == 2) {
             #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                return *reinterpret_cast<const uint16_t*>(p);
+                // 使用 memcpy 避免未定义行为
+                uint16_t val;
+                std::memcpy(&val, p, sizeof(val));
+                return static_cast<T>(val);
             #else
                 return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8);
             #endif
         }
         else if constexpr (sizeof(T) == 4) {
             #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                return *reinterpret_cast<const uint32_t*>(p);
+                // 使用 memcpy 避免未定义行为
+                uint32_t val;
+                std::memcpy(&val, p, sizeof(val));
+                return static_cast<T>(val);
             #else
                 return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8) |
                        (static_cast<T>(p[2]) << 16) | (static_cast<T>(p[3]) << 24);
@@ -81,7 +88,10 @@ public:
         }
         else if constexpr (sizeof(T) == 8) {
             #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-                return *reinterpret_cast<const uint64_t*>(p);
+                // 使用 memcpy 避免未定义行为
+                uint64_t val;
+                std::memcpy(&val, p, sizeof(val));
+                return static_cast<T>(val);
             #else
                 uint64_t lo = static_cast<uint64_t>(p[0]) | (static_cast<uint64_t>(p[1]) << 8) |
                               (static_cast<uint64_t>(p[2]) << 16) | (static_cast<uint64_t>(p[3]) << 24);
@@ -101,7 +111,10 @@ public:
             #if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
                 return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8);
             #else
-                return *reinterpret_cast<const uint16_t*>(p);
+                // 使用 memcpy 避免未定义行为
+                uint16_t val;
+                std::memcpy(&val, p, sizeof(val));
+                return static_cast<T>(val);
             #endif
         }
         else if constexpr (sizeof(T) == 4) {
@@ -109,7 +122,10 @@ public:
                 return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8) |
                        (static_cast<T>(p[2]) << 16) | (static_cast<T>(p[3]) << 24);
             #else
-                return *reinterpret_cast<const uint32_t*>(p);
+                // 使用 memcpy 避免未定义行为
+                uint32_t val;
+                std::memcpy(&val, p, sizeof(val));
+                return static_cast<T>(val);
             #endif
         }
         else if constexpr (sizeof(T) == 8) {
