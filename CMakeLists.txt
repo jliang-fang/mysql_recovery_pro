@@ -5,6 +5,15 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 
+# 集成 nlohmann/json 库
+include(FetchContent)
+FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3 # 稳定版本，支持 C++17
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 find_path(MYSQL_INCLUDE_DIR mysql_version.h PATHS /usr/include/mysql /usr/local/include/mysql NO_DEFAULT_PATH)
 if(MYSQL_INCLUDE_DIR)
     message(STATUS "Found MySQL headers at: ${MYSQL_INCLUDE_DIR}")
