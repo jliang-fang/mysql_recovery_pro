@@ -3,10 +3,8 @@
 #include <stdexcept>
 #include <iostream>
 
-namespace DBRecovery {
-namespace InnoDB {
-
-using namespace dbrecovery::innodb;
+namespace dbrecovery {
+namespace innodb {
 
 PageParser::PageParser(const uint8_t* buffer, size_t size)
     : buffer_(buffer), size_(size), page_type_(0), flags_(0), page_level_(0) {
@@ -156,5 +154,5 @@ std::vector<Record> PageParser::parse_records() const {
     return records;
 }
 
-} // namespace InnoDB
-} // namespace DBRecovery
+} // namespace innodb
+} // namespace dbrecovery
