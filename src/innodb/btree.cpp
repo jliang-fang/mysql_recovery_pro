@@ -108,7 +108,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         }
         
         uint8_t flags = page_data_[offset];
-        bool is_deleted = (flags & 0x80) != 0;
+        bool is_deleted = (flags & REC_INFO_DELETED_FLAG) != 0;
         bool is_extern = (flags & 0x40) != 0;
         uint16_t n_fields = (flags & 0x3F) << 8 | (page_data_[offset + 1] >> 4);
         
@@ -142,13 +142,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             // 检查 NULL
             bool is_null = false;
             uint32_t col_idx = 0;
-            for (uint32_t j = 0; j < pair.first - 1; ++j) {
-                if (schema.columns.at(j + 1).is_nullable) {
+            for (uint32_t j = 1; j < pair.first; ++j) {
+                if (schema.columns.count(j) && schema.columns.at(j).is_nullable) {
                     col_idx++;
                 }
             }
             
-            if (col.is_nullable && null_bytes > 0) {
+            if (col.is_nullable && null_bytes > 0 && col_idx < nullable_columns) {
                 uint32_t byte_idx = col_idx / 8;
                 uint32_t bit_idx = col_idx % 8;
                 is_null = (null_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
