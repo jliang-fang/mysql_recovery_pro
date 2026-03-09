@@ -104,5 +104,26 @@ uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
     return ~crc;
 }
 
+uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {
+    // 使用标准 CRC32 (ISO/Hermann) 算法
+    uint32_t crc = 0xFFFFFFFF;
+    
+    for (size_t i = 0; i < page_data.size(); ++i) {
+        // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
+        if (i >= 24 && i < 28) continue;
+        
+        crc ^= static_cast<uint32_t>(page_data[i]);
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0xEDB88320;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    
+    return ~crc;
+}
+
 } // namespace innodb
 } // namespace dbrecovery

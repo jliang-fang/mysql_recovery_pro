@@ -29,13 +29,18 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
         return fields; // 跳过已删除记录
     }
 
-    // Step 2: 解析 NULL 位图（从 extra_bytes[0] 开始）
+    // Step 2: 解析 NULL 位图（从记录头后开始）
     std::vector<bool> is_null(null_bytes_ * 8, false);
     
+    // InnoDB NULL 位图总是从记录头后第一个字节开始，倒序存储
+    // COMPACT 格式：记录头 5 字节；DYNAMIC/COMPRESSED 格式：记录头可变（12+ 字节）
+    // 此处假设为 COMPACT 格式（最常见于恢复场景），后续需扩展支持 DYNAMIC
+    const uint8_t* null_ptr = record_ptr + 5; // 跳过 5-byte record header (COMPACT)
+    
     for (size_t i = 0; i < null_bytes_; ++i) {
-        uint8_t byte = record_ptr[5 + i]; // 跳过 5 字节记录头
+        uint8_t byte = null_ptr[i];
         for (int j = 0; j < 8; ++j) {
-            // COMPACT 格式：NULL 位图倒序存储，bit 7 是第一个列
+            // 列0对应bit7，列1对应bit6...列7对应bit0
             is_null[i * 8 + j] = (byte >> (7 - j)) & 1;
         }
     }
@@ -69,6 +74,14 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin) const {
     }
 
     return fields;
+}
+
+// 辅助方法：解码单个字段（占位实现，待后续完善）
+FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_nullable, size_t length) const {
+    // TODO: 实现基于 type 的字段解码逻辑
+    FieldValue fv;
+    fv.value = "[UNIMPLEMENTED]";
+    return fv;
 }
 
 } // namespace engine

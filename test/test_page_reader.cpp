@@ -50,6 +50,40 @@ TEST(PageReader, ReadValidFile) {
     }
 }
 
+TEST(PageReader, ComputeCRC32C) {
+    // Test CRC32C computation with a known value
+    // InnoDB uses CRC32C (Castagnoli), reference value for all-zero page
+    std::vector<uint8_t> page(16384, 0);
+    
+    uint32_t crc = PageReader::compute_crc32c(page);
+    // Expected CRC32C of all-zero page (excluding checksum field) is 0x759E3D04
+    EXPECT_EQ(crc, 0x759E3D04);
+}
+
+TEST(PageReader, ValidateChecksumWithZeroes) {
+    // Create a page with zeroed checksum (NONE algorithm)
+    std::string tmp_path = "/tmp/test_none_checksum.ibd";
+    std::ofstream out(tmp_path, std::ios::binary);
+    char zero[16384] = {0};
+    
+    // Set checksum field to 0 (offset 24-27)
+    uint32_t zero_csum = 0;
+    memcpy(zero + 24, &zero_csum, sizeof(zero_csum));
+    
+    for (int i = 0; i < 5; ++i) {
+        out.write(zero, sizeof(zero));
+    }
+    out.close();
+    
+    PageReader reader(tmp_path);
+    auto page = reader.read_page(0);
+    // Should pass because checksum is 0 (NONE algorithm)
+    EXPECT_FALSE(page.empty());
+    
+    std::error_code ec;
+    std::filesystem::remove(tmp_path, ec);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 

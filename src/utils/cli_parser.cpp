@@ -10,19 +10,28 @@ CliParser::CliParser(int argc, char** argv) {
         if (arg.substr(0, 2) == "--") {
             auto pos = arg.find('=');
             if (pos != std::string::npos) {
+                // --key=value 形式
                 std::string key = arg.substr(2, pos - 2);
                 std::string value = arg.substr(pos + 1);
                 
-                // 验证参数名不为空
                 if (!key.empty()) {
                     options_[key] = value;
                 }
             } else {
-                std::string key = arg.substr(2);
-                
-                // 验证参数名不为空
-                if (!key.empty()) {
-                    options_[key] = "";
+                // 检查下一个参数是否为值（--key value 形式）
+                if (i + 1 < argc && argv[i+1][0] != '-') {
+                    std::string key = arg.substr(2);
+                    std::string value = argv[++i]; // 消费下一个参数
+                    
+                    if (!key.empty()) {
+                        options_[key] = value;
+                    }
+                } else {
+                    // 布尔标志 --flag
+                    std::string key = arg.substr(2);
+                    if (!key.empty()) {
+                        options_[key] = "";
+                    }
                 }
             }
         }
