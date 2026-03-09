@@ -25,7 +25,8 @@ bool BPlusTreeParser::parse_header() noexcept {
     uint16_t page_type = MachRead::read_le<uint16_t>(page_data_.data(), 0);
     
     // 检查页类型
-    if (page_type != 9969 && page_type != 9971) { // FIL_PAGE_INDEX or FIL_PAGE_SDI
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
+        page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         return false;
     }
     
@@ -151,8 +152,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             if (col.is_nullable && null_bytes > 0 && col_idx < nullable_columns) {
                 uint32_t byte_idx = col_idx / 8;
                 uint32_t bit_idx = col_idx % 8;
-                // ✅ 修正：MySQL 使用大端序存储位图（最高位先）
-                is_null = (null_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
+                // ✅ 修正：MySQL 使用小端序存储位图（低位在前）
+                is_null = (null_ptr[byte_idx] & (1 << bit_idx)) != 0;
             }
             
             if (is_null) {
