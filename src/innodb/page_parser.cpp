@@ -9,9 +9,7 @@ namespace InnoDB {
 using namespace dbrecovery::innodb;
 
 PageParser::PageParser(const uint8_t* buffer, size_t size)
-    : buffer_(buffer), size_(size), page_type_(0), flags_(0), page_level_(0),
-      n_dir_slots_(0), heap_top_(0), n_heap_(0), free_offset_(0),
-      fil_prev_(0xFFFFFFFF), fil_next_(0xFFFFFFFF) {
+    : buffer_(buffer), size_(size), page_type_(0), flags_(0), page_level_(0) {
     if (!buffer_ || size_ < 38 + 16) { // 至少包含 FIL_HEADER + PAGE_HEADER 基础部分
         throw std::runtime_error("Invalid page buffer: too small");
     }
@@ -19,12 +17,17 @@ PageParser::PageParser(const uint8_t* buffer, size_t size)
 
 bool PageParser::parse_header() {
     // ✅ Step 1: 解析 FIL_HEADER (offset 0–37)
-    fil_prev_ = read_le<uint32_t>(buffer_ + 0);
-    fil_next_ = read_le<uint32_t>(buffer_ + 4);
-    fil_lsn_  = read_le<uint64_t>(buffer_ + 8);   // LSN
+    if (size_ < 38) {
+        return false;
+    }
+    
+    uint32_t fil_prev = read_le<uint32_t>(buffer_ + 0);
+    uint32_t fil_next = read_le<uint32_t>(buffer_ + 4);
+    // LSN (8 bytes)
+    uint64_t fil_lsn = read_le<uint64_t>(buffer_ + 8);
     page_type_ = read_le<uint16_t>(buffer_ + 12); // 注意：FIL_PAGE_TYPE 是 uint16_t！
-    space_id_ = read_le<uint32_t>(buffer_ + 16);
-    page_offset_ = read_le<uint32_t>(buffer_ + 20);
+    uint32_t space_id = read_le<uint32_t>(buffer_ + 16);
+    uint32_t page_offset = read_le<uint32_t>(buffer_ + 20);
 
     // ✅ Step 2: 校验页类型（仅支持索引页）
     if (page_type_ != FIL_PAGE_INDEX && page_type_ != FIL_PAGE_UNDO_LOG) {
@@ -33,12 +36,24 @@ bool PageParser::parse_header() {
 
     // ✅ Step 3: 解析 PAGE_HEADER (offset 38)
     const uint8_t* header = buffer_ + 38;
-    n_dir_slots_ = read_le<uint16_t>(header + 0);
-    heap_top_    = read_le<uint16_t>(header + 2);
-    n_heap_      = read_le<uint16_t>(header + 4) & 0x7FFF; // 最高位为 REC_INFO_NEW_CHUNK_FLAG
-    free_offset_ = read_le<uint16_t>(header + 6);
+    if (size_ < 38 + 14) { // PAGE_HEADER 至少14字节
+        return false;
+    }
+    
+    header_.n_dir_slots = read_le<uint16_t>(header + 0);
+    header_.heap_top    = read_le<uint16_t>(header + 2);
+    header_.n_heap      = read_le<uint16_t>(header + 4) & 0x7FFF; // 最高位为 REC_INFO_NEW_CHUNK_FLAG
+    header_.free_offset = read_le<uint16_t>(header + 6);
+
+    // 解析 BTR_HEADER (PAGE_HEADER 后的8字节)
+    uint16_t n_owned = read_le<uint16_t>(header + 8);
+    uint32_t max_insert = read_le<uint16_t>(header + 10);
+    uint16_t free_space = read_le<uint16_t>(header + 12);
 
     // ✅ Step 4: 解析 flags (offset 24 in FIL_HEADER)
+    if (size_ < 26) {
+        return false;
+    }
     flags_ = read_le<uint16_t>(buffer_ + 24);
     page_level_ = (flags_ >> 12) & 0x0F; // 实际仅占 4 bits
 
@@ -77,7 +92,7 @@ bool PageParser::validate_page_chain() const {
 std::vector<Record> PageParser::parse_records() const {
     std::vector<Record> records;
 
-    if (!buffer_ || n_heap_ == 0 || heap_top_ < 38 + 16) {
+    if (!buffer_ || header_.n_heap == 0 || header_.heap_top < 38 + 16) {
         return records; // 空页或无效堆
     }
 
@@ -90,13 +105,14 @@ std::vector<Record> PageParser::parse_records() const {
     // ✅ Step 2: 遍历记录链表
     while (true) {
         // 检查是否超出堆顶或页边界
-        if (rec >= buffer_ + heap_top_ || rec + 5 > buffer_ + size_) break;
+        if (rec >= buffer_ + header_.heap_top || rec + 5 > buffer_ + size_) break;
 
         uint16_t rec_offset = static_cast<uint16_t>(rec - buffer_);
         uint8_t info_bits = *rec;
         bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
 
         // 提取 next_record 偏移（相对页起始）
+        if (rec + 1 >= buffer_ + size_) break;
         uint16_t next_rec_offset = read_le<uint16_t>(rec + 1);
         
         // ✅ 检查是否为 SUPREMUM 标记
@@ -112,8 +128,16 @@ std::vector<Record> PageParser::parse_records() const {
 
         Record rec_info;
         rec_info.offset = rec_offset;
+        rec_info.info_bits = info_bits;
         rec_info.next_offset = next_rec_offset;
         rec_info.is_deleted = is_deleted;
+
+        // 解析记录头中的字段数量（COMPACT格式）
+        if (rec + 5 <= buffer_ + size_) {
+            uint8_t n_fields_high = info_bits & REC_INFO_BITS_MASK;
+            uint8_t n_fields_low = (rec[1] >> 4) & 0x3F;
+            rec_info.n_fields = (n_fields_high << 6) | n_fields_low;
+        }
 
         records.push_back(rec_info);
 

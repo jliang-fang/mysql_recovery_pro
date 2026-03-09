@@ -100,7 +100,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         std::map<std::string, std::string> record;
         
-        // 解析记录头（COMPACT 格式）
+        // ✅ Step 1: 解析记录头（COMPACT 格式）
         uint8_t header_size = 5; // COMPACT 记录头固定大小
         
         if (offset + header_size > page_data_.size()) {
@@ -109,14 +109,14 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         uint8_t flags = page_data_[offset];
         bool is_deleted = (flags & REC_INFO_DELETED_FLAG) != 0;
-        bool is_extern = (flags & 0x40) != 0;
-        uint16_t n_fields = (flags & 0x3F) << 8 | (page_data_[offset + 1] >> 4);
+        bool is_extern = (flags & 0x40) != 0; // 外部存储标志（BLOB）
+        uint16_t n_fields = ((flags & 0x07) << 8) | (page_data_[offset + 1] >> 4);
         
         if (is_deleted) {
             continue; // 跳过已删除记录
         }
         
-        // 解析 NULL 位图
+        // ✅ Step 2: 解析 NULL 位图（仅对可空列）
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             if (pair.second.is_nullable) {
@@ -127,7 +127,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint32_t null_bytes = (nullable_columns + 7) / 8;
         const uint8_t* null_ptr = page_data_.data() + offset + header_size;
         
-        // 解析字段数据
+        // ✅ Step 3: 解析字段数据
         size_t data_pos = offset + header_size + null_bytes;
         
         for (const auto& pair : schema.columns) {
@@ -139,7 +139,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             
             std::string field_value;
             
-            // 检查 NULL
+            // ✅ Step 3.1: 检查 NULL（正确计算列索引）
             bool is_null = false;
             uint32_t col_idx = 0;
             for (uint32_t j = 1; j < pair.first; ++j) {
@@ -151,31 +151,32 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             if (col.is_nullable && null_bytes > 0 && col_idx < nullable_columns) {
                 uint32_t byte_idx = col_idx / 8;
                 uint32_t bit_idx = col_idx % 8;
+                // ✅ 修正：MySQL 使用大端序存储位图（最高位先）
                 is_null = (null_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
             }
             
             if (is_null) {
                 field_value = "NULL";
             } else {
-                // 根据类型解码字段
+                // ✅ Step 3.2: 根据类型解码字段
                 switch (col.mysql_type_id) {
-                    case 3: { // MYSQL_TYPE_LONG
+                    case 3: { // MYSQL_TYPE_LONG (4字节有符号整数)
                         if (data_pos + 4 <= page_data_.size()) {
-                            uint32_t val = MachRead::read_le<uint32_t>(page_data_.data(), data_pos);
+                            int32_t val = static_cast<int32_t>(MachRead::read_le<uint32_t>(page_data_.data(), data_pos));
                             field_value = std::to_string(val);
                             data_pos += 4;
                         }
                         break;
                     }
-                    case 8: { // MYSQL_TYPE_LONGLONG
+                    case 8: { // MYSQL_TYPE_LONGLONG (8字节有符号整数)
                         if (data_pos + 8 <= page_data_.size()) {
-                            uint64_t val = MachRead::read_le<uint64_t>(page_data_.data(), data_pos);
+                            int64_t val = static_cast<int64_t>(MachRead::read_le<uint64_t>(page_data_.data(), data_pos));
                             field_value = std::to_string(val);
                             data_pos += 8;
                         }
                         break;
                     }
-                    case 15: { // MYSQL_TYPE_VARCHAR
+                    case 15: { // MYSQL_TYPE_VARCHAR (变长字符串)
                         if (data_pos + 1 <= page_data_.size()) {
                             uint8_t len = page_data_[data_pos];
                             data_pos++;
@@ -190,20 +191,34 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         }
                         break;
                     }
-                    case 245: { // MYSQL_TYPE_JSON
+                    case 245: { // MYSQL_TYPE_JSON (JSON类型)
                         if (data_pos + 2 <= page_data_.size()) {
                             uint16_t len = MachRead::read_le<uint16_t>(page_data_.data(), data_pos);
                             data_pos += 2;
                             
                             if (len > 0 && data_pos + len <= page_data_.size()) {
+                                // 简化处理，实际应解析JSON结构
                                 field_value = "[JSON_DATA]";
                                 data_pos += len;
                             }
                         }
                         break;
                     }
+                    case 12: { // MYSQL_TYPE_DATETIME (8字节)
+                        if (data_pos + 8 <= page_data_.size()) {
+                            uint64_t val = MachRead::read_le<uint64_t>(page_data_.data(), data_pos);
+                            // 简化处理，实际应解析为日期时间字符串
+                            field_value = "[DATETIME:" + std::to_string(val) + "]";
+                            data_pos += 8;
+                        }
+                        break;
+                    }
                     default:
                         field_value = "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
+                        // 跳过未知类型的数据
+                        if (col.column_length > 0 && col.column_length < 1024) {
+                            data_pos += col.column_length;
+                        }
                         break;
                 }
             }
@@ -232,44 +247,73 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
         return false;
     }
     
-    // TODO: 实现完整的 B+Tree 遍历逻辑
-    // 当前版本只解析根页的记录
-    
-    auto it = pages_.find(root_page_no_);
-    if (it == pages_.end()) {
-        return false;
-    }
-    
-    BPlusTreeParser parser(it->second);
-    if (!parser.parse()) {
-        return false;
-    }
-    
-    // TODO: 获取表结构（需要从 SDI 或其他元数据源获取）
+    // 获取表结构（需要从 SDI 或其他元数据源获取）
     catalog::TableSchema schema;
-    records_ = parser.parse_records(schema);
     
-    return !records_.empty();
+    // 从根页开始遍历
+    return traverse_tree(root_page_no_, schema);
 }
 
 bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::TableSchema& schema) noexcept {
     auto it = pages_.find(page_no);
     if (it == pages_.end()) {
+        std::cerr << "[ERROR] Page " << page_no << " not found in cache" << std::endl;
         return false;
     }
     
     BPlusTreeParser parser(it->second);
     if (!parser.parse()) {
+        std::cerr << "[ERROR] Failed to parse page " << page_no << std::endl;
         return false;
     }
     
-    // 如果是叶子节点，解析记录
+    // ✅ Step 1: 根据节点类型处理
     if (parser.node_type() == BTreeNodeType::LEAF) {
+        // 叶子节点：直接解析记录
         auto records = parser.parse_records(schema);
         records_.insert(records_.end(), records.begin(), records.end());
-    } else {
-        // 内部节点：递归遍历子节点
-        // TODO: 实现子节点指针解析
+    } else if (parser.node_type() == BTreeNodeType::INTERNAL) {
+        // ✅ Step 2: 内部节点：递归遍历子节点
+        // 解析内部节点的页指针（每个记录包含下级页号）
+        const auto& record_offsets = parser.record_offsets();
+        
+        for (size_t i = 2; i < record_offsets.size(); ++i) { // 跳过 infimum/supremum
+            uint16_t offset = record_offsets[i];
+            
+            if (offset + 10 > it->second.size()) {
+                continue;
+            }
+            
+            // ✅ Step 2.1: 解析记录中的页指针（第5-8字节是下级页号）
+            uint32_t child_page_no = MachRead::read_le<uint32_t>(it->second.data(), offset + 4);
+            
+            if (child_page_no != 0xFFFFFFFF) {
+                // ✅ Step 2.2: 递归遍历子节点
+                traverse_tree(child_page_no, schema);
+            }
+        }
+    } else if (parser.node_type() == BTreeNodeType::ROOT) {
+        // 根节点：可能是叶子也可能是内部，根据页级别判断
+        if (parser.page_level() == 0) {
+            auto records = parser.parse_records(schema);
+            records_.insert(records_.end(), records.begin(), records.end());
+        } else {
+            const auto& record_offsets = parser.record_offsets();
+            
+            for (size_t i = 2; i < record_offsets.size(); ++i) {
+                uint16_t offset = record_offsets[i];
+                
+                if (offset + 10 > it->second.size()) {
+                    continue;
+                }
+                
+                uint32_t child_page_no = MachRead::read_le<uint32_t>(it->second.data(), offset + 4);
+                
+                if (child_page_no != 0xFFFFFFFF) {
+                    traverse_tree(child_page_no, schema);
+                }
+            }
+        }
     }
     
     return true;
