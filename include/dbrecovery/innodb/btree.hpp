@@ -23,8 +23,8 @@ enum class BTreeNodeType : uint8_t {
 // ✅ 记录头标志位常量（用于 COMPACT 格式，参考 MySQL 8.0 源码 sql/dd/impl/table.h）
 // 注意：REC_INFO_STATUS_MASK 是最低3位（0x07），不是0x03！
 constexpr uint8_t REC_INFO_STATUS_MASK    = 0x07;   // 状态位掩码（最低3位，包含 REC_INFO_DELETED_FLAG 和 REC_INFO_MIN_REC_FLAG）
-constexpr uint8_t REC_INFO_DELETED_FLAG   = 0x01;   // 已删除标记
-constexpr uint8_t REC_INFO_MIN_REC_FLAG   = 0x02;   // 最小记录标记（infimum）
+constexpr uint8_t REC_INFO_DELETED_FLAG   = 0x08;   // 已删除标记（bit 3，不是 bit 0！）
+constexpr uint8_t REC_INFO_MIN_REC_FLAG   = 0x10;   // 最小记录标记（infimum，bit 4）
 constexpr uint8_t REC_INFO_EXTERN_FLAG    = 0x40;   // 外部存储标志（BLOB，第6位）
 constexpr uint8_t REC_INFO_BITS_MASK      = 0x07;   // info bits 掩码（最低3位）
 

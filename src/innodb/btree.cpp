@@ -24,9 +24,20 @@ bool BPlusTreeParser::parse_header() noexcept {
     // 解析 FIL Header (38 bytes)
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
     
-    // 检查页类型
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
-        page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
+    // 检查页类型：支持更多 InnoDB 页类型
+    bool is_valid_page_type = false;
+    switch (page_type) {
+        case dbrecovery::innodb::FIL_PAGE_INDEX:      // B+Tree 索引页
+        case dbrecovery::innodb::FIL_PAGE_SDI:        // SDI 元数据页
+        case dbrecovery::innodb::FIL_PAGE_TYPE_BLOB:  // BLOB 数据页
+            is_valid_page_type = true;
+            break;
+        default:
+            // 忽略其他类型页（如 UNDO_LOG）
+            return false;
+    }
+    
+    if (!is_valid_page_type) {
         return false;
     }
     
@@ -123,28 +134,36 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         }
         
         // ✅ Step 1.1: 解析 COMPACT 记录头（5字节）
-        // [0]: info_bits (最低3位是 REC_INFO_BITS_MASK)
-        // [1]: n_fields_high (高4位) + next_record_offset[15:8]
-        // [2-3]: next_record_offset[7:0]
+        // 根据 MySQL 8.0 源码 sql/dd/impl/table.h：
+        // info_bits (byte 0) = [unused:4][status:3][deleted:1]
+        // status bits: REC_STATUS_ORDINARY=0, REC_STATUS_NODE_PTR=1, REC_STATUS_INFIMUM=2, REC_STATUS_SUPREMUM=3
+        // deleted flag: bit 3 (value 0x08)
         
-        flags_ = page_data_[offset];
-        bool is_deleted = (flags_ & REC_INFO_DELETED_FLAG) != 0;
+        uint8_t info_bits = page_data_[offset];
+        bool is_deleted = (info_bits & 0x08) != 0;  // 正确的 deleted 标志位置
         
         // ✅ 修正：REC_INFO_EXTERN_FLAG 在 COMPACT 格式中是第6位（0x40）
         // 这个标志表示字段是否存储在外部页（BLOB）
-        bool is_extern = (flags_ & REC_INFO_EXTERN_FLAG) != 0;
+        bool is_extern = (info_bits & REC_INFO_EXTERN_FLAG) != 0;
         
         // ✅ Step 1.2: 解析记录头中的字段数量（COMPACT 格式）
-        // 记录头格式：[0]: info_bits (5 bits unused, 3 bits status), [1]: n_fields_high(4 bits) | next_rec[15:12](4 bits)
-        // [2]: next_rec[11:4](8 bits)
-        // 正确解析：n_fields = ((info_bits & 0xF0) >> 4) | ((page_data_[offset + 1] & 0xF0) >> 4)
-        uint8_t info_bits = page_data_[offset];
-        uint16_t n_fields = static_cast<uint16_t>(((info_bits & 0xF0) >> 4) | ((page_data_[offset + 1] & 0xF0) >> 4));
+        // 记录头格式：[0]: info_bits, [1]: n_fields_high(4 bits) | next_rec[15:8](4 bits)
+        // [2]: next_rec[7:0](8 bits)
+        // 正确解析：n_fields = ((page_data_[offset + 1] & 0xF0) << 4) | (page_data_[offset + 1] & 0x0F)
+        // 实际上 n_fields 存储在 [1] 的高4位和 [2] 的低4位
+        uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
+        uint8_t n_fields_low = page_data_[offset + 1] & 0x0F; // 注意：这里应该是从 offset+2 获取低4位
+        
+        // 正确的解析方式：n_fields_high 来自 byte[1] 高4位，n_fields_low 来自 byte[2] 高4位
+        uint8_t n_fields_byte2 = page_data_[offset + 2];
+        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | ((n_fields_byte2 & 0xF0) >> 4));
         
         // 验证字段数量合理性（InnoDB 单表最多 1017 个字段）
         if (n_fields == 0 || n_fields > 1017) {
             std::cerr << "[WARN] Invalid field count: " << n_fields 
-                      << " at offset " << offset << ", info_bits=0x" << std::hex << (int)info_bits << std::dec << "\n";
+                      << " at offset " << offset << ", info_bits=0x" << std::hex << (int)info_bits 
+                      << ", byte1=0x" << (int)page_data_[offset+1] 
+                      << ", byte2=0x" << (int)page_data_[offset+2] << std::dec << "\n";
             continue; // 字段数量异常，跳过此记录
         }
         
@@ -156,8 +175,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // 注意：NULL 位图只包含物理存储列，不包括虚拟生成列
         std::vector<uint32_t> physical_column_ordinals;
         for (const auto& pair : schema.columns) {
-            // 简化处理：假设所有列都是物理存储的。实际应根据 table->flags 判断
-            physical_column_ordinals.push_back(pair.first);
+            const auto& col = pair.second;
+            // 虚拟生成列不参与 NULL 位图计算
+            if (!col.is_off_page && col.virtual_gen_store_type == 0) {
+                physical_column_ordinals.push_back(pair.first);
+            }
         }
         
         uint32_t nullable_columns = 0;
