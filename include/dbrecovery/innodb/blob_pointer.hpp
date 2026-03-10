@@ -68,7 +68,14 @@ struct BlobPageChain {
   }
   
   // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
-  static std::optional<std::pair<uint32_t, uint32_t>> parse_blob_pointer(const uint8_t* data) {
+  struct BlobPointer {
+      uint32_t space_id;
+      uint32_t page_no;
+      uint32_t offset;
+      uint32_t len;
+  };
+  
+  static std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data) {
       if (!data) return std::nullopt;
       
       // BLOB 指针格式（20字节）：
@@ -77,10 +84,13 @@ struct BlobPageChain {
       // [8-11]: offset (数据在页内的偏移)
       // [12-15]: len (当前页的数据长度)
       
-      uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(data, 0);
-      uint32_t page_no = dbrecovery::innodb::read_le<uint32_t>(data, 4);
+      BlobPointer ptr;
+      ptr.space_id = dbrecovery::innodb::read_le<uint32_t>(data, 0);
+      ptr.page_no = dbrecovery::innodb::read_le<uint32_t>(data, 4);
+      ptr.offset = dbrecovery::innodb::read_le<uint32_t>(data, 8);
+      ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
       
-      return std::make_pair(space_id, page_no);
+      return ptr;
   }
 };
 

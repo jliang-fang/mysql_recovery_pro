@@ -9,7 +9,7 @@ namespace innodb {
 // ==================== BPlusTreeParser 实现 ====================
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
-    : page_data_(page_data) {
+    : page_data_(page_data), flags_(0) {
 }
 
 bool BPlusTreeParser::parse() noexcept {
@@ -40,6 +40,12 @@ bool BPlusTreeParser::parse_header() noexcept {
     if (!is_valid_page_type) {
         return false;
     }
+    
+    // 解析 FIL Header 中的 flags (offset 24)
+    if (page_data_.size() < 26) {
+        return false;
+    }
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 24);
     
     // 解析 B+Tree Header (38 bytes into page)
     page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38);
@@ -149,14 +155,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // ✅ Step 1.2: 解析记录头中的字段数量（COMPACT 格式）
         // 记录头格式：[0]: info_bits, [1]: n_fields_high(4 bits) | next_rec[15:8](4 bits)
         // [2]: next_rec[7:0](8 bits)
-        // 正确解析：n_fields = ((page_data_[offset + 1] & 0xF0) << 4) | (page_data_[offset + 1] & 0x0F)
-        // 实际上 n_fields 存储在 [1] 的高4位和 [2] 的低4位
+        // 正确解析：n_fields 存储在 byte[1] 的高4位和 byte[2] 的高4位
         uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
-        uint8_t n_fields_low = page_data_[offset + 1] & 0x0F; // 注意：这里应该是从 offset+2 获取低4位
+        uint8_t n_fields_low = (page_data_[offset + 2] & 0xF0) >> 4;
         
-        // 正确的解析方式：n_fields_high 来自 byte[1] 高4位，n_fields_low 来自 byte[2] 高4位
-        uint8_t n_fields_byte2 = page_data_[offset + 2];
-        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | ((n_fields_byte2 & 0xF0) >> 4));
+        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
         
         // 验证字段数量合理性（InnoDB 单表最多 1017 个字段）
         if (n_fields == 0 || n_fields > 1017) {

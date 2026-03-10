@@ -50,6 +50,21 @@ bool PageParser::parse_header() {
     uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16);
     page_offset_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 20);
 
+    // ✅ Step 1.1: 校验页校验和（FIL_PAGE_SPACE_CHECKSUM at offset 4, 8, 24, 28）
+    bool checksum_valid = true;
+    if (size_ >= 52) {
+        uint32_t crc32_a = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
+        uint32_t crc32_b = dbrecovery::innodb::read_le<uint32_t>(buffer_, 8);
+        uint32_t checksum_a = dbrecovery::innodb::read_le<uint32_t>(buffer_, 24);
+        uint32_t checksum_b = dbrecovery::innodb::read_le<uint32_t>(buffer_, 28);
+        
+        // 简化校验：检查 checksum 字段是否一致
+        if (checksum_a != checksum_b && checksum_a != 0 && checksum_b != 0) {
+            std::cerr << "[WARN] Checksum mismatch: " << checksum_a << " vs " << checksum_b << "\n";
+            checksum_valid = false;
+        }
+    }
+
     // ✅ Step 2: 校验页类型（支持索引页、SDI页和Undo日志页）
     if (page_type_ != FIL_PAGE_INDEX && 
         page_type_ != FIL_PAGE_UNDO_LOG && 
@@ -81,6 +96,11 @@ bool PageParser::parse_header() {
     }
     flags_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 24);
     page_level_ = (flags_ >> 12) & 0x0F; // 实际仅占 4 bits
+
+    if (!checksum_valid) {
+        std::cerr << "[WARN] Page " << page_offset_ << " checksum validation failed\n";
+        return false;
+    }
 
     return true;
 }
