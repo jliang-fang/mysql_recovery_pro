@@ -28,6 +28,9 @@ public:
     uint32_t get_nullable_columns() const { return nullable_columns_; }
 
     std::vector<FieldValue> decode_record(size_t origin) const;
+    
+    // ✅ 新增：获取NULL位图起始指针（供内部使用）
+    const uint8_t* get_null_bitmap_ptr() const;
 
     // 辅助方法：检查字段是否为 NULL
     bool is_null(uint32_t col_idx) const {
@@ -40,6 +43,11 @@ public:
         // 列0对应bit7，列1对应bit6...列7对应bit0，然后是下一个字节
         const uint8_t* null_ptr = page_base_ + 1; // 跳过记录头
         return (null_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
+    }
+    
+    // ✅ 新增：获取NULL位图起始指针（供外部使用）
+    const uint8_t* get_null_bitmap_ptr() const {
+        return page_base_ + 1; // 跳过记录头
     }
 
 private:

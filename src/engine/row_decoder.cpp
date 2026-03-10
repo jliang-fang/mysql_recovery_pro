@@ -52,8 +52,10 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint32_t byte_idx = col_idx / 8;
             uint32_t bit_idx = col_idx % 8;
             
-            if (byte_idx < null_bytes_) {
-                bool is_null = (null_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
+            // ✅ 使用统一的NULL位图解析逻辑
+            const uint8_t* null_bitmap_ptr = get_null_bitmap_ptr();
+            if (byte_idx < null_bytes_ && null_bitmap_ptr != nullptr) {
+                bool is_null = (null_bitmap_ptr[byte_idx] & (1 << (7 - bit_idx))) != 0;
                 if (is_null) {
                     fv.value = "NULL";
                     fields.push_back(fv);

@@ -53,8 +53,18 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     // Infimum: 49 bytes after page start (after FIL_HEADER + BTR_HEADER)
     // Supremum: follows infimum
     
+    if (page_data_.size() < 58) { // 至少需要58字节（56+2）
+        return false;
+    }
+    
     uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
     uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
+    
+    // 验证偏移值合理性
+    if (infimum_offset < 38 + 16 || infimum_offset >= page_data_.size() ||
+        supremum_offset < 38 + 16 || supremum_offset >= page_data_.size()) {
+        return false;
+    }
     
     record_offsets_.push_back(infimum_offset);
     record_offsets_.push_back(supremum_offset);

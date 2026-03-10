@@ -90,6 +90,11 @@ private:
     PageHeader header_;
     const uint8_t* buffer_;
     size_t size_;
+    
+    // 页链信息（用于校验）
+    uint32_t fil_prev_ = 0xFFFFFFFF;
+    uint32_t fil_next_ = 0xFFFFFFFF;
+    uint32_t page_offset_ = 0;
 };
 
 } // namespace innodb
