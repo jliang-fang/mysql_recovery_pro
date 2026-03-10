@@ -372,8 +372,8 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
             }
             
             // ✅ Step 2.1: 解析记录头（COMPACT 格式）
-            uint8_t info_bits = it->second[offset] & REC_INFO_BITS_MASK;
-            bool is_leaf_record = (info_bits & 0x80) != 0; // 第7位表示是否为叶子节点记录
+            // 注意：内部节点的记录包含子页号，不需要检查 info_bits 的第7位
+            // 记录类型由 B+Tree header 中的 page_level 决定
             
             // 内部节点的记录格式：[5-8字节] 子页号（偏移 offset+4）
             uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
@@ -399,7 +399,7 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
                 }
                 
                 // ✅ Step 2.3: 解析记录头（COMPACT 格式）
-                uint8_t info_bits = it->second[offset] & REC_INFO_BITS_MASK;
+                // 注意：内部节点的记录包含子页号，不需要检查 info_bits 的第7位
                 
                 // 内部节点的记录格式：[5-8字节] 子页号（偏移 offset+4）
                 uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);

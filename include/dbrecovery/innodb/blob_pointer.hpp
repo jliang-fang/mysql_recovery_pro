@@ -17,12 +17,17 @@ namespace innodb {
 // ✅ BLOB page chain（支持多页拼接）
 struct BlobPageChain {
   std::vector<std::pair<uint32_t, uint32_t>> pages; // (space_id, page_no)
+  
+  // BLOB 页头偏移常量
+  static constexpr size_t BTR_BPAGE_NEXT = 0;   // 下一个 BLOB 页号（4字节）
+  static constexpr size_t BTR_BPAGE_PREV = 4;   // 上一个 BLOB 页号（4字节）
+  static constexpr size_t BTR_BPAGE_LEN  = 8;   // 数据长度（4字节）
 
   void add_page(uint32_t space_id, uint32_t page_no) {
       pages.emplace_back(space_id, page_no);
   }
 
-  bool is_valid() const {
+  bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader) const {
       if (pages.empty()) return false;
       
       // 检查是否有重复页
@@ -32,25 +37,50 @@ struct BlobPageChain {
           seen.insert(p);
       }
       
-      // 检查链表连续性（需要实际读取 BLOB 页头验证）
-      // 这里提供验证框架，实际实现需要从磁盘/内存中读取每个页
+      // 验证链表连续性（需要实际读取 BLOB 页头验证）
       for (size_t i = 1; i < pages.size(); ++i) {
-          if (pages[i].first != pages[0].first) {
+          const auto& prev_page = pages[i-1];
+          const auto& curr_page = pages[i];
+          
+          if (prev_page.first != curr_page.first) {
               // 不同表空间，跳过连续性检查（允许跨表空间BLOB）
-              break;
+              continue;
           }
           
-          // 简单的页号连续性检查（实际应读取每个 BLOB 页头验证 next/prev 链）
-          // 这是一个占位实现，完整实现需要访问实际页数据
-          uint32_t expected_next = pages[i-1].second + 1;
-          if (pages[i].second != expected_next) {
-              // 页号不连续，可能是碎片化的 BLOB 存储
-              // 不直接返回 false，因为 InnoDB 的 BLOB 存储可能不是严格连续的
-              // 完整验证需要读取每个页的 BLOB header 并检查 next_bpage/prev_bpage 字段
+          // 读取前一个页的 BLOB 头以验证 next_bpage 字段
+          if (page_reader) {
+              auto prev_data = page_reader(prev_page.first, prev_page.second);
+              if (!prev_data || prev_data->size() < 16) {
+                  continue; // 无法读取或数据不足，跳过验证
+              }
+              
+              // 读取 next_bpage 字段（偏移 0）
+              uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
+              
+              if (next_bpage != curr_page.second) {
+                  // next_bpage 不匹配，链表断裂
+                  return false;
+              }
           }
       }
       
       return true;
+  }
+  
+  // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
+  static std::optional<std::pair<uint32_t, uint32_t>> parse_blob_pointer(const uint8_t* data) {
+      if (!data) return std::nullopt;
+      
+      // BLOB 指针格式（20字节）：
+      // [0-3]:  space_id
+      // [4-7]:  page_no (first BLOB 页)
+      // [8-11]: offset (数据在页内的偏移)
+      // [12-15]: len (当前页的数据长度)
+      
+      uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(data, 0);
+      uint32_t page_no = dbrecovery::innodb::read_le<uint32_t>(data, 4);
+      
+      return std::make_pair(space_id, page_no);
   }
 };
 

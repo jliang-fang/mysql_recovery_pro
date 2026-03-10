@@ -154,20 +154,55 @@ struct RecoveryCache {
                 case RedoLogType::MLOG_COMP_REC_UPDATE:
                 case RedoLogType::MLOG_COMP_REC_DELETE: {
                     // 复杂的记录操作，需要解析完整 redo record 格式
-                    // 这里提供框架，实际实现需要更详细的 redo record 解析器
-                    std::cerr << "[WARN] Complex redo log type " << (int)type 
-                              << " not fully implemented yet" << std::endl;
+                    // MLOG_COMP_REC_INSERT (30): 插入新记录
+                    // MLOG_COMP_REC_UPDATE (31): 更新现有记录
+                    // MLOG_COMP_REC_DELETE (32): 删除记录
                     
-                    // 跳过未知类型的 redo 记录（简化处理）
-                    // 实际应根据具体类型解析剩余数据
-                    pos = log_size; // 暂时退出循环
+                    if (pos >= log_size) break;
+                    
+                    uint8_t rec_type = log_data[pos];
+                    pos++;
+                    
+                    // 解析记录类型（0=主键更新, 1=普通更新, 2=删除）
+                    if (rec_type > 2) {
+                        std::cerr << "[WARN] Invalid record type " << (int)rec_type 
+                                  << " for redo log type " << (int)type << std::endl;
+                        pos = log_size;
+                        break;
+                    }
+                    
+                    // 跳过记录数据（简化处理，实际应根据表结构解析）
+                    // 完整实现需要：
+                    // 1. 从 SDI 缓存获取表结构
+                    // 2. 解析每列的数据格式
+                    // 3. 应用变更到页缓存
+                    
+                    std::cerr << "[INFO] Complex redo log type " << (int)type 
+                              << " with record type " << (int)rec_type 
+                              << " - partial implementation, skipping data" << std::endl;
+                    
+                    // 暂时跳过剩余数据（实际应根据表结构解析）
+                    pos = log_size; // 临时方案，后续应实现完整解析
                     break;
                 }
                 
                 default: {
                     std::cerr << "[WARN] Unknown redo log type: " << (int)type 
                               << ", skipping remaining data" << std::endl;
-                    pos = log_size; // 未知类型，退出循环
+                    
+                    // ✅ 改进：尝试跳过未知类型的数据而不是直接退出
+                    // 读取剩余数据长度（如果存在）
+                    if (pos + 4 <= log_size) {
+                        uint32_t len = dbrecovery::innodb::read_le<uint32_t>(log_data, pos);
+                        pos += 4;
+                        
+                        if (pos + len <= log_size) {
+                            pos += len; // 跳过指定长度的数据
+                            continue;   // 继续处理后续日志
+                        }
+                    }
+                    
+                    pos = log_size; // 未知类型且无法确定长度，退出循环
                     break;
                 }
             }
