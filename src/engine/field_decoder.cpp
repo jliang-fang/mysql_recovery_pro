@@ -31,12 +31,17 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             if (rec_ptr + 2 > page_base_ + 16384) {
                 return nullptr;
             }
-            uint16_t len_prefix = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
-            // bit 15: 1 表示 2 字节前缀，0 表示 1 字节前缀
-            if (len_prefix & 0x8000) {
-                field_len = 3 + (len_prefix & 0x7FFF); // 2 字节前缀 + 数据
+            // InnoDB VARCHAR 长度前缀是独立存储的：
+            // - 如果列最大长度 <= 255 字节，使用 1 字节前缀
+            // - 否则使用 2 字节前缀
+            bool use_two_byte_prefix = (col_info.column_length > 255);
+            
+            if (use_two_byte_prefix) {
+                uint16_t len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
+                field_len = 2 + len;
             } else {
-                field_len = 1 + len_prefix; // 1 字节前缀 + 数据
+                uint8_t len = rec_ptr[0];
+                field_len = 1 + len;
             }
             break;
         case 245: // JSON

@@ -46,7 +46,7 @@ bool PageParser::parse_header() {
     fil_next_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
     // LSN (8 bytes)
     uint64_t fil_lsn = dbrecovery::innodb::read_le<uint64_t>(buffer_, 8);
-    page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 12); // 注意：FIL_PAGE_TYPE 是 uint16_t！
+    page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 12); // FIL_PAGE_TYPE offset
     uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16);
     page_offset_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 20);
 

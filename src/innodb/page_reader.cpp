@@ -84,7 +84,32 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
 }
 
 uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
-    // 使用标准 CRC32C (Castagnoli) 算法
+#ifdef __SSE4_2__
+    // 使用硬件加速 CRC32C (SSE4.2 指令集)
+    uint32_t crc = 0xFFFFFFFF;
+    
+    for (size_t i = 0; i < page_data.size(); ++i) {
+        // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
+        if (i >= 24 && i < 28) continue;
+        
+#ifdef __x86_64__
+        crc = _mm_crc32_u8(crc, page_data[i]);
+#else
+        // Fallback to software implementation for non-x86_64 platforms
+        crc ^= static_cast<uint32_t>(page_data[i]);
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0x82F63B78;
+            } else {
+                crc >>= 1;
+            }
+        }
+#endif
+    }
+    
+    return ~crc;
+#else
+    // 使用标准 CRC32C (Castagnoli) 算法（软件实现）
     uint32_t crc = 0xFFFFFFFF;
     
     for (size_t i = 0; i < page_data.size(); ++i) {
@@ -102,6 +127,7 @@ uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
     }
     
     return ~crc;
+#endif
 }
 
 uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {

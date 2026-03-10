@@ -66,9 +66,21 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
     if (pages_by_type.count(9971)) {
         std::cout << "[INFO] Found " << pages_by_type[9971].size() << " SDI pages\n";
         
-        // TODO: 解析 SDI 元数据
+        // 解析 SDI 元数据（简化实现，实际应解析 JSON）
         for (const auto& [page_no, page_data] : pages_by_type[9971]) {
             std::cout << "[INFO] SDI Page " << page_no << ": size=" << page_data.size() << "\n";
+            
+            // 从 SDI 页中提取表名（简化实现）
+            const uint8_t* sdi_payload = page_data.data() + 38; // 跳过 FIL_HEADER
+            if (page_data.size() > 58) {
+                std::string table_name(reinterpret_cast<const char*>(sdi_payload + 20), 
+                                      std::min(size_t(64), page_data.size() - 58));
+                size_t null_pos = table_name.find('\0');
+                if (null_pos != std::string::npos) {
+                    table_name.resize(null_pos);
+                }
+                std::cout << "[INFO] SDI Table Name: " << table_name << "\n";
+            }
         }
     }
     
