@@ -135,11 +135,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         bool is_extern = (flags_ & REC_INFO_EXTERN_FLAG) != 0;
         
         // ✅ Step 1.2: 解析记录头中的字段数量（COMPACT 格式）
-        // 记录头格式：[0]: info_bits (3 bits status + 5 bits unused), [1]: n_fields_high(4 bits) + next_rec[15:8](4 bits)
-        // [2]: next_rec[7:0]
-        // 正确解析：n_fields = ((info_bits & 0x07) << 6) | (page_data_[offset+1] >> 2 & 0x3F)
+        // 记录头格式：[0]: info_bits (5 bits unused, 3 bits status), [1]: n_fields_high(4 bits) | next_rec[15:12](4 bits)
+        // [2]: next_rec[11:4](8 bits)
+        // 正确解析：n_fields = ((info_bits & 0xF0) >> 4) | ((page_data_[offset + 1] & 0xF0) >> 4)
         uint8_t info_bits = page_data_[offset];
-        uint16_t n_fields = static_cast<uint16_t>(((info_bits & 0x07) << 6) | ((page_data_[offset + 1] >> 2) & 0x3F));
+        uint16_t n_fields = static_cast<uint16_t>(((info_bits & 0xF0) >> 4) | ((page_data_[offset + 1] & 0xF0) >> 4));
         
         // 验证字段数量合理性（InnoDB 单表最多 1017 个字段）
         if (n_fields == 0 || n_fields > 1017) {
@@ -152,10 +152,18 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue; // 跳过已删除记录
         }
         
-        // ✅ Step 2: 构建 NULL 位图映射（按物理顺序）
-        uint32_t nullable_columns = 0;
+        // ✅ Step 2: 构建 NULL 位图映射（按物理存储列顺序）
+        // 注意：NULL 位图只包含物理存储列，不包括虚拟生成列
+        std::vector<uint32_t> physical_column_ordinals;
         for (const auto& pair : schema.columns) {
-            if (pair.second.is_nullable) {
+            // 简化处理：假设所有列都是物理存储的。实际应根据 table->flags 判断
+            physical_column_ordinals.push_back(pair.first);
+        }
+        
+        uint32_t nullable_columns = 0;
+        for (uint32_t col_idx : physical_column_ordinals) {
+            auto it = schema.columns.find(col_idx);
+            if (it != schema.columns.end() && it->second.is_nullable) {
                 nullable_columns++;
             }
         }
@@ -163,12 +171,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint32_t null_bytes = (nullable_columns + 7) / 8;
         const uint8_t* null_ptr = page_data_.data() + offset + header_size;
         
-        // ✅ Step 2.1: 构建 column_ordinal -> nullable_index 映射
+        // ✅ Step 2.1: 构建 column_ordinal -> nullable_index 映射（按物理顺序）
         std::map<uint32_t, uint32_t> column_nullable_index;
         uint32_t nullable_idx = 0;
-        for (const auto& pair : schema.columns) {
-            if (pair.second.is_nullable) {
-                column_nullable_index[pair.first] = nullable_idx++;
+        for (uint32_t col_idx : physical_column_ordinals) {
+            auto it = schema.columns.find(col_idx);
+            if (it != schema.columns.end() && it->second.is_nullable) {
+                column_nullable_index[col_idx] = nullable_idx++;
             }
         }
         

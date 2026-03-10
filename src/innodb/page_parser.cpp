@@ -137,17 +137,33 @@ std::vector<Record> PageParser::parse_records() const {
     bool found_supremum = false;
 
     // ✅ Step 2: 遍历记录链表
+    std::set<uint16_t> visited_offsets; // 防止循环引用
     while (true) {
         // 检查是否超出堆顶或页边界
         if (rec >= buffer_ + header_.heap_top || rec + 5 > buffer_ + size_) break;
 
         uint16_t rec_offset = static_cast<uint16_t>(rec - buffer_);
+        
+        // ✅ 新增：检查循环引用
+        if (visited_offsets.find(rec_offset) != visited_offsets.end()) {
+            std::cerr << "[WARN] Circular reference detected at offset " << rec_offset << "\n";
+            break;
+        }
+        visited_offsets.insert(rec_offset);
+        
         uint8_t info_bits = *rec;
         bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
 
         // 提取 next_record 偏移（相对页起始）
         if (rec + 1 >= buffer_ + size_) break;
         uint16_t next_rec_offset = dbrecovery::innodb::read_le<uint16_t>(rec, 1);
+        
+        // ✅ 新增：边界检查
+        if (next_rec_offset < 38 + 16 || next_rec_offset >= header_.heap_top) {
+            std::cerr << "[WARN] Invalid next_record offset " << next_rec_offset 
+                      << " at record " << rec_offset << "\n";
+            break;
+        }
         
         // ✅ 检查是否为 SUPREMUM 标记
         if (next_rec_offset == 0xFFFF) {
