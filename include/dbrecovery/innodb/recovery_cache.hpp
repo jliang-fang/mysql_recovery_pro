@@ -67,11 +67,12 @@ struct RecoveryCache {
     }
     
     // ✅ Redo 日志记录类型定义（参考 MySQL 8.0 mtr0mtr.h）
+    // 命名规范：使用标准的 mlog_id_t 枚举值名称
     enum class RedoLogType : uint8_t {
-        MLOG_1BYTE = 1,
-        MLOG_2BYTES = 2,
-        MLOG_4BYTES = 3,
-        MLOG_8BYTES = 4,
+        MLOG_1B = 1,          // 原 MLOG_1BYTE
+        MLOG_2B = 2,          // 原 MLOG_2BYTES
+        MLOG_4B = 3,          // 原 MLOG_4BYTES
+        MLOG_8B = 4,          // 原 MLOG_8BYTES
         MLOG_REC_INSERT = 10,
         MLOG_REC_UPDATE = 11,
         MLOG_REC_DELETE = 12,
@@ -110,10 +111,10 @@ struct RecoveryCache {
             pos++;
             
             switch (static_cast<RedoLogType>(type)) {
-                case RedoLogType::MLOG_1BYTE:
-                case RedoLogType::MLOG_2BYTES:
-                case RedoLogType::MLOG_4BYTES:
-                case RedoLogType::MLOG_8BYTES: {
+                case RedoLogType::MLOG_1B:
+                case RedoLogType::MLOG_2B:
+                case RedoLogType::MLOG_4B:
+                case RedoLogType::MLOG_8B: {
                     // 简单的字节写入操作
                     if (pos + 2 > log_size) break;
                     
