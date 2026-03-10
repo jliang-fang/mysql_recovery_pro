@@ -32,6 +32,13 @@ constexpr uint8_t REC_INFO_BITS_MASK    = 0x07;   // info bits mask (lowest 3 bi
 constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // deleted record flag (bit 0 of info bits)
 constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // minimum record flag (bit 1 of info bits)
 
+// ✅ 兼容性定义：与 btree.hpp 保持一致
+constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;   // status mask (lowest 3 bits)
+constexpr uint8_t REC_STATUS_ORDINARY   = 0x00;   // ordinary record
+constexpr uint8_t REC_STATUS_NODE_PTR   = 0x01;   // node pointer record
+constexpr uint8_t REC_STATUS_INFIMUM    = 0x02;   // infimum system record
+constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record
+
 // ==================== Page Header Offsets (relative to offset 38) ====================
 constexpr uint16_t PAGE_N_DIR_SLOTS     = 0;  // number of slots in page directory
 constexpr uint16_t PAGE_HEAP_TOP        = 2;  // heap top offset

@@ -32,12 +32,6 @@ constexpr uint8_t REC_INFO_BITS_MASK      = 0x07;   // info bits 掩码（最低
 constexpr size_t REC_N_FIELDS_OFFSET      = 1;      // n_fields 存储在 offset+1 的高4位 + offset+2 的低4位
 constexpr size_t REC_NEXT_OFFSET          = 2;      // next_record 偏移（2字节）
 
-// ✅ 记录状态常量（REC_INFO_STATUS_MASK & 0x03）
-constexpr uint8_t REC_STATUS_ORDINARY     = 0x00;   // 普通记录
-constexpr uint8_t REC_STATUS_NODE_PTR     = 0x01;   // 内部节点指针记录
-constexpr uint8_t REC_STATUS_INFIMUM      = 0x02;   // INFIMUM 系统记录
-constexpr uint8_t REC_STATUS_SUPREMUM     = 0x03;   // SUPREMUM 系统记录
-
 /**
  * @brief B+Tree 索引页结构解析器
  */

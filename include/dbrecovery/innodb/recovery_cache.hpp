@@ -66,6 +66,29 @@ struct RecoveryCache {
         return dirty;
     }
     
+    // ✅ Redo 日志记录类型定义（参考 MySQL 8.0 mtr0mtr.h）
+    enum class RedoLogType : uint8_t {
+        MLOG_1BYTE = 1,
+        MLOG_2BYTES = 2,
+        MLOG_4BYTES = 3,
+        MLOG_8BYTES = 4,
+        MLOG_REC_INSERT = 10,
+        MLOG_REC_UPDATE = 11,
+        MLOG_REC_DELETE = 12,
+        MLOG_PAGE_CREATE = 15,
+        MLOG_PAGE_REINIT = 16,
+        MLOG_INDEX_ALLOC = 17,
+        MLOG_COMP_REC_INSERT = 30,
+        MLOG_COMP_REC_UPDATE = 31,
+        MLOG_COMP_REC_DELETE = 32,
+        MLOG_COMP_PAGE_CREATE = 33,
+        MLOG_COMP_PAGE_REINIT = 34,
+        MLOG_BLOB_WRITE = 40,
+        MLOG_MULTI_REC_END = 50,
+        MLOG_CHECKPOINT = 51,
+        MLOG_INDEX_LOAD = 52
+    };
+    
     // ✅ 新增：应用 Redo 日志条目（增强实现）
     void apply_redo_log_entry(uint64_t lsn, uint32_t space_id, uint32_t page_no,
                               const uint8_t* log_data, size_t log_size) {
@@ -79,27 +102,75 @@ struct RecoveryCache {
             it = page_cache.emplace(page_no, PageData{page_no, page_data}).first;
         }
         
-        // 应用 Redo 日志（需要解析 redo 记录类型）
-        // 简化实现：假设 log_data 是页的偏移+数据对列表
-        // 实际实现需要根据 redo log record type 解析
-        
         size_t pos = 0;
-        while (pos + 4 <= log_size) {
-            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(log_data, pos);
-            pos += 2;
+        while (pos < log_size) {
+            if (pos + 1 > log_size) break;
             
-            uint16_t length = dbrecovery::innodb::read_le<uint16_t>(log_data, pos);
-            pos += 2;
+            uint8_t type = log_data[pos];
+            pos++;
             
-            if (pos + length > log_size) break;
-            
-            // 边界检查
-            if (offset < 38 || offset + length > it->second.data.size()) {
-                continue; // 跳过无效的 redo 记录
+            switch (static_cast<RedoLogType>(type)) {
+                case RedoLogType::MLOG_1BYTE:
+                case RedoLogType::MLOG_2BYTES:
+                case RedoLogType::MLOG_4BYTES:
+                case RedoLogType::MLOG_8BYTES: {
+                    // 简单的字节写入操作
+                    if (pos + 2 > log_size) break;
+                    
+                    uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(log_data, pos);
+                    pos += 2;
+                    
+                    size_t length = 0;
+                    switch (static_cast<RedoLogType>(type)) {
+                        case RedoLogType::MLOG_1BYTE: length = 1; break;
+                        case RedoLogType::MLOG_2BYTES: length = 2; break;
+                        case RedoLogType::MLOG_4BYTES: length = 4; break;
+                        case RedoLogType::MLOG_8BYTES: length = 8; break;
+                        default: break;
+                    }
+                    
+                    if (pos + length > log_size) break;
+                    
+                    // 边界检查
+                    if (offset < 38 || offset + length > it->second.data.size()) {
+                        pos += length;
+                        continue;
+                    }
+                    
+                    std::memcpy(it->second.data.data() + offset, log_data + pos, length);
+                    pos += length;
+                    break;
+                }
+                
+                case RedoLogType::MLOG_PAGE_REINIT: {
+                    // 页重新初始化
+                    if (it->second.data.size() >= 38) {
+                        std::memset(it->second.data.data() + 38, 0, it->second.data.size() - 38);
+                    }
+                    break;
+                }
+                
+                case RedoLogType::MLOG_COMP_REC_INSERT:
+                case RedoLogType::MLOG_COMP_REC_UPDATE:
+                case RedoLogType::MLOG_COMP_REC_DELETE: {
+                    // 复杂的记录操作，需要解析完整 redo record 格式
+                    // 这里提供框架，实际实现需要更详细的 redo record 解析器
+                    std::cerr << "[WARN] Complex redo log type " << (int)type 
+                              << " not fully implemented yet" << std::endl;
+                    
+                    // 跳过未知类型的 redo 记录（简化处理）
+                    // 实际应根据具体类型解析剩余数据
+                    pos = log_size; // 暂时退出循环
+                    break;
+                }
+                
+                default: {
+                    std::cerr << "[WARN] Unknown redo log type: " << (int)type 
+                              << ", skipping remaining data" << std::endl;
+                    pos = log_size; // 未知类型，退出循环
+                    break;
+                }
             }
-            
-            std::memcpy(it->second.data.data() + offset, log_data + pos, length);
-            pos += length;
         }
         
         // 标记页为已修改

@@ -9,8 +9,10 @@ namespace utils {
 
 class ZlibHelper {
 public:
-    static std::vector<uint8_t> decompress(const uint8_t* src, size_t src_len, size_t expected_len = 65536) {
-        if (src_len == 0) return std::vector<uint8_t>();
+    static std::vector<uint8_t> decompress(const uint8_t* src, size_t src_len, 
+                                          size_t expected_len = 65536,
+                                          size_t max_size = 1024 * 1024 * 1024) { // 默认最大1GB
+        if (src_len == 0 || src == nullptr) return std::vector<uint8_t>();
         
         std::vector<uint8_t> dest(expected_len);
         z_stream strm = {};
@@ -24,9 +26,17 @@ public:
 
         do {
             ret = inflate(&strm, Z_NO_FLUSH);
-            if (ret == Z_BUF_ERROR) {
+            
+            if (ret == Z_BUF_ERROR || ret == Z_NEED_DICT) {
+                // 扩展缓冲区
                 size_t new_size = dest.size() * 2;
-                if (new_size <= dest.size()) break;
+                
+                // 检查最大大小限制
+                if (new_size > max_size || new_size <= dest.size()) {
+                    inflateEnd(&strm);
+                    return std::vector<uint8_t>();
+                }
+                
                 dest.resize(new_size);
                 strm.next_out = dest.data() + strm.total_out;
                 strm.avail_out = static_cast<uInt>(dest.size() - strm.total_out);
@@ -39,6 +49,33 @@ public:
         dest.resize(strm.total_out);
         inflateEnd(&strm);
         return dest;
+    }
+    
+    // ✅ 新增：解压到指定缓冲区（避免内存拷贝）
+    static bool decompress_to_buffer(const uint8_t* src, size_t src_len,
+                                    uint8_t* dest, size_t dest_size,
+                                    size_t& actual_size) {
+        if (src == nullptr || dest == nullptr) return false;
+        
+        z_stream strm = {};
+        strm.next_in = const_cast<Bytef*>(src);
+        strm.avail_in = static_cast<uInt>(src_len);
+        strm.next_out = dest;
+        strm.avail_out = static_cast<uInt>(dest_size);
+
+        int ret = inflateInit2(&strm, -15);
+        if (ret != Z_OK) return false;
+
+        ret = inflate(&strm, Z_FINISH);
+        
+        if (ret == Z_STREAM_END) {
+            actual_size = strm.total_out;
+            inflateEnd(&strm);
+            return true;
+        }
+        
+        inflateEnd(&strm);
+        return false;
     }
 };
 
