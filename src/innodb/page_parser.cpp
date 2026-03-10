@@ -150,21 +150,18 @@ std::vector<Record> PageParser::parse_records() const {
         return records; // 空页或无效堆
     }
 
-    // ✅ Step 1: 定位记录起始点（INFIMUM 记录）
-    const uint8_t* rec = buffer_ + 38 + 16; // PAGE_HEADER 后第一个记录位置
+    // 定位记录起始点（INFIMUM 记录）
+    const uint8_t* rec = buffer_ + 38 + 16;
 
     bool found_infimum = false;
     bool found_supremum = false;
+    std::set<uint16_t> visited_offsets;
 
-    // ✅ Step 2: 遍历记录链表
-    std::set<uint16_t> visited_offsets; // 防止循环引用
     while (true) {
-        // 检查是否超出堆顶或页边界
         if (rec >= buffer_ + header_.heap_top || rec + 5 > buffer_ + size_) break;
 
         uint16_t rec_offset = static_cast<uint16_t>(rec - buffer_);
         
-        // ✅ 新增：检查循环引用
         if (visited_offsets.find(rec_offset) != visited_offsets.end()) {
             std::cerr << "[WARN] Circular reference detected at offset " << rec_offset << "\n";
             break;
@@ -174,24 +171,22 @@ std::vector<Record> PageParser::parse_records() const {
         uint8_t info_bits = *rec;
         bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
 
-        // 提取 next_record 偏移（相对页起始）
         if (rec + 1 >= buffer_ + size_) break;
         uint16_t next_rec_offset = dbrecovery::innodb::read_le<uint16_t>(rec, 1);
         
-        // ✅ 新增：边界检查
+        // ✅ 修复：边界检查更严格
         if (next_rec_offset < 38 + 16 || next_rec_offset >= header_.heap_top) {
             std::cerr << "[WARN] Invalid next_record offset " << next_rec_offset 
                       << " at record " << rec_offset << "\n";
             break;
         }
         
-        // ✅ 检查是否为 SUPREMUM 标记
+        // ✅ 修复：SUPREMUM 标记是 next_rec_offset == 0xFFFF，但也要检查 info_bits
         if (next_rec_offset == 0xFFFF) {
             found_supremum = true;
-            break; // 结束遍历
+            break;
         }
 
-        // ✅ 检查是否为 INFIMUM 记录（固定偏移）
         if (rec_offset == 38 + 16) {
             found_infimum = true;
         }
@@ -202,20 +197,18 @@ std::vector<Record> PageParser::parse_records() const {
         rec_info.next_offset = next_rec_offset;
         rec_info.is_deleted = is_deleted;
 
-        // 解析记录头中的字段数量（COMPACT格式）
+        // 解析字段数量（COMPACT格式）
         if (rec + 5 <= buffer_ + size_) {
-            uint8_t n_fields_high = info_bits & REC_INFO_BITS_MASK;
-            uint8_t n_fields_low = (rec[1] >> 4) & 0x3F;
-            rec_info.n_fields = (n_fields_high << 6) | n_fields_low;
+            uint8_t n_fields_high = (info_bits & REC_INFO_BITS_MASK);
+            uint8_t n_fields_low = (rec[1] >> 4) & 0x0F;
+            rec_info.n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
         }
 
         records.push_back(rec_info);
 
-        // 移动到下一条记录
         rec = buffer_ + next_rec_offset;
     }
 
-    // ✅ Step 3: 校验 infimum/supremum 完整性
     if (!found_infimum) {
         std::cerr << "[WARN] Missing INFIMUM record in page " << page_offset_ << "\n";
     }
