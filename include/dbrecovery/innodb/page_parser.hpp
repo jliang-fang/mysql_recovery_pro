@@ -25,12 +25,24 @@ constexpr uint32_t FSP_FLAGS_DYNAMIC      = (1 << 1);  // DYNAMIC行格式
 constexpr uint32_t FSP_FLAGS_COMPRESSED   = (2 << 1);  // COMPRESSED行格式
 constexpr uint32_t FSP_FLAGS_MASK         = 0x3F;      // 标志位掩码
 
+// ✅ InnoDB 页大小常量（参考 UNIV_PAGE_SIZE）
+constexpr size_t UNIV_PAGE_SIZE          = 16384;   // 默认 16KB
+constexpr size_t UNIV_PAGE_SIZE_MIN      = 4096;    // 最小 4KB
+constexpr size_t UNIV_PAGE_SIZE_MAX      = 65536;   // 最大 64KB
+
 // ✅ B+树页类型常量
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
 constexpr uint16_t FIL_PAGE_INDEX        = 9969;  // B+Tree索引页
 constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;  // Undo日志页
 constexpr uint16_t FIL_PAGE_SDI          = 9971;  // SDI元数据页
 constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;  // BLOB页
+
+// ✅ FIL Header 常量
+constexpr size_t FIL_PAGE_OFFSET         = 4;     // 页偏移（4字节）
+constexpr size_t FIL_PAGE_LSN            = 8;     // LSN（8字节）
+constexpr size_t FIL_PAGE_TYPE           = 12;    // 页类型（2字节）
+constexpr size_t FIL_PAGE_FILE_FLUSH_LSN = 16;    // 文件刷新LSN（8字节）
+constexpr size_t FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID = 24; // 空间ID（4字节）
 
 // ✅ 记录结构定义（包含完整信息）
 struct Record {

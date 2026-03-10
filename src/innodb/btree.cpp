@@ -135,15 +135,16 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         bool is_extern = (flags_ & REC_INFO_EXTERN_FLAG) != 0;
         
         // ✅ Step 1.2: 解析记录头中的字段数量（COMPACT 格式）
-        // 记录头格式：[0]: info_bits, [1]: n_fields_high + next_rec[15:8], [2]: next_rec[7:0]
-        // n_fields = (info_bits & 0x07) << 8 | (page_data_[offset+1] & 0xF0)
-        uint16_t n_fields = static_cast<uint16_t>(((flags_ & REC_INFO_BITS_MASK) << 8) | 
-                                                   (page_data_[offset + 1] & 0xF0));
+        // 记录头格式：[0]: info_bits (3 bits status + 5 bits unused), [1]: n_fields_high(4 bits) + next_rec[15:8](4 bits)
+        // [2]: next_rec[7:0]
+        // 正确解析：n_fields = ((info_bits & 0x07) << 6) | (page_data_[offset+1] >> 2 & 0x3F)
+        uint8_t info_bits = page_data_[offset];
+        uint16_t n_fields = static_cast<uint16_t>(((info_bits & 0x07) << 6) | ((page_data_[offset + 1] >> 2) & 0x3F));
         
         // 验证字段数量合理性（InnoDB 单表最多 1017 个字段）
         if (n_fields == 0 || n_fields > 1017) {
             std::cerr << "[WARN] Invalid field count: " << n_fields 
-                      << " at offset " << offset << "\n";
+                      << " at offset " << offset << ", info_bits=0x" << std::hex << (int)info_bits << std::dec << "\n";
             continue; // 字段数量异常，跳过此记录
         }
         

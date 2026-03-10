@@ -9,8 +9,16 @@ namespace innodb {
 PageParser::PageParser(const uint8_t* buffer, size_t size)
     : buffer_(buffer), size_(size), page_type_(0), flags_(0), page_level_(0),
       fil_prev_(0xFFFFFFFF), fil_next_(0xFFFFFFFF), page_offset_(0) {
-    if (!buffer_ || size_ < 38 + 16) { // 至少包含 FIL_HEADER + PAGE_HEADER 基础部分
-        throw std::runtime_error("Invalid page buffer: too small");
+    // ✅ 添加页大小校验：InnoDB 页大小通常为 4KB/8KB/16KB/32KB/64KB
+    const size_t MIN_PAGE_SIZE = 4096;
+    const size_t MAX_PAGE_SIZE = 65536;
+    
+    if (!buffer_ || size_ < MIN_PAGE_SIZE) {
+        throw std::runtime_error("Invalid page buffer: too small (less than " + std::to_string(MIN_PAGE_SIZE) + " bytes)");
+    }
+    
+    if (size_ > MAX_PAGE_SIZE) {
+        throw std::runtime_error("Invalid page buffer: too large (exceeds " + std::to_string(MAX_PAGE_SIZE) + " bytes)");
     }
 }
 
@@ -28,6 +36,12 @@ bool PageParser::parse_header() {
         return false;
     }
     
+    // ✅ 添加：校验页大小范围
+    if (size_ < UNIV_PAGE_SIZE_MIN || size_ > UNIV_PAGE_SIZE_MAX) {
+        std::cerr << "[WARN] Invalid page size: " << size_ << "\n";
+        return false;
+    }
+    
     fil_prev_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 0);
     fil_next_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
     // LSN (8 bytes)
@@ -39,7 +53,9 @@ bool PageParser::parse_header() {
     // ✅ Step 2: 校验页类型（支持索引页、SDI页和Undo日志页）
     if (page_type_ != FIL_PAGE_INDEX && 
         page_type_ != FIL_PAGE_UNDO_LOG && 
-        page_type_ != FIL_PAGE_SDI) {
+        page_type_ != FIL_PAGE_SDI &&
+        page_type_ != FIL_PAGE_TYPE_ALLOCATED) {
+        std::cerr << "[WARN] Unsupported page type: 0x" << std::hex << page_type_ << std::dec << "\n";
         return false; // 非有效页类型，跳过
     }
 
