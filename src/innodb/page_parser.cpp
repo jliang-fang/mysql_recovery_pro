@@ -27,13 +27,13 @@ bool PageParser::parse_header() {
         return false;
     }
     
-    uint32_t fil_prev = read_le<uint32_t>(buffer_ + 0);
-    uint32_t fil_next = read_le<uint32_t>(buffer_ + 4);
+    uint32_t fil_prev = dbrecovery::innodb::read_le<uint32_t>(buffer_, 0);
+    uint32_t fil_next = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
     // LSN (8 bytes)
-    uint64_t fil_lsn = read_le<uint64_t>(buffer_ + 8);
-    page_type_ = read_le<uint16_t>(buffer_ + 12); // 注意：FIL_PAGE_TYPE 是 uint16_t！
-    uint32_t space_id = read_le<uint32_t>(buffer_ + 16);
-    uint32_t page_offset = read_le<uint32_t>(buffer_ + 20);
+    uint64_t fil_lsn = dbrecovery::innodb::read_le<uint64_t>(buffer_, 8);
+    page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 12); // 注意：FIL_PAGE_TYPE 是 uint16_t！
+    uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16);
+    uint32_t page_offset = dbrecovery::innodb::read_le<uint32_t>(buffer_, 20);
 
     // ✅ Step 2: 校验页类型（仅支持索引页）
     if (page_type_ != FIL_PAGE_INDEX && page_type_ != FIL_PAGE_UNDO_LOG) {
@@ -46,21 +46,21 @@ bool PageParser::parse_header() {
         return false;
     }
     
-    header_.n_dir_slots = read_le<uint16_t>(header + 0);
-    header_.heap_top    = read_le<uint16_t>(header + 2);
-    header_.n_heap      = read_le<uint16_t>(header + 4) & 0x7FFF; // 最高位为 REC_INFO_NEW_CHUNK_FLAG
-    header_.free_offset = read_le<uint16_t>(header + 6);
+    header_.n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(header, 0);
+    header_.heap_top    = dbrecovery::innodb::read_le<uint16_t>(header, 2);
+    header_.n_heap      = dbrecovery::innodb::read_le<uint16_t>(header, 4) & 0x7FFF; // 最高位为 REC_INFO_NEW_CHUNK_FLAG
+    header_.free_offset = dbrecovery::innodb::read_le<uint16_t>(header, 6);
 
     // 解析 BTR_HEADER (PAGE_HEADER 后的8字节)
-    uint16_t n_owned = read_le<uint16_t>(header + 8);
-    uint32_t max_insert = read_le<uint16_t>(header + 10);
-    uint16_t free_space = read_le<uint16_t>(header + 12);
+    uint16_t n_owned = dbrecovery::innodb::read_le<uint16_t>(header, 8);
+    uint32_t max_insert = dbrecovery::innodb::read_le<uint16_t>(header, 10);
+    uint16_t free_space = dbrecovery::innodb::read_le<uint16_t>(header, 12);
 
     // ✅ Step 4: 解析 flags (offset 24 in FIL_HEADER)
     if (size_ < 26) {
         return false;
     }
-    flags_ = read_le<uint16_t>(buffer_ + 24);
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 24);
     page_level_ = (flags_ >> 12) & 0x0F; // 实际仅占 4 bits
 
     return true;
@@ -119,7 +119,7 @@ std::vector<Record> PageParser::parse_records() const {
 
         // 提取 next_record 偏移（相对页起始）
         if (rec + 1 >= buffer_ + size_) break;
-        uint16_t next_rec_offset = read_le<uint16_t>(rec + 1);
+        uint16_t next_rec_offset = dbrecovery::innodb::read_le<uint16_t>(rec, 1);
         
         // ✅ 检查是否为 SUPREMUM 标记
         if (next_rec_offset == 0xFFFF) {

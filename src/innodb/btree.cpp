@@ -22,7 +22,7 @@ bool BPlusTreeParser::parse() noexcept {
 
 bool BPlusTreeParser::parse_header() noexcept {
     // 解析 FIL Header (38 bytes)
-    uint16_t page_type = MachRead::read_le<uint16_t>(page_data_.data(), 0);
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
     
     // 检查页类型
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
@@ -31,10 +31,10 @@ bool BPlusTreeParser::parse_header() noexcept {
     }
     
     // 解析 B+Tree Header (38 bytes into page)
-    page_level_ = MachRead::read_le<uint16_t>(page_data_.data(), 38);
-    n_records_ = MachRead::read_le<uint16_t>(page_data_.data(), 42);
-    next_page_ = MachRead::read_le<uint32_t>(page_data_.data(), 46);
-    prev_page_ = MachRead::read_le<uint32_t>(page_data_.data(), 50);
+    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38);
+    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42);
+    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 46);
+    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 50);
     
     // 确定节点类型
     if (page_level_ == 0) {
@@ -53,8 +53,8 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     // Infimum: 49 bytes after page start (after FIL_HEADER + BTR_HEADER)
     // Supremum: follows infimum
     
-    uint16_t infimum_offset = MachRead::read_le<uint16_t>(page_data_.data(), 54);
-    uint16_t supremum_offset = MachRead::read_le<uint16_t>(page_data_.data(), 56);
+    uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
+    uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
     
     record_offsets_.push_back(infimum_offset);
     record_offsets_.push_back(supremum_offset);
@@ -70,7 +70,7 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         return false;
     }
     
-    uint16_t dir_size = MachRead::read_le<uint16_t>(page_data_.data(), dir_start);
+    uint16_t dir_size = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start);
     
     for (uint16_t i = 0; i < dir_size; ++i) {
         uint16_t slot_offset = dir_start + 2 + i * 2;
@@ -78,7 +78,7 @@ bool BPlusTreeParser::parse_user_records() noexcept {
             break;
         }
         
-        uint16_t record_offset = MachRead::read_le<uint16_t>(page_data_.data(), slot_offset);
+        uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_offset);
         if (record_offset > 0 && record_offset < 8192) { // 合理范围检查
             record_offsets_.push_back(record_offset);
         }
@@ -169,7 +169,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 switch (col.mysql_type_id) {
                     case 3: { // MYSQL_TYPE_LONG (4字节有符号整数)
                         if (data_pos + 4 <= page_data_.size()) {
-                            int32_t val = static_cast<int32_t>(MachRead::read_le<uint32_t>(page_data_.data(), data_pos));
+                            int32_t val = static_cast<int32_t>(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
                             field_value = std::to_string(val);
                             data_pos += 4;
                         }
@@ -177,7 +177,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                     }
                     case 8: { // MYSQL_TYPE_LONGLONG (8字节有符号整数)
                         if (data_pos + 8 <= page_data_.size()) {
-                            int64_t val = static_cast<int64_t>(MachRead::read_le<uint64_t>(page_data_.data(), data_pos));
+                            int64_t val = static_cast<int64_t>(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
                             field_value = std::to_string(val);
                             data_pos += 8;
                         }
@@ -189,7 +189,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         
                         if (use_two_byte_prefix) {
                             if (data_pos + 2 <= page_data_.size()) {
-                                uint16_t len = MachRead::read_le<uint16_t>(page_data_.data(), data_pos);
+                                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
                                 data_pos += 2;
                                 
                                 if (len > 0 && data_pos + len <= page_data_.size()) {
@@ -218,7 +218,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                     }
                     case 245: { // MYSQL_TYPE_JSON (JSON类型)
                         if (data_pos + 2 <= page_data_.size()) {
-                            uint16_t len = MachRead::read_le<uint16_t>(page_data_.data(), data_pos);
+                            uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
                             data_pos += 2;
                             
                             if (len > 0 && data_pos + len <= page_data_.size()) {
@@ -231,7 +231,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                     }
                     case 12: { // MYSQL_TYPE_DATETIME (8字节)
                         if (data_pos + 8 <= page_data_.size()) {
-                            uint64_t val = MachRead::read_le<uint64_t>(page_data_.data(), data_pos);
+                            uint64_t val = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
                             // 简化处理，实际应解析为日期时间字符串
                             field_value = "[DATETIME:" + std::to_string(val) + "]";
                             data_pos += 8;
@@ -310,7 +310,7 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
             }
             
             // ✅ Step 2.1: 解析记录中的页指针（第5-8字节是下级页号）
-            uint32_t child_page_no = MachRead::read_le<uint32_t>(it->second.data(), offset + 4);
+            uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
             
             if (child_page_no != 0xFFFFFFFF) {
                 // ✅ Step 2.2: 递归遍历子节点
@@ -332,7 +332,7 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
                     continue;
                 }
                 
-                uint32_t child_page_no = MachRead::read_le<uint32_t>(it->second.data(), offset + 4);
+                uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
                 
                 if (child_page_no != 0xFFFFFFFF) {
                     traverse_tree(child_page_no, schema);

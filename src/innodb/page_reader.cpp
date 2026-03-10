@@ -69,7 +69,7 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
     if (page_data.size() < 40) return false;
 
     // InnoDB 校验和位于 FIL_PAGE_CHECKSUM (偏移 24-27)
-    uint32_t stored_csum = dbrecovery::innodb::MachRead::read_le<uint32_t>(
+    uint32_t stored_csum = dbrecovery::innodb::read_le<uint32_t>(
         page_data.data(), 24
     );
     

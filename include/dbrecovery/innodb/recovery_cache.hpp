@@ -69,9 +69,23 @@ struct RecoveryCache {
     // ✅ 新增：应用 Redo 日志条目（占位实现）
     void apply_redo_log_entry(uint64_t lsn, uint32_t space_id, uint32_t page_no,
                               const uint8_t* log_data, size_t log_size) {
-        // TODO: 实现具体 redo 应用逻辑
-        (void)lsn; (void)space_id; (void)page_no;
-        (void)log_data; (void)log_size;
+        if (!log_data || log_size == 0) return;
+        
+        // 获取或创建页数据
+        auto it = page_cache.find(page_no);
+        if (it == page_cache.end()) {
+            // 如果页不存在，从磁盘加载（此处简化为分配新页）
+            std::vector<uint8_t> page_data(16384, 0); // 默认16KB页
+            it = page_cache.emplace(page_no, PageData{page_no, page_data}).first;
+        }
+        
+        // 应用 Redo 日志（简化实现，实际需要解析 redo 记录类型）
+        if (log_size + 38 <= it->second.data.size()) {
+            std::memcpy(it->second.data.data() + 38, log_data, log_size);
+        }
+        
+        // 标记页为已修改
+        mark_modified(page_no);
     }
 };
 
