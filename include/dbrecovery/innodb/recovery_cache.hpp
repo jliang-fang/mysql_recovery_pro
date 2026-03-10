@@ -66,7 +66,7 @@ struct RecoveryCache {
         return dirty;
     }
     
-    // ✅ 新增：应用 Redo 日志条目（占位实现）
+    // ✅ 新增：应用 Redo 日志条目（增强实现）
     void apply_redo_log_entry(uint64_t lsn, uint32_t space_id, uint32_t page_no,
                               const uint8_t* log_data, size_t log_size) {
         if (!log_data || log_size == 0) return;
@@ -79,9 +79,27 @@ struct RecoveryCache {
             it = page_cache.emplace(page_no, PageData{page_no, page_data}).first;
         }
         
-        // 应用 Redo 日志（简化实现，实际需要解析 redo 记录类型）
-        if (log_size + 38 <= it->second.data.size()) {
-            std::memcpy(it->second.data.data() + 38, log_data, log_size);
+        // 应用 Redo 日志（需要解析 redo 记录类型）
+        // 简化实现：假设 log_data 是页的偏移+数据对列表
+        // 实际实现需要根据 redo log record type 解析
+        
+        size_t pos = 0;
+        while (pos + 4 <= log_size) {
+            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(log_data, pos);
+            pos += 2;
+            
+            uint16_t length = dbrecovery::innodb::read_le<uint16_t>(log_data, pos);
+            pos += 2;
+            
+            if (pos + length > log_size) break;
+            
+            // 边界检查
+            if (offset < 38 || offset + length > it->second.data.size()) {
+                continue; // 跳过无效的 redo 记录
+            }
+            
+            std::memcpy(it->second.data.data() + offset, log_data + pos, length);
+            pos += length;
         }
         
         // 标记页为已修改

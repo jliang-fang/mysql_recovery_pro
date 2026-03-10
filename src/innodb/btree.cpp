@@ -121,7 +121,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         flags_ = page_data_[offset];
         bool is_deleted = (flags_ & REC_INFO_DELETED_FLAG) != 0;
         bool is_extern = (flags_ & 0x40) != 0; // 外部存储标志（BLOB）
-        uint16_t n_fields = ((flags_ & 0x07) << 8) | (page_data_[offset + 1] >> 4);
+        
+        // COMPACT 记录头格式: [1 byte info_bits] + [1 byte n_fields_high] + [2 bytes next_record_offset]
+        // n_fields = (info_bits & 0x07) * 256 + next_byte
+        uint8_t n_fields_high = (flags_ & 0x07);
+        uint8_t n_fields_low = page_data_[offset + 1] >> 4;
+        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 8) | n_fields_low);
         
         if (is_deleted) {
             continue; // 跳过已删除记录
@@ -320,9 +325,10 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
             }
             
             // ✅ Step 2.1: 解析记录中的页指针（第5-8字节是下级页号）
+            // 注意：COMPACT 格式记录头为5字节，第5-8字节是子页号
             uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
             
-            if (child_page_no != 0xFFFFFFFF) {
+            if (child_page_no != 0xFFFFFFFF && child_page_no < 0xFFFFFFF0) {
                 // ✅ Step 2.2: 递归遍历子节点
                 traverse_tree(child_page_no, schema);
             }
@@ -342,9 +348,10 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
                     continue;
                 }
                 
+                // ✅ Step 2.3: 解析记录中的页指针（第5-8字节是下级页号）
                 uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
                 
-                if (child_page_no != 0xFFFFFFFF) {
+                if (child_page_no != 0xFFFFFFFF && child_page_no < 0xFFFFFFF0) {
                     traverse_tree(child_page_no, schema);
                 }
             }
