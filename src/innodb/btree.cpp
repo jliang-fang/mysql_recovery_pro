@@ -134,22 +134,24 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         // ✅ 修复：正确解析 n_fields
         // COMPACT 格式记录头：
+        // byte[0]: info_bits (8 bits)
         // byte[1]: [n_fields(4 bits)][next_rec_offset_high(4 bits)]
         // byte[2]: next_rec_offset_low(8 bits)
-        uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
-        uint8_t next_rec_offset_high = page_data_[offset + 1] & 0x0F;
-        uint8_t next_rec_offset_low = page_data_[offset + 2];
+        // n_fields 实际占用 9 bits，但只使用高7位（0-126），存储在 byte1[7:4] 和 byte2[7:4]
         
-        // n_fields 是 9 bits: [n_fields_high(4)][next_rec_offset_high(4)] -> 实际只用高5位
-        // 正确公式：n_fields = ((page_data_[offset+1] & 0xF0) >> 4) | ((page_data_[offset+2] & 0xF0) >> 4)
+        uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
         uint8_t n_fields_low = (page_data_[offset + 2] & 0xF0) >> 4;
         uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
         
-        if (n_fields == 0 || n_fields > 1017) {
+        // 兼容性检查：某些版本可能使用不同格式
+        if (n_fields == 0 || n_fields > 1023) {
             std::cerr << "[WARN] Invalid field count: " << n_fields 
-                      << " at offset " << offset << "\n";
+                      << " at offset " << offset << ", skipping record\n";
             continue;
         }
+        
+        // 调试信息（可选）
+        // std::cout << "[DEBUG] Record at offset " << offset << ": n_fields=" << n_fields << "\n";
         
         if (is_deleted) {
             continue;

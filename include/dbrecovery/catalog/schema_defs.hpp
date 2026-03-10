@@ -30,6 +30,16 @@ struct ColumnInfo {
     // 行格式相关（DYNAMIC/COMPRESSED）
     bool is_off_page = false;      // 是否存储在溢出页（BLOB）
     uint32_t virtual_gen_store_type = 0; // VIRTUAL/STORED 的存储类型 (mysql 8.0.13+)
+    
+    // ✅ 新增：补充字段以支持完整解析
+    bool is_signed = true;         // 数值类型是否有符号（默认true，兼容INT等）
+    uint32_t flags = 0;            // 列标志位（如 PRI_KEY, NOT_NULL 等）
+    uint32_t col_flags = 0;        // MySQL 8.0 列标志
+    std::optional<std::string> comment; // 列注释
+    
+    // ✅ 新增：用于处理不同行格式的字段
+    bool is_variable_length = false; // 是否变长字段
+    uint32_t actual_column_size = 0; // 实际列大小（考虑编码）
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）
