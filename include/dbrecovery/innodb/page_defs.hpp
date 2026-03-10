@@ -37,11 +37,8 @@ constexpr uint16_t BTR_MAX_SIZE         = 50;   // maximum size of a record
 // REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT, extra_bytes = 5 + n_nullable * 1
 
 constexpr uint8_t REC_INFO_BITS_MASK    = 0x07;   // info bits mask (lowest 3 bits)
-constexpr uint8_t REC_INFO_DELETED_FLAG = 0x08;   // deleted record flag (bit 3 of info_bits)
-constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x10;   // minimum record flag (bit 4 of info_bits)
+constexpr uint8_t REC_INFO_EXTERN_FLAG  = 0x20;   // external pointer flag (bit 5 of info_bits)
 
-// ✅ 兼容性定义：与 btree.hpp 保持一致
-constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;   // status mask (lowest 3 bits)
 constexpr uint8_t REC_STATUS_ORDINARY   = 0x00;   // ordinary record
 constexpr uint8_t REC_STATUS_NODE_PTR   = 0x01;   // node pointer record
 constexpr uint8_t REC_STATUS_INFIMUM    = 0x02;   // infimum system record

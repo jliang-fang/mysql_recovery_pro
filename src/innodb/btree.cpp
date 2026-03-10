@@ -137,12 +137,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // byte[0]: info_bits (8 bits)
         // byte[1]: [n_fields_high(4 bits)][next_rec_offset_high(4 bits)]
         // byte[2]: next_rec_offset_low(8 bits) + n_fields_low(4 bits in high nibble)
-        // n_fields 实际占用 9 bits：byte1[7:4] 为高4位，byte2[7:4] 为低4位
-        // 正确组合方式：((byte1 & 0xF0) << 4) | (byte2 & 0xF0)
+        // n_fields 实际占用 9 bits：byte1[7:4] 为高4位，byte2[3:0] 为低4位
+        // 正确组合方式：((byte1 & 0xF0) << 4) | (byte2 & 0x0F)
         
         uint16_t n_fields = static_cast<uint16_t>(
             (((uint16_t)(page_data_[offset + 1] & 0xF0)) << 4) | 
-            ((uint16_t)(page_data_[offset + 2] & 0xF0))
+            ((uint16_t)(page_data_[offset + 2] & 0x0F))
         );
         
         // 兼容性检查：n_fields 范围应为 1-511（9位最大值）
@@ -193,7 +193,9 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
             
+            // ✅ 增强边界检查
             if (data_pos >= page_data_.size()) {
+                std::cerr << "[WARN] Data position exceeds page size at column " << col.name << std::endl;
                 break;
             }
             
@@ -206,7 +208,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 if (col_idx < nullable_columns) {
                     uint32_t byte_idx = col_idx / 8;
                     uint32_t bit_idx = col_idx % 8;
-                    is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
+                    // ✅ 增强边界检查
+                    if (byte_idx >= null_bytes || null_ptr + byte_idx >= page_data_.data() + offset + header_size + null_bytes) {
+                        std::cerr << "[WARN] NULL bitmap out of bounds at column " << col.name << std::endl;
+                        is_null = true; // 安全默认值
+                    } else {
+                        is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
+                    }
                 }
             }
             
@@ -215,8 +223,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             } else {
                 if (is_extern && col.is_off_page) {
                     field_value = "[BLOB_EXTERNAL]";
+                    // ✅ 增强边界检查
                     if (data_pos + 20 <= page_data_.size()) {
                         data_pos += 20;
+                    } else {
+                        std::cerr << "[WARN] BLOB pointer out of bounds at column " << col.name << std::endl;
+                        break;
                     }
                 } else {
                     switch (col.mysql_type_id) {
@@ -225,6 +237,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                                 int32_t val = static_cast<int32_t>(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
                                 field_value = std::to_string(val);
                                 data_pos += 4;
+                            } else {
+                                std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
                             }
                             break;
                         }
@@ -233,6 +247,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                                 int64_t val = static_cast<int64_t>(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
                                 field_value = std::to_string(val);
                                 data_pos += 8;
+                            } else {
+                                std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
                             }
                             break;
                         }
@@ -251,6 +267,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                                         );
                                         data_pos += len;
                                     }
+                                } else {
+                                    std::cerr << "[WARN] VARCHAR length header truncated for column " << col.name << std::endl;
                                 }
                             } else {
                                 if (data_pos + 1 <= page_data_.size()) {
@@ -264,6 +282,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                                         );
                                         data_pos += len;
                                     }
+                                } else {
+                                    std::cerr << "[WARN] VARCHAR length byte truncated for column " << col.name << std::endl;
                                 }
                             }
                             break;
@@ -277,6 +297,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                                     field_value = "[JSON_DATA]";
                                     data_pos += len;
                                 }
+                            } else {
+                                std::cerr << "[WARN] JSON length header truncated for column " << col.name << std::endl;
                             }
                             break;
                         }
@@ -285,13 +307,21 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                                 uint64_t val = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
                                 field_value = "[DATETIME:" + std::to_string(val) + "]";
                                 data_pos += 8;
+                            } else {
+                                std::cerr << "[WARN] DATETIME data truncated for column " << col.name << std::endl;
                             }
                             break;
                         }
                         default:
                             field_value = "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
                             if (col.column_length > 0 && col.column_length < 1024) {
-                                data_pos += col.column_length;
+                                // ✅ 增强边界检查
+                                if (data_pos + col.column_length <= page_data_.size()) {
+                                    data_pos += col.column_length;
+                                } else {
+                                    std::cerr << "[WARN] Column " << col.name << " data truncated" << std::endl;
+                                    break;
+                                }
                             }
                             break;
                     }
