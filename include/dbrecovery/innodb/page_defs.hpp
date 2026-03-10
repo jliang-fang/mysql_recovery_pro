@@ -23,6 +23,14 @@ constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
 
 // InnoDB 常量
 constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
+constexpr size_t UNIV_PAGE_SIZE_MIN     = 4096;  // 最小页大小 (4KB)
+constexpr size_t UNIV_PAGE_SIZE_MAX     = 65536; // 最大页大小 (64KB)
+
+// ==================== B+Tree Header Constants ====================
+// From MySQL 8.0.36: include/page0page.h
+constexpr uint16_t BTR_N_LEVELS         = 38;   // number of levels in the tree
+constexpr uint16_t BTR_IND_PAGE_OFFSET  = 42;   // offset of the index id
+constexpr uint16_t BTR_MAX_SIZE         = 50;   // maximum size of a record
 
 // ==================== Record Header Constants (COMPACT format) ====================
 // From MySQL 8.0.36: include/page0page.h
