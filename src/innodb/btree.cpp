@@ -50,25 +50,25 @@ bool BPlusTreeParser::parse_header() noexcept {
 
 bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     // Infimum 和 Supremum 是系统记录，固定偏移
-    // Infimum: 49 bytes after page start (after FIL_HEADER + BTR_HEADER)
-    // Supremum: follows infimum
-    
+    // INFIMUM 记录在 FIL_HEADER(38) + BTR_HEADER(16) = 54 处开始
+    // SUPREMUM 紧随其后
+        
     if (page_data_.size() < 58) { // 至少需要58字节（56+2）
         return false;
     }
-    
+        
     uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
     uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
-    
+        
     // 验证偏移值合理性
     if (infimum_offset < 38 + 16 || infimum_offset >= page_data_.size() ||
         supremum_offset < 38 + 16 || supremum_offset >= page_data_.size()) {
         return false;
     }
-    
+        
     record_offsets_.push_back(infimum_offset);
     record_offsets_.push_back(supremum_offset);
-    
+        
     return parse_user_records();
 }
 
@@ -122,11 +122,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         bool is_deleted = (flags_ & REC_INFO_DELETED_FLAG) != 0;
         bool is_extern = (flags_ & 0x40) != 0; // 外部存储标志（BLOB）
         
-        // COMPACT 记录头格式: [1 byte info_bits] + [1 byte n_fields_high] + [2 bytes next_record_offset]
-        // n_fields = (info_bits & 0x07) * 256 + next_byte
-        uint8_t n_fields_high = (flags_ & 0x07);
+        // COMPACT 记录头格式: [1 byte info] + [1 byte n_fields_high] + [2 bytes next_record_offset]
+        // info bits 是最低3位，n_fields = (info & 0x07) * 256 + next_byte
+        uint8_t info_bits = flags_ & REC_INFO_BITS_MASK;
         uint8_t n_fields_low = page_data_[offset + 1] >> 4;
-        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 8) | n_fields_low);
+        uint16_t n_fields = static_cast<uint16_t>((info_bits << 8) | n_fields_low);
         
         if (is_deleted) {
             continue; // 跳过已删除记录
@@ -180,86 +180,98 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             if (is_null) {
                 field_value = "NULL";
             } else {
-                // ✅ Step 3.2: 根据类型解码字段
-                switch (col.mysql_type_id) {
-                    case 3: { // MYSQL_TYPE_LONG (4字节有符号整数)
-                        if (data_pos + 4 <= page_data_.size()) {
-                            int32_t val = static_cast<int32_t>(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
-                            field_value = std::to_string(val);
-                            data_pos += 4;
-                        }
-                        break;
+                // ✅ Step 3.2: 处理外部存储字段（BLOB）
+                if (is_extern && col.is_off_page) {
+                    // BLOB 字段，需要从溢出页读取
+                    // 简化处理：返回占位符
+                    field_value = "[BLOB_EXTERNAL]";
+                    
+                    // 跳过 BLOB 指针（20字节）
+                    if (data_pos + 20 <= page_data_.size()) {
+                        data_pos += 20;
                     }
-                    case 8: { // MYSQL_TYPE_LONGLONG (8字节有符号整数)
-                        if (data_pos + 8 <= page_data_.size()) {
-                            int64_t val = static_cast<int64_t>(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
-                            field_value = std::to_string(val);
-                            data_pos += 8;
+                } else {
+                    // ✅ Step 3.3: 根据类型解码字段
+                    switch (col.mysql_type_id) {
+                        case 3: { // MYSQL_TYPE_LONG (4字节有符号整数)
+                            if (data_pos + 4 <= page_data_.size()) {
+                                int32_t val = static_cast<int32_t>(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
+                                field_value = std::to_string(val);
+                                data_pos += 4;
+                            }
+                            break;
                         }
-                        break;
-                    }
-                    case 15: { // MYSQL_TYPE_VARCHAR (变长字符串)
-                        // 根据列定义的最大长度判断使用哪种长度前缀
-                        bool use_two_byte_prefix = (col.column_length > 255);
-                        
-                        if (use_two_byte_prefix) {
+                        case 8: { // MYSQL_TYPE_LONGLONG (8字节有符号整数)
+                            if (data_pos + 8 <= page_data_.size()) {
+                                int64_t val = static_cast<int64_t>(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
+                                field_value = std::to_string(val);
+                                data_pos += 8;
+                            }
+                            break;
+                        }
+                        case 15: { // MYSQL_TYPE_VARCHAR (变长字符串)
+                            // 根据列定义的最大长度判断使用哪种长度前缀
+                            bool use_two_byte_prefix = (col.column_length > 255);
+                            
+                            if (use_two_byte_prefix) {
+                                if (data_pos + 2 <= page_data_.size()) {
+                                    uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
+                                    data_pos += 2;
+                                    
+                                    if (len > 0 && data_pos + len <= page_data_.size()) {
+                                        field_value = std::string(
+                                            reinterpret_cast<const char*>(page_data_.data() + data_pos), 
+                                            len
+                                        );
+                                        data_pos += len;
+                                    }
+                                }
+                            } else {
+                                if (data_pos + 1 <= page_data_.size()) {
+                                    uint8_t len = page_data_[data_pos];
+                                    data_pos++;
+                                    
+                                    if (len > 0 && data_pos + len <= page_data_.size()) {
+                                        field_value = std::string(
+                                            reinterpret_cast<const char*>(page_data_.data() + data_pos), 
+                                            len
+                                        );
+                                        data_pos += len;
+                                    }
+                                }
+                            }
+                            break;
+                        }
+                        case 245: { // MYSQL_TYPE_JSON (JSON类型)
                             if (data_pos + 2 <= page_data_.size()) {
                                 uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
                                 data_pos += 2;
                                 
                                 if (len > 0 && data_pos + len <= page_data_.size()) {
-                                    field_value = std::string(
-                                        reinterpret_cast<const char*>(page_data_.data() + data_pos), 
-                                        len
-                                    );
+                                    // 简化处理，实际应解析JSON结构
+                                    field_value = "[JSON_DATA]";
                                     data_pos += len;
                                 }
                             }
-                        } else {
-                            if (data_pos + 1 <= page_data_.size()) {
-                                uint8_t len = page_data_[data_pos];
-                                data_pos++;
-                                
-                                if (len > 0 && data_pos + len <= page_data_.size()) {
-                                    field_value = std::string(
-                                        reinterpret_cast<const char*>(page_data_.data() + data_pos), 
-                                        len
-                                    );
-                                    data_pos += len;
-                                }
+                            break;
+                        }
+                        case 12: { // MYSQL_TYPE_DATETIME (8字节)
+                            if (data_pos + 8 <= page_data_.size()) {
+                                uint64_t val = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
+                                // 简化处理，实际应解析为日期时间字符串
+                                field_value = "[DATETIME:" + std::to_string(val) + "]";
+                                data_pos += 8;
                             }
+                            break;
                         }
-                        break;
-                    }
-                    case 245: { // MYSQL_TYPE_JSON (JSON类型)
-                        if (data_pos + 2 <= page_data_.size()) {
-                            uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
-                            data_pos += 2;
-                            
-                            if (len > 0 && data_pos + len <= page_data_.size()) {
-                                // 简化处理，实际应解析JSON结构
-                                field_value = "[JSON_DATA]";
-                                data_pos += len;
+                        default:
+                            field_value = "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
+                            // 跳过未知类型的数据
+                            if (col.column_length > 0 && col.column_length < 1024) {
+                                data_pos += col.column_length;
                             }
-                        }
-                        break;
+                            break;
                     }
-                    case 12: { // MYSQL_TYPE_DATETIME (8字节)
-                        if (data_pos + 8 <= page_data_.size()) {
-                            uint64_t val = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
-                            // 简化处理，实际应解析为日期时间字符串
-                            field_value = "[DATETIME:" + std::to_string(val) + "]";
-                            data_pos += 8;
-                        }
-                        break;
-                    }
-                    default:
-                        field_value = "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
-                        // 跳过未知类型的数据
-                        if (col.column_length > 0 && col.column_length < 1024) {
-                            data_pos += col.column_length;
-                        }
-                        break;
                 }
             }
             

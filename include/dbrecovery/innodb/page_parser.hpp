@@ -18,13 +18,6 @@ constexpr uint8_t REC_STATUS_ORDINARY = 0;
 constexpr uint8_t REC_STATUS_NODE_PTR = 1;
 constexpr uint8_t REC_INFO_STATUS_MASK = 0x03;
 
-// ✅ B+树页类型常量（重复定义，确保一致性）
-constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
-constexpr uint16_t FIL_PAGE_INDEX        = 9969;  // B+Tree索引页
-constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;  // Undo日志页
-constexpr uint16_t FIL_PAGE_SDI          = 9971;  // SDI元数据页
-constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;  // BLOB页
-
 // ✅ 行格式标志位（从 FSP_HEADER.flags 中提取）
 constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS = (1 << 0);  // 原子BLOB
 constexpr uint32_t FSP_FLAGS_COMPACT      = (0 << 1);  // COMPACT行格式

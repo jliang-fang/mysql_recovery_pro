@@ -21,9 +21,10 @@ enum class BTreeNodeType : uint8_t {
 };
 
 // ✅ 记录头标志位常量（用于 COMPACT 格式）
-constexpr uint8_t REC_INFO_STATUS_MASK = 0x03;      // 状态位掩码
-constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;     // 已删除标记
-constexpr uint8_t REC_INFO_EXTERN_FLAG = 0x40;      // 外部存储标志（BLOB）
+constexpr uint8_t REC_INFO_STATUS_MASK    = 0x03;   // 状态位掩码
+constexpr uint8_t REC_INFO_DELETED_FLAG   = 0x01;   // 已删除标记
+constexpr uint8_t REC_INFO_EXTERN_FLAG    = 0x40;   // 外部存储标志（BLOB）
+constexpr uint8_t REC_INFO_BITS_MASK      = 0x07;   // info bits 掩码（最低3位）
 
 /**
  * @brief B+Tree 索引页结构解析器
