@@ -2,7 +2,9 @@
 #include "dbrecovery/innodb/v2/page_parser.hpp"
 #include <cstring>
 
-namespace DBRecovery::InnoDB::v2 {
+namespace DBRecovery {
+namespace InnoDB {
+namespace v2 {
 
 PageParser::PageParser(const uint8_t* buffer, size_t size)
     : buffer_(buffer), size_(size) {}
@@ -38,11 +40,17 @@ bool PageParser::parse() noexcept {
     std::memcpy(&header_.garbage,     header_ptr + 8, sizeof(uint16_t));
     std::memcpy(&header_.insert_offset, header_ptr + 10, sizeof(uint32_t));
     std::memcpy(&header_.n_recs,      header_ptr + 12, sizeof(uint16_t));
-    std::memcpy(&header_.max_trx_id,  header_ptr + 14, sizeof(uint64_t)); // MySQL 8.0: 6 bytes (only lower 48 bits valid)
+    
+    // ✅ 修正：MySQL 8.0 的 max_trx_id 是 6 字节（48位），只读取低6字节
+    std::memset(&header_.max_trx_id, 0, sizeof(uint64_t)); // 清零高2字节
+    std::memcpy(&header_.max_trx_id, header_ptr + 14, 6);
+    
     std::memcpy(&header_.page_level,  header_ptr + 22, sizeof(uint16_t));
     std::memcpy(&header_.page_index_id, header_ptr + 24, sizeof(uint64_t));
 
     return true;
 }
 
-} // namespace DBRecovery::InnoDB::v2
+} // namespace v2
+} // namespace InnoDB
+} // namespace DBRecovery

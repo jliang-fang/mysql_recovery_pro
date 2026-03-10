@@ -20,11 +20,15 @@ enum class BTreeNodeType : uint8_t {
     INVALID = 255
 };
 
-// ✅ 记录头标志位常量（用于 COMPACT 格式）
-constexpr uint8_t REC_INFO_STATUS_MASK    = 0x03;   // 状态位掩码
+// ✅ 记录头标志位常量（用于 COMPACT 格式，参考 MySQL 8.0 源码 sql/dd/impl/table.h）
+constexpr uint8_t REC_INFO_STATUS_MASK    = 0x03;   // 状态位掩码（最低2位）
 constexpr uint8_t REC_INFO_DELETED_FLAG   = 0x01;   // 已删除标记
-constexpr uint8_t REC_INFO_EXTERN_FLAG    = 0x40;   // 外部存储标志（BLOB）
+constexpr uint8_t REC_INFO_EXTERN_FLAG    = 0x40;   // 外部存储标志（BLOB，第6位）
 constexpr uint8_t REC_INFO_BITS_MASK      = 0x07;   // info bits 掩码（最低3位）
+
+// ✅ COMPACT 记录头字段偏移定义
+constexpr size_t REC_N_FIELDS_OFFSET      = 1;      // n_fields 存储在 offset+1 的高4位 + offset+2 的低4位
+constexpr size_t REC_NEXT_OFFSET          = 2;      // next_record 偏移（2字节）
 
 /**
  * @brief B+Tree 索引页结构解析器

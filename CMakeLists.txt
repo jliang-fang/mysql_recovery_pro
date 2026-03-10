@@ -27,6 +27,8 @@ add_library(dbrecovery_innodb STATIC
     src/innodb/page_parser.cpp
     src/innodb/page_reader.cpp
     src/innodb/recovery_engine.cpp
+    src/innodb/v2/page_parser.cpp
+    src/innodb/v2/record_parser.cpp
     src/recovery/blob_reconstructor.cpp
     src/utils/cli_parser.cpp
     src/utils/file_mapper.cpp

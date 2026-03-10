@@ -134,13 +134,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // 这个标志表示字段是否存储在外部页（BLOB）
         bool is_extern = (flags_ & REC_INFO_EXTERN_FLAG) != 0;
         
-        // ✅ Step 1.2: 解析记录头中的字段数量
-        uint8_t info_bits = flags_ & REC_INFO_BITS_MASK;  // 最低3位
-        
-        // COMPACT 格式：n_fields = (info_bits[2:0] << 8) | n_fields_high[7:4]
-        // 注意：n_fields_high 实际存储在 offset+1 的高4位
-        uint8_t n_fields_high = page_data_[offset + 1] >> 4;
-        uint16_t n_fields = static_cast<uint16_t>((info_bits << 4) | n_fields_high);
+        // ✅ Step 1.2: 解析记录头中的字段数量（COMPACT 格式）
+        // 记录头格式：[0]: info_bits, [1]: n_fields_high + next_rec[15:8], [2]: next_rec[7:0]
+        // n_fields = (info_bits & 0x07) << 8 | (page_data_[offset+1] & 0xF0)
+        uint16_t n_fields = static_cast<uint16_t>(((flags_ & REC_INFO_BITS_MASK) << 8) | 
+                                                   (page_data_[offset + 1] & 0xF0));
         
         // 验证字段数量合理性（InnoDB 单表最多 1017 个字段）
         if (n_fields == 0 || n_fields > 1017) {
@@ -359,12 +357,15 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
         for (size_t i = 2; i < record_offsets.size(); ++i) { // 跳过 infimum/supremum
             uint16_t offset = record_offsets[i];
             
-            if (offset + 10 > it->second.size()) {
+            if (offset + 5 > it->second.size()) {
                 continue;
             }
             
-            // ✅ Step 2.1: 解析记录中的页指针（第5-8字节是下级页号）
-            // 注意：COMPACT 格式记录头为5字节，第5-8字节是子页号
+            // ✅ Step 2.1: 解析记录头（COMPACT 格式）
+            uint8_t info_bits = it->second[offset] & REC_INFO_BITS_MASK;
+            bool is_leaf_record = (info_bits & 0x80) != 0; // 第7位表示是否为叶子节点记录
+            
+            // 内部节点的记录格式：[5-8字节] 子页号（偏移 offset+4）
             uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
             
             if (child_page_no != 0xFFFFFFFF && child_page_no < 0xFFFFFFF0) {
@@ -383,11 +384,14 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
             for (size_t i = 2; i < record_offsets.size(); ++i) {
                 uint16_t offset = record_offsets[i];
                 
-                if (offset + 10 > it->second.size()) {
+                if (offset + 5 > it->second.size()) {
                     continue;
                 }
                 
-                // ✅ Step 2.3: 解析记录中的页指针（第5-8字节是下级页号）
+                // ✅ Step 2.3: 解析记录头（COMPACT 格式）
+                uint8_t info_bits = it->second[offset] & REC_INFO_BITS_MASK;
+                
+                // 内部节点的记录格式：[5-8字节] 子页号（偏移 offset+4）
                 uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
                 
                 if (child_page_no != 0xFFFFFFFF && child_page_no < 0xFFFFFFF0) {
