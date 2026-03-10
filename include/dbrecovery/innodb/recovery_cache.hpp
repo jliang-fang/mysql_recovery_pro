@@ -122,10 +122,10 @@ struct RecoveryCache {
                     
                     size_t length = 0;
                     switch (static_cast<RedoLogType>(type)) {
-                        case RedoLogType::MLOG_1BYTE: length = 1; break;
-                        case RedoLogType::MLOG_2BYTES: length = 2; break;
-                        case RedoLogType::MLOG_4BYTES: length = 4; break;
-                        case RedoLogType::MLOG_8BYTES: length = 8; break;
+                        case RedoLogType::MLOG_1B: length = 1; break;
+                        case RedoLogType::MLOG_2B: length = 2; break;
+                        case RedoLogType::MLOG_4B: length = 4; break;
+                        case RedoLogType::MLOG_8B: length = 8; break;
                         default: break;
                     }
                     

@@ -135,16 +135,18 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // ✅ 修复：正确解析 n_fields
         // COMPACT 格式记录头：
         // byte[0]: info_bits (8 bits)
-        // byte[1]: [n_fields(4 bits)][next_rec_offset_high(4 bits)]
-        // byte[2]: next_rec_offset_low(8 bits)
-        // n_fields 实际占用 9 bits，但只使用高7位（0-126），存储在 byte1[7:4] 和 byte2[7:4]
+        // byte[1]: [n_fields_high(4 bits)][next_rec_offset_high(4 bits)]
+        // byte[2]: next_rec_offset_low(8 bits) + n_fields_low(4 bits in high nibble)
+        // n_fields 实际占用 9 bits：byte1[7:4] 为高4位，byte2[7:4] 为低4位
+        // 正确组合方式：((byte1 & 0xF0) << 4) | (byte2 & 0xF0)
         
-        uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
-        uint8_t n_fields_low = (page_data_[offset + 2] & 0xF0) >> 4;
-        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
+        uint16_t n_fields = static_cast<uint16_t>(
+            (((uint16_t)(page_data_[offset + 1] & 0xF0)) << 4) | 
+            ((uint16_t)(page_data_[offset + 2] & 0xF0))
+        );
         
-        // 兼容性检查：某些版本可能使用不同格式
-        if (n_fields == 0 || n_fields > 1023) {
+        // 兼容性检查：n_fields 范围应为 1-511（9位最大值）
+        if (n_fields == 0 || n_fields > 511) {
             std::cerr << "[WARN] Invalid field count: " << n_fields 
                       << " at offset " << offset << ", skipping record\n";
             continue;
