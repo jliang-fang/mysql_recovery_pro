@@ -113,17 +113,65 @@ def create_sdi_page(table_name):
     
     return bytes(page)
 
-def generate_ibd(table_name="users"):
-    """Generate a minimal .ibd file with SDI + empty B+ tree"""
+def generate_ibd(table_name="users", include_blob=False):
+    """Generate a minimal .ibd file with SDI + B+ tree with optional test data"""
     pages = []
     
     # Page 0: SDI
     pages.append(create_sdi_page(table_name))
     
-    # Page 1: Root page of clustered index (empty)
+    # Page 1: Root page of clustered index (with test records)
     root_page = create_page_header(FIL_PAGE_INDEX)
     write_le_uint32(root_page, 38, 0)   # PAGE_LEVEL = 0 (leaf)
-    write_le_uint16(root_page, 42, 2)   # PAGE_N_HEAP = 2 (infimum + supremum)
+    
+    # 构建测试记录
+    record_data = bytearray()
+    
+    # INFIMUM 记录（固定偏移 54）
+    infimum = bytearray(13)
+    infimum[0] = 0x02  # info_bits: REC_INFO_MIN_REC_FLAG
+    write_le_uint16(infimum, 1, 56)  # next_record_offset
+    record_data.extend(infimum)
+    
+    # 用户记录示例：id=1, name='test'
+    user_rec = bytearray()
+    user_rec.append(0x00)  # info_bits (普通记录)
+    user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
+    write_le_uint16(user_rec, 1, 56 + len(record_data) + 2)  # next_record_offset
+    
+    # NULL 位图（假设所有列都非空）
+    user_rec.extend(b'\x00')  # 1 byte null bitmap
+    
+    # id 字段 (LONGLONG, 8 bytes)
+    write_le_uint64(user_rec, len(user_rec), 1)
+    
+    # name 字段 (VARCHAR, 前缀长度 1 字节)
+    name_str = "test"
+    user_rec.append(len(name_str))
+    user_rec.extend(name_str.encode())
+    
+    # email 字段 (VARCHAR, 可为空，这里设为非空)
+    email_str = "test@example.com"
+    user_rec.append(len(email_str))
+    user_rec.extend(email_str.encode())
+    
+    # created_at 字段 (DATETIME, 8 bytes)
+    write_le_uint64(user_rec, len(user_rec), 0)
+    
+    record_data.extend(user_rec)
+    
+    # SUPREMUM 记录
+    supremum = bytearray(5)
+    supremum[0] = 0x01  # info_bits: REC_INFO_STATUS_MASK for supremum
+    write_le_uint16(supremum, 1, 0xFFFF)  # next_record_offset = 0xFFFF marks end
+    
+    record_data.extend(supremum)
+    
+    # 写入记录数据到页
+    rec_start = 38 + 16  # PAGE_HEADER 后开始
+    root_page[rec_start:rec_start+len(record_data)] = record_data
+    
+    write_le_uint16(root_page, 42, 4)   # PAGE_N_HEAP = 4 (infimum + user + supremum + dummy)
     
     pages.append(bytes(root_page))
     

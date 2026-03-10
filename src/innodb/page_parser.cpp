@@ -36,9 +36,11 @@ bool PageParser::parse_header() {
     uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16);
     page_offset_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 20);
 
-    // ✅ Step 2: 校验页类型（仅支持索引页）
-    if (page_type_ != FIL_PAGE_INDEX && page_type_ != FIL_PAGE_UNDO_LOG) {
-        return false; // 非 B+ 树页，跳过
+    // ✅ Step 2: 校验页类型（支持索引页、SDI页和Undo日志页）
+    if (page_type_ != FIL_PAGE_INDEX && 
+        page_type_ != FIL_PAGE_UNDO_LOG && 
+        page_type_ != FIL_PAGE_SDI) {
+        return false; // 非有效页类型，跳过
     }
 
     // ✅ Step 3: 解析 PAGE_HEADER (offset 38)
@@ -69,10 +71,40 @@ bool PageParser::parse_header() {
 
 bool PageParser::validate_page_chain() const {
     // ✅ 校验页链表闭环（B+ Tree 要求）
-    // 注意：实际闭环需跨页校验，此处仅验证当前页的 prev/next 是否指向有效范围
-    // 由于缺少必要的成员变量实现，暂时返回true并记录警告
-    std::cerr << "[WARN] validate_page_chain() not fully implemented - missing member variables\n";
-    return true;
+    // 对于 B+ 树叶子节点，需要验证 prev/next 指针形成双向链表
+    // 对于根节点或内部节点，prev/next 可能为 0xFFFFFFFF
+    
+    bool is_valid = true;
+    
+    // 检查页偏移是否在合理范围内
+    if (page_offset_ >= 0xFFFFFFF0) {
+        std::cerr << "[WARN] Invalid page offset: " << page_offset_ << "\n";
+        return false;
+    }
+    
+    // 对于非根节点（有前后页），验证链表连续性
+    if (fil_prev_ != 0xFFFFFFFF && fil_next_ != 0xFFFFFFFF) {
+        // 检查 prev/next 是否指向有效范围
+        if (fil_prev_ >= page_offset_) {
+            std::cerr << "[WARN] Invalid prev page: " << fil_prev_ 
+                      << " >= current page: " << page_offset_ << "\n";
+            is_valid = false;
+        }
+        
+        if (fil_next_ <= page_offset_) {
+            std::cerr << "[WARN] Invalid next page: " << fil_next_ 
+                      << " <= current page: " << page_offset_ << "\n";
+            is_valid = false;
+        }
+    } else if (fil_prev_ != 0xFFFFFFFF && fil_next_ == 0xFFFFFFFF) {
+        // 只有 prev 没有 next，可能是最后一个叶子节点
+        // 这种情况在 B+ 树中是合法的
+    } else if (fil_prev_ == 0xFFFFFFFF && fil_next_ != 0xFFFFFFFF) {
+        // 只有 next 没有 prev，可能是第一个叶子节点
+        // 这种情况在 B+ 树中也是合法的
+    }
+    
+    return is_valid;
 }
 
 std::vector<Record> PageParser::parse_records() const {

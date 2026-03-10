@@ -37,9 +37,13 @@ bool BPlusTreeParser::parse_header() noexcept {
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 50);
     
     // 确定节点类型
+    // 根节点：level > 0 且 prev_page 和 next_page 都是 0xFFFFFFFF
+    // 叶子节点：level == 0
+    // 内部节点：level > 0 且至少有一个非 0xFFFFFFFF 的 prev/next
     if (page_level_ == 0) {
         node_type_ = BTreeNodeType::LEAF;
     } else if (prev_page_ == 0xFFFFFFFF && next_page_ == 0xFFFFFFFF) {
+        // level > 0 且没有前后页，确定为根节点
         node_type_ = BTreeNodeType::ROOT;
     } else {
         node_type_ = BTreeNodeType::INTERNAL;
@@ -118,15 +122,32 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue;
         }
         
+        // ✅ Step 1.1: 解析 COMPACT 记录头（5字节）
+        // [0]: info_bits (最低3位是 REC_INFO_BITS_MASK)
+        // [1]: n_fields_high (高4位) + next_record_offset[15:8]
+        // [2-3]: next_record_offset[7:0]
+        
         flags_ = page_data_[offset];
         bool is_deleted = (flags_ & REC_INFO_DELETED_FLAG) != 0;
-        bool is_extern = (flags_ & 0x40) != 0; // 外部存储标志（BLOB）
         
-        // COMPACT 记录头格式: [1 byte info] + [1 byte n_fields_high] + [2 bytes next_record_offset]
-        // info bits 是最低3位，n_fields = (info & 0x07) * 256 + next_byte
-        uint8_t info_bits = flags_ & REC_INFO_BITS_MASK;
-        uint8_t n_fields_low = page_data_[offset + 1] >> 4;
-        uint16_t n_fields = static_cast<uint16_t>((info_bits << 8) | n_fields_low);
+        // ✅ 修正：REC_INFO_EXTERN_FLAG 在 COMPACT 格式中是第6位（0x40）
+        // 这个标志表示字段是否存储在外部页（BLOB）
+        bool is_extern = (flags_ & REC_INFO_EXTERN_FLAG) != 0;
+        
+        // ✅ Step 1.2: 解析记录头中的字段数量
+        uint8_t info_bits = flags_ & REC_INFO_BITS_MASK;  // 最低3位
+        
+        // COMPACT 格式：n_fields = (info_bits[2:0] << 8) | n_fields_high[7:4]
+        // 注意：n_fields_high 实际存储在 offset+1 的高4位
+        uint8_t n_fields_high = page_data_[offset + 1] >> 4;
+        uint16_t n_fields = static_cast<uint16_t>((info_bits << 4) | n_fields_high);
+        
+        // 验证字段数量合理性（InnoDB 单表最多 1017 个字段）
+        if (n_fields == 0 || n_fields > 1017) {
+            std::cerr << "[WARN] Invalid field count: " << n_fields 
+                      << " at offset " << offset << "\n";
+            continue; // 字段数量异常，跳过此记录
+        }
         
         if (is_deleted) {
             continue; // 跳过已删除记录
@@ -154,6 +175,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         // ✅ Step 3: 解析字段数据
         size_t data_pos = offset + header_size + null_bytes;
+        
+        // 验证 NULL 位图区域不越界
+        if (null_ptr < page_data_.data() || 
+            null_ptr + null_bytes > page_data_.data() + page_data_.size()) {
+            continue; // NULL 位图超出页边界，跳过此记录
+        }
         
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;

@@ -75,6 +75,9 @@ public:
     
     // ✅ 新增：获取页级别（B+树高度）
     [[nodiscard]] uint16_t level() const { return page_level_; }
+    
+    // ✅ 新增：验证页链闭环
+    bool validate_page_chain() const;
 
 private:
     uint16_t page_type_;
