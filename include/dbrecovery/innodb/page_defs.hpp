@@ -29,8 +29,8 @@ constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
 // REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT, extra_bytes = 5 + n_nullable * 1
 
 constexpr uint8_t REC_INFO_BITS_MASK    = 0x07;   // info bits mask (lowest 3 bits)
-constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // deleted record flag (bit 0 of info bits)
-constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // minimum record flag (bit 1 of info bits)
+constexpr uint8_t REC_INFO_DELETED_FLAG = 0x08;   // deleted record flag (bit 3 of info_bits)
+constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x10;   // minimum record flag (bit 4 of info_bits)
 
 // ✅ 兼容性定义：与 btree.hpp 保持一致
 constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;   // status mask (lowest 3 bits)

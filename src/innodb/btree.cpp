@@ -436,5 +436,99 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
     return true;
 }
 
+// ==================== BPlusTreeParser 辅助方法实现 ====================
+
+bool BPlusTreeParser::parse_header() noexcept {
+    // 解析 FIL Header (38 bytes)
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
+    
+    // 检查页类型：支持更多 InnoDB 页类型
+    bool is_valid_page_type = false;
+    switch (page_type) {
+        case dbrecovery::innodb::FIL_PAGE_INDEX:      // B+Tree 索引页
+        case dbrecovery::innodb::FIL_PAGE_SDI:        // SDI 元数据页
+        case dbrecovery::innodb::FIL_PAGE_TYPE_BLOB:  // BLOB 数据页
+            is_valid_page_type = true;
+            break;
+        default:
+            // 忽略其他类型页（如 UNDO_LOG）
+            return false;
+    }
+    
+    if (!is_valid_page_type) {
+        return false;
+    }
+    
+    // 解析 B+Tree Header (38 bytes into page)
+    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38);
+    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42);
+    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 46);
+    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 50);
+    
+    // 确定节点类型
+    // 根节点：level > 0 且 prev_page 和 next_page 都是 0xFFFFFFFF
+    // 叶子节点：level == 0
+    // 内部节点：level > 0 且至少有一个非 0xFFFFFFFF 的 prev/next
+    if (page_level_ == 0) {
+        node_type_ = BTreeNodeType::LEAF;
+    } else if (prev_page_ == 0xFFFFFFFF && next_page_ == 0xFFFFFFFF) {
+        // level > 0 且没有前后页，确定为根节点
+        node_type_ = BTreeNodeType::ROOT;
+    } else {
+        node_type_ = BTreeNodeType::INTERNAL;
+    }
+    
+    return parse_infimum_supremum();
+}
+
+bool BPlusTreeParser::parse_infimum_supremum() noexcept {
+    // Infimum 和 Supremum 是系统记录，固定偏移
+    // INFIMUM 记录在 FIL_HEADER(38) + BTR_HEADER(16) = 54 处开始
+    // SUPREMUM 紧随其后
+        
+    if (page_data_.size() < 58) { // 至少需要58字节（56+2）
+        return false;
+    }
+        
+    uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
+    uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
+        
+    // 验证偏移值合理性
+    if (infimum_offset < 38 + 16 || infimum_offset >= page_data_.size() ||
+        supremum_offset < 38 + 16 || supremum_offset >= page_data_.size()) {
+        return false;
+    }
+        
+    record_offsets_.push_back(infimum_offset);
+    record_offsets_.push_back(supremum_offset);
+        
+    return parse_user_records();
+}
+
+bool BPlusTreeParser::parse_user_records() noexcept {
+    // 解析用户记录偏移数组
+    uint16_t dir_start = 60; // DIRECTORY START offset
+    
+    if (dir_start + 2 > page_data_.size()) {
+        return false;
+    }
+    
+    uint16_t dir_size = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start);
+    
+    for (uint16_t i = 0; i < dir_size; ++i) {
+        uint16_t slot_offset = dir_start + 2 + i * 2;
+        if (slot_offset + 2 > page_data_.size()) {
+            break;
+        }
+        
+        uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_offset);
+        if (record_offset > 0 && record_offset < 8192) { // 合理范围检查
+            record_offsets_.push_back(record_offset);
+        }
+    }
+    
+    return true;
+}
+
 } // namespace innodb
 } // namespace dbrecovery
