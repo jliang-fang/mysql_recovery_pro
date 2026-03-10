@@ -5,7 +5,7 @@
 #include <vector>
 #include <memory>
 #include "dbrecovery/innodb/page_defs.hpp"
-#include "dbrecovery/catalog/schema.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -19,6 +19,11 @@ enum class BTreeNodeType : uint8_t {
     LEAF = 2,
     INVALID = 255
 };
+
+// ✅ 记录头标志位常量（用于 COMPACT 格式）
+constexpr uint8_t REC_INFO_STATUS_MASK = 0x03;      // 状态位掩码
+constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;     // 已删除标记
+constexpr uint8_t REC_INFO_EXTERN_FLAG = 0x40;      // 外部存储标志（BLOB）
 
 /**
  * @brief B+Tree 索引页结构解析器

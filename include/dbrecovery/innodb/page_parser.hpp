@@ -13,6 +13,25 @@ constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // 已删除标记
 constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // 最小记录标记（infimum）
 constexpr uint8_t REC_INFO_NEW_CHUNK_FLAG = 0x40; // 新数据块标志
 
+// ✅ COMPACT 记录头格式标志位
+constexpr uint8_t REC_STATUS_ORDINARY = 0;
+constexpr uint8_t REC_STATUS_NODE_PTR = 1;
+constexpr uint8_t REC_INFO_STATUS_MASK = 0x03;
+
+// ✅ B+树页类型常量（重复定义，确保一致性）
+constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
+constexpr uint16_t FIL_PAGE_INDEX        = 9969;  // B+Tree索引页
+constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;  // Undo日志页
+constexpr uint16_t FIL_PAGE_SDI          = 9971;  // SDI元数据页
+constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;  // BLOB页
+
+// ✅ 行格式标志位（从 FSP_HEADER.flags 中提取）
+constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS = (1 << 0);  // 原子BLOB
+constexpr uint32_t FSP_FLAGS_COMPACT      = (0 << 1);  // COMPACT行格式
+constexpr uint32_t FSP_FLAGS_DYNAMIC      = (1 << 1);  // DYNAMIC行格式
+constexpr uint32_t FSP_FLAGS_COMPRESSED   = (2 << 1);  // COMPRESSED行格式
+constexpr uint32_t FSP_FLAGS_MASK         = 0x3F;      // 标志位掩码
+
 // ✅ B+树页类型常量
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
 constexpr uint16_t FIL_PAGE_INDEX        = 9969;  // B+Tree索引页

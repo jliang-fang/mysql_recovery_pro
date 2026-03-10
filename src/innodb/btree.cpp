@@ -117,7 +117,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue; // 跳过已删除记录
         }
         
-        // ✅ Step 2: 解析 NULL 位图（仅对可空列）
+        // ✅ Step 2: 构建 NULL 位图映射（按物理顺序）
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             if (pair.second.is_nullable) {
@@ -127,6 +127,15 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         uint32_t null_bytes = (nullable_columns + 7) / 8;
         const uint8_t* null_ptr = page_data_.data() + offset + header_size;
+        
+        // ✅ Step 2.1: 构建 column_ordinal -> nullable_index 映射
+        std::map<uint32_t, uint32_t> column_nullable_index;
+        uint32_t nullable_idx = 0;
+        for (const auto& pair : schema.columns) {
+            if (pair.second.is_nullable) {
+                column_nullable_index[pair.first] = nullable_idx++;
+            }
+        }
         
         // ✅ Step 3: 解析字段数据
         size_t data_pos = offset + header_size + null_bytes;
@@ -140,20 +149,17 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             
             std::string field_value;
             
-            // ✅ Step 3.1: 检查 NULL（正确计算列索引）
+            // ✅ Step 3.1: 检查 NULL（使用正确的列索引映射）
             bool is_null = false;
-            uint32_t col_idx = 0;
-            for (uint32_t j = 1; j < pair.first; ++j) {
-                if (schema.columns.count(j) && schema.columns.at(j).is_nullable) {
-                    col_idx++;
+            auto it = column_nullable_index.find(pair.first);
+            if (col.is_nullable && it != column_nullable_index.end() && null_bytes > 0) {
+                uint32_t col_idx = it->second;
+                if (col_idx < nullable_columns) {
+                    uint32_t byte_idx = col_idx / 8;
+                    uint32_t bit_idx = col_idx % 8;
+                    // MySQL 使用小端序存储位图（低位在前）
+                    is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
                 }
-            }
-            
-            if (col.is_nullable && null_bytes > 0 && col_idx < nullable_columns) {
-                uint32_t byte_idx = col_idx / 8;
-                uint32_t bit_idx = col_idx % 8;
-                // ✅ 修正：MySQL 使用小端序存储位图（低位在前）
-                is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
             }
             
             if (is_null) {
@@ -178,25 +184,34 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         break;
                     }
                     case 15: { // MYSQL_TYPE_VARCHAR (变长字符串)
-                        if (data_pos + 1 <= page_data_.size()) {
-                            uint8_t len = page_data_[data_pos];
-                            data_pos++;
-                            
-                            // 检查是否为 1-byte 或 2-byte 长度前缀（MySQL 5.7+）
-                            if (len >= 0xFE) {
-                                // 2-byte length prefix
-                                if (data_pos + 2 <= page_data_.size()) {
-                                    len = MachRead::read_le<uint16_t>(page_data_.data(), data_pos - 1);
-                                    data_pos++; // 跳过额外的长度字节
+                        // 根据列定义的最大长度判断使用哪种长度前缀
+                        bool use_two_byte_prefix = (col.column_length > 255);
+                        
+                        if (use_two_byte_prefix) {
+                            if (data_pos + 2 <= page_data_.size()) {
+                                uint16_t len = MachRead::read_le<uint16_t>(page_data_.data(), data_pos);
+                                data_pos += 2;
+                                
+                                if (len > 0 && data_pos + len <= page_data_.size()) {
+                                    field_value = std::string(
+                                        reinterpret_cast<const char*>(page_data_.data() + data_pos), 
+                                        len
+                                    );
+                                    data_pos += len;
                                 }
                             }
-                            
-                            if (len > 0 && data_pos + len <= page_data_.size()) {
-                                field_value = std::string(
-                                    reinterpret_cast<const char*>(page_data_.data() + data_pos), 
-                                    len
-                                );
-                                data_pos += len;
+                        } else {
+                            if (data_pos + 1 <= page_data_.size()) {
+                                uint8_t len = page_data_[data_pos];
+                                data_pos++;
+                                
+                                if (len > 0 && data_pos + len <= page_data_.size()) {
+                                    field_value = std::string(
+                                        reinterpret_cast<const char*>(page_data_.data() + data_pos), 
+                                        len
+                                    );
+                                    data_pos += len;
+                                }
                             }
                         }
                         break;
