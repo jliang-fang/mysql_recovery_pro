@@ -107,7 +107,10 @@ struct BlobPageChain {
           return std::nullopt; // 无效的 BLOB 指针
       }
       
-      if (ptr.len > ptr.total_len && ptr.total_len != 0) {
+      // total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
+      if (ptr.total_len == 0) {
+          ptr.total_len = ptr.len;
+      } else if (ptr.len > ptr.total_len) {
           return std::nullopt; // 长度不一致
       }
       

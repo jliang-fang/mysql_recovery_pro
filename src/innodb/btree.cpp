@@ -25,14 +25,15 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // 检查页类型
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
+    // 检查页类型（FIL_PAGE_TYPE 在偏移0处是4字节）
+    uint32_t page_type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 0);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI && 
         page_type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
         health.status_message = "Unsupported page type: " + std::to_string(page_type);
     }
     
     // 检查页头信息
+    // PAGE_N_HEAP 在偏移 42（BTR_N_LEVELS + 4），PAGE_N_DIR_SLOTS 在偏移 38（FIL_HEADER_SIZE）
     uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42) & 0x7FFF;
     uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
     
@@ -196,10 +197,9 @@ std::string BPlusTreeParser::parse_field_value(
     size_t& data_pos,
     bool is_extern) const {
     
-    // 检查是否为 NULL（简化处理，实际应结合 NULL 位图）
-    if (col.is_nullable && !col.is_off_page && col.virtual_gen_store_type == 0) {
-        // TODO: 实现 NULL 位图检查
-    }
+    // 检查是否为 NULL（需要结合 NULL 位图）
+    // 注意：此函数在 parse_records 中被调用，NULL 位图已在 parse_records 中计算
+    // 这里仅做占位处理，实际 NULL 检查在 parse_records 的循环中完成
     
     if (col.is_off_page || (is_extern && col.mysql_type_id >= 249)) { // BLOB types
         if (data_pos + 20 <= page_data_.size()) {
