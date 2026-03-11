@@ -23,7 +23,6 @@ enum class BTreeNodeType : uint8_t {
 // ✅ 记录头标志位常量（用于 COMPACT 格式，参考 MySQL 8.0 源码 sql/dd/impl/table.h 和 page/page0page.h）
 // 注意：REC_INFO_STATUS_MASK 是最低3位（0x07），REC_INFO_DELETED_FLAG 是 bit 3 (0x08)
 // 这些常量已在 page_defs.hpp 中定义，此处仅作引用以保持向后兼容性
-#include "dbrecovery/innodb/page_defs.hpp"
 
 // ✅ COMPACT 记录头字段偏移定义
 constexpr size_t REC_N_FIELDS_OFFSET      = 1;      // n_fields 存储在 offset+1 的高4位 + offset+2 的低4位
