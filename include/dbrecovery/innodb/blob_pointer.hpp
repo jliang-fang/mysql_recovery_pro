@@ -76,8 +76,8 @@ struct BlobPageChain {
       uint32_t total_len;     // BLOB 总长度（完整指针格式包含此字段）
   };
   
-  static std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data) {
-      if (!data) return std::nullopt;
+  static std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20) {
+      if (!data || data_size < 16) return std::nullopt;
       
       // BLOB 指针格式（20字节）：
       // [0-3]:  space_id
@@ -92,9 +92,8 @@ struct BlobPageChain {
       ptr.offset = dbrecovery::innodb::read_le<uint32_t>(data, 8);
       ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
       
-      // 尝试读取总长度（如果数据足够）
-      // MySQL 8.0 BLOB 指针格式总是包含 total_len 字段
-      if (true) {
+      // ✅ 修复：尝试读取总长度（需要额外4字节）
+      if (data_size >= 20) {
           ptr.total_len = dbrecovery::innodb::read_le<uint32_t>(data, 16);
       } else {
           // 如果数据不足，保持默认值（len）

@@ -180,6 +180,184 @@ bool BPlusTreeParser::parse_user_records() noexcept {
     return true;
 }
 
+// ✅ 新增：提取类型解析逻辑为独立函数
+std::string BPlusTreeParser::parse_field_value(
+    const catalog::ColumnInfo& col,
+    size_t& data_pos,
+    bool is_extern) const {
+    
+    // 检查是否为 NULL（简化处理，实际应结合 NULL 位图）
+    if (col.is_nullable && !col.is_off_page && col.virtual_gen_store_type == 0) {
+        // TODO: 实现 NULL 位图检查
+    }
+    
+    if (col.is_off_page || (is_extern && col.mysql_type_id >= 249)) { // BLOB types
+        if (data_pos + 20 <= page_data_.size()) {
+            data_pos += 20;
+            return "[BLOB_EXTERNAL]";
+        } else {
+            std::cerr << "[WARN] BLOB pointer truncated for column " << col.name << std::endl;
+            if (data_pos < page_data_.size()) {
+                data_pos = page_data_.size();
+            }
+            return "[TRUNCATED_BLOB_PTR]";
+        }
+    }
+    
+    if (col.virtual_gen_store_type > 0) {
+        return "[VIRTUAL_COLUMN]";
+    }
+    
+    // 解析具体类型
+    switch (col.mysql_type_id) {
+        case mysql_types::LONGLONG: { // 8
+            if (data_pos + 8 <= page_data_.size()) {
+                int64_t val = static_cast<int64_t>(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
+                data_pos += 8;
+                return std::to_string(val);
+            } else {
+                std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::LONG: { // 3
+            if (data_pos + 4 <= page_data_.size()) {
+                int32_t val = static_cast<int32_t>(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
+                data_pos += 4;
+                return std::to_string(val);
+            } else {
+                std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::SHORT: { // 2
+            if (data_pos + 2 <= page_data_.size()) {
+                int16_t val = static_cast<int16_t>(dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos));
+                data_pos += 2;
+                return std::to_string(val);
+            } else {
+                std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::TINY: { // 1
+            if (data_pos + 1 <= page_data_.size()) {
+                int8_t val = static_cast<int8_t>(page_data_[data_pos]);
+                data_pos += 1;
+                return std::to_string(val);
+            } else {
+                std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::VARCHAR: { // 15
+            bool use_two_byte_prefix = (col.column_length > 255);
+            
+            if (use_two_byte_prefix) {
+                if (data_pos + 2 <= page_data_.size()) {
+                    uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
+                    data_pos += 2;
+                    
+                    if (len > 0 && data_pos + len <= page_data_.size()) {
+                        std::string result(
+                            reinterpret_cast<const char*>(page_data_.data() + data_pos), 
+                            len
+                        );
+                        data_pos += len;
+                        return result;
+                    } else {
+                        return "[TRUNCATED]";
+                    }
+                } else {
+                    std::cerr << "[WARN] VARCHAR length header truncated for column " << col.name << std::endl;
+                    return "[TRUNCATED]";
+                }
+            } else {
+                if (data_pos + 1 <= page_data_.size()) {
+                    uint8_t len = page_data_[data_pos];
+                    data_pos++;
+                    
+                    if (len > 0 && data_pos + len <= page_data_.size()) {
+                        std::string result(
+                            reinterpret_cast<const char*>(page_data_.data() + data_pos), 
+                            len
+                        );
+                        data_pos += len;
+                        return result;
+                    } else {
+                        return "[TRUNCATED]";
+                    }
+                } else {
+                    std::cerr << "[WARN] VARCHAR length byte truncated for column " << col.name << std::endl;
+                    return "[TRUNCATED]";
+                }
+            }
+        }
+        case mysql_types::DATETIME: { // 12
+            if (data_pos + 8 <= page_data_.size()) {
+                uint64_t val = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
+                data_pos += 8;
+                return "[DATETIME:" + std::to_string(val) + "]";
+            } else {
+                std::cerr << "[WARN] DATETIME data truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::DATETIME2: { // 18
+            int precision = col.datetime_precision >= 0 ? col.datetime_precision : 0;
+            if (precision < 0) precision = 0;
+            if (precision > 6) precision = 6;
+            
+            uint32_t datetime_bytes[] = {5, 5, 6, 6, 7, 7, 8};
+            
+            if (data_pos + datetime_bytes[precision] <= page_data_.size()) {
+                const uint8_t* datetime_ptr = page_data_.data() + data_pos;
+                uint64_t val = 0;
+                for (int i = 0; i < datetime_bytes[precision]; ++i) {
+                    val |= static_cast<uint64_t>(datetime_ptr[i]) << (i * 8);
+                }
+                data_pos += datetime_bytes[precision];
+                return "[DATETIME2:" + std::to_string(precision) + "p]";
+            } else {
+                std::cerr << "[WARN] DATETIME2 data truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::JSON: { // 245
+            if (data_pos + 2 <= page_data_.size()) {
+                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
+                data_pos += 2;
+                
+                if (len > 0 && data_pos + len <= page_data_.size()) {
+                    data_pos += len;
+                    return "[JSON_DATA]";
+                } else {
+                    return "[TRUNCATED_JSON]";
+                }
+            } else {
+                std::cerr << "[WARN] JSON length header truncated for column " << col.name << std::endl;
+                return "[TRUNCATED]";
+            }
+        }
+        case mysql_types::TINY_BLOB:   // 249
+        case mysql_types::MEDIUM_BLOB: // 250
+        case mysql_types::LONG_BLOB:   // 251
+        case mysql_types::BLOB:        // 252
+            data_pos += 20; // 跳过 BLOB 指针
+            return "[BLOB_DATA]";
+        default:
+            std::cerr << "[WARN] Unimplemented type: " << col.mysql_type_id << std::endl;
+            if (col.column_length > 0 && col.column_length < 1024) {
+                if (data_pos + col.column_length <= page_data_.size()) {
+                    data_pos += col.column_length;
+                } else {
+                    std::cerr << "[WARN] Column " << col.name << " data truncated" << std::endl;
+                }
+            }
+            return "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
+    }
+}
+
 std::vector<std::map<std::string, std::string>> 
 BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
     std::vector<std::map<std::string, std::string>> result;
@@ -195,13 +373,6 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         std::map<std::string, std::string> record;
             
         // ✅ 修复：正确解析 COMPACT 记录头
-        // COMPACT 记录头格式（5-12字节）：
-        // byte[0]: info_bits (8 bits) - [deleted_flag(1)][min_rec_flag(1)][reserved(6)]
-        // byte[1]: n_fields_high(4 bits) | next_rec_offset_high(4 bits)
-        // byte[2]: next_rec_offset_low(8 bits)
-        // byte[3]: n_owned(4 bits) | heap_no(12 bits in high 12 bits, but stored differently)
-        // byte[4]: n_fields_low(4 bits in low nibble)
-            
         uint8_t info_bits = page_data_[offset];
         bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
         bool is_min_rec = (info_bits & REC_INFO_MIN_REC_FLAG) != 0;
@@ -335,183 +506,9 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 
             if (is_null) {
                 field_value = "NULL";
-            } else if (col.is_off_page || (is_extern && col.mysql_type_id >= 249)) { // BLOB types
-                // ✅ 新增：验证 BLOB 指针格式
-                if (data_pos + 20 <= page_data_.size()) {
-                    field_value = "[BLOB_EXTERNAL]";
-                    data_pos += 20;
-                } else {
-                    std::cerr << "[WARN] BLOB pointer truncated for column " << col.name << std::endl;
-                    field_value = "[TRUNCATED_BLOB_PTR]";
-                    // 尝试跳过剩余数据
-                    if (data_pos < page_data_.size()) {
-                        data_pos = page_data_.size();
-                    }
-                }
-            } else if (col.virtual_gen_store_type > 0) {
-                // 虚拟列不存储实际数据
-                field_value = "[VIRTUAL_COLUMN]";
             } else {
-                // 解析具体类型
-                switch (col.mysql_type_id) {
-                    case mysql_types::LONGLONG: { // 8
-                        if (data_pos + 8 <= page_data_.size()) {
-                            int64_t val = static_cast<int64_t>(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
-                            field_value = std::to_string(val);
-                            data_pos += 8;
-                        } else {
-                            std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::LONG: { // 3
-                        if (data_pos + 4 <= page_data_.size()) {
-                            int32_t val = static_cast<int32_t>(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
-                            field_value = std::to_string(val);
-                            data_pos += 4;
-                        } else {
-                            std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::SHORT: { // 2
-                        if (data_pos + 2 <= page_data_.size()) {
-                            int16_t val = static_cast<int16_t>(dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos));
-                            field_value = std::to_string(val);
-                            data_pos += 2;
-                        } else {
-                            std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::TINY: { // 1
-                        if (data_pos + 1 <= page_data_.size()) {
-                            int8_t val = static_cast<int8_t>(page_data_[data_pos]);
-                            field_value = std::to_string(val);
-                            data_pos += 1;
-                        } else {
-                            std::cerr << "[WARN] Data truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::VARCHAR: { // 15
-                        bool use_two_byte_prefix = (col.column_length > 255);
-                            
-                        if (use_two_byte_prefix) {
-                            if (data_pos + 2 <= page_data_.size()) {
-                                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
-                                data_pos += 2;
-                                    
-                                if (len > 0 && data_pos + len <= page_data_.size()) {
-                                    field_value = std::string(
-                                        reinterpret_cast<const char*>(page_data_.data() + data_pos), 
-                                        len
-                                    );
-                                    data_pos += len;
-                                } else {
-                                    field_value = "[TRUNCATED]";
-                                }
-                            } else {
-                                std::cerr << "[WARN] VARCHAR length header truncated for column " << col.name << std::endl;
-                                field_value = "[TRUNCATED]";
-                            }
-                        } else {
-                            if (data_pos + 1 <= page_data_.size()) {
-                                uint8_t len = page_data_[data_pos];
-                                data_pos++;
-                                    
-                                if (len > 0 && data_pos + len <= page_data_.size()) {
-                                    field_value = std::string(
-                                        reinterpret_cast<const char*>(page_data_.data() + data_pos), 
-                                        len
-                                    );
-                                    data_pos += len;
-                                } else {
-                                    field_value = "[TRUNCATED]";
-                                }
-                            } else {
-                                std::cerr << "[WARN] VARCHAR length byte truncated for column " << col.name << std::endl;
-                                field_value = "[TRUNCATED]";
-                            }
-                        }
-                        break;
-                    }
-                    case mysql_types::DATETIME: { // 12
-                        if (data_pos + 8 <= page_data_.size()) {
-                            uint64_t val = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
-                            field_value = "[DATETIME:" + std::to_string(val) + "]";
-                            data_pos += 8;
-                        } else {
-                            std::cerr << "[WARN] DATETIME data truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::DATETIME2: { // 18
-                        // MySQL 8.0 新格式，支持小数位精度
-                        int precision = col.datetime_precision >= 0 ? col.datetime_precision : 0;
-                        if (precision < 0) precision = 0;
-                        if (precision > 6) precision = 6;
-                            
-                        // DATETIME2 字节数：5(精度0-1), 6(精度2-3), 7(精度4-5), 8(精度6)
-                        uint32_t datetime_bytes[] = {5, 5, 6, 6, 7, 7, 8};
-                            
-                        if (data_pos + datetime_bytes[precision] <= page_data_.size()) {
-                            // 解析 DATETIME2 值
-                            const uint8_t* datetime_ptr = page_data_.data() + data_pos;
-                            uint64_t val = 0;
-                            for (int i = 0; i < datetime_bytes[precision]; ++i) {
-                                val |= static_cast<uint64_t>(datetime_ptr[i]) << (i * 8);
-                            }
-                            field_value = "[DATETIME2:" + std::to_string(precision) + "p]";
-                            data_pos += datetime_bytes[precision];
-                        } else {
-                            std::cerr << "[WARN] DATETIME2 data truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::JSON: { // 245
-                        if (data_pos + 2 <= page_data_.size()) {
-                            uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
-                            data_pos += 2;
-                                
-                            if (len > 0 && data_pos + len <= page_data_.size()) {
-                                field_value = "[JSON_DATA]";
-                                // TODO: 实现 JSON 解析
-                                data_pos += len;
-                            } else {
-                                field_value = "[TRUNCATED_JSON]";
-                            }
-                        } else {
-                            std::cerr << "[WARN] JSON length header truncated for column " << col.name << std::endl;
-                            field_value = "[TRUNCATED]";
-                        }
-                        break;
-                    }
-                    case mysql_types::TINY_BLOB:   // 249
-                    case mysql_types::MEDIUM_BLOB: // 250
-                    case mysql_types::LONG_BLOB:   // 251
-                    case mysql_types::BLOB:        // 252
-                        field_value = "[BLOB_DATA]";
-                        data_pos += 20; // 跳过 BLOB 指针
-                        break;
-                    default:
-                        field_value = "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
-                        if (col.column_length > 0 && col.column_length < 1024) {
-                            if (data_pos + col.column_length <= page_data_.size()) {
-                                data_pos += col.column_length;
-                            } else {
-                                std::cerr << "[WARN] Column " << col.name << " data truncated" << std::endl;
-                                break;
-                            }
-                        }
-                        break;
-                }
+                // ✅ 使用提取的函数解析字段值
+                field_value = parse_field_value(col, data_pos, is_extern);
             }
                 
             record[col.name] = field_value;

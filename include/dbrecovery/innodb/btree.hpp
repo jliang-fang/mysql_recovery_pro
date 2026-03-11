@@ -41,6 +41,19 @@ public:
     [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
     
     /**
+     * @brief 解析字段值（提取的辅助函数）
+     * 
+     * @param col 列定义
+     * @param data_pos 数据位置引用（会被修改）
+     * @param is_extern 是否为外部指针
+     * @return std::string 解析后的字段值
+     */
+    std::string parse_field_value(
+        const catalog::ColumnInfo& col,
+        size_t& data_pos,
+        bool is_extern) const;
+    
+    /**
      * @brief 解析记录数据（仅支持 COMPACT 格式）
      * 
      * @param schema 表结构定义
