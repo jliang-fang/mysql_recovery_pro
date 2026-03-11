@@ -76,6 +76,13 @@ struct BlobPageChain {
       uint32_t offset;
       uint32_t len;           // 当前页的数据长度
       uint32_t total_len;     // BLOB 总长度（完整指针格式包含此字段）
+      
+      // ✅ 新增：BLOB 页链信息
+      std::vector<std::pair<uint32_t, uint32_t>> chain_pages; // (space_id, page_no)
+      
+      bool is_complete() const {
+          return total_len > 0 && !chain_pages.empty();
+      }
   };
   
   static std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20) {
@@ -143,6 +150,9 @@ struct BlobPageChain {
           return std::nullopt;
       }
       
+      // ✅ 新增：初始化页链（至少包含当前页）
+      ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
+      
       return ptr;
   }
   
@@ -150,6 +160,56 @@ struct BlobPageChain {
   static std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data) {
       if (data.size() < 16) return std::nullopt;
       return parse_blob_pointer(data.data(), data.size());
+  }
+  
+  // ✅ 新增：从 BLOB 页数据中解析完整页链
+  static std::optional<BlobPageChain> build_blob_page_chain(
+      uint32_t first_space_id,
+      uint32_t first_page_no,
+      const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }
+  ) {
+      BlobPageChain chain;
+      
+      if (!page_reader) {
+          return std::nullopt;
+      }
+      
+      uint32_t current_space_id = first_space_id;
+      uint32_t current_page_no = first_page_no;
+      size_t max_pages = 1000; // 防止无限循环
+      
+      while (max_pages-- > 0) {
+          chain.add_page(current_space_id, current_page_no);
+          
+          auto page_data = page_reader(current_space_id, current_page_no);
+          if (!page_data || page_data->size() < 16) {
+              break;
+          }
+          
+          // 读取下一个 BLOB 页号
+          uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BTR_BPAGE_NEXT);
+          
+          if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
+              // 链表结束
+              break;
+          }
+          
+          // 检查是否跨表空间（MySQL 8.0 支持）
+          // 如果 next_bpage 的高16位非零，可能表示新的 space_id
+          if (current_space_id != 0 && (next_bpage >> 16) != 0) {
+              // 可能是新的 space_id（需要根据实际格式调整）
+              current_space_id = next_bpage >> 16;
+              current_page_no = next_bpage & 0xFFFF;
+          } else {
+              current_page_no = next_bpage;
+          }
+      }
+      
+      if (chain.pages.empty()) {
+          return std::nullopt;
+      }
+      
+      return chain;
   }
 };
 

@@ -25,16 +25,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移12处）
-    uint32_t page_type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 12);
-    
-    // ✅ 新增：验证页类型范围
-    if (page_type > 0xFFFF) {
-        std::cerr << "[WARN] Invalid page type: " << page_type << std::endl;
-        health.is_valid = false;
-        health.status_message = "Invalid page type value";
-        return health;
-    }
+    // ✅ 修复：正确读取2字节页类型（FIL_PAGE_TYPE 在偏移12处）
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 12);
     
     bool is_valid_page_type = false;
     std::string unsupported_message;
@@ -42,8 +34,9 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX) {
         is_valid_page_type = true;
     } else if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
-        // ✅ 修复：SDI页不支持记录解析，标记为不支持
+        // ✅ 修复：SDI页支持元数据解析，但不支持记录解析
         unsupported_message = "SDI page type not supported for record parsing";
+        is_valid_page_type = true; // SDI页本身是有效的
     } else if (page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
         is_valid_page_type = true;
     } else if (page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
