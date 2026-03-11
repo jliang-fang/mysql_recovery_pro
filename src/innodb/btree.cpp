@@ -40,9 +40,11 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     health.n_dir_slots = n_dir_slots;
     
     // 检查是否存在 infimum 和 supremum
+    // infimum 应该在页目录开始位置 (38 + 16 = 54)
+    // supremum 应该在 infimum 之后 (56)
     if (page_data_.size() >= 58) {
-        uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 16);
-        uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 18);
+        uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
+        uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
         
         health.has_infimum = (infimum_offset == 54);
         health.has_supremum = (supremum_offset == 56);
@@ -145,8 +147,16 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
     uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
         
+    // 验证偏移量有效性
     if (infimum_offset < 38 + 16 || infimum_offset >= page_data_.size() ||
         supremum_offset < 38 + 16 || supremum_offset >= page_data_.size()) {
+        return false;
+    }
+        
+    // 验证 infimum 和 supremum 的值
+    if (infimum_offset != 54 || supremum_offset != 56) {
+        std::cerr << "[WARN] Invalid system record offsets: infimum=" << infimum_offset 
+                  << ", supremum=" << supremum_offset << std::endl;
         return false;
     }
         
@@ -384,15 +394,16 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
             
         // 解析 next_record_offset: 高4位在 byte[1] 的低4位，低8位在 byte[2]
+        // 注意：COMPACT 格式中 next_record_offset 是 little-endian
         uint16_t next_rec_offset = static_cast<uint16_t>(
-            (((uint16_t)(page_data_[offset + 1] & 0x0F)) << 8) | 
-            ((uint16_t)page_data_[offset + 2])
-        );
+            (static_cast<uint16_t>(page_data_[offset + 2]) << 8) | 
+            page_data_[offset + 1]
+        ) & 0x3FFF; // 只取低14位（高2位是其他标志）
             
         // 解析 heap_no: 在 byte[3] 的低4位和 byte[4] 的高4位
         uint16_t heap_no = static_cast<uint16_t>(
-            ((page_data_[offset + 3] & 0x0F) << 8) | 
-            ((page_data_[offset + 4] & 0xF0) >> 4)
+            ((page_data_[offset + 4] & 0xF0) << 4) | 
+            (page_data_[offset + 3] & 0x0F)
         );
             
         // 兼容性检查：n_fields 范围应为 1-511（9位最大值）

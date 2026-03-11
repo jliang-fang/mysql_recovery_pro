@@ -100,6 +100,15 @@ struct BlobPageChain {
           ptr.total_len = ptr.len;
       }
       
+      // 验证 BLOB 指针的有效性
+      if (ptr.space_id == 0xFFFFFFFF || ptr.page_no == 0xFFFFFFFF) {
+          return std::nullopt; // 无效的 BLOB 指针
+      }
+      
+      if (ptr.len > ptr.total_len && ptr.total_len != 0) {
+          return std::nullopt; // 长度不一致
+      }
+      
       return ptr;
   }
 };
