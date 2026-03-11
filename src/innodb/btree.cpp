@@ -14,12 +14,6 @@ constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;
 constexpr uint16_t FIL_PAGE_SDI          = 9971;
 constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;
 
-// 记录头信息常量
-constexpr uint8_t REC_INFO_BITS_MASK       = 0x07;
-constexpr uint8_t REC_INFO_DELETED_FLAG    = 0x01;
-constexpr uint8_t REC_INFO_MIN_REC_FLAG    = 0x02;
-constexpr uint8_t REC_INFO_EXTERN_FLAG     = 0x10;
-
 // ==================== BPlusTreeParser 实现 ====================
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
@@ -84,7 +78,6 @@ bool BPlusTreeParser::parse() noexcept {
     return parse_header();
 }
 
-// ✅ 修复：删除重复定义的 parse_header()
 bool BPlusTreeParser::parse_header() noexcept {
     // 解析 FIL Header (38 bytes)
     if (page_data_.size() < 38) {
