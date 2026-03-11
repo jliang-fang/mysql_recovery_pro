@@ -42,7 +42,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX) {
         is_valid_page_type = true;
     } else if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
-        is_valid_page_type = true;
+        // ✅ 修复：SDI页不支持记录解析，标记为不支持
+        unsupported_message = "SDI page type not supported for record parsing";
     } else if (page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
         is_valid_page_type = true;
     } else if (page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
@@ -553,6 +554,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
+            // ✅ 修复：正确处理自增列，它不参与 NULL 位图
             if (col.is_nullable && !col.is_auto_increment) {
                 nullable_columns++;
             }
@@ -586,6 +588,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             
         // ✅ 修复：NULL bitmap 正确位置（在 base_header + var_len_size 之后）
         const uint8_t* null_ptr = page_data_.data() + offset + 5 + var_len_size;
+        
+        // ✅ 新增：验证 null_ptr 指针有效性
+        if (null_ptr == nullptr || null_ptr < page_data_.data() || 
+            null_ptr >= page_data_.data() + page_data_.size()) {
+            std::cerr << "[ERROR] Invalid null bitmap pointer at offset " << offset << std::endl;
+            continue;
+        }
             
         // 构建列索引映射：为每个可空列分配位图中的索引
         std::map<uint32_t, uint32_t> col_idx_map; // schema_ordinal -> bitmap_index

@@ -129,6 +129,20 @@ struct BlobPageChain {
           return std::nullopt;
       }
       
+      // ✅ 新增：验证总长度与当前页长度的一致性
+      if (ptr.total_len < ptr.len) {
+          std::cerr << "[ERROR] BLOB total_len less than current page len: total=" 
+                    << ptr.total_len << ", current=" << ptr.len << std::endl;
+          return std::nullopt;
+      }
+      
+      // ✅ 新增：验证偏移和长度的合理性
+      if (ptr.offset >= 16384 || ptr.len == 0) {
+          std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
+                    << ptr.offset << ", len=" << ptr.len << std::endl;
+          return std::nullopt;
+      }
+      
       return ptr;
   }
   
