@@ -5,6 +5,7 @@
 #include <vector>
 #include <utility>
 #include <set>
+#include <functional>
 
 namespace dbrecovery {
 namespace innodb {
