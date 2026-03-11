@@ -86,7 +86,18 @@ bool BPlusTreeParser::parse() noexcept {
         return false;
     }
     
-    return parse_header();
+    if (!parse_header()) {
+        return false;
+    }
+    
+    // ✅ 新增：页健康状态检查
+    PageHealth health = check_health();
+    if (!health.is_valid) {
+        std::cerr << "[ERROR] Page health check failed: " << health.status_message << std::endl;
+        return false;
+    }
+    
+    return true;
 }
 
 bool BPlusTreeParser::parse_header() noexcept {
@@ -484,12 +495,18 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue;
         }
             
-        // 跳过 INFIMUM/SUPREMUM 记录
-        if (is_min_rec || next_rec_offset == 0xFFFF) {
+        // ✅ 新增：跳过 INFIMUM/SUPREMUM 记录（使用更严格的检查）
+        if (is_min_rec || next_rec_offset == 0xFFFF || offset >= page_data_.size()) {
             continue;
         }
-            
+        
         if (is_deleted) {
+            continue;
+        }
+        
+        // ✅ 新增：记录边界检查
+        if (offset + 5 > page_data_.size()) {
+            std::cerr << "[WARN] Record header exceeds page at offset " << offset << std::endl;
             continue;
         }
             

@@ -85,6 +85,24 @@ struct TableSchema {
     uint32_t auto_inc_value = 0;          // AUTO_INCREMENT 当前值
     
     void debug_print() const;
+    
+    // ✅ 新增：表结构验证
+    bool validate() const;
+    
+    // ✅ 新增：计算列大小（用于行格式适配）
+    uint32_t get_column_size(const ColumnInfo& col) const;
+    
+    // ✅ 新增：计算可空列数量（用于 NULL 位图）
+    uint32_t get_nullable_column_count() const;
+    
+    // ✅ 新增：获取列在表中的物理偏移
+    std::optional<uint32_t> get_column_offset(const std::string& col_name) const;
+    
+    // ✅ 新增：序列化为 JSON 字符串（用于 SDI 兼容）
+    std::string to_json_string() const;
+    
+    // ✅ 新增：从 JSON 字符串反序列化（用于 SDI 解析）
+    bool from_json_string(const std::string& json_str);
 };
 
 // MySQL 8.0 类型常量（参考 include/mysql/mysql_type.h）
