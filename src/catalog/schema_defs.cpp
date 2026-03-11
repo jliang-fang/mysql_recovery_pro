@@ -53,9 +53,11 @@ bool TableSchema::validate() const {
         return false;
     }
     
-    // 检查页大小
+    // ✅ 修复：确保包含正确的头文件以使用 UNIV_PAGE_SIZE_MIN 和 UNIV_PAGE_SIZE_MAX
+    // 这些常量定义在 page_defs.hpp 中，需要确保包含该头文件
     if (page_size != 0 && 
-        (page_size < UNIV_PAGE_SIZE_MIN || page_size > UNIV_PAGE_SIZE_MAX)) {
+        (page_size < dbrecovery::innodb::UNIV_PAGE_SIZE_MIN || 
+         page_size > dbrecovery::innodb::UNIV_PAGE_SIZE_MAX)) {
         std::cerr << "[ERROR] Invalid page size: " << page_size << std::endl;
         return false;
     }
@@ -93,7 +95,7 @@ bool TableSchema::validate() const {
         }
     }
     
-    // 检查列偏移计算
+    // ✅ 增强：检查列大小总和
     uint32_t current_offset = 0;
     for (const auto& [pos, col] : columns) {
         // 计算固定长度部分
@@ -103,10 +105,27 @@ bool TableSchema::validate() const {
                 std::cerr << "[ERROR] Row size too large: " << current_offset + col_size << std::endl;
                 return false;
             }
+        } else {
+            // 对于变长字段，只计算最大可能长度
+            if (col.mysql_type_id == mysql_types::VARCHAR) {
+                uint32_t max_var_len = (col.column_length > 255) ? col.column_length + 2 : col.column_length + 1;
+                current_offset += max_var_len;
+            }
         }
     }
     
     return true;
+}
+
+// ✅ 新增：计算可空列数量（用于 NULL 位图）
+uint32_t TableSchema::get_nullable_column_count() const {
+    uint32_t count = 0;
+    for (const auto& [pos, col] : columns) {
+        if (col.is_nullable && !col.is_auto_increment) {
+            count++;
+        }
+    }
+    return count;
 }
 
 // ✅ 新增：计算列大小（用于行格式适配）
@@ -175,7 +194,12 @@ std::optional<uint32_t> TableSchema::get_column_offset(const std::string& col_na
             current_offset += get_column_size(col);
         } else {
             // VARCHAR 使用变长存储，需要在解析时动态计算
-            current_offset += (col.column_length > 255) ? 2 : 1;
+            // 对于偏移计算，我们使用最大可能长度作为估计
+            if (col.column_length > 255) {
+                current_offset += col.column_length + 2;
+            } else {
+                current_offset += col.column_length + 1;
+            }
         }
     }
     
