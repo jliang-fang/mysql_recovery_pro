@@ -410,7 +410,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint8_t info_bits = page_data_[offset];
         bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
         bool is_min_rec = (info_bits & REC_INFO_MIN_REC_FLAG) != 0;
-        bool is_extern = (info_bits & REC_INFO_EXTERN_FLAG) != 0;
+        // ✅ 使用 page_defs.hpp 中定义的 REC_INFO_EXTERN_FLAG
+        bool is_extern = (info_bits & dbrecovery::innodb::REC_INFO_EXTERN_FLAG) != 0;
             
         // 解析 n_fields: 高4位在 byte[1] 的高4位，低4位在 byte[4] 的低4位
         uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
@@ -474,7 +475,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         header_size += var_len_size;
             
         // ✅ 新增：边界检查 - 确保记录头不会超出页大小
-        if (header_size > 128) { // COMPACT 记录头通常不超过 128 字节
+        if (header_size > 64) { // COMPACT 记录头通常不超过 64 字节（更严格的限制）
             std::cerr << "[WARN] Record header size too large: " << static_cast<int>(header_size) 
                       << " at offset " << offset << ", skipping record\n";
             continue;
@@ -490,12 +491,21 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         }
             
         uint32_t null_bytes = (nullable_columns + 7) / 8;
+        
+        // ✅ 防止整数溢出：null_bytes 不应超过合理范围（例如 128 字节）
+        if (null_bytes > 128) {
+            std::cerr << "[WARN] Null bitmap too large: " << null_bytes 
+                      << " at offset " << offset << ", skipping record\n";
+            continue;
+        }
+        
         header_size += null_bytes;
             
         // ✅ 增强边界检查
         if (offset + header_size > page_data_.size()) {
             std::cerr << "[WARN] Record header exceeds page size at offset " << offset 
-                      << ", header_size=" << static_cast<int>(header_size) << std::endl;
+                      << ", header_size=" << static_cast<int>(header_size) 
+                      << ", page_size=" << page_data_.size() << std::endl;
             continue;
         }
             
@@ -527,7 +537,10 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                     uint32_t byte_idx = it->second / 8;
                     uint32_t bit_idx = it->second % 8;
                         
-                    if (byte_idx < null_bytes && null_ptr + byte_idx < page_data_.data() + offset + header_size) {
+                    // ✅ 增强边界检查：确保 byte_idx 在有效范围内
+                    if (byte_idx < null_bytes && 
+                        null_ptr != nullptr &&
+                        null_ptr + byte_idx < page_data_.data() + offset + header_size) {
                         is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
                     }
                 }

@@ -27,7 +27,7 @@ struct BlobPageChain {
       pages.emplace_back(space_id, page_no);
   }
 
-  bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader) const {
+  bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t /*space_id*/, uint32_t /*page_no*/)>& page_reader = {}) const {
       if (pages.empty()) return false;
       
       // 检查是否有重复页
@@ -48,19 +48,21 @@ struct BlobPageChain {
           }
           
           // 读取前一个页的 BLOB 头以验证 next_bpage 字段
-          if (page_reader) {
-              auto prev_data = page_reader(prev_page.first, prev_page.second);
-              if (!prev_data || prev_data->size() < 16) {
-                  continue; // 无法读取或数据不足，跳过验证
-              }
-              
-              // 读取 next_bpage 字段（偏移 0）
-              uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
-              
-              if (next_bpage != curr_page.second) {
-                  // next_bpage 不匹配，链表断裂
-                  return false;
-              }
+          if (!page_reader) {
+              continue; // 没有提供 page_reader，跳过验证
+          }
+          
+          auto prev_data = page_reader(prev_page.first, prev_page.second);
+          if (!prev_data || prev_data->size() < 16) {
+              continue; // 无法读取或数据不足，跳过验证
+          }
+          
+          // 读取 next_bpage 字段（偏移 0）
+          uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
+          
+          if (next_bpage != curr_page.second) {
+              // next_bpage 不匹配，链表断裂
+              return false;
           }
       }
       

@@ -38,8 +38,8 @@ struct ColumnInfo {
     std::optional<std::string> comment; // 列注释
     
     // ✅ 新增：用于处理不同行格式的字段
-    bool is_variable_length = false; // 是否变长字段
-    uint32_t actual_column_size = 0; // 实际列大小（考虑编码）
+    bool is_variable_length = false; // 是否变长字段（VARCHAR, VARBINARY等）
+    uint32_t actual_column_size = 0; // 实际列大小（考虑编码，如utf8mb4可能占用3-4字节/字符）
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）
