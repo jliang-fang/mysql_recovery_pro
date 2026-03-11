@@ -42,12 +42,18 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
         return false;
     }
     
+    // ✅ 修复：防止整数溢出
+    Offset new_end = offset + static_cast<Offset>(data.size());
+    if (new_end < offset) { // 检测溢出
+        std::cerr << "[ERROR] Blob chunk offset overflow detected\n";
+        return false;
+    }
+    
     // Check for overlap and handle edge cases
     for (const auto& chunk : chunks_) {
         Offset new_start = offset;
-        Offset new_end = offset + data.size();
         Offset old_start = chunk.offset;
-        Offset old_end = chunk.offset + chunk.length;
+        Offset old_end = chunk.offset + static_cast<Offset>(chunk.length);
         
         // 完全包含：新块被旧块完全覆盖，拒绝添加
         if (new_start >= old_start && new_end <= old_end) {
@@ -58,18 +64,20 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
         if (new_start < old_end && old_start < new_end) {
             // 如果新块的起始位置比旧块早，则允许追加到末尾
             if (new_start < old_start) {
-                size_t overlap = static_cast<size_t>(old_start - new_start);
+                Offset overlap_offset = old_start - new_start;
+                size_t overlap = static_cast<size_t>(overlap_offset);
                 if (overlap >= data.size()) return false; // 完全重叠
                 // 只添加不重叠的部分
                 DataChunk new_data(data.begin() + overlap, data.end());
-                return AddChunk(new_start + overlap, new_data);
+                Offset new_offset = offset + overlap_offset;
+                return AddChunk(new_offset, new_data);
             }
             return false;  // 其他情况拒绝添加
         }
     }
     
     chunks_.push_back({offset, static_cast<Length>(data.size()), data});
-    current_size_ = std::max(current_size_, offset + static_cast<Offset>(data.size()));
+    current_size_ = std::max(current_size_, new_end);
     std::sort(chunks_.begin(), chunks_.end(),
               [](const auto& a, const auto& b) { return a.offset < b.offset; });
     return true;

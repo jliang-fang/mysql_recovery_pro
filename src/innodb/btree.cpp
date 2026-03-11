@@ -475,22 +475,35 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         header_size += var_len_size;
             
         // ✅ 新增：边界检查 - 确保记录头不会超出页大小
-        if (header_size > 64) { // COMPACT 记录头通常不超过 64 字节（更严格的限制）
+        if (header_size > 128) { // COMPACT 记录头通常不超过 64 字节，但考虑变长字段和NULL位图后可能更大
             std::cerr << "[WARN] Record header size too large: " << static_cast<int>(header_size) 
                       << " at offset " << offset << ", skipping record\n";
             continue;
         }
+        
+        // ✅ 新增：防止记录头超出页边界
+        if (offset + header_size > page_data_.size()) {
+            std::cerr << "[ERROR] Record header exceeds page size at offset " << offset 
+                      << ", header_size=" << static_cast<int>(header_size) 
+                      << ", page_offset=" << offset << ", page_size=" << page_data_.size() << std::endl;
+            continue;
+        }
             
         // 计算 NULL 位图大小：所有可空列（包括 BLOB）都需要在位图中占位
+        // 注意：auto_increment 列隐式 NOT NULL，不需要在 NULL 位图中占位
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
-            if (col.is_nullable && !col.is_auto_increment) { // auto_increment 列隐式 NOT NULL
+            if (col.is_nullable && !col.is_auto_increment) {
                 nullable_columns++;
             }
         }
-            
-        uint32_t null_bytes = (nullable_columns + 7) / 8;
+        
+        // ✅ 修复：确保 nullable_columns 不为负数（虽然类型是 unsigned）
+        uint32_t null_bytes = 0;
+        if (nullable_columns > 0) {
+            null_bytes = (nullable_columns + 7) / 8;
+        }
         
         // ✅ 防止整数溢出：null_bytes 不应超过合理范围（例如 128 字节）
         if (null_bytes > 128) {
