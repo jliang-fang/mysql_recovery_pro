@@ -129,20 +129,6 @@ FileMapper::FileMapper(FileMapper&& other) noexcept
     other.handle_ = INVALID_HANDLE_VALUE;
 #endif
 }
-#ifdef _WIN32
-    : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_), handle_(other.handle_)
-#else
-    : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
-#endif
-{
-    other.fd_ = -1;
-    other.data_ = nullptr;
-    other.size_ = 0;
-    other.is_valid_ = false;
-#ifdef _WIN32
-    other.handle_ = INVALID_HANDLE_VALUE;
-#endif
-}
 
 FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
     if (this != &other) {
@@ -190,8 +176,6 @@ FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
     
     return *this;
 }
-
-// ✅ 析构函数和赋值操作符已在前面定义，此处仅保留实现
 
 } // namespace utils
 } // namespace dbrecovery
