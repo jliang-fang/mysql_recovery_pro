@@ -318,16 +318,40 @@ std::string BPlusTreeParser::parse_field_value(
             if (precision < 0) precision = 0;
             if (precision > 6) precision = 6;
             
-            uint32_t datetime_bytes[] = {5, 5, 6, 6, 7, 7, 8};
+            // MySQL 8.0 DATETIME2 编码：前5字节是日期/时间值，后(precision+1)/2字节是小数部分
+            size_t datetime_bytes = 5 + (precision + 1) / 2;
             
-            if (data_pos + datetime_bytes[precision] <= page_data_.size()) {
+            if (data_pos + datetime_bytes <= page_data_.size()) {
                 const uint8_t* datetime_ptr = page_data_.data() + data_pos;
-                uint64_t val = 0;
-                for (int i = 0; i < datetime_bytes[precision]; ++i) {
-                    val |= static_cast<uint64_t>(datetime_ptr[i]) << (i * 8);
+                
+                // 解析前5字节：year(2), month+day(1), hour+minute+second(2)
+                uint16_t year = dbrecovery::innodb::read_le<uint16_t>(datetime_ptr, 0);
+                uint8_t month = datetime_ptr[2] & 0x0F;
+                uint8_t day = datetime_ptr[2] >> 4;
+                uint8_t hour = datetime_ptr[3] & 0x1F;
+                uint8_t minute = datetime_ptr[3] >> 5 | (datetime_ptr[4] & 0x03) << 3;
+                uint8_t second = datetime_ptr[4] >> 2;
+                
+                // 解析小数部分
+                uint64_t frac = 0;
+                if (precision > 0) {
+                    size_t frac_bytes = (precision + 1) / 2;
+                    for (size_t i = 0; i < frac_bytes; ++i) {
+                        frac |= static_cast<uint64_t>(datetime_ptr[5 + i]) << (i * 8);
+                    }
+                    // 根据精度缩放
+                    static const uint64_t frac_scale[] = {0, 100000, 10000, 1000, 100, 10, 1};
+                    frac = frac / frac_scale[precision];
                 }
-                data_pos += datetime_bytes[precision];
-                return "[DATETIME2:" + std::to_string(precision) + "p]";
+                
+                data_pos += datetime_bytes;
+                return std::to_string(year) + "-" + 
+                       std::to_string(month) + "-" + 
+                       std::to_string(day) + " " +
+                       std::to_string(hour) + ":" + 
+                       std::to_string(minute) + ":" + 
+                       std::to_string(second) +
+                       (precision > 0 ? "." + std::to_string(frac) : "");
             } else {
                 std::cerr << "[WARN] DATETIME2 data truncated for column " << col.name << std::endl;
                 return "[TRUNCATED]";
@@ -393,16 +417,16 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint8_t n_fields_low  = page_data_[offset + 4] & 0x0F;
         uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
             
-        // 解析 next_record_offset: 高4位在 byte[1] 的低4位，低8位在 byte[2]
-        // 注意：COMPACT 格式中 next_record_offset 是 little-endian
+        // 解析 next_record_offset: byte[1] 的低4位是高4位，byte[2] 是低8位
+        // 这是一个 14 位的无符号整数，表示到下一个记录的偏移量（相对当前记录头）
         uint16_t next_rec_offset = static_cast<uint16_t>(
-            (static_cast<uint16_t>(page_data_[offset + 2]) << 8) | 
-            page_data_[offset + 1]
-        ) & 0x3FFF; // 只取低14位（高2位是其他标志）
+            ((static_cast<uint16_t>(page_data_[offset + 1] & 0x0F)) << 8) | 
+            page_data_[offset + 2]
+        );
             
-        // 解析 heap_no: 在 byte[3] 的低4位和 byte[4] 的高4位
+        // 解析 heap_no: byte[3] 的低4位是低4位，byte[4] 的高4位是高4位
         uint16_t heap_no = static_cast<uint16_t>(
-            ((page_data_[offset + 4] & 0xF0) << 4) | 
+            ((static_cast<uint16_t>(page_data_[offset + 4] & 0xF0)) << 4) | 
             (page_data_[offset + 3] & 0x0F)
         );
             
