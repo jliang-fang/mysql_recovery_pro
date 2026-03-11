@@ -4,6 +4,9 @@
 #include <sstream>
 #include <algorithm>
 
+// 包含 nlohmann/json 头文件
+#include <nlohmann/json.hpp>
+
 namespace dbrecovery {
 namespace catalog {
 
@@ -182,6 +185,17 @@ std::optional<uint32_t> TableSchema::get_column_offset(const std::string& col_na
     }
     
     return std::nullopt;
+}
+
+// ✅ 新增：计算可空列数量（用于 NULL 位图）
+uint32_t TableSchema::get_nullable_column_count() const {
+    uint32_t count = 0;
+    for (const auto& [pos, col] : columns) {
+        if (col.is_nullable && !col.is_auto_increment) {
+            count++;
+        }
+    }
+    return count;
 }
 
 // ✅ 新增：序列化为 JSON 字符串（用于 SDI 兼容）
@@ -416,58 +430,6 @@ bool TableSchema::from_json(const nlohmann::json& j) {
     }
     
     return true;
-}
-    bool first_col = true;
-    for (const auto& [pos, col] : columns) {
-        if (!first_col) oss << ",";
-        first_col = false;
-        
-        oss << "{";
-        oss << "\"name\":\"" << col.name << "\",";
-        oss << "\"type\":" << col.mysql_type_id << ",";
-        oss << "\"nullable\":" << (col.is_nullable ? "true" : "false") << ",";
-        oss << "\"length\":" << col.column_length;
-        if (col.datetime_precision >= 0) {
-            oss << ",\"datetime_precision\":" << col.datetime_precision;
-        }
-        oss << "}";
-    }
-    oss << "],";
-    
-    // 序列化索引
-    oss << "\"indexes\":[";
-    bool first_idx = true;
-    for (const auto& idx : indexes) {
-        if (!first_idx) oss << ",";
-        first_idx = false;
-        
-        oss << "{";
-        oss << "\"name\":\"" << idx.name << "\",";
-        oss << "\"primary\":" << (idx.is_primary ? "true" : "false") << ",";
-        oss << "\"unique\":" << (idx.is_unique ? "true" : "false") << ",";
-        oss << "\"columns\":[";
-        
-        bool first_col_in_idx = true;
-        for (const auto& col : idx.columns) {
-            if (!first_col_in_idx) oss << ",";
-            first_col_in_idx = false;
-            oss << "\"" << col << "\"";
-        }
-        oss << "]}";
-    }
-    oss << "]";
-    
-    oss << "}";
-    
-    return oss.str();
-}
-
-// ✅ 新增：从 JSON 字符串反序列化（用于 SDI 解析）
-bool TableSchema::from_json_string(const std::string& json_str) {
-    // TODO: 使用 nlohmann/json 库解析 JSON
-    // 这里仅提供占位实现，实际应使用 JSON 库
-    std::cerr << "[WARN] JSON deserialization not implemented yet" << std::endl;
-    return false;
 }
 
 } // namespace catalog
