@@ -27,7 +27,7 @@ struct BlobPageChain {
       pages.emplace_back(space_id, page_no);
   }
 
-  bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = {}) const {
+  bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) const {
       if (pages.empty()) return false;
       
       // 检查是否有重复页
