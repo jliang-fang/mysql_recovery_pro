@@ -25,12 +25,14 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移0处是4字节）
-    uint32_t page_type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 0);
+    // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移12处）
+    uint32_t page_type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 12);
     
     // ✅ 新增：验证页类型范围
     if (page_type > 0xFFFF) {
         std::cerr << "[WARN] Invalid page type: " << page_type << std::endl;
+        health.is_valid = false;
+        health.status_message = "Invalid page type value";
         return health;
     }
     
@@ -78,6 +80,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     if (!is_valid_page_type && health.status_message.empty()) {
         health.status_message = unsupported_message.empty() ? "Unknown page type" : unsupported_message;
+        health.is_valid = false;
     }
     
     if (health.status_message.empty()) {
@@ -112,7 +115,8 @@ bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
+    // ✅ 修复：正确读取页类型（FIL_PAGE_TYPE 在偏移12处）
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 12);
     
     // 检查页类型：支持更多 InnoDB 页类型
     bool is_valid_page_type = false;
@@ -200,7 +204,8 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
 }
 
 bool BPlusTreeParser::parse_user_records() noexcept {
-    uint16_t dir_start = 60; // DIRECTORY START offset
+    // ✅ 修复：正确计算目录开始位置
+    uint16_t dir_start = 38 + 16; // PAGE_HEADER 后是 DIRECTORY START
     
     if (dir_start + 2 > page_data_.size()) {
         return false;
@@ -215,7 +220,8 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         }
         
         uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_offset);
-        if (record_offset > 0 && record_offset < 8192) {
+        // ✅ 增强：验证记录偏移的有效性
+        if (record_offset > 38 + 16 && record_offset < page_data_.size()) {
             record_offsets_.push_back(record_offset);
         }
     }
@@ -486,8 +492,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
              (static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8))
         );
         
-        // 解析 n_fields: 在记录数据部分，需要先跳过 header 和 var_len
-        // COMPACT 记录头结构：[1 byte info_bits] + [4 bytes next_record_offset]
+        // ✅ 修复：正确解析 n_fields（COMPACT 格式）
+        // COMPACT 记录头结构：[1 byte info_bits] + [2 bytes next_record_offset] + [2 bytes heap_no]
         // 实际 n_fields 编码在记录数据开始处的前2字节：
         // 高4位在第一个字节的高4位，低4位在第二个字节的低4位
         uint8_t n_fields_high = (page_data_[offset + 5] & 0xF0) >> 4;
@@ -517,8 +523,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         }
             
         // ✅ 修复：计算 header_size（可变长度）
-        uint8_t header_size = 5; // 基础头大小
-            
+        uint8_t header_size = 5; // 基础头大小 (info_bits + next_record_offset)
+        
         // 检查是否有额外的变长字段长度信息
         bool has_var_fields = false;
         for (const auto& pair : schema.columns) {
@@ -542,24 +548,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         }
             
         header_size += var_len_size;
-            
-        // ✅ 新增：边界检查 - 确保记录头不会超出页大小
-        if (header_size > 128) { // COMPACT 记录头通常不超过 64 字节，但考虑变长字段和NULL位图后可能更大
-            std::cerr << "[WARN] Record header size too large: " << static_cast<int>(header_size) 
-                      << " at offset " << offset << ", skipping record\n";
-            continue;
-        }
         
-        // ✅ 新增：防止记录头超出页边界
-        if (offset + header_size > page_data_.size()) {
-            std::cerr << "[ERROR] Record header exceeds page size at offset " << offset 
-                      << ", header_size=" << static_cast<int>(header_size) 
-                      << ", page_offset=" << offset << ", page_size=" << page_data_.size() << std::endl;
-            continue;
-        }
-            
-        // 计算 NULL 位图大小：所有可空列（包括 BLOB）都需要在位图中占位
-        // 注意：auto_increment 列隐式 NOT NULL，不需要在 NULL 位图中占位
+        // ✅ 新增：计算 NULL 位图大小（在变长字段之后）
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
@@ -594,7 +584,8 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue;
         }
             
-        const uint8_t* null_ptr = page_data_.data() + offset + 5; // NULL bitmap starts after base header
+        // ✅ 修复：NULL bitmap 正确位置（在 base_header + var_len_size 之后）
+        const uint8_t* null_ptr = page_data_.data() + offset + 5 + var_len_size;
             
         // 构建列索引映射：为每个可空列分配位图中的索引
         std::map<uint32_t, uint32_t> col_idx_map; // schema_ordinal -> bitmap_index

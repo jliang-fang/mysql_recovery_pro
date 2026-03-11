@@ -131,6 +131,12 @@ struct BlobPageChain {
       
       return ptr;
   }
+  
+  // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
+  static std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data) {
+      if (data.size() < 16) return std::nullopt;
+      return parse_blob_pointer(data.data(), data.size());
+  }
 };
 
 } // namespace innodb
