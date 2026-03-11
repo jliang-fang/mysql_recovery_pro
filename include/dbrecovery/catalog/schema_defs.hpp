@@ -103,6 +103,12 @@ struct TableSchema {
     
     // ✅ 新增：从 JSON 字符串反序列化（用于 SDI 解析）
     bool from_json_string(const std::string& json_str);
+    
+    // ✅ 新增：从 nlohmann/json 对象加载
+    bool from_json(const class json& j);
+    
+    // ✅ 新增：转换为 nlohmann/json 对象
+    json to_json() const;
 };
 
 // MySQL 8.0 类型常量（参考 include/mysql/mysql_type.h）

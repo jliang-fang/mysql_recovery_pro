@@ -28,6 +28,12 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移0处是4字节）
     uint32_t page_type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 0);
     
+    // ✅ 新增：验证页类型范围
+    if (page_type > 0xFFFF) {
+        std::cerr << "[WARN] Invalid page type: " << page_type << std::endl;
+        return health;
+    }
+    
     bool is_valid_page_type = false;
     std::string unsupported_message;
     
@@ -470,14 +476,14 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         // 解析 next_record_offset: little-endian 格式，[1] 是低字节，[2] 是高字节
         uint16_t next_rec_offset = static_cast<uint16_t>(
-            ((static_cast<uint16_t>(page_data_[offset + 2]) << 8) | 
-             page_data_[offset + 1])
+            (static_cast<uint16_t>(page_data_[offset + 1]) | 
+             (static_cast<uint16_t>(page_data_[offset + 2]) << 8))
         );
         
         // 解析 heap_no: [3] 是低字节，[4] 的低6位是高6位
         uint16_t heap_no = static_cast<uint16_t>(
-            ((static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8) | 
-             page_data_[offset + 3])
+            (static_cast<uint16_t>(page_data_[offset + 3]) | 
+             (static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8))
         );
         
         // 解析 n_fields: 在记录数据部分，需要先跳过 header 和 var_len

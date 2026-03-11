@@ -116,9 +116,16 @@ struct BlobPageChain {
           return std::nullopt; // 长度不一致
       }
       
-      // ✅ 新增：验证 offset 合法性
-      if (ptr.offset >= 16384) { // 假设最大页大小为 16KB
-          std::cerr << "[WARN] BLOB pointer offset too large: " << ptr.offset << std::endl;
+      // ✅ 新增：验证总长度合理性（BLOB 不能超过 4GB）
+      if (ptr.total_len > 0xFFFFFFFF) {
+          std::cerr << "[ERROR] BLOB total_len exceeds maximum: " << ptr.total_len << std::endl;
+          return std::nullopt;
+      }
+      
+      // ✅ 新增：验证当前页偏移 + 长度不超过页大小
+      if (ptr.offset + ptr.len > 16384) { // 假设最大页大小为 16KB
+          std::cerr << "[ERROR] BLOB data exceeds page boundary: offset=" << ptr.offset 
+                    << ", len=" << ptr.len << std::endl;
           return std::nullopt;
       }
       
