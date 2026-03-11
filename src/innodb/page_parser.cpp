@@ -147,6 +147,14 @@ std::vector<Record> PageParser::parse_records() const {
         return records; // 空页或无效堆
     }
 
+    // ✅ 增强：添加更严格的边界检查
+    size_t max_record_area = std::min(buffer_ + size_ - (buffer_ + 38 + 16), 
+                                      static_cast<size_t>(header_.heap_top - (38 + 16)));
+    
+    if (max_record_area < 5) { // 最小记录头大小
+        return records;
+    }
+
     // 定位记录起始点（INFIMUM 记录）
     const uint8_t* rec = buffer_ + 38 + 16;
 
@@ -155,7 +163,11 @@ std::vector<Record> PageParser::parse_records() const {
     std::set<uint16_t> visited_offsets;
 
     while (true) {
-        if (rec >= buffer_ + header_.heap_top || rec + 5 > buffer_ + size_) break;
+        // ✅ 增强：更严格的边界检查
+        if (rec < buffer_ + 38 + 16 || rec >= buffer_ + header_.heap_top || 
+            rec + 5 > buffer_ + size_ || rec + 5 > buffer_ + header_.heap_top) {
+            break;
+        }
 
         uint16_t rec_offset = static_cast<uint16_t>(rec - buffer_);
         
@@ -171,14 +183,14 @@ std::vector<Record> PageParser::parse_records() const {
         if (rec + 1 >= buffer_ + size_) break;
         uint16_t next_rec_offset = dbrecovery::innodb::read_le<uint16_t>(rec, 1);
         
-        // ✅ 修复：边界检查更严格
+        // ✅ 增强：边界检查更严格
         if (next_rec_offset < 38 + 16 || next_rec_offset >= header_.heap_top) {
             std::cerr << "[WARN] Invalid next_record offset " << next_rec_offset 
                       << " at record " << rec_offset << "\n";
             break;
         }
         
-        // ✅ 修复：SUPREMUM 标记是 next_rec_offset == 0xFFFF，但也要检查 info_bits
+        // ✅ 增强：SUPREMUM 标记是 next_rec_offset == 0xFFFF
         if (next_rec_offset == 0xFFFF) {
             found_supremum = true;
             break;
@@ -203,6 +215,12 @@ std::vector<Record> PageParser::parse_records() const {
 
         records.push_back(rec_info);
 
+        // ✅ 增强：防止无限循环
+        if (rec + next_rec_offset <= rec) {
+            std::cerr << "[WARN] Invalid record pointer at offset " << rec_offset << "\n";
+            break;
+        }
+        
         rec = buffer_ + next_rec_offset;
     }
 

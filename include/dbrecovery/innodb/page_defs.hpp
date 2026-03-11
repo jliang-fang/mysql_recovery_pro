@@ -105,12 +105,14 @@ struct alignas(1) PageHeader {
     uint16_t heap_top;      // PAGE_HEAP_TOP
     uint16_t n_heap;        // PAGE_N_HEAP & 0x7FFF
     uint16_t free_offset;   // PAGE_FREE
-
+    uint16_t garbage_end;   // PAGE_GARBAGE_END (optional)
+    uint16_t last_insert;   // PAGE_LAST_INSERT (optional)
+    
     std::string to_string() const {
         return "PageHeader{n_dir_slots=" + std::to_string(n_dir_slots) +
                ", heap_top=" + std::to_string(heap_top) +
                ", n_heap=" + std::to_string(n_heap) +
-               ", free_offset=" + std::to_string(free_offset) + "}";
+               ", free_offset=" + std::to_string(free_offset);
     }
 };
 
@@ -120,12 +122,16 @@ struct alignas(1) Record {
     uint16_t next_offset;     // next record's absolute offset
     bool is_deleted;          // REC_INFO_DELETED_FLAG
     uint16_t heap_no;         // heap number for ordering
-
+    uint8_t info_bits;        // 原始 info_bits 用于进一步分析
+    uint16_t n_fields;        // 字段数量（COMPACT格式）
+    
     std::string to_string() const {
         return "Record{offset=" + std::to_string(offset) +
                ", next=" + std::to_string(next_offset) +
                ", deleted=" + std::to_string(is_deleted) +
-               ", heap_no=" + std::to_string(heap_no) + "}";
+               ", heap_no=" + std::to_string(heap_no) +
+               ", info_bits=0x" + std::hex + std::to_string(info_bits) + std::dec +
+               ", n_fields=" + std::to_string(n_fields) + "}";
     }
 };
 

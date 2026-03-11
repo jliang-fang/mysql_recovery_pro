@@ -36,6 +36,12 @@ BlobReconstructor& BlobReconstructor::operator=(BlobReconstructor&& other) noexc
 bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     if (data.empty()) return false;
     
+    // ✅ 增强：验证偏移和数据大小的合理性
+    if (offset > 0x100000000ULL) { // 限制最大偏移到4GB
+        std::cerr << "[WARN] Blob chunk offset too large: " << offset << "\n";
+        return false;
+    }
+    
     // Check for overlap and handle edge cases
     for (const auto& chunk : chunks_) {
         Offset new_start = offset;
@@ -52,7 +58,7 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
         if (new_start < old_end && old_start < new_end) {
             // 如果新块的起始位置比旧块早，则允许追加到末尾
             if (new_start < old_start) {
-                size_t overlap = old_start - new_start;
+                size_t overlap = static_cast<size_t>(old_start - new_start);
                 if (overlap >= data.size()) return false; // 完全重叠
                 // 只添加不重叠的部分
                 DataChunk new_data(data.begin() + overlap, data.end());
