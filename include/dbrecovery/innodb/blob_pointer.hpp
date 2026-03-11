@@ -7,6 +7,8 @@
 #include <set>
 #include <functional>
 
+#include "dbrecovery/innodb/mach_read.hpp"
+
 namespace dbrecovery {
 namespace innodb {
 
