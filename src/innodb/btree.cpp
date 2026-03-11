@@ -273,6 +273,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         header_size += var_len_size;
         
+        // ✅ 新增：边界检查 - 确保记录头不会超出页大小
+        if (header_size > 128) { // COMPACT 记录头通常不超过 128 字节
+            std::cerr << "[WARN] Record header size too large: " << static_cast<int>(header_size) 
+                      << " at offset " << offset << ", skipping record\n";
+            continue;
+        }
+        
         // 计算 NULL 位图大小
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
@@ -335,9 +342,18 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             if (is_null) {
                 field_value = "NULL";
             } else if (col.is_off_page || (is_extern && col.mysql_type_id >= 249)) { // BLOB types
-                field_value = "[BLOB_EXTERNAL]";
-                // 跳过 BLOB 指针（20字节）
-                data_pos += 20;
+                // ✅ 新增：验证 BLOB 指针格式
+                if (data_pos + 20 <= page_data_.size()) {
+                    field_value = "[BLOB_EXTERNAL]";
+                    data_pos += 20;
+                } else {
+                    std::cerr << "[WARN] BLOB pointer truncated for column " << col.name << std::endl;
+                    field_value = "[TRUNCATED_BLOB_PTR]";
+                    // 尝试跳过剩余数据
+                    if (data_pos < page_data_.size()) {
+                        data_pos = page_data_.size();
+                    }
+                }
             } else if (col.virtual_gen_store_type > 0) {
                 // 虚拟列不存储实际数据
                 field_value = "[VIRTUAL_COLUMN]";
@@ -444,11 +460,19 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                     case mysql_types::DATETIME2: { // 18
                         // MySQL 8.0 新格式，支持小数位精度
                         int precision = col.datetime_precision >= 0 ? col.datetime_precision : 0;
-                        uint32_t datetime_bytes[] = {5, 5, 6, 6, 7, 7, 8}; // 不同精度的字节数
-                        
+                        if (precision < 0) precision = 0;
                         if (precision > 6) precision = 6;
                         
+                        // DATETIME2 字节数：5(精度0-1), 6(精度2-3), 7(精度4-5), 8(精度6)
+                        uint32_t datetime_bytes[] = {5, 5, 6, 6, 7, 7, 8};
+                        
                         if (data_pos + datetime_bytes[precision] <= page_data_.size()) {
+                            // 解析 DATETIME2 值
+                            const uint8_t* datetime_ptr = page_data_.data() + data_pos;
+                            uint64_t val = 0;
+                            for (int i = 0; i < datetime_bytes[precision]; ++i) {
+                                val |= static_cast<uint64_t>(datetime_ptr[i]) << (i * 8);
+                            }
                             field_value = "[DATETIME2:" + std::to_string(precision) + "p]";
                             data_pos += datetime_bytes[precision];
                         } else {

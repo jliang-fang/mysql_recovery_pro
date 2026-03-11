@@ -12,14 +12,15 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
     std::vector<FieldValue> fields;
     
     // 基础校验：至少包含记录头（5 字节）+ 1 字节数据
-    if (!page_base_ || origin + 6 > 16384) {
+    constexpr size_t MAX_PAGE_SIZE = 65536; // InnoDB 最大页大小 (64KB)
+    if (!page_base_ || origin + 6 > MAX_PAGE_SIZE) {
         return fields;
     }
 
     const uint8_t* record_ptr = page_base_ + origin;
 
     // Step 1: 解析记录头（COMPACT 格式，5 字节）
-    if (origin + 5 > 16384) {
+    if (origin + 5 > MAX_PAGE_SIZE) {
         return fields;
     }
     
@@ -44,7 +45,9 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         if (col.is_nullable && null_bytes_ > 0) {
             uint32_t col_idx = 0;
             for (uint32_t j = 1; j < pair.first; ++j) {
-                if (schema.columns.at(j).is_nullable) {
+                const auto& prev_col = schema.columns.at(j);
+                // 只计算可空列的索引
+                if (prev_col.is_nullable && !prev_col.is_off_page && prev_col.virtual_gen_store_type == 0) {
                     col_idx++;
                 }
             }
@@ -53,9 +56,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint32_t bit_idx = col_idx % 8;
             
             // ✅ 使用统一的NULL位图解析逻辑（小端序：低位在前）
-            const uint8_t* null_bitmap_ptr = get_null_bitmap_ptr();
-            if (byte_idx < null_bytes_ && null_bitmap_ptr != nullptr) {
-                bool is_null = (null_bitmap_ptr[byte_idx] & (1U << bit_idx)) != 0;
+            if (byte_idx < null_bytes_ && null_ptr != nullptr) {
+                bool is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
                 if (is_null) {
                     fv.value = "NULL";
                     fields.push_back(fv);
@@ -92,37 +94,39 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         }
         
         // 解析当前字段
+        constexpr size_t MAX_PAGE_SIZE = 65536; // InnoDB 最大页大小 (64KB)
+        
         if (col.mysql_type_id == 15) { // VARCHAR
             uint8_t len = *data_ptr;
             data_ptr += 1;
             
-            if (len > 0 && data_ptr + len <= page_base_ + 16384) {
+            if (len > 0 && data_ptr + len <= page_base_ + MAX_PAGE_SIZE) {
                 fv.value = std::string(reinterpret_cast<const char*>(data_ptr), len);
             } else {
-                fv.value = "";
+                fv.value = "[TRUNCATED]";
             }
         } else if (col.mysql_type_id == 245) { // JSON
             uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
             data_ptr += 2;
             
-            if (len > 0 && data_ptr + len <= page_base_ + 16384) {
+            if (len > 0 && data_ptr + len <= page_base_ + MAX_PAGE_SIZE) {
                 fv.value = "[JSON_DATA]";
             } else {
-                fv.value = "";
+                fv.value = "[TRUNCATED_JSON]";
             }
         } else if (col.mysql_type_id == 3) { // LONG
-            if (data_ptr + 4 <= page_base_ + 16384) {
+            if (data_ptr + 4 <= page_base_ + MAX_PAGE_SIZE) {
                 uint32_t val = MachRead::read_le<uint32_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
-                fv.value = "INVALID";
+                fv.value = "[TRUNCATED]";
             }
         } else if (col.mysql_type_id == 8) { // LONGLONG
-            if (data_ptr + 8 <= page_base_ + 16384) {
+            if (data_ptr + 8 <= page_base_ + MAX_PAGE_SIZE) {
                 uint64_t val = MachRead::read_le<uint64_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
-                fv.value = "INVALID";
+                fv.value = "[TRUNCATED]";
             }
         } else {
             fv.value = "[UNIMPLEMENTED_TYPE_" + std::to_string(col.mysql_type_id) + "]";
