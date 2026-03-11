@@ -24,13 +24,6 @@ enum class BTreeNodeType : uint8_t {
 // 注意：REC_INFO_STATUS_MASK 是最低3位（0x07），REC_INFO_DELETED_FLAG 是 bit 3 (0x08)
 // 这些常量已在 page_defs.hpp 中定义，此处仅作引用以保持向后兼容性
 
-constexpr uint16_t REC_N_FIELDS_OFFSET      = 1;      // n_fields 存储在 offset+1 的高4位 + offset+2 的低4位
-constexpr size_t REC_NEXT_OFFSET          = 2;      // next_record 偏移（2字节）
-
-// ✅ COMPACT 记录头字段偏移定义
-constexpr size_t REC_N_FIELDS_OFFSET      = 1;      // n_fields 存储在 offset+1 的高4位 + offset+2 的低4位
-constexpr size_t REC_NEXT_OFFSET          = 2;      // next_record 偏移（2字节）
-
 /**
  * @brief B+Tree 索引页结构解析器
  */

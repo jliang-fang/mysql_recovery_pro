@@ -7,13 +7,6 @@
 namespace dbrecovery {
 namespace innodb {
 
-// ==================== 常量定义 ====================
-constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
-constexpr uint16_t FIL_PAGE_INDEX        = 9969;
-constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;
-constexpr uint16_t FIL_PAGE_SDI          = 9971;
-constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;
-
 // ==================== BPlusTreeParser 实现 ====================
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
