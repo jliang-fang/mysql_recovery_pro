@@ -2,7 +2,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include <algorithm>
-#include <stdexcept>
+#include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
