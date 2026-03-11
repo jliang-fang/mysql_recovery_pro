@@ -368,9 +368,9 @@ std::string BPlusTreeParser::parse_field_value(
                 // ✅ 修复：正确解析 packed 格式的日期时间值
                 // MySQL 8.0 使用 packed format 存储 DATETIME2：
                 // [0-1]: year (2 bytes, little-endian)
-                // [2]: month (4 bits) + day (4 bits)
-                // [3]: hour (5 bits) + minute (6 bits)
-                // [4]: second (6 bits) + precision info (2 bits)
+                // [2]: month_day (4 bits month + 4 bits day)
+                // [3]: hour_minute (5 bits hour + 6 bits minute)
+                // [4]: second_packed (6 bits second + 2 bits precision info)
                 
                 uint16_t year = dbrecovery::innodb::read_le<uint16_t>(datetime_ptr, 0);
                 uint8_t month_day = datetime_ptr[2];
