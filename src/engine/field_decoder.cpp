@@ -28,7 +28,7 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             break;
         case 15: // VARCHAR
             // ✅ 修复：处理 1 字节和 2 字节长度前缀
-            if (rec_ptr + 2 > page_base_ + 16384) {
+            if (rec_ptr + 2 > page_base_ + size_) {
                 return nullptr;
             }
             // InnoDB VARCHAR 长度前缀是独立存储的：
@@ -39,18 +39,33 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             if (use_two_byte_prefix) {
                 uint16_t len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
                 field_len = 2 + len;
+                
+                // ✅ 新增：边界检查
+                if (rec_ptr + field_len > page_base_ + size_) {
+                    return nullptr;
+                }
             } else {
                 uint8_t len = rec_ptr[0];
                 field_len = 1 + len;
+                
+                // ✅ 新增：边界检查
+                if (rec_ptr + field_len > page_base_ + size_) {
+                    return nullptr;
+                }
             }
             break;
         case 245: // JSON
             // ✅ 修复：JSON 使用小端 2 字节长度前缀
-            if (rec_ptr + 2 > page_base_ + 16384) {
+            if (rec_ptr + 2 > page_base_ + size_) {
                 return nullptr;
             }
             uint16_t json_len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
             field_len = 2 + json_len;
+            
+            // ✅ 新增：边界检查
+            if (rec_ptr + field_len > page_base_ + size_) {
+                return nullptr;
+            }
             break;
         case 248: // TEXT
         case 249: // TINYBLOB
@@ -69,12 +84,22 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                 // 对于较小的 BLOB/TEXT，可能直接存储在记录中（inline）
                 // 需要根据实际记录格式动态判断
                 field_len = col_info.column_length;
+                
+                // ✅ 新增：边界检查
+                if (rec_ptr + field_len > page_base_ + size_) {
+                    return nullptr;
+                }
             }
             break;
         default:
             // 默认假设为固定长度字段
             field_len = 4;
             break;
+    }
+    
+    // ✅ 新增：最终边界检查
+    if (rec_ptr + field_len > page_base_ + size_) {
+        return nullptr;
     }
     
     return rec_ptr + field_len;

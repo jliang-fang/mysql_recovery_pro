@@ -10,15 +10,12 @@ PageParser::PageParser(const uint8_t* buffer, size_t size)
     : buffer_(buffer), size_(size), page_type_(0), flags_(0), page_level_(0),
       fil_prev_(0xFFFFFFFF), fil_next_(0xFFFFFFFF), page_offset_(0) {
     // ✅ 添加页大小校验：InnoDB 页大小通常为 4KB/8KB/16KB/32KB/64KB
-    const size_t MIN_PAGE_SIZE = 4096;
-    const size_t MAX_PAGE_SIZE = 65536;
-    
-    if (!buffer_ || size_ < MIN_PAGE_SIZE) {
-        throw std::runtime_error("Invalid page buffer: too small (less than " + std::to_string(MIN_PAGE_SIZE) + " bytes)");
+    if (!buffer_ || size_ < UNIV_PAGE_SIZE_MIN) {
+        throw std::runtime_error("Invalid page buffer: too small (less than " + std::to_string(UNIV_PAGE_SIZE_MIN) + " bytes)");
     }
     
-    if (size_ > MAX_PAGE_SIZE) {
-        throw std::runtime_error("Invalid page buffer: too large (exceeds " + std::to_string(MAX_PAGE_SIZE) + " bytes)");
+    if (size_ > UNIV_PAGE_SIZE_MAX) {
+        throw std::runtime_error("Invalid page buffer: too large (exceeds " + std::to_string(UNIV_PAGE_SIZE_MAX) + " bytes)");
     }
 }
 

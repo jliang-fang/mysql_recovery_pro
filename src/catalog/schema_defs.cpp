@@ -28,7 +28,11 @@ void TableSchema::debug_print() const {
     if (partition_info.has_value()) {
         const auto& p = partition_info.value();
         std::cout << "Partitioning: method=" << p.method 
-                  << ", column=" << p.column_name << std::endl;
+                  << ", columns=";
+        for (const auto& col : p.column_names) {
+            std::cout << col << " ";
+        }
+        std::cout << std::endl;
     }
 }
 

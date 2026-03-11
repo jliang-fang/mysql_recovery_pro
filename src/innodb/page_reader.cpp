@@ -1,5 +1,6 @@
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/utils/file_mapper.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>

@@ -12,15 +12,19 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
     std::vector<FieldValue> fields;
     
     // 基础校验：至少包含记录头（5 字节）+ 1 字节数据
+    if (!page_base_ || size_ == 0) {
+        return fields;
+    }
+    
     constexpr size_t MAX_PAGE_SIZE = 65536; // InnoDB 最大页大小 (64KB)
-    if (!page_base_ || origin + 6 > MAX_PAGE_SIZE) {
+    if (origin + 6 > size_ || origin + 6 > MAX_PAGE_SIZE) {
         return fields;
     }
 
     const uint8_t* record_ptr = page_base_ + origin;
 
     // Step 1: 解析记录头（COMPACT 格式，5 字节）
-    if (origin + 5 > MAX_PAGE_SIZE) {
+    if (origin + 5 > size_ || origin + 5 > MAX_PAGE_SIZE) {
         return fields;
     }
     
@@ -75,14 +79,14 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 uint8_t len = *data_ptr;
                 data_ptr += 1;
                 
-                if (len > 0 && data_ptr + len <= page_base_ + 16384) {
+                if (len > 0 && data_ptr + len <= page_base_ + size_) {
                     data_ptr += len;
                 }
             } else if (prev_col.mysql_type_id == 245) { // JSON
                 uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
                 data_ptr += 2;
                 
-                if (len > 0 && data_ptr + len <= page_base_ + 16384) {
+                if (len > 0 && data_ptr + len <= page_base_ + size_) {
                     data_ptr += len;
                 }
             } else if (prev_col.mysql_type_id == 3 || prev_col.mysql_type_id == 8) { // LONG/LONGLONG
@@ -100,7 +104,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint8_t len = *data_ptr;
             data_ptr += 1;
             
-            if (len > 0 && data_ptr + len <= page_base_ + MAX_PAGE_SIZE) {
+            if (len > 0 && data_ptr + len <= page_base_ + size_) {
                 fv.value = std::string(reinterpret_cast<const char*>(data_ptr), len);
             } else {
                 fv.value = "[TRUNCATED]";
@@ -109,20 +113,20 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
             data_ptr += 2;
             
-            if (len > 0 && data_ptr + len <= page_base_ + MAX_PAGE_SIZE) {
+            if (len > 0 && data_ptr + len <= page_base_ + size_) {
                 fv.value = "[JSON_DATA]";
             } else {
                 fv.value = "[TRUNCATED_JSON]";
             }
         } else if (col.mysql_type_id == 3) { // LONG
-            if (data_ptr + 4 <= page_base_ + MAX_PAGE_SIZE) {
+            if (data_ptr + 4 <= page_base_ + size_) {
                 uint32_t val = MachRead::read_le<uint32_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }
         } else if (col.mysql_type_id == 8) { // LONGLONG
-            if (data_ptr + 8 <= page_base_ + MAX_PAGE_SIZE) {
+            if (data_ptr + 8 <= page_base_ + size_) {
                 uint64_t val = MachRead::read_le<uint64_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {

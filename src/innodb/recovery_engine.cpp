@@ -66,20 +66,39 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
     if (pages_by_type.count(9971)) {
         std::cout << "[INFO] Found " << pages_by_type[9971].size() << " SDI pages\n";
         
-        // 解析 SDI 元数据（简化实现，实际应解析 JSON）
+        // 解析 SDI 元数据（使用 nlohmann/json 库）
         for (const auto& [page_no, page_data] : pages_by_type[9971]) {
             std::cout << "[INFO] SDI Page " << page_no << ": size=" << page_data.size() << "\n";
             
-            // 从 SDI 页中提取表名（简化实现）
+            // 从 SDI 页中提取 JSON 负载
             const uint8_t* sdi_payload = page_data.data() + 38; // 跳过 FIL_HEADER
             if (page_data.size() > 58) {
-                std::string table_name(reinterpret_cast<const char*>(sdi_payload + 20), 
-                                      std::min(size_t(64), page_data.size() - 58));
-                size_t null_pos = table_name.find('\0');
-                if (null_pos != std::string::npos) {
-                    table_name.resize(null_pos);
+                std::string json_str(reinterpret_cast<const char*>(sdi_payload), 
+                                    page_data.size() - 38);
+                
+                try {
+                    // 使用 nlohmann/json 解析 SDI JSON
+                    auto sdi_json = nlohmann::json::parse(json_str);
+                    
+                    // 提取表名
+                    if (sdi_json.contains("name")) {
+                        std::string table_name = sdi_json["name"].get<std::string>();
+                        std::cout << "[INFO] SDI Table Name: " << table_name << "\n";
+                    }
+                } catch (const nlohmann::json::parse_error& e) {
+                    std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
+                    
+                    // 降级方案：尝试提取表名（简化实现）
+                    if (page_data.size() > 58) {
+                        std::string table_name(reinterpret_cast<const char*>(sdi_payload + 20), 
+                                              std::min(size_t(64), page_data.size() - 58));
+                        size_t null_pos = table_name.find('\0');
+                        if (null_pos != std::string::npos) {
+                            table_name.resize(null_pos);
+                        }
+                        std::cout << "[INFO] SDI Table Name (fallback): " << table_name << "\n";
+                    }
                 }
-                std::cout << "[INFO] SDI Table Name: " << table_name << "\n";
             }
         }
     }
