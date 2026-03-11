@@ -12,9 +12,9 @@ namespace innodb {
 
 constexpr uint16_t FIL_PAGE_TYPE        = 12;   // offset in FIL_HEADER
 constexpr uint16_t TYPE_OFFSET          = 12;   // alias for FIL_PAGE_TYPE
-constexpr uint16_t FIL_PAGE_OFFSET      = 20;   // offset of page number
-constexpr uint16_t FIL_PAGE_LSN         = 8;    // LSN of last change
-constexpr uint16_t FIL_PAGE_SPACE_ID    = 16;   // tablespace ID
+constexpr uint16_t FIL_PAGE_OFFSET      = 4;    // offset of page number (4 bytes at offset 4)
+constexpr uint16_t FIL_PAGE_LSN         = 8;    // LSN of last change (8 bytes at offset 8)
+constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;    // tablespace ID (4 bytes at offset 0, but not standard)
 
 // Page types (FIL_PAGE_TYPE value)
 constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x2041 — B+Tree index page

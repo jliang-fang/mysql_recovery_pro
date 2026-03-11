@@ -87,6 +87,10 @@ bool BPlusTreeParser::parse() noexcept {
 // ✅ 修复：删除重复定义的 parse_header()
 bool BPlusTreeParser::parse_header() noexcept {
     // 解析 FIL Header (38 bytes)
+    if (page_data_.size() < 38) {
+        return false;
+    }
+    
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
     
     // 检查页类型：支持更多 InnoDB 页类型
@@ -113,6 +117,9 @@ bool BPlusTreeParser::parse_header() noexcept {
     flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 24);
     
     // 解析 B+Tree Header (38 bytes into page)
+    if (page_data_.size() < 54) { // 需要至少 54 字节（38 + 16）
+        return false;
+    }
     page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38);
     n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42);
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 46);
@@ -190,16 +197,17 @@ bool BPlusTreeParser::parse_user_records() noexcept {
 std::vector<std::map<std::string, std::string>> 
 BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
     std::vector<std::map<std::string, std::string>> result;
-    
+        
     for (size_t i = 2; i < record_offsets_.size(); ++i) {
         uint16_t offset = record_offsets_[i];
-        
+            
+        // ✅ 增强边界检查
         if (offset + 5 > page_data_.size()) {
             continue;
         }
-        
+            
         std::map<std::string, std::string> record;
-        
+            
         // ✅ 修复：正确解析 COMPACT 记录头
         // COMPACT 记录头格式（5-12字节）：
         // byte[0]: info_bits (8 bits) - [deleted_flag(1)][min_rec_flag(1)][reserved(6)]
@@ -207,48 +215,48 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // byte[2]: next_rec_offset_low(8 bits)
         // byte[3]: n_owned(4 bits) | heap_no(12 bits in high 12 bits, but stored differently)
         // byte[4]: n_fields_low(4 bits in low nibble)
-        
+            
         uint8_t info_bits = page_data_[offset];
         bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
         bool is_min_rec = (info_bits & REC_INFO_MIN_REC_FLAG) != 0;
         bool is_extern = (info_bits & REC_INFO_EXTERN_FLAG) != 0;
-        
+            
         // 解析 n_fields: 高4位在 byte[1] 的高4位，低4位在 byte[4] 的低4位
         uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
         uint8_t n_fields_low  = page_data_[offset + 4] & 0x0F;
         uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
-        
+            
         // 解析 next_record_offset: 高4位在 byte[1] 的低4位，低8位在 byte[2]
         uint16_t next_rec_offset = static_cast<uint16_t>(
             (((uint16_t)(page_data_[offset + 1] & 0x0F)) << 8) | 
             ((uint16_t)page_data_[offset + 2])
         );
-        
+            
         // 解析 heap_no: 在 byte[3] 的低4位和 byte[4] 的高4位
         uint16_t heap_no = static_cast<uint16_t>(
             ((page_data_[offset + 3] & 0x0F) << 8) | 
             ((page_data_[offset + 4] & 0xF0) >> 4)
         );
-        
+            
         // 兼容性检查：n_fields 范围应为 1-511（9位最大值）
         if (n_fields == 0 || n_fields > 511) {
             std::cerr << "[WARN] Invalid field count: " << n_fields 
                       << " at offset " << offset << ", skipping record\n";
             continue;
         }
-        
+            
         // 跳过 INFIMUM/SUPREMUM 记录
         if (is_min_rec || next_rec_offset == 0xFFFF) {
             continue;
         }
-        
+            
         if (is_deleted) {
             continue;
         }
-        
+            
         // ✅ 修复：计算 header_size（可变长度）
         uint8_t header_size = 5; // 基础头大小
-        
+            
         // 检查是否有额外的变长字段长度信息
         bool has_var_fields = false;
         for (const auto& pair : schema.columns) {
@@ -258,7 +266,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 break;
             }
         }
-        
+            
         // 计算变长字段长度信息大小
         uint8_t var_len_size = 0;
         if (has_var_fields) {
@@ -270,16 +278,16 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 }
             }
         }
-        
+            
         header_size += var_len_size;
-        
+            
         // ✅ 新增：边界检查 - 确保记录头不会超出页大小
         if (header_size > 128) { // COMPACT 记录头通常不超过 128 字节
             std::cerr << "[WARN] Record header size too large: " << static_cast<int>(header_size) 
                       << " at offset " << offset << ", skipping record\n";
             continue;
         }
-        
+            
         // 计算 NULL 位图大小
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
@@ -288,18 +296,18 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 nullable_columns++;
             }
         }
-        
+            
         uint32_t null_bytes = (nullable_columns + 7) / 8;
         header_size += null_bytes;
-        
+            
         // ✅ 增强边界检查
         if (offset + header_size > page_data_.size()) {
             std::cerr << "[WARN] Record header exceeds page size at offset " << offset << std::endl;
             continue;
         }
-        
+            
         const uint8_t* null_ptr = page_data_.data() + offset + 5; // NULL bitmap starts after base header
-        
+            
         // 构建列索引映射
         std::vector<uint32_t> physical_columns;
         for (const auto& pair : schema.columns) {
@@ -308,15 +316,15 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 physical_columns.push_back(pair.first);
             }
         }
-        
+            
         size_t data_pos = offset + header_size;
-        
+            
         // 遍历表定义中的所有列
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
-            
+                
             std::string field_value;
-            
+                
             // 检查是否为 NULL
             bool is_null = false;
             if (col.is_nullable && !col.is_off_page && col.virtual_gen_store_type == 0) {
@@ -328,17 +336,17 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         col_idx++;
                     }
                 }
-                
+                    
                 if (col_idx < nullable_columns && null_bytes > 0) {
                     uint32_t byte_idx = col_idx / 8;
                     uint32_t bit_idx = col_idx % 8;
-                    
+                        
                     if (byte_idx < null_bytes && null_ptr + byte_idx < page_data_.data() + offset + header_size) {
                         is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
                     }
                 }
             }
-            
+                
             if (is_null) {
                 field_value = "NULL";
             } else if (col.is_off_page || (is_extern && col.mysql_type_id >= 249)) { // BLOB types
@@ -406,12 +414,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                     }
                     case mysql_types::VARCHAR: { // 15
                         bool use_two_byte_prefix = (col.column_length > 255);
-                        
+                            
                         if (use_two_byte_prefix) {
                             if (data_pos + 2 <= page_data_.size()) {
                                 uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
                                 data_pos += 2;
-                                
+                                    
                                 if (len > 0 && data_pos + len <= page_data_.size()) {
                                     field_value = std::string(
                                         reinterpret_cast<const char*>(page_data_.data() + data_pos), 
@@ -429,7 +437,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                             if (data_pos + 1 <= page_data_.size()) {
                                 uint8_t len = page_data_[data_pos];
                                 data_pos++;
-                                
+                                    
                                 if (len > 0 && data_pos + len <= page_data_.size()) {
                                     field_value = std::string(
                                         reinterpret_cast<const char*>(page_data_.data() + data_pos), 
@@ -462,10 +470,10 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         int precision = col.datetime_precision >= 0 ? col.datetime_precision : 0;
                         if (precision < 0) precision = 0;
                         if (precision > 6) precision = 6;
-                        
+                            
                         // DATETIME2 字节数：5(精度0-1), 6(精度2-3), 7(精度4-5), 8(精度6)
                         uint32_t datetime_bytes[] = {5, 5, 6, 6, 7, 7, 8};
-                        
+                            
                         if (data_pos + datetime_bytes[precision] <= page_data_.size()) {
                             // 解析 DATETIME2 值
                             const uint8_t* datetime_ptr = page_data_.data() + data_pos;
@@ -485,7 +493,7 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         if (data_pos + 2 <= page_data_.size()) {
                             uint16_t len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
                             data_pos += 2;
-                            
+                                
                             if (len > 0 && data_pos + len <= page_data_.size()) {
                                 field_value = "[JSON_DATA]";
                                 // TODO: 实现 JSON 解析
@@ -519,13 +527,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                         break;
                 }
             }
-            
+                
             record[col.name] = field_value;
         }
-        
+            
         result.push_back(record);
     }
-    
+        
     return result;
 }
 

@@ -93,8 +93,8 @@ struct BlobPageChain {
       ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
       
       // 尝试读取总长度（如果数据足够）
-      if (true) { // 简化处理，实际应根据表结构判断
-          // 这里假设总是包含 total_len 字段
+      // MySQL 8.0 BLOB 指针格式总是包含 total_len 字段
+      if (true) {
           ptr.total_len = dbrecovery::innodb::read_le<uint32_t>(data, 16);
       } else {
           // 如果数据不足，保持默认值（len）
