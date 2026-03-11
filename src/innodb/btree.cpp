@@ -480,11 +480,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             continue;
         }
             
-        // 计算 NULL 位图大小
+        // 计算 NULL 位图大小：所有可空列（包括 BLOB）都需要在位图中占位
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
-            if (!col.is_off_page && col.virtual_gen_store_type == 0 && col.is_nullable) {
+            if (col.is_nullable && !col.is_auto_increment) { // auto_increment 列隐式 NOT NULL
                 nullable_columns++;
             }
         }
@@ -494,18 +494,20 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             
         // ✅ 增强边界检查
         if (offset + header_size > page_data_.size()) {
-            std::cerr << "[WARN] Record header exceeds page size at offset " << offset << std::endl;
+            std::cerr << "[WARN] Record header exceeds page size at offset " << offset 
+                      << ", header_size=" << static_cast<int>(header_size) << std::endl;
             continue;
         }
             
         const uint8_t* null_ptr = page_data_.data() + offset + 5; // NULL bitmap starts after base header
             
-        // 构建列索引映射
-        std::vector<uint32_t> physical_columns;
+        // 构建列索引映射：为每个可空列分配位图中的索引
+        std::map<uint32_t, uint32_t> col_idx_map; // schema_ordinal -> bitmap_index
+        uint32_t bitmap_index = 0;
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
-            if (!col.is_off_page && col.virtual_gen_store_type == 0) {
-                physical_columns.push_back(pair.first);
+            if (col.is_nullable && !col.is_auto_increment) {
+                col_idx_map[pair.first] = bitmap_index++;
             }
         }
             
@@ -517,21 +519,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
                 
             std::string field_value;
                 
-            // 检查是否为 NULL
+            // 检查是否为 NULL（包括 BLOB 列）
             bool is_null = false;
-            if (col.is_nullable && !col.is_off_page && col.virtual_gen_store_type == 0) {
-                uint32_t col_idx = 0;
-                for (uint32_t pc : physical_columns) {
-                    if (pc == pair.first) break;
-                    const auto& pc_col = schema.columns.at(pc);
-                    if (!pc_col.is_off_page && pc_col.virtual_gen_store_type == 0) {
-                        col_idx++;
-                    }
-                }
-                    
-                if (col_idx < nullable_columns && null_bytes > 0) {
-                    uint32_t byte_idx = col_idx / 8;
-                    uint32_t bit_idx = col_idx % 8;
+            if (col.is_nullable && !col.is_auto_increment) {
+                auto it = col_idx_map.find(pair.first);
+                if (it != col_idx_map.end() && null_bytes > 0) {
+                    uint32_t byte_idx = it->second / 8;
+                    uint32_t bit_idx = it->second % 8;
                         
                     if (byte_idx < null_bytes && null_ptr + byte_idx < page_data_.data() + offset + header_size) {
                         is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
