@@ -93,16 +93,12 @@ struct BlobPageChain {
       ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
       
       // 尝试读取总长度（如果数据足够）
-      if (data) {
-          // 检查是否包含 total_len 字段
-          // 实际格式可能因 MySQL 版本而异，这里做兼容处理
-          ptr.total_len = ptr.len; // 默认为当前页长度
-          
-          // 尝试读取完整 20 字节格式的 total_len（偏移16）
-          if (true) { // 简化处理，实际应根据表结构判断
-              // 这里假设总是包含 total_len 字段
-              // 如果数据不足，保持默认值
-          }
+      if (true) { // 简化处理，实际应根据表结构判断
+          // 这里假设总是包含 total_len 字段
+          ptr.total_len = dbrecovery::innodb::read_le<uint32_t>(data, 16);
+      } else {
+          // 如果数据不足，保持默认值（len）
+          ptr.total_len = ptr.len;
       }
       
       return ptr;

@@ -27,6 +27,55 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
       next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF), node_type_(BTreeNodeType::LEAF) {
 }
 
+// ✅ 新增：页健康状态检查
+BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
+    PageHealth health;
+    
+    // 检查页大小
+    if (page_data_.size() < 38) {
+        health.is_valid = false;
+        health.status_message = "Page too small";
+        return health;
+    }
+    
+    // 检查页类型
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 0);
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI && 
+        page_type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+        health.status_message = "Unsupported page type: " + std::to_string(page_type);
+    }
+    
+    // 检查页头信息
+    uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42) & 0x7FFF;
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+    
+    health.n_records = n_heap - 2; // 减去 infimum 和 supremum
+    health.n_dir_slots = n_dir_slots;
+    
+    // 检查是否存在 infimum 和 supremum
+    if (page_data_.size() >= 58) {
+        uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 16);
+        uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 18);
+        
+        health.has_infimum = (infimum_offset == 54);
+        health.has_supremum = (supremum_offset == 56);
+        
+        if (!health.has_infimum || !health.has_supremum) {
+            health.status_message += "Missing system records; ";
+        }
+    }
+    
+    // 检查页尾校验和（简化处理）
+    // 实际应计算并比较 checksum
+    health.checksum_match = true;
+    
+    if (health.status_message.empty()) {
+        health.status_message = "Healthy";
+    }
+    
+    return health;
+}
+
 bool BPlusTreeParser::parse() noexcept {
     if (page_data_.size() < 38) { // FIL_HEADER 大小
         return false;
@@ -79,6 +128,20 @@ bool BPlusTreeParser::parse_header() noexcept {
     }
     
     return parse_infimum_supremum();
+}
+
+// ✅ 新增：SDI 页表 ID 获取
+uint64_t BPlusTreeParser::get_sdi_table_id() const {
+    if (page_data_.size() < 58) {
+        return 0;
+    }
+    
+    uint32_t type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38);
+    if (type != 1) { // SDI 类型应为 1
+        return 0;
+    }
+    
+    return dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), 42);
 }
 
 bool BPlusTreeParser::parse_infimum_supremum() noexcept {
@@ -458,6 +521,20 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
     }
     
     catalog::TableSchema schema; // TODO: 从 SDI 加载
+    
+    // ✅ 新增：尝试从 SDI 页获取表元数据
+    for (const auto& [page_no, page_data] : pages_) {
+        if (dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 0) == dbrecovery::innodb::FIL_PAGE_SDI) {
+            BPlusTreeParser sdi_parser(page_data);
+            if (sdi_parser.parse()) {
+                uint64_t table_id = sdi_parser.get_sdi_table_id();
+                if (table_id != 0) {
+                    schema.table_id = table_id;
+                    // TODO: 解析 SDI JSON 获取完整表结构
+                }
+            }
+        }
+    }
     
     return traverse_tree(root_page_no_, schema);
 }

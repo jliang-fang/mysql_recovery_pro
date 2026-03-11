@@ -58,6 +58,26 @@ public:
     bool is_compact_format() const {
         return (flags_ & 0x80) == 0; // COMPACT 格式标志位为 0
     }
+    
+    // ✅ 新增：页健康状态检查
+    struct PageHealth {
+        bool is_valid = true;
+        std::string status_message;
+        uint32_t checksum_expected = 0;
+        uint32_t checksum_actual = 0;
+        bool checksum_match = false;
+        
+        // B+Tree specific
+        bool has_infimum = false;
+        bool has_supremum = false;
+        uint16_t n_records = 0;
+        uint16_t n_dir_slots = 0;
+    };
+    
+    [[nodiscard]] PageHealth check_health() const;
+    
+    // ✅ 新增：SDI 页解析支持
+    [[nodiscard]] uint64_t get_sdi_table_id() const;
 
 private:
     std::vector<uint8_t> page_data_;
