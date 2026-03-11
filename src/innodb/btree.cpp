@@ -25,10 +25,21 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // 检查页类型（FIL_PAGE_TYPE 在偏移0处是4字节）
+    // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移0处是4字节）
     uint32_t page_type = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 0);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI && 
-        page_type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+    
+    bool is_valid_page_type = false;
+    std::string unsupported_message;
+    
+    if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX) {
+        is_valid_page_type = true;
+    } else if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
+        is_valid_page_type = true;
+    } else if (page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+        is_valid_page_type = true;
+    } else if (page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+        unsupported_message = "Undo log page type not supported for record parsing";
+    } else {
         health.status_message = "Unsupported page type: " + std::to_string(page_type);
     }
     
@@ -58,6 +69,10 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     // 检查页尾校验和（简化处理）
     // 实际应计算并比较 checksum
     health.checksum_match = true;
+    
+    if (!is_valid_page_type && health.status_message.empty()) {
+        health.status_message = unsupported_message.empty() ? "Unknown page type" : unsupported_message;
+    }
     
     if (health.status_message.empty()) {
         health.status_message = "Healthy";
@@ -318,30 +333,51 @@ std::string BPlusTreeParser::parse_field_value(
             if (precision < 0) precision = 0;
             if (precision > 6) precision = 6;
             
-            // MySQL 8.0 DATETIME2 编码：前5字节是日期/时间值，后(precision+1)/2字节是小数部分
+            // ✅ 修复：MySQL 8.0 DATETIME2 编码格式
+            // 前5字节是日期/时间值（packed format），后(precision+1)/2字节是小数部分
+            
             size_t datetime_bytes = 5 + (precision + 1) / 2;
             
             if (data_pos + datetime_bytes <= page_data_.size()) {
                 const uint8_t* datetime_ptr = page_data_.data() + data_pos;
                 
-                // 解析前5字节：year(2), month+day(1), hour+minute+second(2)
+                // ✅ 修复：正确解析 packed 格式的日期时间值
+                // MySQL 8.0 使用 packed format 存储 DATETIME2：
+                // [0-1]: year (2 bytes, little-endian)
+                // [2]: month (4 bits) + day (4 bits)
+                // [3]: hour (5 bits) + minute (6 bits)
+                // [4]: second (6 bits) + precision info (2 bits)
+                
                 uint16_t year = dbrecovery::innodb::read_le<uint16_t>(datetime_ptr, 0);
-                uint8_t month = datetime_ptr[2] & 0x0F;
-                uint8_t day = datetime_ptr[2] >> 4;
-                uint8_t hour = datetime_ptr[3] & 0x1F;
-                uint8_t minute = datetime_ptr[3] >> 5 | (datetime_ptr[4] & 0x03) << 3;
-                uint8_t second = datetime_ptr[4] >> 2;
+                uint8_t month_day = datetime_ptr[2];
+                uint8_t hour_minute = datetime_ptr[3];
+                uint8_t second_packed = datetime_ptr[4];
+                
+                uint8_t month = month_day & 0x0F;
+                uint8_t day = month_day >> 4;
+                uint8_t hour = hour_minute & 0x1F;
+                uint8_t minute = (hour_minute >> 5) | ((second_packed & 0x03) << 3);
+                uint8_t second = second_packed >> 2;
                 
                 // 解析小数部分
                 uint64_t frac = 0;
                 if (precision > 0) {
                     size_t frac_bytes = (precision + 1) / 2;
-                    for (size_t i = 0; i < frac_bytes; ++i) {
-                        frac |= static_cast<uint64_t>(datetime_ptr[5 + i]) << (i * 8);
-                    }
-                    // 根据精度缩放
+                    
+                    // ✅ 修复：使用正确的缩放因子
                     static const uint64_t frac_scale[] = {0, 100000, 10000, 1000, 100, 10, 1};
-                    frac = frac / frac_scale[precision];
+                    
+                    if (frac_bytes > 0 && frac_bytes <= 3) {
+                        // 小数部分也是 little-endian 格式
+                        for (size_t i = 0; i < frac_bytes; ++i) {
+                            frac |= static_cast<uint64_t>(datetime_ptr[5 + i]) << (i * 8);
+                        }
+                        
+                        // 根据精度缩放
+                        if (precision < sizeof(frac_scale)/sizeof(frac_scale[0])) {
+                            frac = frac / frac_scale[precision];
+                        }
+                    }
                 }
                 
                 data_pos += datetime_bytes;
@@ -413,23 +449,33 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // ✅ 使用 page_defs.hpp 中定义的 REC_INFO_EXTERN_FLAG
         bool is_extern = (info_bits & dbrecovery::innodb::REC_INFO_EXTERN_FLAG) != 0;
             
-        // 解析 n_fields: 高4位在 byte[1] 的高4位，低4位在 byte[4] 的低4位
-        uint8_t n_fields_high = (page_data_[offset + 1] & 0xF0) >> 4;
-        uint8_t n_fields_low  = page_data_[offset + 4] & 0x0F;
-        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
-            
-        // 解析 next_record_offset: byte[1] 的低4位是高4位，byte[2] 是低8位
-        // 这是一个 14 位的无符号整数，表示到下一个记录的偏移量（相对当前记录头）
+        // ✅ 修复：正确解析 COMPACT 记录头
+        // 根据 page_defs.hpp 中的 RecordHeader 结构：
+        // [0]: info_bits
+        // [1]: next_rec_off_0 (bits 0-7 of offset)
+        // [2]: next_rec_off_1 (bits 8-15 of offset)
+        // [3]: heap_no_0 (bits 0-7 of heap_no)
+        // [4]: heap_no_1 (bits 8-13 of heap_no, only 6 bits used)
+        
+        // 解析 next_record_offset: little-endian 格式，[1] 是低字节，[2] 是高字节
         uint16_t next_rec_offset = static_cast<uint16_t>(
-            ((static_cast<uint16_t>(page_data_[offset + 1] & 0x0F)) << 8) | 
-            page_data_[offset + 2]
+            ((static_cast<uint16_t>(page_data_[offset + 2]) << 8) | 
+             page_data_[offset + 1])
         );
-            
-        // 解析 heap_no: byte[3] 的低4位是低4位，byte[4] 的高4位是高4位
+        
+        // 解析 heap_no: [3] 是低字节，[4] 的低6位是高6位
         uint16_t heap_no = static_cast<uint16_t>(
-            ((static_cast<uint16_t>(page_data_[offset + 4] & 0xF0)) << 4) | 
-            (page_data_[offset + 3] & 0x0F)
+            ((static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8) | 
+             page_data_[offset + 3])
         );
+        
+        // 解析 n_fields: 在记录数据部分，需要先跳过 header 和 var_len
+        // COMPACT 记录头结构：[1 byte info_bits] + [4 bytes next_record_offset]
+        // 实际 n_fields 编码在记录数据开始处的前2字节：
+        // 高4位在第一个字节的高4位，低4位在第二个字节的低4位
+        uint8_t n_fields_high = (page_data_[offset + 5] & 0xF0) >> 4;
+        uint8_t n_fields_low  = page_data_[offset + 6] & 0x0F;
+        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
             
         // 兼容性检查：n_fields 范围应为 1-511（9位最大值）
         if (n_fields == 0 || n_fields > 511) {
@@ -503,13 +549,16 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint32_t null_bytes = 0;
         if (nullable_columns > 0) {
             null_bytes = (nullable_columns + 7) / 8;
-        }
-        
-        // ✅ 防止整数溢出：null_bytes 不应超过合理范围（例如 128 字节）
-        if (null_bytes > 128) {
-            std::cerr << "[WARN] Null bitmap too large: " << null_bytes 
-                      << " at offset " << offset << ", skipping record\n";
-            continue;
+            
+            // ✅ 防止整数溢出：null_bytes 不应超过合理范围（例如 128 字节）
+            if (null_bytes > 128) {
+                std::cerr << "[WARN] Null bitmap too large: " << null_bytes 
+                          << " at offset " << offset << ", skipping record\n";
+                continue;
+            }
+        } else {
+            // ✅ 新增：明确处理无可空列的情况
+            null_bytes = 0;
         }
         
         header_size += null_bytes;

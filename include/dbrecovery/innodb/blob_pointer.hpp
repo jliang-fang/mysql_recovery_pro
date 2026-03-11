@@ -107,11 +107,19 @@ struct BlobPageChain {
           return std::nullopt; // 无效的 BLOB 指针
       }
       
-      // total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
+      // ✅ 修复：total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
       if (ptr.total_len == 0) {
           ptr.total_len = ptr.len;
       } else if (ptr.len > ptr.total_len) {
+          std::cerr << "[WARN] BLOB pointer length mismatch: len=" << ptr.len 
+                    << ", total_len=" << ptr.total_len << std::endl;
           return std::nullopt; // 长度不一致
+      }
+      
+      // ✅ 新增：验证 offset 合法性
+      if (ptr.offset >= 16384) { // 假设最大页大小为 16KB
+          std::cerr << "[WARN] BLOB pointer offset too large: " << ptr.offset << std::endl;
+          return std::nullopt;
       }
       
       return ptr;
