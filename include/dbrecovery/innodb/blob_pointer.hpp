@@ -124,47 +124,28 @@ struct BlobPageChain {
           ptr.total_len = ptr.len;
       }
       
-      // ✅ 新增：验证 BLOB 总长度合理性（BLOB 不能超过 4GB）
+      // ✅ 修复：合并重复的验证逻辑，避免代码冗余
+      
+      // 验证 BLOB 总长度合理性（BLOB 不能超过 4GB）
       if (ptr.total_len > 0xFFFFFFFF) {
           std::cerr << "[ERROR] BLOB total_len exceeds maximum: " << ptr.total_len << std::endl;
           return std::nullopt;
       }
       
-      // ✅ 新增：验证当前页偏移 + 长度不超过页大小（允许一定弹性）
+      // 验证当前页偏移和长度
       if (ptr.offset >= 16384 || ptr.len > 16384) {
           std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
                     << ptr.offset << ", len=" << ptr.len << std::endl;
           return std::nullopt;
       }
       
-      // ✅ 新增：验证偏移和长度的合理性
+      // 验证偏移和长度的合理性（允许跨页）
       if (ptr.offset + ptr.len > 16384) {
           std::cerr << "[WARN] BLOB data may exceed page boundary: offset=" << ptr.offset 
                     << ", len=" << ptr.len << ", page_size=16384. Data may be cross-page." << std::endl;
-          // 不直接返回 nullopt，因为某些情况下数据可能跨页
       }
       
-      // ✅ 新增：验证总长度合理性（BLOB 不能超过 4GB）
-      if (ptr.total_len > 0xFFFFFFFF) {
-          std::cerr << "[ERROR] BLOB total_len exceeds maximum: " << ptr.total_len << std::endl;
-          return std::nullopt;
-      }
-      
-      // ✅ 新增：验证当前页偏移 + 长度不超过页大小（允许一定弹性）
-      if (ptr.offset >= 16384 || ptr.len > 16384) {
-          std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
-                    << ptr.offset << ", len=" << ptr.len << std::endl;
-          return std::nullopt;
-      }
-      
-      // ✅ 新增：验证偏移和长度的合理性
-      if (ptr.offset + ptr.len > 16384) {
-          std::cerr << "[WARN] BLOB data may exceed page boundary: offset=" << ptr.offset 
-                    << ", len=" << ptr.len << ", page_size=16384. Data may be cross-page." << std::endl;
-          // 不直接返回 nullopt，因为某些情况下数据可能跨页
-      }
-          
-      // ✅ 新增：初始化页链（至少包含当前页）
+      // 初始化页链（至少包含当前页）
       ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
           
       return ptr;
