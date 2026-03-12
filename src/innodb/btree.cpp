@@ -177,9 +177,12 @@ bool BPlusTreeParser::parse_header() noexcept {
     if (page_level_ == 0) {
         node_type_ = BTreeNodeType::LEAF;
     } else if (prev_page_ == 0xFFFFFFFF && next_page_ == 0xFFFFFFFF) {
+        // 根节点且非叶子节点（level > 0）
         node_type_ = BTreeNodeType::ROOT;
-    } else {
+    } else if (page_level_ > 0) {
         node_type_ = BTreeNodeType::INTERNAL;
+    } else {
+        node_type_ = BTreeNodeType::INVALID;
     }
     
     return parse_infimum_supremum();
@@ -379,7 +382,7 @@ std::string BPlusTreeParser::parse_field_value(
             if (precision < 0) precision = 6;
             if (precision > 6) precision = 6;
             
-            // ✅ 修复：MySQL 8.0 DATETIME2 编码格式
+            // ✅ 修复：MySQL 8.0 DATETIME2 编码格式（参考 sql/field.cc field_datetimef::val_int()）
             // 前5字节是日期/时间值（packed format），后(precision+1)/2字节是小数部分
                 
             size_t datetime_bytes = 5 + (precision + 1) / 2;
@@ -422,7 +425,7 @@ std::string BPlusTreeParser::parse_field_value(
                 if (precision > 0) {
                     size_t frac_bytes = (precision + 1) / 2;
                         
-                    // ✅ 修复：使用正确的缩放因子
+                    // ✅ 修复：使用正确的缩放因子（参考 MySQL 8.0 源码）
                     static const uint64_t frac_scale[] = {0, 100000, 10000, 1000, 100, 10, 1};
                         
                     if (frac_bytes > 0 && frac_bytes <= 3) {
@@ -532,11 +535,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         // ✅ 修复：正确解析 n_fields（COMPACT 格式）
         // COMPACT 记录头结构：[1 byte info_bits] + [2 bytes next_record_offset] + [2 bytes heap_no]
-        // 实际 n_fields 编码在记录数据开始处的前2字节：
-        // 高4位在第一个字节的高4位，低4位在第二个字节的低4位
+        // 实际 n_fields 编码在记录数据开始处的前3字节：
+        // 高4位在第一个字节的高4位，低8位在接下来的2字节中
         uint8_t n_fields_high = (page_data_[offset + 5] & 0xF0) >> 4;
-        uint8_t n_fields_low  = page_data_[offset + 6] & 0x0F;
-        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
+        uint8_t n_fields_mid  = page_data_[offset + 6];
+        uint8_t n_fields_low  = page_data_[offset + 7] & 0x0F;
+        uint16_t n_fields = static_cast<uint16_t>((n_fields_high << 8) | (n_fields_mid << 4) | n_fields_low);
             
         // 兼容性检查：n_fields 范围应为 1-511（9位最大值）
         if (n_fields == 0 || n_fields > 511) {
