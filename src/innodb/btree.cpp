@@ -7,35 +7,6 @@
 namespace dbrecovery {
 namespace innodb {
 
-// MySQL 8.0 类型常量定义（参考 MySQL 源码 include/mysql_com.h）
-namespace mysql_types {
-    constexpr uint8_t DECIMAL     = 0;
-    constexpr uint8_t TINY        = 1;
-    constexpr uint8_t SHORT       = 2;
-    constexpr uint8_t LONG        = 3;
-    constexpr uint8_t FLOAT       = 4;
-    constexpr uint8_t DOUBLE      = 5;
-    constexpr uint8_t NULL_TYPE   = 6;
-    constexpr uint8_t TIMESTAMP   = 7;
-    constexpr uint8_t LONGLONG    = 8;
-    constexpr uint8_t INT24       = 9;
-    constexpr uint8_t DATE        = 10;
-    constexpr uint8_t TIME        = 11;
-    constexpr uint8_t DATETIME    = 12;
-    constexpr uint8_t YEAR        = 13;
-    constexpr uint8_t NEWDATE     = 14;
-    constexpr uint8_t VARCHAR     = 15;
-    constexpr uint8_t BIT         = 16;
-    constexpr uint8_t TIMESTAMP2  = 17;
-    constexpr uint8_t DATETIME2   = 18;
-    constexpr uint8_t TIME2       = 19;
-    constexpr uint8_t JSON        = 245;
-    constexpr uint8_t BLOB        = 252;
-    constexpr uint8_t TINY_BLOB   = 249;
-    constexpr uint8_t MEDIUM_BLOB = 250;
-    constexpr uint8_t LONG_BLOB   = 251;
-}
-
 // ==================== BPlusTreeParser 实现 ====================
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
@@ -54,7 +25,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // ✅ 修复：正确读取2字节页类型（FIL_PAGE_TYPE 在偏移12处）
+    // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移12处，但实际是2字节值）
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 12);
     
     bool is_valid_page_type = false;
@@ -105,10 +76,15 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         // 读取存储的校验和（最后4字节）
         uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), checksum_offset);
         
-        // 计算实际校验和（简化实现，仅计算前 page_size-4 字节）
+        // 计算实际校验和（使用标准 CRC32 算法）
         uint32_t computed_checksum = 0;
         for (size_t i = 0; i < page_data_.size() - 4; ++i) {
-            computed_checksum ^= static_cast<uint32_t>(page_data_[i]) << ((i % 4) * 8);
+            uint8_t byte = page_data_[i];
+            for (int j = 0; j < 8; ++j) {
+                bool bit = (byte >> j) & 1;
+                bool xor_bit = (computed_checksum >> 31) & 1;
+                computed_checksum = (computed_checksum << 1) ^ (xor_bit * 0xEDB88320);
+            }
         }
         
         health.checksum_expected = stored_checksum;
@@ -405,63 +381,63 @@ std::string BPlusTreeParser::parse_field_value(
             
             // ✅ 修复：MySQL 8.0 DATETIME2 编码格式
             // 前5字节是日期/时间值（packed format），后(precision+1)/2字节是小数部分
-            
+                
             size_t datetime_bytes = 5 + (precision + 1) / 2;
-            
+                
             if (data_pos + datetime_bytes <= page_data_.size()) {
                 const uint8_t* datetime_ptr = page_data_.data() + data_pos;
-                
+                    
                 // ✅ 修复：正确解析 packed 格式的日期时间值
                 // MySQL 8.0 使用 packed format 存储 DATETIME2：
                 // [0-1]: year (2 bytes, little-endian)
                 // [2]: month_day (4 bits month + 4 bits day)
                 // [3]: hour_minute (5 bits hour + 6 bits minute)
                 // [4]: second_packed (6 bits second + 2 bits precision info)
-                
+                    
                 uint16_t year = dbrecovery::innodb::read_le<uint16_t>(datetime_ptr, 0);
                 uint8_t month_day = datetime_ptr[2];
                 uint8_t hour_minute = datetime_ptr[3];
                 uint8_t second_packed = datetime_ptr[4];
-                
+                    
                 // ✅ 新增：边界检查
                 if (year < 1970 || year > 2038) {
                     std::cerr << "[WARN] DATETIME2 year out of expected range: " << year << std::endl;
                 }
-                
+                    
                 uint8_t month = month_day & 0x0F;
                 uint8_t day = month_day >> 4;
                 uint8_t hour = hour_minute & 0x1F;
                 uint8_t minute = (hour_minute >> 5) | ((second_packed & 0x03) << 3);
                 uint8_t second = second_packed >> 2;
-                
+                    
                 // ✅ 新增：验证日期时间有效性
                 if (month > 12 || day > 31 || hour > 23 || minute > 59 || second > 59) {
                     std::cerr << "[WARN] DATETIME2 has invalid date/time values: " 
                               << year << "-" << month << "-" << day << " "
                               << hour << ":" << minute << ":" << second << std::endl;
                 }
-                
+                    
                 // 解析小数部分
                 uint64_t frac = 0;
                 if (precision > 0) {
                     size_t frac_bytes = (precision + 1) / 2;
-                    
+                        
                     // ✅ 修复：使用正确的缩放因子
                     static const uint64_t frac_scale[] = {0, 100000, 10000, 1000, 100, 10, 1};
-                    
+                        
                     if (frac_bytes > 0 && frac_bytes <= 3) {
                         // 小数部分也是 little-endian 格式
                         for (size_t i = 0; i < frac_bytes; ++i) {
                             frac |= static_cast<uint64_t>(datetime_ptr[5 + i]) << (i * 8);
                         }
-                        
+                            
                         // 根据精度缩放
                         if (precision < sizeof(frac_scale)/sizeof(frac_scale[0])) {
                             frac = frac / frac_scale[precision];
                         }
                     }
                 }
-                
+                    
                 data_pos += datetime_bytes;
                 std::string result = std::to_string(year) + "-" + 
                                    std::to_string(month) + "-" + 
