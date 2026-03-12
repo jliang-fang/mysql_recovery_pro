@@ -346,8 +346,8 @@ std::string BPlusTreeParser::parse_field_value(
             }
         }
         case mysql_types::DATETIME2: { // 18
-            int precision = col.datetime_precision >= 0 ? col.datetime_precision : 0;
-            if (precision < 0) precision = 0;
+            int precision = col.datetime_precision >= 0 ? col.datetime_precision : 6;
+            if (precision < 0) precision = 6;
             if (precision > 6) precision = 6;
             
             // ✅ 修复：MySQL 8.0 DATETIME2 编码格式
@@ -370,11 +370,23 @@ std::string BPlusTreeParser::parse_field_value(
                 uint8_t hour_minute = datetime_ptr[3];
                 uint8_t second_packed = datetime_ptr[4];
                 
+                // ✅ 新增：边界检查
+                if (year < 1970 || year > 2038) {
+                    std::cerr << "[WARN] DATETIME2 year out of expected range: " << year << std::endl;
+                }
+                
                 uint8_t month = month_day & 0x0F;
                 uint8_t day = month_day >> 4;
                 uint8_t hour = hour_minute & 0x1F;
                 uint8_t minute = (hour_minute >> 5) | ((second_packed & 0x03) << 3);
                 uint8_t second = second_packed >> 2;
+                
+                // ✅ 新增：验证日期时间有效性
+                if (month > 12 || day > 31 || hour > 23 || minute > 59 || second > 59) {
+                    std::cerr << "[WARN] DATETIME2 has invalid date/time values: " 
+                              << year << "-" << month << "-" << day << " "
+                              << hour << ":" << minute << ":" << second << std::endl;
+                }
                 
                 // 解析小数部分
                 uint64_t frac = 0;
@@ -398,13 +410,16 @@ std::string BPlusTreeParser::parse_field_value(
                 }
                 
                 data_pos += datetime_bytes;
-                return std::to_string(year) + "-" + 
-                       std::to_string(month) + "-" + 
-                       std::to_string(day) + " " +
-                       std::to_string(hour) + ":" + 
-                       std::to_string(minute) + ":" + 
-                       std::to_string(second) +
-                       (precision > 0 ? "." + std::to_string(frac) : "");
+                std::string result = std::to_string(year) + "-" + 
+                                   std::to_string(month) + "-" + 
+                                   std::to_string(day) + " " +
+                                   std::to_string(hour) + ":" + 
+                                   std::to_string(minute) + ":" + 
+                                   std::to_string(second);
+                if (precision > 0 && frac > 0) {
+                    result += "." + std::to_string(frac);
+                }
+                return result;
             } else {
                 std::cerr << "[WARN] DATETIME2 data truncated for column " << col.name << std::endl;
                 return "[TRUNCATED]";

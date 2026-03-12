@@ -155,8 +155,12 @@ def generate_ibd(table_name="users", include_blob=False):
     user_rec.append(len(email_str))
     user_rec.extend(email_str.encode())
     
-    # created_at 字段 (DATETIME, 8 bytes)
-    write_le_uint64(user_rec, len(user_rec), 0)
+    # created_at 字段 (DATETIME2(6), 8 bytes for no precision + 4 bytes for frac)
+    import struct
+    # 简单的 DATETIME2 编码：year=2024, month=1, day=1, hour=0, minute=0, second=0, frac=0
+    datetime_val = (2024 << 20) | (1 << 16) | (1 << 11) | (0 << 5) | (0 >> 2)
+    write_le_uint32(user_rec, len(user_rec), datetime_val & 0xFFFFFFFF)
+    write_le_uint32(user_rec, len(user_rec), (datetime_val >> 32) & 0x0F)
     
     record_data.extend(user_rec)
     

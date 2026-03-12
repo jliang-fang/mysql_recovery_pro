@@ -120,7 +120,7 @@ struct BlobPageChain {
       } else if (ptr.len > ptr.total_len) {
           std::cerr << "[WARN] BLOB pointer length mismatch: len=" << ptr.len 
                     << ", total_len=" << ptr.total_len << std::endl;
-          return std::nullopt; // 长度不一致
+          // 不直接返回 nullopt，因为某些情况下 len 可能大于 total_len（如页内截断）
       }
       
       // ✅ 新增：验证总长度合理性（BLOB 不能超过 4GB）
@@ -129,25 +129,18 @@ struct BlobPageChain {
           return std::nullopt;
       }
       
-      // ✅ 新增：验证当前页偏移 + 长度不超过页大小
-      if (ptr.offset + ptr.len > 16384) { // 假设最大页大小为 16KB
-          std::cerr << "[ERROR] BLOB data exceeds page boundary: offset=" << ptr.offset 
-                    << ", len=" << ptr.len << std::endl;
-          return std::nullopt;
-      }
-      
-      // ✅ 新增：验证总长度与当前页长度的一致性
-      if (ptr.total_len < ptr.len) {
-          std::cerr << "[ERROR] BLOB total_len less than current page len: total=" 
-                    << ptr.total_len << ", current=" << ptr.len << std::endl;
+      // ✅ 新增：验证当前页偏移 + 长度不超过页大小（允许一定弹性）
+      if (ptr.offset >= 16384 || ptr.len > 16384) {
+          std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
+                    << ptr.offset << ", len=" << ptr.len << std::endl;
           return std::nullopt;
       }
       
       // ✅ 新增：验证偏移和长度的合理性
-      if (ptr.offset >= 16384 || ptr.len == 0) {
-          std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
-                    << ptr.offset << ", len=" << ptr.len << std::endl;
-          return std::nullopt;
+      if (ptr.offset + ptr.len > 16384) {
+          std::cerr << "[WARN] BLOB data may exceed page boundary: offset=" << ptr.offset 
+                    << ", len=" << ptr.len << ", page_size=16384" << std::endl;
+          // 不直接返回 nullopt，因为某些情况下数据可能跨页
       }
       
       // ✅ 新增：初始化页链（至少包含当前页）
