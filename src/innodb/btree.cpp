@@ -544,14 +544,14 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         
         // 解析 next_record_offset: little-endian 格式，[1] 是低字节，[2] 是高字节
         uint16_t next_rec_offset = static_cast<uint16_t>(
-            (static_cast<uint16_t>(page_data_[offset + 1]) | 
-             (static_cast<uint16_t>(page_data_[offset + 2]) << 8))
+            (static_cast<uint16_t>(page_data_[offset + 2]) << 8) | 
+             static_cast<uint16_t>(page_data_[offset + 1])
         );
         
         // 解析 heap_no: [3] 是低字节，[4] 的低6位是高6位
         uint16_t heap_no = static_cast<uint16_t>(
-            (static_cast<uint16_t>(page_data_[offset + 3]) | 
-             (static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8))
+            (static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8) | 
+             static_cast<uint16_t>(page_data_[offset + 3])
         );
         
         // ✅ 修复：正确解析 n_fields（COMPACT 格式）

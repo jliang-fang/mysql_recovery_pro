@@ -43,11 +43,12 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     }
     
     // ✅ 修复：防止整数溢出
-    Offset new_end = offset + static_cast<Offset>(data.size());
-    if (new_end < offset) { // 检测溢出
+    if (data.size() > static_cast<size_t>(std::numeric_limits<Offset>::max() - offset)) {
         std::cerr << "[ERROR] Blob chunk offset overflow detected\n";
         return false;
     }
+    
+    Offset new_end = offset + static_cast<Offset>(data.size());
     
     // Check for overlap and handle edge cases
     for (const auto& chunk : chunks_) {

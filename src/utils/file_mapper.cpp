@@ -93,7 +93,9 @@ FileMapper::FileMapper(const std::string& path)
 FileMapper::~FileMapper() {
 #ifdef _WIN32
     if (data_) {
-        UnmapViewOfFile(data_);
+        if (!UnmapViewOfFile(data_)) {
+            std::cerr << "[ERROR] Failed to unmap view of file: " << GetLastError() << std::endl;
+        }
         data_ = nullptr;
     }
     if (handle_ != INVALID_HANDLE_VALUE) {
@@ -102,12 +104,16 @@ FileMapper::~FileMapper() {
     }
 #else
     if (data_ && data_ != MAP_FAILED) {
-        munmap(data_, size_);
+        if (munmap(data_, size_) != 0) {
+            std::cerr << "[ERROR] Failed to unmap memory: " << strerror(errno) << std::endl;
+        }
         data_ = nullptr;
     }
     
     if (fd_ >= 0) {
-        close(fd_);
+        if (close(fd_) != 0) {
+            std::cerr << "[ERROR] Failed to close file descriptor: " << strerror(errno) << std::endl;
+        }
         fd_ = -1;
     }
 #endif

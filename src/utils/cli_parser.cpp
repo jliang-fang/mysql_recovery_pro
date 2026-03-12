@@ -1,5 +1,6 @@
 #include "dbrecovery/utils/cli_parser.hpp"
 #include <algorithm>
+#include <iostream>
 
 namespace dbrecovery {
 namespace utils {
@@ -7,6 +8,8 @@ namespace utils {
 CliParser::CliParser(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
+        
+        // 处理 --key=value 形式
         if (arg.substr(0, 2) == "--") {
             auto pos = arg.find('=');
             if (pos != std::string::npos) {
@@ -30,9 +33,21 @@ CliParser::CliParser(int argc, char** argv) {
                     // 布尔标志 --flag
                     std::string key = arg.substr(2);
                     if (!key.empty()) {
-                        options_[key] = "true";  // ✅ 修正：使用 "true" 而非空字符串
+                        options_[key] = "true";
                     }
                 }
+            }
+        }
+        // 处理 -key value 形式（短选项）
+        else if (arg[0] == '-' && arg.size() > 1) {
+            if (i + 1 < argc && argv[i+1][0] != '-') {
+                std::string key = arg.substr(1);
+                std::string value = argv[++i];
+                options_[key] = value;
+            } else {
+                // 短选项布尔标志
+                std::string key = arg.substr(1);
+                options_[key] = "true";
             }
         }
     }

@@ -1,5 +1,6 @@
 #include "dbrecovery/disk/disk_scanner.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <algorithm>
 #include <sys/stat.h>
 #include <dirent.h>
