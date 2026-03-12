@@ -157,10 +157,38 @@ def generate_ibd(table_name="users", include_blob=False):
     
     # created_at 字段 (DATETIME2(6), 8 bytes for no precision + 4 bytes for frac)
     import struct
-    # 简单的 DATETIME2 编码：year=2024, month=1, day=1, hour=0, minute=0, second=0, frac=0
-    datetime_val = (2024 << 20) | (1 << 16) | (1 << 11) | (0 << 5) | (0 >> 2)
-    write_le_uint32(user_rec, len(user_rec), datetime_val & 0xFFFFFFFF)
-    write_le_uint32(user_rec, len(user_rec), (datetime_val >> 32) & 0x0F)
+    # ✅ 修复：正确的 DATETIME2 编码（参考 MySQL 8.0 源码 sql/field.cc）
+    # 前5字节 packed format: [year_low, year_high, month_day, hour_minute, second_packed]
+    # 后3字节小数部分 (precision=6)
+    
+    year = 2024
+    month = 1
+    day = 1
+    hour = 0
+    minute = 0
+    second = 0
+    frac = 0
+    
+    # Pack date/time into 5 bytes
+    year_low = year & 0xFF
+    year_high = (year >> 8) & 0xFF
+    month_day = ((day << 4) | month) & 0xFF
+    hour_minute = ((minute & 0x3F) << 2) | (hour & 0x1F)
+    second_packed = ((second & 0x3F) << 2) | ((frac >> 16) & 0x03)
+    
+    user_rec.append(year_low)
+    user_rec.append(year_high)
+    user_rec.append(month_day)
+    user_rec.append(hour_minute)
+    user_rec.append(second_packed)
+    
+    # Pack fractional part (3 bytes for precision=6)
+    frac_bytes = [
+        (frac >> 0) & 0xFF,
+        (frac >> 8) & 0xFF,
+        (frac >> 16) & 0xFF
+    ]
+    user_rec.extend(frac_bytes)
     
     record_data.extend(user_rec)
     
