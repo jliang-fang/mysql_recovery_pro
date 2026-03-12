@@ -40,12 +40,20 @@ CliParser::CliParser(int argc, char** argv) {
         }
         // 处理 -key value 形式（短选项）
         else if (arg[0] == '-' && arg.size() > 1) {
-            if (i + 1 < argc && argv[i+1][0] != '-') {
+            // ✅ 新增：支持短选项组合形式（如 -abc）
+            if (arg.size() > 2 && arg[1] != '-') {
+                // 处理组合短选项，例如 -abc
+                for (size_t j = 1; j < arg.size(); ++j) {
+                    std::string key(1, arg[j]);
+                    options_[key] = "true";
+                }
+            } else if (i + 1 < argc && argv[i+1][0] != '-') {
+                // -o value 形式
                 std::string key = arg.substr(1);
                 std::string value = argv[++i];
                 options_[key] = value;
             } else {
-                // 短选项布尔标志
+                // 短选项布尔标志（单个字符）
                 std::string key = arg.substr(1);
                 options_[key] = "true";
             }

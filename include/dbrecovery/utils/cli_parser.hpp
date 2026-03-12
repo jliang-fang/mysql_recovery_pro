@@ -72,8 +72,9 @@ inline void CliParser::require_options(const std::vector<std::string>& required)
 }
 
 inline bool CliParser::validate() const {
-    // 基本验证：检查必要参数
-    return has_option("input") || has_option("path");
+    // ✅ 修复：根据主程序实际使用的选项进行验证
+    // 主程序使用 "ibd" 作为必选参数，"table-id" 和 "output" 为可选
+    return has_option("ibd");
 }
 
 } // namespace utils

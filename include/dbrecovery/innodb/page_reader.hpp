@@ -42,6 +42,14 @@ public:
     uint32_t get_total_pages() const { return total_pages_; }
 
     /**
+     * @brief 获取文件有效性状态
+     *
+     * @return true 文件有效且已成功初始化
+     * @return false 文件无效或初始化失败
+     */
+    [[nodiscard]] bool is_valid() const { return is_valid_; }
+
+    /**
      * @brief 校验页校验和（支持 CRC32C / INNODB / NONE）
      *
      * @param page_data 页数据（包含 FIL_HEADER）

@@ -53,8 +53,17 @@ public:
     // const std::vector<RedoRecord>& get_redo_records() const;
 
 private:
-    // 成员变量（待实现）
-    // BlobReconstructor blob_reconstructor_;
+    // ✅ 新增：关键成员变量
+    std::unique_ptr<BlobReconstructor> blob_reconstructor_;
+    
+    // 页缓存，用于存储已读取的页数据
+    std::map<uint32_t, std::vector<uint8_t>> page_cache_;
+    
+    // 表结构缓存，用于存储从 SDI 解析的元数据
+    catalog::TableSchema table_schema_;
+    
+    // 恢复状态标志
+    bool is_initialized_ = false;
 };
 
 } // namespace innodb

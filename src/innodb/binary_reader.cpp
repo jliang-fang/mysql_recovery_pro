@@ -9,17 +9,28 @@ namespace innodb {
 void BinaryReader::parse_table_name(const std::string& json_str, catalog::TableSchema& schema) {
     if (json_str.empty()) return;
     
-    // 简化解析：查找 "name" 字段
-    size_t name_pos = json_str.find("\"name\"");
-    if (name_pos != std::string::npos) {
-        size_t colon_pos = json_str.find(':', name_pos);
-        if (colon_pos != std::string::npos) {
-            // 跳过冒号和可能的空格
-            size_t start = json_str.find_first_not_of(" \t\n\r", colon_pos + 1);
-            if (start != std::string::npos && json_str[start] == '"') {
-                size_t end = json_str.find('"', start + 1);
-                if (end != std::string::npos) {
-                    schema.table_name = json_str.substr(start + 1, end - start - 1);
+    try {
+        // ✅ 使用 nlohmann/json 进行正式解析
+        auto j = nlohmann::json::parse(json_str);
+        
+        if (j.contains("name")) {
+            schema.table_name = j["name"].get<std::string>();
+        }
+    } catch (const nlohmann::json::parse_error& e) {
+        std::cerr << "[WARN] Failed to parse JSON for table name: " << e.what() << "\n";
+        
+        // 降级方案：查找 "name" 字段
+        size_t name_pos = json_str.find("\"name\"");
+        if (name_pos != std::string::npos) {
+            size_t colon_pos = json_str.find(':', name_pos);
+            if (colon_pos != std::string::npos) {
+                // 跳过冒号和可能的空格
+                size_t start = json_str.find_first_not_of(" \t\n\r", colon_pos + 1);
+                if (start != std::string::npos && json_str[start] == '"') {
+                    size_t end = json_str.find('"', start + 1);
+                    if (end != std::string::npos) {
+                        schema.table_name = json_str.substr(start + 1, end - start - 1);
+                    }
                 }
             }
         }
@@ -28,37 +39,73 @@ void BinaryReader::parse_table_name(const std::string& json_str, catalog::TableS
 
 // ✅ 新增：解析表的列定义
 void BinaryReader::parse_columns(const std::string& json_str, catalog::TableSchema& schema) {
-    // 查找 "columns" 数组
-    size_t columns_pos = json_str.find("\"columns\"");
-    if (columns_pos == std::string::npos) return;
-    
-    // 找到数组开始位置
-    size_t array_start = json_str.find('[', columns_pos);
-    if (array_start == std::string::npos) return;
-    
-    // 简单解析：逐个提取列定义（实际应使用 JSON 解析器）
-    int brace_count = 0;
-    bool in_column = false;
-    size_t col_start = 0;
-    
-    for (size_t i = array_start + 1; i < json_str.length(); ++i) {
-        if (json_str[i] == '{') {
-            if (brace_count == 0) {
-                col_start = i;
-                in_column = true;
+    try {
+        // ✅ 使用 nlohmann/json 进行正式解析
+        auto j = nlohmann::json::parse(json_str);
+        
+        if (j.contains("columns") && j["columns"].is_array()) {
+            for (const auto& col_json : j["columns"]) {
+                catalog::ColumnInfo col;
+                
+                if (col_json.contains("name")) {
+                    col.name = col_json["name"].get<std::string>();
+                }
+                
+                if (col_json.contains("type")) {
+                    col.mysql_type_id = col_json["type"].get<uint32_t>();
+                }
+                
+                if (col_json.contains("is_nullable")) {
+                    col.is_nullable = col_json["is_nullable"].get<bool>();
+                }
+                
+                if (col_json.contains("length")) {
+                    col.column_length = col_json["length"].get<uint32_t>();
+                }
+                
+                if (col_json.contains("charset_id")) {
+                    col.charset_id = col_json["charset_id"].get<uint32_t>();
+                }
+                
+                // 添加到表结构
+                if (!col.name.empty()) {
+                    schema.columns[schema.columns.size() + 1] = col;
+                }
             }
-            brace_count++;
-        } else if (json_str[i] == '}') {
-            brace_count--;
-            if (brace_count == 0 && in_column) {
-                std::string column_json = json_str.substr(col_start, i - col_start + 1);
-                parse_single_column(column_json, schema);
-                in_column = false;
+        }
+    } catch (const nlohmann::json::parse_error& e) {
+        std::cerr << "[WARN] Failed to parse JSON for columns: " << e.what() << "\n";
+        
+        // 降级方案：原始字符串解析
+        size_t columns_pos = json_str.find("\"columns\"");
+        if (columns_pos == std::string::npos) return;
+        
+        size_t array_start = json_str.find('[', columns_pos);
+        if (array_start == std::string::npos) return;
+        
+        int brace_count = 0;
+        bool in_column = false;
+        size_t col_start = 0;
+        
+        for (size_t i = array_start + 1; i < json_str.length(); ++i) {
+            if (json_str[i] == '{') {
+                if (brace_count == 0) {
+                    col_start = i;
+                    in_column = true;
+                }
+                brace_count++;
+            } else if (json_str[i] == '}') {
+                brace_count--;
+                if (brace_count == 0 && in_column) {
+                    std::string column_json = json_str.substr(col_start, i - col_start + 1);
+                    parse_single_column(column_json, schema);
+                    in_column = false;
+                }
+            } else if (json_str[i] == '[') {
+                brace_count++;
+            } else if (json_str[i] == ']') {
+                brace_count--;
             }
-        } else if (json_str[i] == '[') {
-            brace_count++;
-        } else if (json_str[i] == ']') {
-            brace_count--;
         }
     }
 }
@@ -154,32 +201,70 @@ void BinaryReader::parse_single_column(const std::string& json_str, catalog::Tab
 
 // ✅ 新增：解析索引定义
 void BinaryReader::parse_indexes(const std::string& json_str, catalog::TableSchema& schema) {
-    size_t indexes_pos = json_str.find("\"indexes\"");
-    if (indexes_pos == std::string::npos) return;
-    
-    // 简单解析：逐个提取索引定义
-    int brace_count = 0;
-    bool in_index = false;
-    size_t idx_start = 0;
-    
-    for (size_t i = indexes_pos; i < json_str.length(); ++i) {
-        if (json_str[i] == '{') {
-            if (brace_count == 0) {
-                idx_start = i;
-                in_index = true;
+    try {
+        // ✅ 使用 nlohmann/json 进行正式解析
+        auto j = nlohmann::json::parse(json_str);
+        
+        if (j.contains("indexes") && j["indexes"].is_array()) {
+            for (const auto& idx_json : j["indexes"]) {
+                catalog::IndexInfo index;
+                
+                if (idx_json.contains("name")) {
+                    index.name = idx_json["name"].get<std::string>();
+                }
+                
+                if (idx_json.contains("is_primary")) {
+                    index.is_primary = idx_json["is_primary"].get<bool>();
+                }
+                
+                if (idx_json.contains("is_unique")) {
+                    index.is_unique = idx_json["is_unique"].get<bool>();
+                }
+                
+                if (idx_json.contains("columns") && idx_json["columns"].is_array()) {
+                    for (const auto& col : idx_json["columns"]) {
+                        if (col.is_string()) {
+                            index.columns.push_back(col.get<std::string>());
+                        }
+                    }
+                }
+                
+                // 添加到表结构
+                if (!index.name.empty()) {
+                    schema.indexes.push_back(index);
+                }
             }
-            brace_count++;
-        } else if (json_str[i] == '}') {
-            brace_count--;
-            if (brace_count == 0 && in_index) {
-                std::string index_json = json_str.substr(idx_start, i - idx_start + 1);
-                parse_single_index(index_json, schema);
-                in_index = false;
+        }
+    } catch (const nlohmann::json::parse_error& e) {
+        std::cerr << "[WARN] Failed to parse JSON for indexes: " << e.what() << "\n";
+        
+        // 降级方案：原始字符串解析
+        size_t indexes_pos = json_str.find("\"indexes\"");
+        if (indexes_pos == std::string::npos) return;
+        
+        int brace_count = 0;
+        bool in_index = false;
+        size_t idx_start = 0;
+        
+        for (size_t i = indexes_pos; i < json_str.length(); ++i) {
+            if (json_str[i] == '{') {
+                if (brace_count == 0) {
+                    idx_start = i;
+                    in_index = true;
+                }
+                brace_count++;
+            } else if (json_str[i] == '}') {
+                brace_count--;
+                if (brace_count == 0 && in_index) {
+                    std::string index_json = json_str.substr(idx_start, i - idx_start + 1);
+                    parse_single_index(index_json, schema);
+                    in_index = false;
+                }
+            } else if (json_str[i] == '[') {
+                brace_count++;
+            } else if (json_str[i] == ']') {
+                brace_count--;
             }
-        } else if (json_str[i] == '[') {
-            brace_count++;
-        } else if (json_str[i] == ']') {
-            brace_count--;
         }
     }
 }
