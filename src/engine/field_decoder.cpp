@@ -14,16 +14,16 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
     size_t field_len = 0;
     
     switch (col_info.mysql_type_id) {
-        case 1:  // TINYINT
+        case mysql_types::TINY:  // 1
             field_len = 1;
             break;
-        case 2:  // SHORTINT
+        case mysql_types::SHORT:  // 2
             field_len = 2;
             break;
-        case 3:  // LONGINT
+        case mysql_types::LONG:  // 3
             field_len = 4;
             break;
-        case 8:  // LONGLONG
+        case mysql_types::LONGLONG:  // 8
             field_len = 8;
             break;
         case mysql_types::VARCHAR: // 15
