@@ -637,6 +637,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
             null_bytes = 0;
         }
         
+        // ✅ 新增：验证 NULL 位图大小与实际页数据的一致性
+        if (null_bytes > 0 && offset + 5 + var_len_size + null_bytes > page_data_.size()) {
+            std::cerr << "[WARN] Insufficient space for null bitmap at offset " << offset << std::endl;
+            continue;
+        }
+        
         header_size += null_bytes;
             
         // ✅ 增强边界检查

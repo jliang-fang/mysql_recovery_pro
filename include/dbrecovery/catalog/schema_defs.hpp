@@ -7,6 +7,17 @@
 #include <optional>
 #include <iostream>
 
+// ✅ 新增：nlohmann/json 依赖声明
+#ifdef JSON_HPP_INCLUDED
+// 使用 nlohmann/json 库
+#else
+// 如果未定义 JSON_HPP_INCLUDED，需要包含 json 头文件或确保已定义相关类型
+// 这里使用前向声明避免编译错误
+namespace nlohmann {
+    class json;
+}
+#endif
+
 namespace dbrecovery {
 namespace catalog {
 

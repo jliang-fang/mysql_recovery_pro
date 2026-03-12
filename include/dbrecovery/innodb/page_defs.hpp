@@ -37,7 +37,7 @@ constexpr uint16_t BTR_MAX_SIZE         = 50;   // maximum size of a record
 // REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT, extra_bytes = 5 + n_nullable * 1
 
 constexpr uint8_t REC_INFO_BITS_MASK    = 0x07;   // info bits mask (lowest 3 bits)
-constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // deleted flag (bit 0 of info_bits)
+constexpr uint8_t REC_INFO_DELETED_FLAG = 0x08;   // deleted flag (bit 3 of info_bits) - 修复：MySQL 8.0 中是 bit 3
 constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // min record flag (bit 1 of info_bits)
 constexpr uint8_t REC_INFO_EXTERN_FLAG  = 0x10;   // external pointer flag (bit 4 of info_bits) - BLOB指针标志
 
