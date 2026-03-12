@@ -24,8 +24,6 @@ enum class BTreeNodeType : uint8_t {
 // 注意：REC_INFO_STATUS_MASK 是最低3位（0x07），REC_INFO_DELETED_FLAG 是 bit 3 (0x08)
 // 这些常量已在 page_defs.hpp 中定义，此处仅作引用以保持向后兼容性
 
-// ✅ 修复：确认记录头标志位定义与 MySQL 8.0 源码一致
-
 /**
  * @brief B+Tree 索引页结构解析器
  */

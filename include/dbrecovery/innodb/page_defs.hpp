@@ -68,7 +68,11 @@ struct alignas(1) RecordHeader {
     uint8_t heap_no_0;       // bits 0-7 of heap_no
     uint8_t heap_no_1;       // bits 8-13 of heap_no (only 6 bits used)
 
-    static RecordHeader parse(const uint8_t* ptr) {
+    static std::optional<RecordHeader> parse(const uint8_t* ptr, size_t max_size = 5) {
+        if (!ptr || max_size < 5) {
+            return std::nullopt;
+        }
+        
         RecordHeader header;
         header.info_bits = ptr[0];
         header.next_rec_off_0 = ptr[1];

@@ -12,201 +12,205 @@
 namespace dbrecovery {
 namespace innodb {
 
-// Helper types only (no struct redefinition)
-
 // ✅ BLOB page chain（支持多页拼接）
 struct BlobPageChain {
-  std::vector<std::pair<uint32_t, uint32_t>> pages; // (space_id, page_no)
-  
-  // BLOB 页头偏移常量
-  static constexpr size_t BTR_BPAGE_NEXT = 0;   // 下一个 BLOB 页号（4字节）
-  static constexpr size_t BTR_BPAGE_PREV = 4;   // 上一个 BLOB 页号（4字节）
-  static constexpr size_t BTR_BPAGE_LEN  = 8;   // 数据长度（4字节）
+    std::vector<std::pair<uint32_t, uint32_t>> pages; // (space_id, page_no)
+    
+    // BLOB 页头偏移常量
+    static constexpr size_t BTR_BPAGE_NEXT = 0;   // 下一个 BLOB 页号（4字节）
+    static constexpr size_t BTR_BPAGE_PREV = 4;   // 上一个 BLOB 页号（4字节）
+    static constexpr size_t BTR_BPAGE_LEN  = 8;   // 数据长度（4字节）
 
-  void add_page(uint32_t space_id, uint32_t page_no) {
-      pages.emplace_back(space_id, page_no);
-  }
+    void add_page(uint32_t space_id, uint32_t page_no) {
+        pages.emplace_back(space_id, page_no);
+    }
 
-  bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) const {
-      if (pages.empty()) return false;
-      
-      // 检查是否有重复页
-      std::set<std::pair<uint32_t, uint32_t>> seen;
-      for (const auto& p : pages) {
-          if (seen.count(p)) return false;
-          seen.insert(p);
-      }
-      
-      // 验证链表连续性（需要实际读取 BLOB 页头验证）
-      for (size_t i = 1; i < pages.size(); ++i) {
-          const auto& prev_page = pages[i-1];
-          const auto& curr_page = pages[i];
-          
-          if (prev_page.first != curr_page.first) {
-              // 不同表空间，跳过连续性检查（允许跨表空间BLOB）
-              continue;
-          }
-          
-          // 读取前一个页的 BLOB 头以验证 next_bpage 字段
-          if (!page_reader) {
-              continue; // 没有提供 page_reader，跳过验证
-          }
-          
-          auto prev_data = page_reader(prev_page.first, prev_page.second);
-          if (!prev_data || prev_data->size() < 16) {
-              continue; // 无法读取或数据不足，跳过验证
-          }
-          
-          // 读取 next_bpage 字段（偏移 0）
-          uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
-          
-          if (next_bpage != curr_page.second) {
-              // next_bpage 不匹配，链表断裂
-              return false;
-          }
-      }
-      
-      return true;
-  }
-  
-  // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
-  struct BlobPointer {
-      uint32_t space_id;
-      uint32_t page_no;
-      uint32_t offset;
-      uint32_t len;           // 当前页的数据长度
-      uint32_t total_len;     // BLOB 总长度（完整指针格式包含此字段）
-          
-      // ✅ 新增：BLOB 页链信息
-      std::vector<std::pair<uint32_t, uint32_t>> chain_pages; // (space_id, page_no)
-          
-      bool is_complete() const {
-          return total_len > 0 && !chain_pages.empty();
-      }
-  };
-      
-  static std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20) {
-      if (!data || data_size < 16) return std::nullopt;
-          
-      // BLOB 指针格式（20字节）：
-      // [0-3]:  space_id
-      // [4-7]:  page_no (first BLOB 页)
-      // [8-11]: offset (数据在页内的偏移)
-      // [12-15]: len (当前页的数据长度)
-      // [16-19]: total_len (BLOB 总长度，某些版本可能省略)
-          
-      BlobPointer ptr;
-      ptr.space_id = dbrecovery::innodb::read_le<uint32_t>(data, 0);
-      ptr.page_no = dbrecovery::innodb::read_le<uint32_t>(data, 4);
-      ptr.offset = dbrecovery::innodb::read_le<uint32_t>(data, 8);
-      ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
-          
-      // ✅ 修复：尝试读取总长度（需要额外4字节）
-      if (data_size >= 20) {
-          ptr.total_len = dbrecovery::innodb::read_le<uint32_t>(data, 16);
-      } else {
-          // 如果数据不足，保持默认值（len）
-          ptr.total_len = ptr.len;
-      }
-          
-      // 验证 BLOB 指针的有效性
-      if (ptr.space_id == 0xFFFFFFFF || ptr.page_no == 0xFFFFFFFF) {
-          return std::nullopt; // 无效的 BLOB 指针
-      }
-          
-      // ✅ 修复：total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
-      if (ptr.total_len == 0) {
-          ptr.total_len = ptr.len;
-      } else if (ptr.len > ptr.total_len) {
-          std::cerr << "[WARN] BLOB pointer length mismatch: len=" << ptr.len 
-                    << ", total_len=" << ptr.total_len << ". Using len as total_len." << std::endl;
-          // 某些情况下 len 可能大于 total_len（如页内截断），以 len 为准
-          ptr.total_len = ptr.len;
-      }
-      
-      // ✅ 修复：合并重复的验证逻辑，避免代码冗余
-      
-      // 验证 BLOB 总长度合理性（BLOB 不能超过 4GB）
-      if (ptr.total_len > 0xFFFFFFFF) {
-          std::cerr << "[ERROR] BLOB total_len exceeds maximum: " << ptr.total_len << std::endl;
-          return std::nullopt;
-      }
-      
-      // 验证当前页偏移和长度
-      if (ptr.offset >= 16384 || ptr.len > 16384) {
-          std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
-                    << ptr.offset << ", len=" << ptr.len << std::endl;
-          return std::nullopt;
-      }
-      
-      // 验证偏移和长度的合理性（允许跨页）
-      if (ptr.offset + ptr.len > 16384) {
-          std::cerr << "[WARN] BLOB data may exceed page boundary: offset=" << ptr.offset 
-                    << ", len=" << ptr.len << ", page_size=16384. Data may be cross-page." << std::endl;
-      }
-      
-      // 初始化页链（至少包含当前页）
-      ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
-          
-      return ptr;
-  }
-  
-  // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
-  static std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data) {
-      if (data.size() < 16) return std::nullopt;
-      return parse_blob_pointer(data.data(), data.size());
-  }
-  
-  // ✅ 新增：从 BLOB 页数据中解析完整页链
-  static std::optional<BlobPageChain> build_blob_page_chain(
-      uint32_t first_space_id,
-      uint32_t first_page_no,
-      const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }
-  ) {
-      BlobPageChain chain;
-      
-      if (!page_reader) {
-          return std::nullopt;
-      }
-      
-      uint32_t current_space_id = first_space_id;
-      uint32_t current_page_no = first_page_no;
-      size_t max_pages = 1000; // 防止无限循环
-      
-      while (max_pages-- > 0) {
-          chain.add_page(current_space_id, current_page_no);
-          
-          auto page_data = page_reader(current_space_id, current_page_no);
-          if (!page_data || page_data->size() < 16) {
-              break;
-          }
-          
-          // 读取下一个 BLOB 页号
-          uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BTR_BPAGE_NEXT);
-          
-          if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
-              // 链表结束
-              break;
-          }
-          
-          // 检查是否跨表空间（MySQL 8.0 支持）
-          // 如果 next_bpage 的高16位非零，可能表示新的 space_id
-          if (current_space_id != 0 && (next_bpage >> 16) != 0) {
-              // 可能是新的 space_id（需要根据实际格式调整）
-              current_space_id = next_bpage >> 16;
-              current_page_no = next_bpage & 0xFFFF;
-          } else {
-              current_page_no = next_bpage;
-          }
-      }
-      
-      if (chain.pages.empty()) {
-          return std::nullopt;
-      }
-      
-      return chain;
-  }
+    bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) const {
+        if (pages.empty()) return false;
+        
+        // 检查是否有重复页
+        std::set<std::pair<uint32_t, uint32_t>> seen;
+        for (const auto& p : pages) {
+            if (seen.count(p)) return false;
+            seen.insert(p);
+        }
+        
+        // 验证链表连续性（需要实际读取 BLOB 页头验证）
+        for (size_t i = 1; i < pages.size(); ++i) {
+            const auto& prev_page = pages[i-1];
+            const auto& curr_page = pages[i];
+            
+            if (prev_page.first != curr_page.first) {
+                // 不同表空间，跳过连续性检查（允许跨表空间BLOB）
+                continue;
+            }
+            
+            // 读取前一个页的 BLOB 头以验证 next_bpage 字段
+            auto prev_data = page_reader(prev_page.first, prev_page.second);
+            if (!prev_data || prev_data->size() < 16) {
+                continue; // 无法读取或数据不足，跳过验证
+            }
+            
+            // 读取 next_bpage 字段（偏移 0）
+            uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
+            
+            if (next_bpage != curr_page.second) {
+                // next_bpage 不匹配，链表断裂
+                return false;
+            }
+        }
+        
+        return true;
+    }
 };
+
+// ✅ BLOB 指针结构（20字节）
+struct BlobPointer {
+    uint32_t space_id;
+    uint32_t page_no;
+    uint32_t offset;
+    uint32_t len;           // 当前页的数据长度
+    uint32_t total_len;     // BLOB 总长度（完整指针格式包含此字段）
+    
+    // ✅ 新增：BLOB 页链信息
+    std::vector<std::pair<uint32_t, uint32_t>> chain_pages; // (space_id, page_no)
+    
+    bool is_complete() const {
+        return total_len > 0 && !chain_pages.empty();
+    }
+};
+
+// ✅ 新增：从页数据中解析 BLOB 指针（20字节）
+std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20);
+
+// ✅ 新增：从页数据中解析 BLOB 指针（20字节）
+std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data);
+
+// ✅ 新增：从 BLOB 页数据中解析完整页链
+std::optional<BlobPageChain> build_blob_page_chain(
+    uint32_t first_space_id,
+    uint32_t first_page_no,
+    const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }
+);
+
+// ==================== 实现部分 ====================
+inline std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size) {
+    if (!data || data_size < 16) return std::nullopt;
+    
+    // BLOB 指针格式（20字节）：
+    // [0-3]:  space_id
+    // [4-7]:  page_no (first BLOB 页)
+    // [8-11]: offset (数据在页内的偏移)
+    // [12-15]: len (当前页的数据长度)
+    // [16-19]: total_len (BLOB 总长度，某些版本可能省略)
+    
+    BlobPointer ptr;
+    ptr.space_id = dbrecovery::innodb::read_le<uint32_t>(data, 0);
+    ptr.page_no = dbrecovery::innodb::read_le<uint32_t>(data, 4);
+    ptr.offset = dbrecovery::innodb::read_le<uint32_t>(data, 8);
+    ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
+    
+    // ✅ 修复：尝试读取总长度（需要额外4字节）
+    if (data_size >= 20) {
+        ptr.total_len = dbrecovery::innodb::read_le<uint32_t>(data, 16);
+    } else {
+        // 如果数据不足，保持默认值（len）
+        ptr.total_len = ptr.len;
+    }
+    
+    // 验证 BLOB 指针的有效性
+    if (ptr.space_id == 0xFFFFFFFF || ptr.page_no == 0xFFFFFFFF) {
+        return std::nullopt; // 无效的 BLOB 指针
+    }
+    
+    // ✅ 修复：total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
+    if (ptr.total_len == 0) {
+        ptr.total_len = ptr.len;
+    } else if (ptr.len > ptr.total_len) {
+        std::cerr << "[WARN] BLOB pointer length mismatch: len=" << ptr.len 
+                  << ", total_len=" << ptr.total_len << ". Using len as total_len." << std::endl;
+        // 某些情况下 len 可能大于 total_len（如页内截断），以 len 为准
+        ptr.total_len = ptr.len;
+    }
+    
+    // 验证 BLOB 总长度合理性（BLOB 不能超过 4GB）
+    if (ptr.total_len > 0xFFFFFFFF) {
+        std::cerr << "[ERROR] BLOB total_len exceeds maximum: " << ptr.total_len << std::endl;
+        return std::nullopt;
+    }
+    
+    // 验证当前页偏移和长度
+    if (ptr.offset >= 16384 || ptr.len > 16384) {
+        std::cerr << "[ERROR] BLOB pointer has invalid offset or length: offset=" 
+                  << ptr.offset << ", len=" << ptr.len << std::endl;
+        return std::nullopt;
+    }
+    
+    // 验证偏移和长度的合理性（允许跨页）
+    if (ptr.offset + ptr.len > 16384) {
+        std::cerr << "[WARN] BLOB data may exceed page boundary: offset=" << ptr.offset 
+                  << ", len=" << ptr.len << ", page_size=16384. Data may be cross-page." << std::endl;
+    }
+    
+    // 初始化页链（至少包含当前页）
+    ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
+    
+    return ptr;
+}
+
+inline std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data) {
+    if (data.size() < 16) return std::nullopt;
+    return parse_blob_pointer(data.data(), data.size());
+}
+
+inline std::optional<BlobPageChain> build_blob_page_chain(
+    uint32_t first_space_id,
+    uint32_t first_page_no,
+    const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader
+) {
+    BlobPageChain chain;
+    
+    if (!page_reader) {
+        return std::nullopt;
+    }
+    
+    uint32_t current_space_id = first_space_id;
+    uint32_t current_page_no = first_page_no;
+    size_t max_pages = 1000; // 防止无限循环
+    
+    while (max_pages-- > 0) {
+        chain.add_page(current_space_id, current_page_no);
+        
+        auto page_data = page_reader(current_space_id, current_page_no);
+        if (!page_data || page_data->size() < 16) {
+            break;
+        }
+        
+        // 读取下一个 BLOB 页号
+        uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_NEXT);
+        
+        if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
+            // 链表结束
+            break;
+        }
+        
+        // 检查是否跨表空间（MySQL 8.0 支持）
+        // 如果 next_bpage 的高16位非零，可能表示新的 space_id
+        if (current_space_id != 0 && (next_bpage >> 16) != 0) {
+            // 可能是新的 space_id（需要根据实际格式调整）
+            current_space_id = next_bpage >> 16;
+            current_page_no = next_bpage & 0xFFFF;
+        } else {
+            current_page_no = next_bpage;
+        }
+    }
+    
+    if (chain.pages.empty()) {
+        return std::nullopt;
+    }
+    
+    return chain;
+}
 
 } // namespace innodb
 } // namespace dbrecovery

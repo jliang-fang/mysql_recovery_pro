@@ -98,16 +98,138 @@ struct TableSchema {
     void debug_print() const;
     
     // ✅ 新增：表结构验证
-    bool validate() const;
+    bool validate() const {
+        if (table_name.empty()) {
+            std::cerr << "[ERROR] Table name is empty" << std::endl;
+            return false;
+        }
+        
+        if (columns.empty()) {
+            std::cerr << "[ERROR] Table has no columns" << std::endl;
+            return false;
+        }
+        
+        // 验证列定义
+        for (const auto& pair : columns) {
+            const auto& col = pair.second;
+            if (col.name.empty()) {
+                std::cerr << "[ERROR] Column has empty name at ordinal " << pair.first << std::endl;
+                return false;
+            }
+            
+            // 验证 MySQL 类型
+            if (col.mysql_type_id > 255) {
+                std::cerr << "[ERROR] Invalid MySQL type ID " << col.mysql_type_id 
+                          << " for column " << col.name << std::endl;
+                return false;
+            }
+        }
+        
+        // 验证索引定义
+        for (const auto& index : indexes) {
+            if (index.columns.empty()) {
+                std::cerr << "[ERROR] Index " << index.name << " has no columns" << std::endl;
+                return false;
+            }
+            
+            // 验证索引列存在于表中
+            for (const auto& col_name : index.columns) {
+                bool found = false;
+                for (const auto& pair : columns) {
+                    if (pair.second.name == col_name) {
+                        found = true;
+                        break;
+                    }
+                }
+                
+                if (!found) {
+                    std::cerr << "[ERROR] Index " << index.name << " references non-existent column " 
+                              << col_name << std::endl;
+                    return false;
+                }
+            }
+        }
+        
+        return true;
+    }
     
     // ✅ 新增：计算列大小（用于行格式适配）
-    uint32_t get_column_size(const ColumnInfo& col) const;
+    uint32_t get_column_size(const ColumnInfo& col) const {
+        switch (col.mysql_type_id) {
+            case mysql_types::TINY:
+                return 1;
+            case mysql_types::SHORT:
+                return 2;
+            case mysql_types::LONG:
+                return 4;
+            case mysql_types::LONGLONG:
+                return 8;
+            case mysql_types::INT24:
+                return 3;
+            case mysql_types::FLOAT:
+                return 4;
+            case mysql_types::DOUBLE:
+                return 8;
+            case mysql_types::VARCHAR:
+            case mysql_types::VAR_STRING:
+                // 考虑字符集编码（utf8mb4 最多4字节/字符）
+                return col.column_length * 4 + 2; // 长度前缀
+            case mysql_types::CHAR:
+                return col.column_length * 4;
+            case mysql_types::DATE:
+                return 3;
+            case mysql_types::DATETIME:
+            case mysql_types::TIMESTAMP:
+                return 5;
+            case mysql_types::DATETIME2:
+            case mysql_types::TIMESTAMP2:
+                // 精度决定大小
+                if (col.datetime_precision <= 2) return 3;
+                if (col.datetime_precision <= 4) return 4;
+                return 5;
+            case mysql_types::TIME:
+                return 3;
+            case mysql_types::TIME2:
+                return 3;
+            case mysql_types::YEAR:
+                return 1;
+            case mysql_types::BIT:
+                return (col.column_length + 7) / 8;
+            case mysql_types::JSON:
+                // JSON 存储为 BLOB
+                return col.column_length;
+            default:
+                // BLOB/TEXT 类型
+                if (col.mysql_type_id >= mysql_types::TINY_BLOB && 
+                    col.mysql_type_id <= mysql_types::BLOB) {
+                    return 4; // 指针大小
+                }
+                return col.column_length;
+        }
+    }
     
     // ✅ 新增：计算可空列数量（用于 NULL 位图）
-    uint32_t get_nullable_column_count() const;
+    uint32_t get_nullable_column_count() const {
+        uint32_t count = 0;
+        for (const auto& pair : columns) {
+            if (pair.second.is_nullable) {
+                count++;
+            }
+        }
+        return count;
+    }
     
     // ✅ 新增：获取列在表中的物理偏移
-    std::optional<uint32_t> get_column_offset(const std::string& col_name) const;
+    std::optional<uint32_t> get_column_offset(const std::string& col_name) const {
+        uint32_t offset = 0;
+        for (const auto& pair : columns) {
+            if (pair.second.name == col_name) {
+                return offset;
+            }
+            offset += get_column_size(pair.second);
+        }
+        return std::nullopt;
+    }
     
     // ✅ 新增：序列化为 JSON 字符串（用于 SDI 兼容）
     std::string to_json_string() const;
