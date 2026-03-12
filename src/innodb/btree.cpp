@@ -118,6 +118,11 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         if (!health.checksum_match) {
             health.status_message += "Checksum mismatch; ";
         }
+    } else {
+        // 页太小，无法进行校验和检查
+        health.checksum_expected = 0;
+        health.checksum_actual = 0;
+        health.checksum_match = true;
     }
     
     if (!is_valid_page_type && health.status_message.empty()) {
