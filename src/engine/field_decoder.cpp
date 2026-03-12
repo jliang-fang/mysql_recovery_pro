@@ -26,29 +26,31 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
         case 8:  // LONGLONG
             field_len = 8;
             break;
-        case 15: // VARCHAR
-            // ✅ 修复：处理 1 字节和 2 字节长度前缀
-            if (rec_ptr + 2 > page_base_ + size_) {
-                return nullptr;
-            }
+        case mysql_types::VARCHAR: // 15
             // InnoDB VARCHAR 长度前缀是独立存储的：
             // - 如果列最大长度 <= 255 字节，使用 1 字节前缀
             // - 否则使用 2 字节前缀
             bool use_two_byte_prefix = (col_info.column_length > 255);
             
             if (use_two_byte_prefix) {
+                if (rec_ptr + 2 > page_base_ + size_) {
+                    return nullptr;
+                }
                 uint16_t len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
                 field_len = 2 + len;
                 
-                // ✅ 新增：边界检查
+                // 边界检查
                 if (rec_ptr + field_len > page_base_ + size_) {
                     return nullptr;
                 }
             } else {
+                if (rec_ptr + 1 > page_base_ + size_) {
+                    return nullptr;
+                }
                 uint8_t len = rec_ptr[0];
                 field_len = 1 + len;
                 
-                // ✅ 新增：边界检查
+                // 边界检查
                 if (rec_ptr + field_len > page_base_ + size_) {
                     return nullptr;
                 }
@@ -67,28 +69,40 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                 return nullptr;
             }
             break;
-        case 248: // TEXT
-        case 249: // TINYBLOB
-        case 250: // BLOB
-        case 251: // MEDIUMBLOB
-        case 252: // LONGBLOB
-        case 253: // VARCHAR (newer MySQL)
-        case 254: // VARSTRING
-            // ✅ 新增：处理 BLOB/TEXT 类型（使用 BLOB 指针）
-            // 根据列定义中的长度信息判断是 inline 还是 overflow
-            if (col_info.column_length >= 0x10000) {
-                field_len = 9; // LONGBLOB 指针长度（8 字节 + 1 字节长度前缀）
-            } else if (col_info.column_length >= 0x100) {
-                field_len = 5; // BLOB 指针长度（4 字节 + 1 字节长度前缀）
+        case mysql_types::TINY_BLOB:   // 249
+        case mysql_types::MEDIUM_BLOB: // 250
+        case mysql_types::LONG_BLOB:   // 251
+        case mysql_types::BLOB:        // 252
+        case mysql_types::TEXT:        // 252 (alias)
+            // BLOB/TEXT 类型处理：
+            // - 如果 is_off_page=true，使用 BLOB 指针（20 字节）
+            // - 否则直接读取数据（inline 存储）
+            if (col_info.is_off_page) {
+                field_len = 20; // BLOB 指针长度
             } else {
-                // 对于较小的 BLOB/TEXT，可能直接存储在记录中（inline）
-                // 需要根据实际记录格式动态判断
-                field_len = col_info.column_length;
-                
-                // ✅ 新增：边界检查
-                if (rec_ptr + field_len > page_base_ + size_) {
-                    return nullptr;
+                // inline 存储：根据列定义中的长度信息判断
+                if (col_info.column_length >= 0x10000) {
+                    field_len = 9; // LONGBLOB: 8 字节数据 + 1 字节长度前缀
+                } else if (col_info.column_length >= 0x100) {
+                    field_len = 5; // BLOB: 4 字节数据 + 1 字节长度前缀
+                } else {
+                    field_len = col_info.column_length;
+                    
+                    // 边界检查
+                    if (rec_ptr + field_len > page_base_ + size_) {
+                        return nullptr;
+                    }
                 }
+            }
+            break;
+        case mysql_types::VAR_STRING:  // 253
+        case mysql_types::STRING:      // 254
+            // VAR_STRING 和 STRING 类型处理（固定长度字符串）
+            field_len = col_info.column_length;
+            
+            // 边界检查
+            if (rec_ptr + field_len > page_base_ + size_) {
+                return nullptr;
             }
             break;
         default:

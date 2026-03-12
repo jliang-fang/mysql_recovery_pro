@@ -75,22 +75,33 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         for (uint32_t j = 1; j < pair.first; ++j) {
             const auto& prev_col = schema.columns.at(j);
             
-            if (prev_col.mysql_type_id == 15) { // VARCHAR
-                uint8_t len = *data_ptr;
-                data_ptr += 1;
+            if (prev_col.mysql_type_id == mysql_types::VARCHAR) { // VARCHAR
+                bool use_two_byte_prefix = (prev_col.column_length > 255);
                 
-                if (len > 0 && data_ptr + len <= page_base_ + size_) {
-                    data_ptr += len;
+                if (use_two_byte_prefix) {
+                    uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
+                    data_ptr += 2;
+                    
+                    if (len > 0 && data_ptr + len <= page_base_ + size_) {
+                        data_ptr += len;
+                    }
+                } else {
+                    uint8_t len = *data_ptr;
+                    data_ptr += 1;
+                    
+                    if (len > 0 && data_ptr + len <= page_base_ + size_) {
+                        data_ptr += len;
+                    }
                 }
-            } else if (prev_col.mysql_type_id == 245) { // JSON
+            } else if (prev_col.mysql_type_id == mysql_types::JSON) { // JSON
                 uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
                 data_ptr += 2;
                 
                 if (len > 0 && data_ptr + len <= page_base_ + size_) {
                     data_ptr += len;
                 }
-            } else if (prev_col.mysql_type_id == 3 || prev_col.mysql_type_id == 8) { // LONG/LONGLONG
-                data_ptr += (prev_col.mysql_type_id == 8) ? 8 : 4;
+            } else if (prev_col.mysql_type_id == mysql_types::LONG || prev_col.mysql_type_id == mysql_types::LONGLONG) { // LONG/LONGLONG
+                data_ptr += (prev_col.mysql_type_id == mysql_types::LONGLONG) ? 8 : 4;
             } else {
                 // 其他类型暂不支持，跳过固定长度
                 data_ptr += 1; // 默认假设为 1 字节
@@ -100,16 +111,29 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         // 解析当前字段
         constexpr size_t MAX_PAGE_SIZE = 65536; // InnoDB 最大页大小 (64KB)
         
-        if (col.mysql_type_id == 15) { // VARCHAR
-            uint8_t len = *data_ptr;
-            data_ptr += 1;
+        if (col.mysql_type_id == mysql_types::VARCHAR) { // VARCHAR
+            bool use_two_byte_prefix = (col.column_length > 255);
             
-            if (len > 0 && data_ptr + len <= page_base_ + size_) {
-                fv.value = std::string(reinterpret_cast<const char*>(data_ptr), len);
+            if (use_two_byte_prefix) {
+                uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
+                data_ptr += 2;
+                
+                if (len > 0 && data_ptr + len <= page_base_ + size_) {
+                    fv.value = std::string(reinterpret_cast<const char*>(data_ptr), len);
+                } else {
+                    fv.value = "[TRUNCATED]";
+                }
             } else {
-                fv.value = "[TRUNCATED]";
+                uint8_t len = *data_ptr;
+                data_ptr += 1;
+                
+                if (len > 0 && data_ptr + len <= page_base_ + size_) {
+                    fv.value = std::string(reinterpret_cast<const char*>(data_ptr), len);
+                } else {
+                    fv.value = "[TRUNCATED]";
+                }
             }
-        } else if (col.mysql_type_id == 245) { // JSON
+        } else if (col.mysql_type_id == mysql_types::JSON) { // JSON
             uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
             data_ptr += 2;
             
@@ -118,14 +142,14 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             } else {
                 fv.value = "[TRUNCATED_JSON]";
             }
-        } else if (col.mysql_type_id == 3) { // LONG
+        } else if (col.mysql_type_id == mysql_types::LONG) { // LONG
             if (data_ptr + 4 <= page_base_ + size_) {
                 uint32_t val = MachRead::read_le<uint32_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == 8) { // LONGLONG
+        } else if (col.mysql_type_id == mysql_types::LONGLONG) { // LONGLONG
             if (data_ptr + 8 <= page_base_ + size_) {
                 uint64_t val = MachRead::read_le<uint64_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
@@ -147,7 +171,7 @@ FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_
     FieldValue fv;
     
     switch (type) {
-        case 3: { // MYSQL_TYPE_LONG
+        case mysql_types::LONG: { // 3
             if (length >= 4) {
                 uint32_t val = MachRead::read_le<uint32_t>(data, 0);
                 fv.value = std::to_string(val);
@@ -156,7 +180,7 @@ FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_
             }
             break;
         }
-        case 8: { // MYSQL_TYPE_LONGLONG
+        case mysql_types::LONGLONG: { // 8
             if (length >= 8) {
                 uint64_t val = MachRead::read_le<uint64_t>(data, 0);
                 fv.value = std::to_string(val);
@@ -165,7 +189,7 @@ FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_
             }
             break;
         }
-        case 15: { // MYSQL_TYPE_VARCHAR
+        case mysql_types::VARCHAR: { // 15
             if (length > 0) {
                 uint8_t len = *data;
                 if (len > 0 && length >= len + 1) {
@@ -178,7 +202,7 @@ FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_
             }
             break;
         }
-        case 245: { // MYSQL_TYPE_JSON
+        case mysql_types::JSON: { // 245
             if (length >= 2) {
                 uint16_t len = MachRead::read_le<uint16_t>(data, 0);
                 if (len > 0 && length >= len + 2) {
