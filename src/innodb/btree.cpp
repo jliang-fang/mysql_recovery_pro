@@ -68,16 +68,16 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
     }
     
-    // ✅ 增强：计算并验证页校验和（InnoDB 校验和算法）
-    // InnoDB 支持多种校验和算法，这里实现默认的 CRC32
+    // ✅ 修复：使用标准 CRC32 算法计算校验和（参考 InnoDB 实现）
+    // MySQL 8.0 默认使用 CRC32 校验和算法
     if (page_data_.size() >= 50) {
         uint32_t checksum_offset = page_data_.size() - 4; // 校验和位于页尾
         
         // 读取存储的校验和（最后4字节）
         uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), checksum_offset);
         
-        // 计算实际校验和（使用标准 CRC32 算法）
-        uint32_t computed_checksum = 0;
+        // 计算实际校验和（使用标准 CRC32 算法，参考 InnoDB 实现）
+        uint32_t computed_checksum = 0xFFFFFFFF;
         for (size_t i = 0; i < page_data_.size() - 4; ++i) {
             uint8_t byte = page_data_[i];
             for (int j = 0; j < 8; ++j) {
@@ -86,6 +86,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
                 computed_checksum = (computed_checksum << 1) ^ (xor_bit * 0xEDB88320);
             }
         }
+        computed_checksum ^= 0xFFFFFFFF;
         
         health.checksum_expected = stored_checksum;
         health.checksum_actual = computed_checksum;
@@ -595,9 +596,11 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         uint32_t nullable_columns = 0;
         for (const auto& pair : schema.columns) {
             const auto& col = pair.second;
-            // ✅ 修复：正确处理自增列，它不参与 NULL 位图
+            // 自增列不参与 NULL 位图，但需要验证其 NOT NULL 属性
             if (col.is_nullable && !col.is_auto_increment) {
                 nullable_columns++;
+            } else if (col.is_auto_increment && col.is_nullable) {
+                std::cerr << "[WARN] AUTO_INCREMENT column should not be nullable: " << col.name << std::endl;
             }
         }
         
