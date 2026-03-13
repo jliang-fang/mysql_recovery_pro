@@ -23,6 +23,8 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
         return *p;
     } else if constexpr (sizeof(T) == 2) {
         return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8);
+    } else if constexpr (sizeof(T) == 3) { // ✅ 新增：支持 uint24
+        return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8) | (static_cast<T>(p[2]) << 16);
     } else if constexpr (sizeof(T) == 4) {
         return static_cast<T>(p[0]) | (static_cast<T>(p[1]) << 8) |
                (static_cast<T>(p[2]) << 16) | (static_cast<T>(p[3]) << 24);

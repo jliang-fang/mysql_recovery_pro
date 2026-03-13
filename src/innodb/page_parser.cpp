@@ -178,7 +178,8 @@ std::vector<Record> PageParser::parse_records() const {
         visited_offsets.insert(rec_offset);
         
         uint8_t info_bits = *rec;
-        bool is_deleted = (info_bits & REC_INFO_DELETED_FLAG) != 0;
+        // ✅ 修复：REC_INFO_DELETED_FLAG 是 bit 3 (mask = 0x08)
+        bool is_deleted = (info_bits & 0x08) != 0;
 
         if (rec + 1 >= buffer_ + size_) break;
         uint16_t next_rec_offset = dbrecovery::innodb::read_le<uint16_t>(rec, 1);
@@ -206,9 +207,9 @@ std::vector<Record> PageParser::parse_records() const {
         rec_info.next_offset = next_rec_offset;
         rec_info.is_deleted = is_deleted;
 
-        // 解析字段数量（COMPACT格式）
+        // ✅ 修复：解析字段数量（COMPACT格式）
         if (rec + 5 <= buffer_ + size_) {
-            uint8_t n_fields_high = (info_bits & REC_INFO_BITS_MASK);
+            uint8_t n_fields_high = (info_bits & 0x07); // REC_INFO_BITS_MASK = 0x07
             uint8_t n_fields_low = (rec[1] >> 4) & 0x0F;
             rec_info.n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
         }
