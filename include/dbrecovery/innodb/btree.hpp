@@ -60,7 +60,55 @@ public:
      * @return std::vector<std::map<std::string, std::string>> 解析后的记录
      */
     std::vector<std::map<std::string, std::string>> parse_records(
-        const catalog::TableSchema& schema) const;
+        const catalog::TableSchema& schema) const {
+        std::vector<std::map<std::string, std::string>> records;
+        
+        if (!is_compact_format()) {
+            // 仅支持 COMPACT 格式
+            return records;
+        }
+        
+        // 解析每个用户记录
+        for (size_t i = 0; i < record_offsets_.size(); ++i) {
+            uint16_t offset = record_offsets_[i];
+            
+            // 跳过 INFIMUM 和 SUPREMUM 系统记录
+            if (offset == 0 || offset >= page_data_.size() - 5) {
+                continue;
+            }
+            
+            // 解析记录头
+            auto header = RecordHeader::parse(page_data_.data() + offset, 
+                                             static_cast<uint16_t>(page_data_.size() - offset));
+            if (!header) {
+                continue;
+            }
+            
+            // 跳过已删除的记录
+            if (header->is_deleted()) {
+                continue;
+            }
+            
+            // 解析字段数据
+            std::map<std::string, std::string> record;
+            size_t data_pos = offset + 5; // 跳过记录头
+            
+            for (const auto& pair : schema.columns) {
+                const auto& col = pair.second;
+                
+                if (data_pos >= page_data_.size()) {
+                    break;
+                }
+                
+                std::string value = parse_field_value(col, data_pos, false);
+                record[col.name] = value;
+            }
+            
+            records.push_back(record);
+        }
+        
+        return records;
+    }
     
     // ✅ 新增：格式校验方法
     bool is_compact_format() const {

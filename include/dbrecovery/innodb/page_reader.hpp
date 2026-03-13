@@ -55,7 +55,34 @@ public:
      * @param page_data 页数据（包含 FIL_HEADER）
      * @return true 校验通过
      */
-    static bool validate_checksum(const std::vector<uint8_t>& page_data);
+    static bool validate_checksum(const std::vector<uint8_t>& page_data) {
+        if (page_data.size() < 50) {
+            return false; // 页太小，无法校验
+        }
+        
+        // 读取存储的校验和（偏移 24-27）
+        uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
+        
+        if (stored_checksum == 0) {
+            // NONE 校验模式
+            return true;
+        }
+        
+        // 计算当前校验和
+        uint32_t computed_checksum = compute_crc32c(page_data);
+        
+        // 比较校验和（忽略页头中的校验和字段）
+        std::vector<uint8_t> page_copy = page_data;
+        // 临时清零校验和字段以便计算
+        for (int i = 0; i < 4; ++i) {
+            page_copy[24 + i] = 0;
+        }
+        
+        uint32_t computed_without_checksum = compute_crc32c(page_copy);
+        
+        // MySQL 8.0 使用多种校验算法，需要检查不同算法的结果
+        return (computed_without_checksum == stored_checksum);
+    }
 
     /**
      * @brief 计算页的 CRC32C 校验和
@@ -63,7 +90,27 @@ public:
      * @param page_data 页数据（包含 FIL_HEADER）
      * @return uint32_t CRC32C 值
      */
-    static uint32_t compute_crc32c(const std::vector<uint8_t>& page_data);
+    static uint32_t compute_crc32c(const std::vector<uint8_t>& page_data) {
+        // 使用 zlib 的 crc32c 实现
+        // 这里提供一个简化的实现，实际应使用硬件加速的 crc32c
+        
+        uint32_t crc = 0xFFFFFFFF;
+        
+        for (size_t i = 0; i < page_data.size(); ++i) {
+            uint8_t byte = page_data[i];
+            crc ^= byte;
+            
+            for (int j = 0; j < 8; ++j) {
+                if (crc & 1) {
+                    crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        
+        return ~crc;
+    }
 
 private:
     int fd_;
