@@ -1,4 +1,66 @@
 #include "dbrecovery/innodb/page_reader.hpp"
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cstring>
+
+#ifdef _WIN32
+#  include <windows.h>
+#else
+#  include <sys/mman.h>
+#endif
+
+namespace dbrecovery {
+namespace innodb {
+
+PageReader::PageReader(const std::string& file_path)
+    : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0), is_valid_(false) {
+    
+    utils::FileMapper mapper(file_path);
+    if (!mapper.is_valid()) {
+        return;
+    }
+    
+    file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
+    file_size_ = mapper.size();
+    page_size_ = 16384; // 默认页大小
+    total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
+    
+    if (total_pages_ == 0) {
+        return;
+    }
+    
+    is_valid_ = true;
+}
+
+PageReader::~PageReader() {
+    file_data_.reset();
+}
+
+std::vector<uint8_t> PageReader::read_page(uint32_t page_no) {
+    if (!is_valid_ || page_no >= total_pages_) {
+        return {};
+    }
+    
+    size_t offset = static_cast<size_t>(page_no) * page_size_;
+    if (offset + page_size_ > file_data_->size()) {
+        return {};
+    }
+    
+    std::vector<uint8_t> page_data(page_size_);
+    std::memcpy(page_data.data(), file_data_->data() + offset, page_size_);
+    
+    // 校验页校验和
+    if (!validate_checksum(page_data)) {
+        // 可以选择记录警告或返回空
+        // std::cerr << "[WARN] Page " << page_no << " checksum mismatch" << std::endl;
+    }
+    
+    return page_data;
+}
+
+} // namespace innodb
+} // namespace dbrecovery
 #include "dbrecovery/utils/file_mapper.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include <fcntl.h>
