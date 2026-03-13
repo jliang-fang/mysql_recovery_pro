@@ -68,25 +68,16 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
     }
     
-    // ✅ 修复：使用标准 CRC32 算法计算校验和（参考 InnoDB 实现）
-    // MySQL 8.0 默认使用 CRC32 校验和算法
+    // ✅ 修复：使用标准 CRC32C 算法计算校验和（参考 InnoDB 实现）
+    // MySQL 8.0 默认使用 CRC32C 校验和算法
     if (page_data_.size() >= 50) {
         uint32_t checksum_offset = page_data_.size() - 4; // 校验和位于页尾
         
         // 读取存储的校验和（最后4字节）
         uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), checksum_offset);
         
-        // 计算实际校验和（使用标准 CRC32 算法，参考 InnoDB 实现）
-        uint32_t computed_checksum = 0xFFFFFFFF;
-        for (size_t i = 0; i < page_data_.size() - 4; ++i) {
-            uint8_t byte = page_data_[i];
-            for (int j = 0; j < 8; ++j) {
-                bool bit = (byte >> j) & 1;
-                bool xor_bit = (computed_checksum >> 31) & 1;
-                computed_checksum = (computed_checksum << 1) ^ (xor_bit * 0xEDB88320);
-            }
-        }
-        computed_checksum ^= 0xFFFFFFFF;
+        // 计算实际校验和（使用标准 CRC32C 算法，参考 InnoDB 实现）
+        uint32_t computed_checksum = PageReader::compute_crc32c(page_data_);
         
         health.checksum_expected = stored_checksum;
         health.checksum_actual = computed_checksum;
@@ -170,7 +161,7 @@ bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38);
-    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42);
+    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42) & 0x7FFF; // 修正：只取低15位
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 46);
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 50);
     
@@ -522,13 +513,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // [3]: heap_no_0 (bits 0-7 of heap_no)
         // [4]: heap_no_1 (bits 8-13 of heap_no, only 6 bits used)
         
-        // 解析 next_record_offset: little-endian 格式，[1] 是低字节，[2] 是高字节
+        // 解析 next_record_offset: little-endian 格式，[2] 是高字节，[1] 是低字节
         uint16_t next_rec_offset = static_cast<uint16_t>(
             (static_cast<uint16_t>(page_data_[offset + 2]) << 8) | 
              static_cast<uint16_t>(page_data_[offset + 1])
         );
         
-        // 解析 heap_no: [3] 是低字节，[4] 的低6位是高6位
+        // 解析 heap_no: [4] 的低6位是高6位，[3] 是低字节
         uint16_t heap_no = static_cast<uint16_t>(
             (static_cast<uint16_t>(page_data_[offset + 4] & 0x3F) << 8) | 
              static_cast<uint16_t>(page_data_[offset + 3])
@@ -562,6 +553,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         // ✅ 新增：记录边界检查
         if (offset + 5 > page_data_.size()) {
             std::cerr << "[WARN] Record header exceeds page at offset " << offset << std::endl;
+            continue;
+        }
+        
+        // ✅ 修复：验证 next_rec_offset 的有效性（必须大于当前偏移）
+        if (next_rec_offset <= offset) {
+            std::cerr << "[WARN] Invalid next record offset: " << next_rec_offset 
+                      << " at offset " << offset << ", skipping record\n";
             continue;
         }
             
@@ -627,6 +625,13 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         }
         
         header_size += null_bytes;
+        
+        // ✅ 新增：验证记录头大小合理性（COMPACT 格式通常为 5 + var_len_size + null_bytes）
+        if (header_size < 5 || header_size > 128) {
+            std::cerr << "[WARN] Unreasonable header size: " << static_cast<int>(header_size) 
+                      << " at offset " << offset << ", skipping record\n";
+            continue;
+        }
             
         // ✅ 增强边界检查
         if (offset + header_size > page_data_.size()) {
@@ -753,12 +758,12 @@ bool BPlusTreeReconstructor::traverse_tree(uint32_t page_no, const catalog::Tabl
         for (size_t i = 2; i < record_offsets.size(); ++i) {
             uint16_t offset = record_offsets[i];
             
-            if (offset + 5 > it->second.size()) {
+            if (offset + 9 > it->second.size()) { // 内部节点需要至少 9 字节（5字节头 + 4字节子页号）
                 continue;
             }
             
-            // 内部节点记录格式：[5-8字节] 子页号（偏移 offset+4）
-            uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 4);
+            // ✅ 修复：内部节点记录格式：[5-8字节] 子页号（偏移 offset+5，不是 offset+4）
+            uint32_t child_page_no = dbrecovery::innodb::read_le<uint32_t>(it->second.data(), offset + 5);
             
             if (child_page_no != 0xFFFFFFFF && child_page_no < 0xFFFFFFF0) {
                 traverse_tree(child_page_no, schema);
