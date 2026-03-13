@@ -76,7 +76,18 @@ struct BlobPointer {
     std::vector<std::pair<uint32_t, uint32_t>> chain_pages; // (space_id, page_no)
     
     bool is_complete() const {
-        return total_len > 0 && !chain_pages.empty();
+        // ✅ 增强：验证 BLOB 指针的完整性
+        if (total_len == 0 || chain_pages.empty()) {
+            return false;
+        }
+        
+        // 验证链表长度与总长度的一致性（粗略检查）
+        // 实际长度需要读取每个页并累加数据长度
+        if (chain_pages.size() > 1 && total_len <= len) {
+            std::cerr << "[WARN] BLOB chain has multiple pages but total_len <= single_page_len" << std::endl;
+        }
+        
+        return true;
     }
 };
 

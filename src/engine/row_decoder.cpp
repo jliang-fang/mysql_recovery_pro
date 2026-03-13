@@ -174,16 +174,16 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 }
             } else if (prev_col.mysql_type_id == mysql_types::DATETIME2 || 
                        prev_col.mysql_type_id == mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
-                // 根据精度计算大小
+                // 根据精度计算大小（参考 MySQL 8.0 源码 sql/field.cc）
                 int precision = prev_col.datetime_precision;
                 if (precision < 0) precision = 6; // 默认精度
                 
                 uint32_t size = 5; // 基础部分总是5字节
                 if (precision <= 2) {
-                    size += 3; // 小数部分3字节
+                    size += 1; // 小数部分1字节
                 } else if (precision <= 4) {
-                    size += 3; // 小数部分3字节
-                } else {
+                    size += 2; // 小数部分2字节
+                } else { // precision >= 5
                     size += 3; // 小数部分3字节
                 }
                 

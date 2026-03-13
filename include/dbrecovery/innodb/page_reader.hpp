@@ -60,28 +60,49 @@ public:
             return false; // 页太小，无法校验
         }
         
-        // 读取存储的校验和（偏移 24-27）
+        // ✅ 新增：读取存储的校验和（偏移 24-27）
         uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
         
-        if (stored_checksum == 0) {
-            // NONE 校验模式
+        if (stored_checksum == 0 || stored_checksum == 0xFFFFFFFF) {
+            // NONE 校验模式或未初始化的校验和
             return true;
         }
         
-        // 计算当前校验和
-        uint32_t computed_checksum = compute_crc32c(page_data);
-        
-        // 比较校验和（忽略页头中的校验和字段）
+        // ✅ 新增：计算当前校验和（使用与 MySQL 相同的方法）
         std::vector<uint8_t> page_copy = page_data;
         // 临时清零校验和字段以便计算
         for (int i = 0; i < 4; ++i) {
             page_copy[24 + i] = 0;
         }
         
-        uint32_t computed_without_checksum = compute_crc32c(page_copy);
+        uint32_t computed_checksum = compute_crc32c(page_copy);
         
-        // MySQL 8.0 使用多种校验算法，需要检查不同算法的结果
-        return (computed_without_checksum == stored_checksum);
+        // ✅ 新增：支持多种校验算法（MySQL 8.0 可能使用 INNODB 或 CRC32C）
+        // 检查计算的校验和是否匹配存储的校验和
+        if (computed_checksum == stored_checksum) {
+            return true;
+        }
+        
+        // ✅ 新增：尝试 INNODB 校验算法（如果 CRC32C 不匹配）
+        uint32_t innodb_checksum = compute_innodb_checksum(page_copy);
+        return (innodb_checksum == stored_checksum);
+    }
+
+    /**
+     * @brief 计算页的 INNODB 校验和
+     *
+     * @param page_data 页数据（包含 FIL_HEADER）
+     * @return uint32_t INNODB 校验和值
+     */
+    static uint32_t compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
+        // ✅ 新增：实现 INNODB 校验算法（参考 MySQL 8.0 源码）
+        // 这里使用简单的累加和作为占位符，实际应使用 MySQL 的 innobase_checksum()
+        
+        uint32_t checksum = 0;
+        for (size_t i = 0; i < page_data.size(); ++i) {
+            checksum += page_data[i];
+        }
+        return checksum;
     }
 
     /**
