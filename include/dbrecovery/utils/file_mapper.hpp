@@ -92,6 +92,11 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         
 #ifdef _WIN32
         handle_ = other.handle_;
+#else
+        if (data_ == MAP_FAILED) {
+            data_ = nullptr;
+            is_valid_ = false;
+        }
 #endif
         
         // 清空源对象
@@ -101,6 +106,8 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         other.is_valid_ = false;
 #ifdef _WIN32
         other.handle_ = INVALID_HANDLE_VALUE;
+#else
+        other.data_ = MAP_FAILED; // 确保其他文件描述符的正确清理
 #endif
     }
     

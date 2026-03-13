@@ -246,6 +246,7 @@ struct TableSchema {
 
 // MySQL 8.0 类型常量（参考 include/mysql/mysql_type.h）
 namespace mysql_types {
+    // 数值类型
     constexpr uint8_t DECIMAL     = 0;
     constexpr uint8_t TINY        = 1;
     constexpr uint8_t SHORT       = 2;
@@ -256,27 +257,50 @@ namespace mysql_types {
     constexpr uint8_t TIMESTAMP   = 7;
     constexpr uint8_t LONGLONG    = 8;
     constexpr uint8_t INT24       = 9;
+    
+    // 日期时间类型
     constexpr uint8_t DATE        = 10;
     constexpr uint8_t TIME        = 11;
     constexpr uint8_t DATETIME    = 12;
     constexpr uint8_t YEAR        = 13;
     constexpr uint8_t NEWDATE     = 14;
+    
+    // 字符串类型
     constexpr uint8_t VARCHAR     = 15;
     constexpr uint8_t BIT         = 16;
     constexpr uint8_t TIMESTAMP2  = 17;
     constexpr uint8_t DATETIME2   = 18;
     constexpr uint8_t TIME2       = 19;
+    
+    // JSON 和新类型
     constexpr uint8_t JSON        = 245;
     constexpr uint8_t NEWDECIMAL  = 246;
     constexpr uint8_t ENUM        = 247;
     constexpr uint8_t SET         = 248;
     constexpr uint8_t TINY_BLOB   = 249;
-    constexpr uint8_t MEDIUM_BLOB  = 250;
-    constexpr uint8_t LONG_BLOB    = 251;
-    constexpr uint8_t BLOB         = 252;
-    constexpr uint8_t VAR_STRING   = 253;
-    constexpr uint8_t STRING       = 254;
-    constexpr uint8_t GEOMETRY     = 255;
+    constexpr uint8_t MEDIUM_BLOB = 250;
+    constexpr uint8_t LONG_BLOB   = 251;
+    constexpr uint8_t BLOB        = 252;
+    constexpr uint8_t VAR_STRING  = 253;
+    constexpr uint8_t STRING      = 254;
+    constexpr uint8_t GEOMETRY    = 255;
+
+    // 辅助函数：判断是否为 BLOB 类型
+    inline bool is_blob_type(uint8_t type_id) {
+        return (type_id >= TINY_BLOB && type_id <= GEOMETRY);
+    }
+
+    // 辅助函数：判断是否为日期时间类型
+    inline bool is_datetime_type(uint8_t type_id) {
+        return (type_id == DATE || type_id == DATETIME || type_id == TIMESTAMP ||
+                type_id == TIME || type_id == YEAR ||
+                type_id == NEWDATE || type_id == DATETIME2 || type_id == TIMESTAMP2 || type_id == TIME2);
+    }
+
+    // 辅助函数：判断是否为数值类型
+    inline bool is_numeric_type(uint8_t type_id) {
+        return (type_id <= DOUBLE || type_id == NEWDECIMAL);
+    }
 }
 
 // 行格式常量
