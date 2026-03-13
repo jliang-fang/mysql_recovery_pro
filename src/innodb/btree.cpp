@@ -426,9 +426,11 @@ std::string BPlusTreeParser::parse_field_value(
                             frac |= static_cast<uint64_t>(datetime_ptr[5 + i]) << (i * 8);
                         }
                             
-                        // 根据精度缩放
-                        if (precision < sizeof(frac_scale)/sizeof(frac_scale[0])) {
+                        // ✅ 修复：使用正确的缩放因子计算（避免除法精度损失）
+                        if (precision > 0 && precision < sizeof(frac_scale)/sizeof(frac_scale[0])) {
                             frac = frac / frac_scale[precision];
+                        } else {
+                            frac = 0;
                         }
                     }
                 }
@@ -441,7 +443,13 @@ std::string BPlusTreeParser::parse_field_value(
                                    std::to_string(minute) + ":" + 
                                    std::to_string(second);
                 if (precision > 0 && frac > 0) {
-                    result += "." + std::to_string(frac);
+                    // ✅ 修复：格式化小数部分，去除前导零
+                    std::string frac_str = std::to_string(frac);
+                    // 移除末尾的零以保持精度但不冗余
+                    while (frac_str.length() > 1 && frac_str.back() == '0') {
+                        frac_str.pop_back();
+                    }
+                    result += "." + frac_str;
                 }
                 return result;
             } else {

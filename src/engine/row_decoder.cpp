@@ -48,10 +48,13 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         // 检查 NULL
         if (col.is_nullable && null_bytes_ > 0) {
             uint32_t col_idx = 0;
-            for (uint32_t j = 1; j < pair.first; ++j) {
-                const auto& prev_col = schema.columns.at(j);
-                // 只计算可空列的索引
+            for (const auto& prev_pair : schema.columns) {
+                const auto& prev_col = prev_pair.second;
+                // 只计算可空列的索引（按列定义顺序）
                 if (prev_col.is_nullable && !prev_col.is_off_page && prev_col.virtual_gen_store_type == 0) {
+                    if (prev_pair.first == pair.first) {
+                        break; // 找到当前列，停止计数
+                    }
                     col_idx++;
                 }
             }
