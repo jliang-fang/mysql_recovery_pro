@@ -223,7 +223,7 @@ std::vector<Record> PageParser::parse_records() const {
         }
         
         // ✅ 防止偏移溢出
-        if (rec + next_rec_offset < rec) {
+        if (rec + next_rec_offset < rec || rec + next_rec_offset >= buffer_ + size_) {
             std::cerr << "[ERROR] Record pointer overflow at offset " << rec_offset << "\n";
             break;
         }
