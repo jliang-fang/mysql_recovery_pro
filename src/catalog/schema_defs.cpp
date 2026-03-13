@@ -668,3 +668,64 @@ bool TableSchema::from_json(const nlohmann::json& j) {
 
 } // namespace catalog
 } // namespace dbrecovery
+#include "dbrecovery/catalog/schema_defs.hpp"
+#include <sstream>
+#include <iomanip>
+
+namespace dbrecovery {
+namespace catalog {
+
+void TableSchema::debug_print() const {
+    std::cout << "Table: " << table_name << std::endl;
+    std::cout << "Row Format: " << row_format << ", Page Size: " << page_size << std::endl;
+    std::cout << "Columns:" << std::endl;
+    
+    for (const auto& pair : columns) {
+        const auto& col = pair.second;
+        std::cout << "  [" << pair.first << "] " << col.name 
+                  << " (type=" << static_cast<int>(col.mysql_type_id)
+                  << ", nullable=" << col.is_nullable
+                  << ", length=" << col.column_length << ")" << std::endl;
+    }
+    
+    std::cout << "Indexes: " << indexes.size() << std::endl;
+    for (const auto& index : indexes) {
+        std::cout << "  " << index.name << ": ";
+        for (size_t i = 0; i < index.columns.size(); ++i) {
+            if (i > 0) std::cout << ", ";
+            std::cout << index.columns[i];
+        }
+        std::cout << std::endl;
+    }
+}
+
+std::string TableSchema::to_json_string() const {
+    // 简化实现，实际应使用 nlohmann/json
+    std::ostringstream oss;
+    oss << "{"
+        << "\"table_name\": \"" << table_name << "\", "
+        << "\"row_format\": " << row_format << ", "
+        << "\"page_size\": " << page_size << ", "
+        << "\"columns\": {}, "
+        << "\"indexes\": []"
+        << "}";
+    return oss.str();
+}
+
+bool TableSchema::from_json_string(const std::string& json_str) {
+    // 简化实现，实际应解析 JSON
+    return false;
+}
+
+bool TableSchema::from_json(const class json& j) {
+    // 简化实现
+    return false;
+}
+
+json TableSchema::to_json() const {
+    // 简化实现
+    return json{};
+}
+
+} // namespace catalog
+} // namespace dbrecovery

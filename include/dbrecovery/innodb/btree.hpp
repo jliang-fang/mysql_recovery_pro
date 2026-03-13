@@ -64,7 +64,7 @@ public:
     
     // ✅ 新增：格式校验方法
     bool is_compact_format() const {
-        return (flags_ & 0x80) == 0; // COMPACT 格式标志位为 0
+        return (btr_format_ & 0x80) == 0; // COMPACT 格式标志位为 0
     }
     
     // ✅ 新增：页健康状态检查
@@ -95,7 +95,7 @@ private:
     uint32_t prev_page_ = 0xFFFFFFFF;
     uint16_t n_records_ = 0;
     std::vector<uint16_t> record_offsets_;
-    uint8_t flags_ = 0;  // 记录头标志位
+    uint8_t btr_format_ = 0;  // B+树记录格式标志位 (BTR_FORMAT_MASK)
     
     bool parse_header() noexcept;
     bool parse_infimum_supremum() noexcept;
