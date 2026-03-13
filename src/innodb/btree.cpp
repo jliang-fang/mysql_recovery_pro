@@ -359,11 +359,11 @@ bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     
-    // 解析 FIL Header 中的 flags (offset 24)
-    if (page_data_.size() < 26) {
+    // 解析 FIL Header 中的 flags (offset 38 + 24 = 62)
+    if (page_data_.size() < 64) {
         return false;
     }
-    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 24);
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 24);
     
     // 解析 B+Tree Header (38 bytes into page)
     if (page_data_.size() < 54) { // 需要至少 54 字节（38 + 16）
@@ -865,6 +865,12 @@ BPlusTreeParser::parse_records(const catalog::TableSchema& schema) const {
         if (null_ptr == nullptr || null_ptr < page_data_.data() || 
             null_ptr >= page_data_.data() + page_data_.size()) {
             std::cerr << "[ERROR] Invalid null bitmap pointer at offset " << offset << std::endl;
+            continue;
+        }
+        
+        // ✅ 新增：验证 NULL 位图在记录头范围内
+        if (null_ptr + null_bytes > page_data_.data() + offset + header_size) {
+            std::cerr << "[ERROR] Null bitmap extends beyond record header at offset " << offset << std::endl;
             continue;
         }
             
