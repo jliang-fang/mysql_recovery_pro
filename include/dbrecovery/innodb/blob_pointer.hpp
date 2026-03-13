@@ -194,21 +194,13 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
-        // 检查是否跨表空间（MySQL 8.0 支持）
-        // BLOB 页头格式：[0-3]: next_bpage (space_id << 16 | page_no)
-        if (next_bpage != 0xFFFFFFFF && next_bpage != 0) {
-            // ✅ 修复：正确解析跨表空间 BLOB 页号
-            // MySQL 8.0 中，next_bpage 的高16位是 space_id，低16位是 page_no
-            current_space_id = (next_bpage >> 16) & 0xFFFF;
-            current_page_no = next_bpage & 0xFFFF;
-            
-            // 如果解析出的 space_id 为 0，保持原值（防止错误覆盖）
-            if (current_space_id == 0) {
-                current_space_id = first_space_id;
-            }
-        } else {
+        // BLOB 页链在同一表空间内连续
+        // next_bpage 是下一页的页号（同一 space_id）
+        if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
             break; // 链表结束
         }
+        
+        current_page_no = next_bpage;
     }
     
     if (chain.pages.empty()) {

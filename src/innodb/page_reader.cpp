@@ -79,9 +79,10 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
         return true; // 允许 NONE 校验和
     }
     
-    uint32_t new_csum = compute_crc32c(page_data);
+    // MySQL 8.0 默认使用 CRC32C (Castagnoli) 算法
+    uint32_t computed_csum = compute_crc32c(page_data);
 
-    return stored_csum == new_csum;
+    return stored_csum == computed_csum;
 }
 
 uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
