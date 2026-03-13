@@ -44,10 +44,9 @@ private:
 
 // ==================== 移动语义实现（必须在类外，但需要访问私有成员）====================
 inline FileMapper::FileMapper(FileMapper&& other) noexcept 
-#ifdef _WIN32
-    : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_), handle_(other.handle_)
-#else
     : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
+#ifdef _WIN32
+      , handle_(other.handle_)
 #endif
 {
     // 转移所有权：清空源对象
