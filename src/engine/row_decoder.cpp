@@ -344,27 +344,21 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 uint8_t byte3 = data_ptr[3];
                 uint8_t byte4 = data_ptr[4];
                 
-                uint8_t year = (byte0 & 0x7F);
-                uint8_t month = ((byte0 >> 7) & 0x0F) | ((byte1 << 1) & 0x07);
-                uint8_t day = (byte1 >> 2) & 0x1F;
+                // ✅ 修复：正确的 DATETIME 解析逻辑（参考 MySQL 8.0 源码）
+                uint16_t year = ((byte0 & 0x7F) << 9) | ((byte1 & 0xE0) << 3) | (byte1 >> 5);
+                uint8_t month = ((byte1 & 0x1C) >> 2) | ((byte2 & 0x80) >> 7);
+                uint8_t day = (byte2 & 0x7C) >> 2;
                 
-                uint8_t hour = byte2 & 0x1F;
-                uint8_t minute = ((byte2 >> 5) & 0x03) | ((byte3 << 2) & 0x3F);
-                uint8_t second = (byte3 >> 6) & 0x03 | (byte4 << 2);
+                uint8_t hour = ((byte2 & 0x03) << 4) | ((byte3 & 0xF0) >> 4);
+                uint8_t minute = ((byte3 & 0x0F) << 2) | ((byte4 & 0xC0) >> 6);
+                uint8_t second = (byte4 & 0x3F);
                 
-                fv.value = std::to_string(year + 1900) + "-" + 
+                fv.value = std::to_string(year) + "-" + 
                           std::to_string(month) + "-" + 
                           std::to_string(day) + " " +
                           std::to_string(hour) + ":" + 
                           std::to_string(minute) + ":" + 
                           std::to_string(second);
-            } else {
-                fv.value = "[TRUNCATED]";
-            }
-        } else if (col.mysql_type_id == mysql_types::LONGLONG) { // LONGLONG
-            if (data_ptr + 8 <= page_base_ + size_) {
-                uint64_t val = MachRead::read_le<uint64_t>(data_ptr, 0);
-                fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }

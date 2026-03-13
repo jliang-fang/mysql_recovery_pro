@@ -191,7 +191,7 @@ std::optional<uint32_t> TableSchema::get_column_offset(const std::string& col_na
 uint32_t TableSchema::get_nullable_column_count() const {
     uint32_t count = 0;
     for (const auto& [pos, col] : columns) {
-        if (col.is_nullable && !col.is_auto_increment) {
+        if (col.is_nullable) {
             count++;
         }
     }
