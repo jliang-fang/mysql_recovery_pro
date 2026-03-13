@@ -37,6 +37,14 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                     return nullptr;
                 }
                 uint16_t len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
+                
+                // ✅ 新增：验证长度前缀的有效性
+                if (len > col_info.column_length) {
+                    std::cerr << "[WARN] VARCHAR length " << len 
+                              << " exceeds column max length " << col_info.column_length << std::endl;
+                    return nullptr;
+                }
+                
                 field_len = 2 + len;
                 
                 // 边界检查
@@ -48,6 +56,14 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                     return nullptr;
                 }
                 uint8_t len = rec_ptr[0];
+                
+                // ✅ 新增：验证长度前缀的有效性
+                if (len > col_info.column_length) {
+                    std::cerr << "[WARN] VARCHAR length " << (int)len 
+                              << " exceeds column max length " << col_info.column_length << std::endl;
+                    return nullptr;
+                }
+                
                 field_len = 1 + len;
                 
                 // 边界检查

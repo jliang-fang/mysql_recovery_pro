@@ -19,17 +19,47 @@ void BinaryReader::parse_table_name(const std::string& json_str, catalog::TableS
     } catch (const nlohmann::json::parse_error& e) {
         std::cerr << "[WARN] Failed to parse JSON for table name: " << e.what() << "\n";
         
-        // 降级方案：查找 "name" 字段
+        // ✅ 增强：使用更健壮的字符串解析方法
         size_t name_pos = json_str.find("\"name\"");
         if (name_pos != std::string::npos) {
+            // 跳过键名和冒号
             size_t colon_pos = json_str.find(':', name_pos);
             if (colon_pos != std::string::npos) {
-                // 跳过冒号和可能的空格
+                // 跳过空格、制表符等空白字符
                 size_t start = json_str.find_first_not_of(" \t\n\r", colon_pos + 1);
                 if (start != std::string::npos && json_str[start] == '"') {
-                    size_t end = json_str.find('"', start + 1);
-                    if (end != std::string::npos) {
+                    // 找到字符串结束位置（处理转义字符）
+                    size_t end = start + 1;
+                    while (end < json_str.length()) {
+                        if (json_str[end] == '\\' && end + 1 < json_str.length()) {
+                            end += 2; // 跳过转义字符
+                        } else if (json_str[end] == '"') {
+                            break;
+                        } else {
+                            end++;
+                        }
+                    }
+                    
+                    if (end < json_str.length()) {
                         schema.table_name = json_str.substr(start + 1, end - start - 1);
+                        // 处理转义字符
+                        std::string unescaped;
+                        for (size_t i = 0; i < schema.table_name.length(); ++i) {
+                            if (schema.table_name[i] == '\\' && i + 1 < schema.table_name.length()) {
+                                ++i;
+                                switch (schema.table_name[i]) {
+                                    case 'n': unescaped += '\n'; break;
+                                    case 't': unescaped += '\t'; break;
+                                    case 'r': unescaped += '\r'; break;
+                                    case '"': unescaped += '"'; break;
+                                    case '\\': unescaped += '\\'; break;
+                                    default: unescaped += schema.table_name[i]; break;
+                                }
+                            } else {
+                                unescaped += schema.table_name[i];
+                            }
+                        }
+                        schema.table_name = std::move(unescaped);
                     }
                 }
             }

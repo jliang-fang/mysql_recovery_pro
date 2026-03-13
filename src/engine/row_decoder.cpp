@@ -62,8 +62,15 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint32_t byte_idx = col_idx / 8;
             uint32_t bit_idx = col_idx % 8;
             
+            // ✅ 新增：边界检查确保不会越界访问
+            if (byte_idx >= null_bytes_) {
+                std::cerr << "[WARN] NULL bitmap index out of range: " << byte_idx 
+                          << " >= " << null_bytes_ << std::endl;
+                return fields; // 跳过此字段
+            }
+            
             // ✅ 使用统一的NULL位图解析逻辑（小端序：低位在前）
-            if (byte_idx < null_bytes_ && null_ptr != nullptr) {
+            if (null_ptr != nullptr && null_ptr + byte_idx < page_base_ + size_) {
                 bool is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
                 if (is_null) {
                     fv.value = "NULL";
