@@ -20,65 +20,6 @@ PageReader::PageReader(const std::string& file_path)
     if (!mapper.is_valid()) {
         return;
     }
-    
-    file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
-    file_size_ = mapper.size();
-    page_size_ = 16384; // 默认页大小
-    total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
-    
-    if (total_pages_ == 0) {
-        return;
-    }
-    
-    is_valid_ = true;
-}
-
-PageReader::~PageReader() {
-    file_data_.reset();
-}
-
-std::vector<uint8_t> PageReader::read_page(uint32_t page_no) {
-    if (!is_valid_ || page_no >= total_pages_) {
-        return {};
-    }
-    
-    size_t offset = static_cast<size_t>(page_no) * page_size_;
-    if (offset + page_size_ > file_data_->size()) {
-        return {};
-    }
-    
-    std::vector<uint8_t> page_data(page_size_);
-    std::memcpy(page_data.data(), file_data_->data() + offset, page_size_);
-    
-    // 校验页校验和
-    if (!validate_checksum(page_data)) {
-        // 可以选择记录警告或返回空
-        // std::cerr << "[WARN] Page " << page_no << " checksum mismatch" << std::endl;
-    }
-    
-    return page_data;
-}
-
-} // namespace innodb
-} // namespace dbrecovery
-#include "dbrecovery/utils/file_mapper.hpp"
-#include "dbrecovery/innodb/mach_read.hpp"
-#include <fcntl.h>
-#include <unistd.h>
-#include <sys/stat.h>
-#include <cstring>
-#include <stdexcept>
-
-namespace dbrecovery {
-namespace innodb {
-
-PageReader::PageReader(const std::string& file_path)
-    : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0), is_valid_(false) {
-    
-    utils::FileMapper mapper(file_path);
-    if (!mapper.is_valid()) {
-        return;
-    }
 
     file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
     file_size_ = file_data_->size();
@@ -168,7 +109,18 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
     // MySQL 8.0 默认使用 CRC32C (Castagnoli) 算法
     uint32_t computed_csum = compute_crc32c(page_data);
 
-    return stored_csum == computed_csum;
+    // ✅ 新增：支持 INNODB 校验和（旧版本兼容）
+    if (stored_csum == computed_csum) {
+        return true;
+    }
+    
+    // 尝试 CRC32 (ISO/Hermann) 作为备选
+    uint32_t computed_crc32 = compute_crc32(page_data);
+    if (stored_csum == computed_crc32) {
+        return true;
+    }
+    
+    return false;
 }
 
 uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
@@ -237,37 +189,6 @@ uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {
     }
     
     return ~crc;
-}
-
-// ✅ 新增：支持更多校验和类型
-bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
-    if (page_data.size() < 40) return false;
-
-    // InnoDB 校验和位于 FIL_PAGE_CHECKSUM (偏移 24-27)
-    uint32_t stored_csum = dbrecovery::innodb::read_le<uint32_t>(
-        page_data.data(), 24
-    );
-    
-    // 如果校验和为 0 或 0xFFFFFFFF，可能表示未启用校验或使用其他算法
-    if (stored_csum == 0 || stored_csum == 0xFFFFFFFF) {
-        return true; // 允许 NONE 校验和
-    }
-    
-    // MySQL 8.0 默认使用 CRC32C (Castagnoli) 算法
-    uint32_t computed_csum = compute_crc32c(page_data);
-
-    // ✅ 新增：支持 INNODB 校验和（旧版本兼容）
-    if (stored_csum == computed_csum) {
-        return true;
-    }
-    
-    // 尝试 CRC32 (ISO/Hermann) 作为备选
-    uint32_t computed_crc32 = compute_crc32(page_data);
-    if (stored_csum == computed_crc32) {
-        return true;
-    }
-    
-    return false;
 }
 
 } // namespace innodb

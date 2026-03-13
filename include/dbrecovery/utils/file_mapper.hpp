@@ -106,7 +106,7 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
 #ifdef _WIN32
         other.handle_ = INVALID_HANDLE_VALUE;
 #else
-        other.data_ = MAP_FAILED; // 确保其他文件描述符的正确清理
+        other.data_ = static_cast<uint8_t*>(MAP_FAILED); // 确保其他文件描述符的正确清理
 #endif
     }
     
