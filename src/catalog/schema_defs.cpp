@@ -432,8 +432,8 @@ bool TableSchema::from_json(const nlohmann::json& j) {
     return true;
 }
 
-    return true;
-}
+} // namespace catalog
+} // namespace dbrecovery
 
 } // namespace catalog
 } // namespace dbrecovery

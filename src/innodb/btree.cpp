@@ -105,6 +105,97 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     return health;
 }
 
+// ✅ 新增：页健康状态检查
+BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
+    PageHealth health;
+    
+    // 检查页大小
+    if (page_data_.size() < 38) {
+        health.is_valid = false;
+        health.status_message = "Page too small";
+        return health;
+    }
+    
+    // ✅ 修复：正确读取4字节页类型（FIL_PAGE_TYPE 在偏移12处，但实际是2字节值）
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 12);
+    
+    bool is_valid_page_type = false;
+    std::string unsupported_message;
+    
+    if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX) {
+        is_valid_page_type = true;
+    } else if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
+        // ✅ 修复：SDI页支持元数据解析，但不支持记录解析
+        unsupported_message = "SDI page type not supported for record parsing";
+        is_valid_page_type = true; // SDI页本身是有效的
+    } else if (page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+        is_valid_page_type = true;
+    } else if (page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+        unsupported_message = "Undo log page type not supported for record parsing";
+    } else {
+        health.status_message = "Unsupported page type: " + std::to_string(page_type);
+    }
+    
+    // 检查页头信息
+    // PAGE_N_HEAP 在偏移 42（BTR_N_LEVELS + 4），PAGE_N_DIR_SLOTS 在偏移 38（FIL_HEADER_SIZE）
+    uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42) & 0x7FFF;
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+    
+    health.n_records = n_heap - 2; // 减去 infimum 和 supremum
+    health.n_dir_slots = n_dir_slots;
+    
+    // 检查是否存在 infimum 和 supremum
+    // infimum 应该在页目录开始位置 (38 + 16 = 54)
+    // supremum 应该在 infimum 之后 (56)
+    if (page_data_.size() >= 58) {
+        uint16_t infimum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 54);
+        uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 56);
+        
+        health.has_infimum = (infimum_offset == 54);
+        health.has_supremum = (supremum_offset == 56);
+        
+        if (!health.has_infimum || !health.has_supremum) {
+            health.status_message += "Missing system records; ";
+        }
+    }
+    
+    // ✅ 修复：使用标准 CRC32C 算法计算校验和（参考 InnoDB 实现）
+    // MySQL 8.0 默认使用 CRC32C 校验和算法
+    if (page_data_.size() >= 50) {
+        uint32_t checksum_offset = page_data_.size() - 4; // 校验和位于页尾
+        
+        // 读取存储的校验和（最后4字节）
+        uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), checksum_offset);
+        
+        // 计算实际校验和（使用标准 CRC32C 算法，参考 InnoDB 实现）
+        uint32_t computed_checksum = PageReader::compute_crc32c(page_data_);
+        
+        health.checksum_expected = stored_checksum;
+        health.checksum_actual = computed_checksum;
+        health.checksum_match = (stored_checksum == computed_checksum);
+        
+        if (!health.checksum_match) {
+            health.status_message += "Checksum mismatch; ";
+        }
+    } else {
+        // 页太小，无法进行校验和检查
+        health.checksum_expected = 0;
+        health.checksum_actual = 0;
+        health.checksum_match = true;
+    }
+    
+    if (!is_valid_page_type && health.status_message.empty()) {
+        health.status_message = unsupported_message.empty() ? "Unknown page type" : unsupported_message;
+        health.is_valid = false;
+    }
+    
+    if (health.status_message.empty()) {
+        health.status_message = "Healthy";
+    }
+    
+    return health;
+}
+
 bool BPlusTreeParser::parse() noexcept {
     if (page_data_.size() < 38) { // FIL_HEADER 大小
         return false;
