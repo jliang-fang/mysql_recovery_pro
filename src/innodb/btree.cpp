@@ -476,8 +476,9 @@ std::string BPlusTreeParser::parse_field_value(
                 size_t frac_bytes = (datetime_precision + 1) / 2;
                 if (data_pos + frac_bytes <= page_data_.size()) {
                     uint64_t frac_val = 0;
+                    // ✅ 修复：MySQL DATETIME2 小数部分使用大端序存储（高位在前）
                     for (size_t i = 0; i < frac_bytes; ++i) {
-                        frac_val |= (static_cast<uint64_t>(page_data_[data_pos + i]) << (i * 8));
+                        frac_val = (frac_val << 8) | page_data_[data_pos + i];
                     }
                     
                     // 转换为微秒

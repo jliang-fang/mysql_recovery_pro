@@ -92,6 +92,26 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                 return nullptr;
             }
             break;
+        case mysql_types::DATETIME2:  // 18
+        case mysql_types::TIMESTAMP2: // 17
+            // DATETIME2/TIMESTAMP2 处理（根据精度）
+            int precision = col_info.datetime_precision;
+            if (precision < 0) precision = 6; // 默认精度
+            
+            field_len = 5; // 基础部分总是5字节
+            if (precision <= 2) {
+                field_len += 1; // 小数部分1字节
+            } else if (precision <= 4) {
+                field_len += 2; // 小数部分2字节
+            } else { // precision >= 5
+                field_len += 3; // 小数部分3字节
+            }
+            
+            // 边界检查
+            if (rec_ptr + field_len > page_base_ + size_) {
+                return nullptr;
+            }
+            break;
         case mysql_types::TINY_BLOB:   // 249
         case mysql_types::MEDIUM_BLOB: // 250
         case mysql_types::LONG_BLOB:   // 251

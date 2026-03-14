@@ -174,7 +174,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 }
             } else if (prev_col.mysql_type_id == mysql_types::DATETIME2 || 
                        prev_col.mysql_type_id == mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
-                // 根据精度计算大小（参考 MySQL 8.0 源码 sql/field.cc）
+                // ✅ 修复：根据精度计算大小（参考 MySQL 8.0 源码 sql/field.cc）
                 int precision = prev_col.datetime_precision;
                 if (precision < 0) precision = 6; // 默认精度
                 
@@ -227,9 +227,9 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 }
             } else if (prev_col.mysql_type_id >= mysql_types::TINY_BLOB && 
                        prev_col.mysql_type_id <= mysql_types::BLOB) { // BLOB类型
-                // BLOB指针固定4字节
-                if (data_ptr + 4 <= page_base_ + size_) {
-                    data_ptr += 4;
+                // ✅ 新增：BLOB指针长度为20字节（不是4字节）
+                if (data_ptr + 20 <= page_base_ + size_) {
+                    data_ptr += 20;
                 } else {
                     break; // 数据不足
                 }
@@ -361,6 +361,58 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                           std::to_string(second);
             } else {
                 fv.value = "[TRUNCATED]";
+            }
+        } else if (col.mysql_type_id == mysql_types::DATETIME2 || 
+                   col.mysql_type_id == mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
+            // ✅ 新增：DATETIME2 解析逻辑（参考 MySQL 8.0 源码 sql/field.cc）
+            int precision = col.datetime_precision;
+            if (precision < 0) precision = 6; // 默认精度
+            
+            uint32_t size = 5; // 基础部分总是5字节
+            if (precision <= 2) {
+                size += 1; // 小数部分1字节
+            } else if (precision <= 4) {
+                size += 2; // 小数部分2字节
+            } else { // precision >= 5
+                size += 3; // 小数部分3字节
+            }
+            
+            if (data_ptr + size > page_base_ + size_) {
+                fv.value = "[TRUNCATED]";
+            } else {
+                uint8_t year_low = data_ptr[0];
+                uint8_t year_high = data_ptr[1];
+                uint8_t month_day = data_ptr[2];
+                uint8_t hour_minute = data_ptr[3];
+                uint8_t second_packed = data_ptr[4];
+                
+                int year = (year_high << 8) | year_low;
+                int month = month_day >> 4;
+                int day = month_day & 0x0F;
+                int hour = hour_minute & 0x1F;
+                int minute = hour_minute >> 2;
+                int second = second_packed >> 2;
+                
+                std::ostringstream oss;
+                oss << year << "-" << month << "-" << day << " " 
+                    << hour << ":" << minute << ":" << second;
+                
+                // 小数部分（根据精度）
+                if (precision > 0) {
+                    size_t frac_bytes = (precision + 1) / 2;
+                    uint64_t frac_val = 0;
+                    for (size_t i = 0; i < frac_bytes; ++i) {
+                        // ✅ 修复：MySQL DATETIME2 小数部分使用大端序存储（高位在前）
+                        frac_val = (frac_val << 8) | data_ptr[5 + i];
+                    }
+                    
+                    // 转换为微秒
+                    double frac_sec = static_cast<double>(frac_val) / 
+                                     std::pow(10, precision);
+                    oss << std::fixed << std::setprecision(precision) << frac_sec;
+                }
+                
+                fv.value = oss.str();
             }
         } else if (col.mysql_type_id == mysql_types::FLOAT) { // FLOAT
             if (data_ptr + 4 <= page_base_ + size_) {
