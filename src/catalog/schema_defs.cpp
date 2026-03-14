@@ -65,6 +65,12 @@ bool TableSchema::validate() const {
         return false;
     }
     
+    // ✅ 新增：验证行格式
+    if (row_format > dbrecovery::catalog::row_formats::COMPRESSED) {
+        std::cerr << "[ERROR] Invalid row format value: " << row_format << std::endl;
+        return false;
+    }
+    
     // 检查列定义
     if (columns.empty()) {
         std::cerr << "[ERROR] Table must have at least one column" << std::endl;
@@ -140,10 +146,13 @@ uint32_t TableSchema::get_column_size(const ColumnInfo& col) const {
         case mysql_types::VARCHAR:
         case mysql_types::VAR_STRING:
             // VARCHAR 使用变长存储：1-2 字节长度前缀 + 实际数据
-            if (col.column_length > 255) {
-                return col.column_length + 2;
+            // ✅ 修复：考虑字符集编码（utf8mb4 最多4字节/字符）
+            uint32_t max_bytes_per_char = 4; // utf8mb4
+            uint32_t max_data_size = col.column_length * max_bytes_per_char;
+            if (max_data_size > 255) {
+                return max_data_size + 2;
             } else {
-                return col.column_length + 1;
+                return max_data_size + 1;
             }
         case mysql_types::CHAR:
             // CHAR 使用固定长度存储（考虑字符集）

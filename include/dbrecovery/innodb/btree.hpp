@@ -77,15 +77,16 @@ public:
                 continue;
             }
             
-            // 解析记录头
-            auto header = RecordHeader::parse(page_data_.data() + offset, 
-                                             static_cast<uint16_t>(page_data_.size() - offset));
-            if (!header) {
+            // 解析记录头（COMPACT格式固定5字节）
+            if (offset + 5 > page_data_.size()) {
                 continue;
             }
             
+            uint8_t info_bits = page_data_[offset];
+            uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + offset + 1, 0) & 0x3FFF;
+            
             // 跳过已删除的记录
-            if (header->is_deleted()) {
+            if (info_bits & dbrecovery::innodb::REC_INFO_DELETED_FLAG) {
                 continue;
             }
             

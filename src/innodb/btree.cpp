@@ -116,10 +116,15 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         }
         
         uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_pos);
-        if (record_offset > 0 && record_offset < heap_top) {
-            // 跳过INFIMUM和SUPREMUM
-            if (record_offset != 54 && record_offset != dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 55)) {
-                record_offsets_.push_back(record_offset);
+        // ✅ 修复：添加更严格的边界检查
+        if (record_offset >= 38 + 16 && record_offset < heap_top) {
+            // 跳过INFIMUM(54)和SUPREMUM（需要动态获取）
+            if (record_offset != 54) {
+                // 检查是否为SUPREMUM
+                uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 55);
+                if (record_offset != supremum_offset) {
+                    record_offsets_.push_back(record_offset);
+                }
             }
         }
     }
@@ -171,6 +176,13 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         if (n_dir_slots < 2) {
             health.status_message += "Insufficient dir slots; ";
             health.is_valid = false;
+        }
+        
+        // ✅ 新增：计算空闲空间
+        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_HEAP_TOP + 38);
+        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_FREE + 38);
+        if (heap_top >= free_offset) {
+            health.free_space = heap_top - free_offset;
         }
     } else {
         health.status_message += "Page header incomplete; ";
