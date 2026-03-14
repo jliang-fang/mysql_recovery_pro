@@ -52,14 +52,19 @@ public:
         const catalog::ColumnInfo& col,
         size_t& data_pos,
         bool is_extern) const {
-        // 简化实现，实际需要根据列类型进行详细解析
-        if (data_pos >= page_data_.size()) {
-            return "";
+        // 检查 NULL 值
+        if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {
+            data_pos++;
+            return "NULL";
         }
         
         switch (col.mysql_type_id) {
-            case catalog::mysql_types::TINY:
-                return std::to_string(static_cast<int8_t>(page_data_[data_pos++]));
+            case catalog::mysql_types::TINY: {
+                if (data_pos >= page_data_.size()) return "";
+                int8_t value = static_cast<int8_t>(page_data_[data_pos]);
+                data_pos++;
+                return std::to_string(value);
+            }
             case catalog::mysql_types::SHORT: {
                 if (data_pos + 2 > page_data_.size()) return "";
                 uint16_t value = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);

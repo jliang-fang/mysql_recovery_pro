@@ -1,7 +1,11 @@
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
+
+namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
@@ -25,12 +29,21 @@ int main(int argc, char** argv) {
     }
     
     // 检查文件是否存在
-    FILE* f = fopen(ibd_path.c_str(), "rb");
-    if (!f) {
+    std::ifstream f(ibd_path);
+    if (!f.good()) {
         std::cerr << "[ERROR] Cannot open file: " << ibd_path << "\n";
         return 1;
     }
-    fclose(f);
+    f.close();
+    
+    // 创建输出目录
+    try {
+        fs::create_directories(output_dir);
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to create output directory: " << output_dir 
+                  << ", error: " << e.what() << "\n";
+        return 1;
+    }
     
     // Run recovery
     dbrecovery::innodb::RecoveryEngine engine;
