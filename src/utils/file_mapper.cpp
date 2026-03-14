@@ -25,23 +25,27 @@ FileMapper::FileMapper(const std::string& path)
     HANDLE hFile = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile == INVALID_HANDLE_VALUE) {
+        std::cerr << "[ERROR] Failed to open file: " << path << ", error: " << GetLastError() << std::endl;
         return;
     }
 
     LARGE_INTEGER liSize;
     if (!GetFileSizeEx(hFile, &liSize)) {
+        std::cerr << "[ERROR] Failed to get file size: " << path << ", error: " << GetLastError() << std::endl;
         CloseHandle(hFile);
         return;
     }
     
     size_ = static_cast<size_t>(liSize.QuadPart);
     if (size_ == 0) {
+        std::cerr << "[ERROR] File is empty: " << path << std::endl;
         CloseHandle(hFile);
         return;
     }
 
     HANDLE hMapping = CreateFileMappingA(hFile, nullptr, PAGE_READONLY, 0, 0, nullptr);
     if (!hMapping) {
+        std::cerr << "[ERROR] Failed to create file mapping: " << path << ", error: " << GetLastError() << std::endl;
         CloseHandle(hFile);
         return;
     }
@@ -52,6 +56,7 @@ FileMapper::FileMapper(const std::string& path)
     CloseHandle(hMapping);
     
     if (!data_) {
+        std::cerr << "[ERROR] Failed to map view of file: " << path << ", error: " << GetLastError() << std::endl;
         CloseHandle(hFile);
         return;
     }
@@ -62,11 +67,13 @@ FileMapper::FileMapper(const std::string& path)
 #else
     fd_ = open(path.c_str(), O_RDONLY);
     if (fd_ < 0) {
+        std::cerr << "[ERROR] Failed to open file: " << path << ", error: " << strerror(errno) << std::endl;
         return;
     }
 
     struct stat st;
     if (fstat(fd_, &st) != 0) {
+        std::cerr << "[ERROR] Failed to fstat file: " << path << ", error: " << strerror(errno) << std::endl;
         close(fd_);
         fd_ = -1;
         return;
@@ -74,6 +81,7 @@ FileMapper::FileMapper(const std::string& path)
     
     size_ = static_cast<size_t>(st.st_size);
     if (size_ == 0) {
+        std::cerr << "[ERROR] File is empty: " << path << std::endl;
         close(fd_);
         fd_ = -1;
         return;
@@ -81,6 +89,7 @@ FileMapper::FileMapper(const std::string& path)
 
     data_ = static_cast<uint8_t*>(mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd_, 0));
     if (data_ == MAP_FAILED) {
+        std::cerr << "[ERROR] Failed to mmap file: " << path << ", error: " << strerror(errno) << std::endl;
         close(fd_);
         fd_ = -1;
         return;
