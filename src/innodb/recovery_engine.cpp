@@ -88,15 +88,34 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
                 } catch (const nlohmann::json::parse_error& e) {
                     std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
                     
-                    // 降级方案：尝试提取表名（简化实现）
+                    // ✅ 修复：更健壮的降级方案
                     if (page_data.size() > 58) {
-                        std::string table_name(reinterpret_cast<const char*>(sdi_payload + 20), 
-                                              std::min(size_t(64), page_data.size() - 58));
-                        size_t null_pos = table_name.find('\0');
-                        if (null_pos != std::string::npos) {
-                            table_name.resize(null_pos);
+                        // 尝试从JSON中提取表名（不依赖固定偏移）
+                        std::string sdi_str(reinterpret_cast<const char*>(sdi_payload), 
+                                           page_data.size() - 38);
+                        
+                        size_t name_pos = sdi_str.find("\"name\"");
+                        if (name_pos != std::string::npos) {
+                            size_t colon_pos = sdi_str.find(':', name_pos);
+                            if (colon_pos != std::string::npos) {
+                                size_t start = sdi_str.find_first_not_of(" \t\n\r", colon_pos + 1);
+                                if (start != std::string::npos && sdi_str[start] == '"') {
+                                    size_t end = start + 1;
+                                    while (end < sdi_str.length() && sdi_str[end] != '"') {
+                                        if (sdi_str[end] == '\\' && end + 1 < sdi_str.length()) {
+                                            end += 2; // 跳过转义字符
+                                        } else {
+                                            end++;
+                                        }
+                                    }
+                                    
+                                    if (end < sdi_str.length()) {
+                                        std::string table_name = sdi_str.substr(start + 1, end - start - 1);
+                                        std::cout << "[INFO] SDI Table Name (fallback): " << table_name << "\n";
+                                    }
+                                }
+                            }
                         }
-                        std::cout << "[INFO] SDI Table Name (fallback): " << table_name << "\n";
                     }
                 }
             }

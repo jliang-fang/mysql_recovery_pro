@@ -158,20 +158,20 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     }
     
     // INFIMUM 记录偏移（固定为54）
-    uint16_t infimum_offset = 54;
-    if (infimum_offset + 13 > page_data_.size()) {
+    infimum_offset_ = 54;
+    if (infimum_offset_ + 13 > page_data_.size()) {
         return false;
     }
     
     // SUPREMUM 记录偏移
-    uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_offset + 1);
-    if (supremum_offset == 0 || supremum_offset >= page_data_.size()) {
+    supremum_offset_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_offset_ + 1);
+    if (supremum_offset_ == 0 || supremum_offset_ >= page_data_.size()) {
         return false;
     }
     
     // 记录偏移列表
-    record_offsets_.push_back(infimum_offset);
-    record_offsets_.push_back(supremum_offset);
+    record_offsets_.push_back(infimum_offset_);
+    record_offsets_.push_back(supremum_offset_);
     
     return true;
 }
@@ -202,13 +202,9 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_pos);
         // ✅ 修复：添加更严格的边界检查
         if (record_offset >= 38 + 16 && record_offset < heap_top) {
-            // 跳过INFIMUM(54)和SUPREMUM（需要动态获取）
-            if (record_offset != 54) {
-                // 检查是否为SUPREMUM
-                uint16_t supremum_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 55);
-                if (record_offset != supremum_offset) {
-                    record_offsets_.push_back(record_offset);
-                }
+            // 跳过INFIMUM和SUPREMUM（使用已存储的值）
+            if (record_offset != infimum_offset_ && record_offset != supremum_offset_) {
+                record_offsets_.push_back(record_offset);
             }
         }
     }

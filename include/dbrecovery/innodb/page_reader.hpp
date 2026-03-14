@@ -74,7 +74,7 @@ public:
         for (int i = 0; i < 4; ++i) {
             page_copy[24 + i] = 0;
         }
-        
+    
         uint32_t computed_crc32c = compute_crc32c(page_copy);
         if (computed_crc32c == stored_checksum) {
             return true;
@@ -85,13 +85,13 @@ public:
         if (computed_innodb == stored_checksum) {
             return true;
         }
-
-        // ✅ 修复：尝试 FULL_CKPT 校验算法（MySQL 8.0 默认）
-        uint32_t computed_full_ckpt = compute_full_ckpt_checksum(page_copy);
-        if (computed_full_ckpt == stored_checksum) {
+    
+        // ✅ 修复：尝试 OLD 校验算法（旧版本兼容）
+        uint32_t computed_old = compute_old_checksum(page_copy);
+        if (computed_old == stored_checksum) {
             return true;
         }
-        
+    
         // 所有校验均失败
         return false;
     }
@@ -233,6 +233,29 @@ public:
         }
         
         return ~crc;
+    }
+
+    /**
+     * @brief 计算页的 OLD 校验和（MySQL 5.5/5.6 兼容）
+     *
+     * @param page_data 页数据（包含 FIL_HEADER）
+     * @return uint32_t OLD 校验和值
+     */
+    static uint32_t compute_old_checksum(const std::vector<uint8_t>& page_data) {
+        // ✅ 实现：使用 MySQL 5.5/5.6 的旧校验算法
+        // 这是简单的累加和（非CRC）
+        
+        const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
+        size_t len = page_data.size() / 4;
+        
+        uint32_t checksum = 0;
+        for (size_t i = 0; i < len; ++i) {
+            if (i >= 6 && i < 8) continue; // Skip checksum fields at offset 24-31
+            
+            checksum += mach_read_from_4(data + i);
+        }
+        
+        return checksum;
     }
 
 private:
