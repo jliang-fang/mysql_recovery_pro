@@ -158,7 +158,7 @@ public:
             }
             
             // 解析记录头（COMPACT格式）
-            if (offset + 5 > page_data_.size()) {
+            if (offset + 6 > page_data_.size()) {
                 continue;
             }
             
@@ -179,7 +179,7 @@ public:
             
             // 解析字段数据
             std::map<std::string, std::string> record;
-            size_t data_pos = offset + 5; // 跳过记录头
+            size_t data_pos = offset + 6; // 跳过记录头（5字节header + 1字节n_fields）
             
             // ✅ 修复：根据实际解析的字段数进行循环
             uint16_t parsed_fields = 0;

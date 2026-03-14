@@ -19,12 +19,61 @@ namespace innodb {
  */
 class PageReader {
 public:
-    explicit PageReader(const std::string& file_path);
-    ~PageReader();
+    explicit PageReader(const std::string& file_path)
+        : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0), is_valid_(false) {
+        
+#ifdef _WIN32
+        fd_ = _open(file_path.c_str(), _O_RDONLY | _O_BINARY);
+#else
+        fd_ = open(file_path.c_str(), O_RDONLY);
+#endif
+        
+        if (fd_ < 0) {
+            return;
+        }
+        
+        // 获取文件大小
+#ifdef _WIN32
+        struct _stat64 st;
+        if (_fstat64(fd_, &st) != 0) {
+            close();
+            return;
+        }
+        file_size_ = st.st_size;
+#else
+        struct stat st;
+        if (fstat(fd_, &st) != 0) {
+            close();
+            return;
+        }
+        file_size_ = st.st_size;
+#endif
+        
+        // 计算总页数
+        total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
+        
+        is_valid_ = (total_pages_ > 0);
+    }
+
+    ~PageReader() {
+        close();
+    }
 
     // 禁止拷贝
     PageReader(const PageReader&) = delete;
     PageReader& operator=(const PageReader&) = delete;
+
+private:
+    void close() {
+        if (fd_ >= 0) {
+#ifdef _WIN32
+            _close(fd_);
+#else
+            close(fd_);
+#endif
+            fd_ = -1;
+        }
+    }
 
     /**
      * @brief 读取指定页号的数据（带校验）
@@ -32,7 +81,31 @@ public:
      * @param page_no 页号（从0开始）
      * @return std::vector<uint8_t> 页数据，失败返回空
      */
-    std::vector<uint8_t> read_page(uint32_t page_no);
+    std::vector<uint8_t> read_page(uint32_t page_no) {
+        if (!is_valid_ || fd_ < 0) {
+            return {};
+        }
+        
+        // 计算页在文件中的偏移
+        uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
+        if (offset >= file_size_) {
+            return {};
+        }
+        
+        // 读取一页数据
+        std::vector<uint8_t> page_data(page_size_);
+        if (pread(fd_, page_data.data(), page_size_, offset) != static_cast<ssize_t>(page_size_)) {
+            return {};
+        }
+        
+        // 校验校验和
+        if (!validate_checksum(page_data)) {
+            std::cerr << "[WARN] Page " << page_no << " checksum validation failed" << std::endl;
+            return {};
+        }
+        
+        return page_data;
+    }
 
     /**
      * @brief 获取文件总页数
