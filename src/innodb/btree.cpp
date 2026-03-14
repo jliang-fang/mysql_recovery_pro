@@ -19,6 +19,11 @@ std::string parse_varchar_value(const uint8_t* data, size_t& pos, size_t max_len
         return "NULL";
     }
     
+    // 边界检查：确保至少有一个字节用于长度前缀
+    if (pos >= max_len) {
+        return "";
+    }
+    
     // 读取长度前缀（1字节或2字节）
     uint8_t len_byte = data[pos];
     pos++;
@@ -32,6 +37,11 @@ std::string parse_varchar_value(const uint8_t* data, size_t& pos, size_t max_len
         } else {
             return "";
         }
+    }
+    
+    // 边界检查：确保有足够的数据用于字符串
+    if (pos + str_len > max_len) {
+        return "";
     }
     
     // 读取字符串数据
@@ -477,9 +487,9 @@ std::string BPlusTreeParser::parse_field_value(
                 size_t frac_bytes = (datetime_precision + 1) / 2;
                 if (data_pos + frac_bytes <= page_data_.size()) {
                     uint64_t frac_val = 0;
-                    // ✅ 修复：MySQL DATETIME2 小数部分使用大端序存储（高位在前）
+                    // ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
                     for (size_t i = 0; i < frac_bytes; ++i) {
-                        frac_val = (frac_val << 8) | page_data_[data_pos + i];
+                        frac_val |= (static_cast<uint64_t>(page_data_[data_pos + i]) << (i * 8));
                     }
                     
                     // 转换为微秒
