@@ -87,6 +87,20 @@ struct BlobPointer {
             std::cerr << "[WARN] BLOB chain has multiple pages but total_len <= single_page_len" << std::endl;
         }
         
+        // ✅ 新增：验证链表中每个页的偏移和长度是否合理
+        for (const auto& page : chain_pages) {
+            if (page.second >= 0xFFFFFFFF) {
+                std::cerr << "[ERROR] BLOB chain contains invalid page number" << std::endl;
+                return false;
+            }
+        }
+        
+        // ✅ 新增：验证总长度是否超过合理限制（64GB）
+        if (total_len > (64ULL * 1024 * 1024 * 1024)) {
+            std::cerr << "[ERROR] BLOB total_len exceeds reasonable limit: " << total_len << std::endl;
+            return false;
+        }
+        
         return true;
     }
 };
