@@ -187,31 +187,6 @@ public:
         return ~crc;
     }
 
-    /**
-     * @brief 计算页的 INNODB 校验和（MySQL 官方算法）
-     *
-     * @param page_data 页数据（包含 FIL_HEADER）
-     * @return uint32_t INNODB 校验和值
-     */
-    static uint32_t compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
-        // ✅ 实现：使用 MySQL 8.0 的 innobase_get_csum() 算法
-        // 这是 MySQL 官方使用的校验算法
-        
-        const uint8_t* data = page_data.data();
-        size_t len = page_data.size();
-        
-        // 跳过校验和字段（偏移 24-27）
-        uint32_t checksum = 0;
-        for (size_t i = 0; i < len; ++i) {
-            if (i >= 24 && i < 28) continue; // Skip checksum field
-            
-            checksum ^= data[i];
-            checksum = (checksum << 1) | (checksum >> 31); // 循环左移1位
-        }
-        
-        return checksum;
-    }
-
 private:
     int fd_;
     uint64_t file_size_;
