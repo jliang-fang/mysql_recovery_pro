@@ -1,4 +1,5 @@
 #include "dbrecovery/innodb/btree.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <iostream>
 #include <cstring>
 #include <iomanip>
@@ -6,6 +7,13 @@
 
 namespace dbrecovery {
 namespace innodb {
+
+// InnoDB 页类型常量（参考 MySQL 8.0 源码 include/fil0fil.h）
+constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
+constexpr uint16_t FIL_PAGE_INDEX        = 9969;   // B+Tree 索引页
+constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;   // Undo 日志页
+constexpr uint16_t FIL_PAGE_SDI          = 9971;   // SDI 元数据页
+constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;   // BLOB页
 
 // ==================== 辅助函数：字段值解析 ====================
 
@@ -41,7 +49,7 @@ std::string parse_varchar_value(const uint8_t* data, size_t& pos, size_t max_len
 }
 
 std::string parse_int_value(const uint8_t* data, size_t& pos, size_t field_size, bool is_signed, bool is_nullable) {
-    if (is_nullable && pos < data.size() && data[pos] == 0xFF) {
+    if (is_nullable && pos < max_len && data[pos] == 0xFF) {
         pos++;
         return "NULL";
     }
@@ -177,14 +185,14 @@ bool BPlusTreeParser::parse_user_records() noexcept {
     }
     
     // 解析页目录槽
-    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_DIR_SLOTS + 38);
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_DIR_SLOTS + 38);
     if (n_dir_slots < 2) { // 至少有INFIMUM和SUPREMUM
         return false;
     }
     
     // 解析每个记录偏移
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_HEAP_TOP + 38);
-    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_HEAP + 38) & 0x7FFF;
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_HEAP_TOP + 38);
+    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_HEAP + 38) & 0x7FFF;
     
     // 从页目录中解析记录偏移
     uint16_t dir_slot_offset = 38 + 36; // PAGE_DIRECTORY 开始位置
@@ -223,8 +231,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     }
     
     // 解析页类型
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), FIL_PAGE_TYPE);
-    if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI) {
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_PAGE_TYPE);
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         health.is_valid = false;
         health.status_message = "Invalid page type: " + std::to_string(page_type);
         return health;
@@ -248,7 +256,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     // 解析页目录
     if (page_data_.size() >= 38 + 36) { // 确保有足够空间读取页目录
-        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_DIR_SLOTS + 38);
+        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_DIR_SLOTS + 38);
         health.n_dir_slots = n_dir_slots;
         
         // 验证页目录槽数量合理性（至少有INFIMUM和SUPREMUM）
@@ -258,8 +266,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
         
         // ✅ 新增：计算空闲空间
-        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_HEAP_TOP + 38);
-        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_FREE + 38);
+        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_HEAP_TOP + 38);
+        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_FREE + 38);
         if (heap_top >= free_offset) {
             health.free_space = heap_top - free_offset;
         }
@@ -270,7 +278,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     // 解析堆大小
     if (page_data_.size() >= 38 + 4) { // 确保有足够空间读取PAGE_N_HEAP
-        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_HEAP + 38) & 0x7FFF;
+        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_HEAP + 38) & 0x7FFF;
         health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
         
         // 验证堆大小合理性

@@ -31,7 +31,11 @@ struct BlobPageChain {
         // 检查是否有重复页
         std::set<std::pair<uint32_t, uint32_t>> seen;
         for (const auto& p : pages) {
-            if (seen.count(p)) return false;
+            if (seen.count(p)) {
+                std::cerr << "[ERROR] BLOB chain contains duplicate page: (" 
+                          << p.first << ", " << p.second << ")" << std::endl;
+                return false;
+            }
             seen.insert(p);
         }
         
@@ -48,6 +52,8 @@ struct BlobPageChain {
             // 读取前一个页的 BLOB 头以验证 next_bpage 字段
             auto prev_data = page_reader(prev_page.first, prev_page.second);
             if (!prev_data || prev_data->size() < 16) {
+                std::cerr << "[WARN] Cannot read BLOB page header for validation: (" 
+                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
                 continue; // 无法读取或数据不足，跳过验证
             }
             
@@ -55,8 +61,11 @@ struct BlobPageChain {
             uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
             
             if (next_bpage != curr_page.second) {
-                // next_bpage 不匹配，链表断裂
-                return false;
+                std::cerr << "[ERROR] BLOB chain断裂 at page (" 
+                          << prev_page.first << ", " << prev_page.second 
+                          << "): expected next=" << curr_page.second 
+                          << ", actual=" << next_bpage << std::endl;
+                return false; // next_bpage 不匹配，链表断裂
             }
         }
         

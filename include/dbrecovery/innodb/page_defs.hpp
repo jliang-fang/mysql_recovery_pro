@@ -88,8 +88,13 @@ struct alignas(1) RecordHeader {
         return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x3F) << 8) | next_rec_off_0);
     }
 
-    bool is_deleted() const { return (info_bits & REC_INFO_DELETED_FLAG) != 0; }
-    bool is_min_rec() const { return (info_bits & REC_INFO_MIN_REC_FLAG) != 0; }
+    bool is_deleted() const { 
+        return (info_bits & REC_INFO_DELETED_FLAG) != 0; 
+    }
+    
+    bool is_min_rec() const { 
+        return (info_bits & REC_INFO_MIN_REC_FLAG) != 0; 
+    }
 
     uint16_t get_heap_no() const {
         return static_cast<uint16_t>((((uint16_t)(heap_no_1 & 0x3F)) << 8) | heap_no_0);
@@ -116,7 +121,9 @@ struct alignas(1) PageHeader {
         return "PageHeader{n_dir_slots=" + std::to_string(n_dir_slots) +
                ", heap_top=" + std::to_string(heap_top) +
                ", n_heap=" + std::to_string(n_heap) +
-               ", free_offset=" + std::to_string(free_offset);
+               ", free_offset=" + std::to_string(free_offset) +
+               ", garbage_end=" + std::to_string(garbage_end) +
+               ", last_insert=" + std::to_string(last_insert) + "}";
     }
 };
 
