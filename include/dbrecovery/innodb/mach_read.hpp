@@ -109,7 +109,18 @@ public:
 
     template<typename T>
     static T read_be(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
-        return read_be<T>(ptr, offset);
+        if (ptr == nullptr) {
+            throw std::invalid_argument("Pointer is null in read_be");
+        }
+        
+        const uint8_t* p = ptr + offset;
+        T value = 0;
+        
+        for (size_t i = 0; i < sizeof(T); ++i) {
+            value = (value << 8) | p[i];
+        }
+        
+        return value;
     }
 };
 

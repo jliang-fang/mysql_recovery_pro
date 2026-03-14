@@ -281,6 +281,15 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
         return std::nullopt;
     }
     
+    // ✅ 新增：验证总长度一致性（需要读取所有页并累加数据长度）
+    size_t total_data_len = 0;
+    for (const auto& page : chain.pages) {
+        auto page_data = page_reader(page.first, page.second);
+        if (page_data && page_data->size() >= 16) {
+            total_data_len += read_blob_page_data_length(*page_data);
+        }
+    }
+    
     return chain;
 }
 

@@ -105,8 +105,50 @@ bool DiskScanner::is_innodb_file(const std::string& file_path) {
 
 std::string DiskScanner::get_filesystem_type(const std::string& path) {
 #ifdef _WIN32
-    // Windows平台暂不支持完整文件系统识别，返回通用标识
-    return "NTFS";  // 假设为NTFS（常见于Windows）
+    // Windows平台使用GetVolumeInformation获取文件系统类型
+    wchar_t volume_path[4] = {0};
+    wchar_t fs_name[MAX_PATH] = {0};
+    
+    if (path.length() >= 2 && path[1] == ':') {
+        // 处理驱动器路径如 "C:"
+        volume_path[0] = towlower(path[0]);
+        volume_path[1] = L':';
+        volume_path[2] = L'\\';
+        
+        if (GetVolumeInformationW(volume_path, nullptr, 0, nullptr, nullptr, nullptr, fs_name, MAX_PATH)) {
+            std::wstring ws(fs_name);
+            return std::string(ws.begin(), ws.end());
+        }
+    } else {
+        // 处理文件路径，获取其所在卷
+        wchar_t volume_path_w[MAX_PATH];
+        mbstowcs(volume_path_w, path.c_str(), MAX_PATH);
+        
+        // 提取根目录
+        wchar_t drive[4] = {0};
+        if (path.length() >= 2 && path[1] == ':') {
+            drive[0] = towlower(path[0]);
+            drive[1] = L':';
+            drive[2] = L'\\';
+        } else {
+            // 对于相对路径，使用当前工作目录
+            GetCurrentDirectoryW(MAX_PATH, volume_path_w);
+            
+            // 提取驱动器号
+            if (volume_path_w[0] && volume_path_w[1] == L':') {
+                drive[0] = towlower(volume_path_w[0]);
+                drive[1] = L':';
+                drive[2] = L'\\';
+            }
+        }
+        
+        if (GetVolumeInformationW(drive, nullptr, 0, nullptr, nullptr, nullptr, fs_name, MAX_PATH)) {
+            std::wstring ws(fs_name);
+            return std::string(ws.begin(), ws.end());
+        }
+    }
+    
+    return "Unknown";
 #else
     struct statfs stat;
     if (statfs(path.c_str(), &stat) == 0) {

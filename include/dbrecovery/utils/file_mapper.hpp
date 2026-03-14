@@ -64,7 +64,9 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         // 清理当前资源
 #ifdef _WIN32
         if (data_ && data_ != nullptr) {
-            UnmapViewOfFile(data_);
+            if (!UnmapViewOfFile(data_)) {
+                std::cerr << "[ERROR] Failed to unmap view of file during move assignment: " << GetLastError() << std::endl;
+            }
             data_ = nullptr;
         }
         if (handle_ != INVALID_HANDLE_VALUE) {
@@ -73,12 +75,16 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         }
 #else
         if (data_ && data_ != MAP_FAILED) {
-            munmap(data_, size_);
+            if (munmap(data_, size_) != 0) {
+                std::cerr << "[ERROR] Failed to unmap memory during move assignment: " << strerror(errno) << std::endl;
+            }
             data_ = nullptr;
         }
         
         if (fd_ >= 0) {
-            close(fd_);
+            if (close(fd_) != 0) {
+                std::cerr << "[ERROR] Failed to close file descriptor during move assignment: " << strerror(errno) << std::endl;
+            }
             fd_ = -1;
         }
 #endif
