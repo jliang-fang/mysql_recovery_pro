@@ -51,7 +51,72 @@ public:
     std::string parse_field_value(
         const catalog::ColumnInfo& col,
         size_t& data_pos,
-        bool is_extern) const;
+        bool is_extern) const {
+        // 简化实现，实际需要根据列类型进行详细解析
+        if (data_pos >= page_data_.size()) {
+            return "";
+        }
+        
+        switch (col.mysql_type_id) {
+            case catalog::mysql_types::TINY:
+                return std::to_string(static_cast<int8_t>(page_data_[data_pos++]));
+            case catalog::mysql_types::SHORT: {
+                if (data_pos + 2 > page_data_.size()) return "";
+                uint16_t value = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
+                data_pos += 2;
+                return std::to_string(value);
+            }
+            case catalog::mysql_types::LONG: {
+                if (data_pos + 4 > page_data_.size()) return "";
+                uint32_t value = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos);
+                data_pos += 4;
+                return std::to_string(value);
+            }
+            case catalog::mysql_types::LONGLONG: {
+                if (data_pos + 8 > page_data_.size()) return "";
+                uint64_t value = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
+                data_pos += 8;
+                return std::to_string(value);
+            }
+            case catalog::mysql_types::VARCHAR:
+            case catalog::mysql_types::VAR_STRING: {
+                if (data_pos >= page_data_.size()) return "";
+                uint8_t len = page_data_[data_pos++];
+                if (data_pos + len > page_data_.size()) return "";
+                std::string value(reinterpret_cast<const char*>(&page_data_[data_pos]), len);
+                data_pos += len;
+                return value;
+            }
+            case catalog::mysql_types::DATETIME2:
+            case catalog::mysql_types::TIMESTAMP2: {
+                // MySQL 8.0 DATETIME2 编码：前5字节 packed format，后3字节小数部分
+                if (data_pos + 8 > page_data_.size()) return "";
+                
+                uint8_t year_low = page_data_[data_pos++];
+                uint8_t year_high = page_data_[data_pos++];
+                uint8_t month_day = page_data_[data_pos++];
+                uint8_t hour_minute = page_data_[data_pos++];
+                uint8_t second_packed = page_data_[data_pos++];
+                
+                int year = year_low | (year_high << 8);
+                int month = month_day & 0x0F;
+                int day = month_day >> 4;
+                int hour = hour_minute & 0x1F;
+                int minute = (hour_minute >> 2) & 0x3F;
+                int second = second_packed >> 2;
+                
+                char buffer[32];
+                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+                        year, month, day, hour, minute, second);
+                data_pos += 3; // skip fractional part
+                return std::string(buffer);
+            }
+            default:
+                return "[UNSUPPORTED_TYPE]";
+        }
+        
+        return "";
+    }
     
     /**
      * @brief 解析记录数据（仅支持 COMPACT 格式）
