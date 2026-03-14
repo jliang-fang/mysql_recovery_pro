@@ -255,41 +255,43 @@ inline bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     
-    // 读取 FIL_PAGE_TYPE (offset 24 in page, but offset 12 in header)
+    // 读取 FIL_PAGE_TYPE (offset 24 in page header)
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 24);
     
-    if (page_type == FIL_PAGE_INDEX) {
-        node_type_ = BTreeNodeType::LEAF;
-        
-        // 读取页级别（BTR_PAGE_LEVEL，offset 38+38=76）
-        if (page_data_.size() >= 78) {
-            page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 38);
-        }
-        
-        // 读取 BTR_N_DIR_SLOTS（offset 38+0）
-        if (page_data_.size() >= 40) {
-            n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
-        }
-        
-        // 读取 BTR_FORMAT（flags 字段的 bit 7）
-        if (page_data_.size() >= 44) {
-            btr_format_ = page_data_[38 + 2]; // BTR_FORMAT_MASK at offset 40
-        }
-    } else {
+    if (page_type != FIL_PAGE_INDEX) {
         node_type_ = BTreeNodeType::INVALID;
         return false;
     }
     
+    // 读取页级别（BTR_PAGE_LEVEL，位于 page header offset 38+38）
+    if (page_data_.size() >= 76) {
+        page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 38);
+    }
+    
+    // 读取 BTR_N_DIR_SLOTS（位于 page header offset 38+0）
+    if (page_data_.size() >= 40) {
+        n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+    }
+    
+    // 读取 BTR_FORMAT（位于 page header offset 38+2）
+    if (page_data_.size() >= 42) {
+        btr_format_ = page_data_[38 + 2];
+    }
+    
+    node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
     return true;
 }
 
 inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
-    if (page_data_.size() < 56) { // INFIMUM record at offset 54, minimal size 13
+    // PAGE_DATA_START = 38 (FIL header) + 16 (BTR header for index pages)
+    const uint16_t page_data_start = 38 + 16;
+    
+    if (page_data_.size() < page_data_start + 13) { // INFIMUM minimal size
         return false;
     }
     
-    // INFIMUM 记录在偏移 54 处（PAGE_DATA_START = 38 + 16）
-    uint16_t infimum_offset = 54;
+    // INFIMUM 记录在偏移 54 处（固定位置）
+    const uint16_t infimum_offset = 54;
     if (infimum_offset >= page_data_.size()) {
         return false;
     }
@@ -297,7 +299,20 @@ inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     // 检查 INFIMUM 记录标志
     uint8_t info_bits = page_data_[infimum_offset];
     if ((info_bits & REC_INFO_MIN_REC_FLAG) == 0) {
-        // 可能格式不正确，但继续尝试解析
+        std::cerr << "[WARN] INFIMUM record missing MIN_REC_FLAG" << std::endl;
+    }
+    
+    // 检查 SUPREMUM 记录（最后一个记录）
+    if (!record_offsets_.empty()) {
+        uint16_t supremum_offset = record_offsets_.back();
+        if (supremum_offset < page_data_.size()) {
+            uint8_t sup_info_bits = page_data_[supremum_offset];
+            // SUPREMUM 的 info_bits 应该是 REC_STATUS_SUPREMUM (0x03)
+            if ((sup_info_bits & 0x03) != REC_STATUS_SUPREMUM) {
+                std::cerr << "[WARN] SUPREMUM record has incorrect status: " 
+                          << static_cast<int>(sup_info_bits & 0x03) << std::endl;
+            }
+        }
     }
     
     return true;
@@ -307,12 +322,15 @@ inline bool BPlusTreeParser::parse_user_records() noexcept {
     // 解析记录目录（directory slots）
     uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
     if (n_dir_slots == 0 || n_dir_slots > 1000) {
+        std::cerr << "[ERROR] Invalid number of directory slots: " << n_dir_slots << std::endl;
         return false;
     }
     
     // 解析堆顶位置
     uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 2);
     if (heap_top < 56 || heap_top > page_data_.size()) {
+        std::cerr << "[ERROR] Invalid heap top position: " << heap_top 
+                  << ", page size: " << page_data_.size() << std::endl;
         return false;
     }
     
@@ -320,16 +338,32 @@ inline bool BPlusTreeParser::parse_user_records() noexcept {
     record_offsets_.clear();
     
     // 目录槽位于页尾部，每个槽占2字节
-    uint16_t dir_start = (page_data_.size() / 16) * 16 - n_dir_slots * 2;
-    if (dir_start < 38 + 16) {
+    // 页目录在页的末尾部分，紧接在页数据之后
+    uint16_t page_size = static_cast<uint16_t>(page_data_.size());
+    uint16_t dir_start = (page_size / 16) * 16 - n_dir_slots * 2;
+    
+    // 确保目录槽位置有效
+    if (dir_start < 38 + 16 || dir_start >= page_size) {
+        std::cerr << "[ERROR] Invalid directory start position: " << dir_start << std::endl;
         return false;
     }
     
     for (uint16_t i = 0; i < n_dir_slots; ++i) {
+        if (dir_start + i * 2 + 2 > page_data_.size()) {
+            std::cerr << "[ERROR] Directory slot out of bounds at index: " << i << std::endl;
+            return false;
+        }
+        
         uint16_t slot_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start + i * 2);
+        
+        // 验证槽偏移的有效性
         if (slot_offset >= 38 && slot_offset < heap_top) {
             record_offsets_.push_back(slot_offset);
         }
+    }
+    
+    if (record_offsets_.empty()) {
+        std::cerr << "[WARN] No user records found in page" << std::endl;
     }
     
     return !record_offsets_.empty();
