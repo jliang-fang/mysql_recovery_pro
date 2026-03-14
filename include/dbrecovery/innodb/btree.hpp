@@ -94,7 +94,7 @@ public:
             }
             case catalog::mysql_types::DATETIME2:
             case catalog::mysql_types::TIMESTAMP2: {
-                // MySQL 8.0 DATETIME2 编码：前5字节 packed format，后3字节小数部分
+                // MySQL 8.0 DATETIME2 编码：前5字节 packed format，后3字节小数部分（小端序）
                 if (data_pos + 8 > page_data_.size()) return "";
                 
                 uint8_t year_low = page_data_[data_pos++];
@@ -110,10 +110,20 @@ public:
                 int minute = (hour_minute >> 2) & 0x3F;
                 int second = second_packed >> 2;
                 
-                char buffer[32];
-                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
-                        year, month, day, hour, minute, second);
-                data_pos += 3; // skip fractional part
+                // ✅ 修复：正确读取小数部分（小端序）
+                uint32_t frac = page_data_[data_pos] | 
+                               (page_data_[data_pos + 1] << 8) |
+                               (page_data_[data_pos + 2] << 16);
+                data_pos += 3;
+                
+                char buffer[64];
+                if (frac > 0) {
+                    snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%06u",
+                            year, month, day, hour, minute, second, frac);
+                } else {
+                    snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+                            year, month, day, hour, minute, second);
+                }
                 return std::string(buffer);
             }
             default:
@@ -147,7 +157,7 @@ public:
                 continue;
             }
             
-            // 解析记录头（COMPACT格式固定5字节）
+            // 解析记录头（COMPACT格式）
             if (offset + 5 > page_data_.size()) {
                 continue;
             }
@@ -160,19 +170,29 @@ public:
                 continue;
             }
             
+            // ✅ 新增：解析 n_fields 字段数量（位于记录头第5字节）
+            uint16_t n_fields = page_data_[offset + 5];
+            if (n_fields == 0 || n_fields > schema.columns.size()) {
+                // 兼容性处理：如果无法确定字段数，使用schema中的字段数
+                n_fields = static_cast<uint16_t>(schema.columns.size());
+            }
+            
             // 解析字段数据
             std::map<std::string, std::string> record;
             size_t data_pos = offset + 5; // 跳过记录头
             
+            // ✅ 修复：根据实际解析的字段数进行循环
+            uint16_t parsed_fields = 0;
             for (const auto& pair : schema.columns) {
                 const auto& col = pair.second;
                 
-                if (data_pos >= page_data_.size()) {
+                if (data_pos >= page_data_.size() || parsed_fields >= n_fields) {
                     break;
                 }
                 
                 std::string value = parse_field_value(col, data_pos, false);
                 record[col.name] = value;
+                parsed_fields++;
             }
             
             records.push_back(record);

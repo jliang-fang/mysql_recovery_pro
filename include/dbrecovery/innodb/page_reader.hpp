@@ -137,7 +137,21 @@ public:
         for (size_t i = 0; i < len; ++i) {
             if (i >= 24 && i < 28) continue; // Skip checksum field
             
-            crc = _mm_crc32_u8(crc, data[i]);
+            #ifdef __SSE4_2__
+                crc = _mm_crc32_u8(crc, data[i]);
+            #else
+                // 软件实现的 CRC32C（使用正确的多项式）
+                uint8_t byte = data[i];
+                crc ^= byte;
+                
+                for (int j = 0; j < 8; ++j) {
+                    if (crc & 1) {
+                        crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            #endif
         }
         
         return ~crc;

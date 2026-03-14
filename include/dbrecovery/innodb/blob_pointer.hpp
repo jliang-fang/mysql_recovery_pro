@@ -126,6 +126,9 @@ std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_page_no,
     const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }
 );
+    
+// ✅ 新增：从 BLOB 页数据中读取实际数据长度
+size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data);
 
 // ==================== 实现部分 ====================
 inline std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size) {
@@ -197,6 +200,15 @@ inline std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>&
     return parse_blob_pointer(data.data(), data.size());
 }
 
+inline size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
+    if (page_data.size() < BlobPageChain::BTR_BPAGE_LEN + 4) {
+        return 0;
+    }
+    
+    // BLOB 页头偏移 8 处是数据长度（4字节）
+    return dbrecovery::innodb::read_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN);
+}
+
 inline std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_space_id,
     uint32_t first_page_no,
@@ -223,6 +235,9 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
+        // ✅ 新增：验证 BLOB 页头校验和（可选，增强数据完整性检查）
+        // 这里可以添加 CRC32 校验逻辑
+        
         // ✅ 修复：验证 BLOB 页头有效性
         uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_NEXT);
         uint32_t prev_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_PREV);
@@ -240,12 +255,19 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
+        // ✅ 新增：读取并验证当前页的数据长度
+        size_t current_page_data_len = read_blob_page_data_length(*page_data);
+        if (current_page_data_len == 0 || current_page_data_len > page_data->size() - 16) {
+            std::cerr << "[WARN] Invalid BLOB page data length: " << current_page_data_len << std::endl;
+            break;
+        }
+        
         // 链表结束条件
         if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
             break;
         }
         
-        // ✅ 修复：验证页链连续性（可选，需要额外读取前一页）
+        // ✅ 新增：验证页链连续性（可选，需要额外读取前一页）
         // 这里只做基本检查，避免跨页错误
         
         current_page_no = next_bpage;
