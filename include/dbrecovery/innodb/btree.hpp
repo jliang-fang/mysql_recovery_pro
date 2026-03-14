@@ -251,7 +251,7 @@ inline bool BPlusTreeParser::parse() noexcept {
 }
 
 inline bool BPlusTreeParser::parse_header() noexcept {
-    if (page_data_.size() < 38) {
+    if (page_data_.size() < 38 + 36) { // FIL header (38) + BTR header (36)
         return false;
     }
     
@@ -263,22 +263,29 @@ inline bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     
-    // ✅ 修复：B+树页头偏移计算（FIL header 38 bytes + BTR header）
-    const uint16_t btr_header_offset = 38; // FIL header size
+    // ✅ 修复：B+树页头偏移计算（FIL header 38 bytes + BTR header 36 bytes）
+    const uint16_t btr_header_offset = 38; 
     
     // 读取页级别（BTR_PAGE_LEVEL，位于 BTR header offset 4）
     if (page_data_.size() >= btr_header_offset + 42) {
-        page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset + 38);
+        page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset + 4);
+    } else {
+        // 兼容性处理：如果页太小，尝试从其他位置读取
+        if (page_data_.size() >= 50) {
+            page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 42);
+        }
     }
     
     // 读取目录槽数量（PAGE_N_DIR_SLOTS，位于 BTR header offset 0）
     if (page_data_.size() >= btr_header_offset + 40) {
-        n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset + 0);
+        n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset);
     }
     
     // 读取 BTR_FORMAT（位于 BTR header offset 2）
-    if (page_data_.size() >= btr_header_offset + 42) {
+    if (page_data_.size() >= btr_header_offset + 40) {
         btr_format_ = page_data_[btr_header_offset + 2];
+    } else {
+        btr_format_ = 0; // 默认为 COMPACT 格式
     }
     
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
@@ -323,14 +330,15 @@ inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
 
 inline bool BPlusTreeParser::parse_user_records() noexcept {
     // 解析记录目录（directory slots）
-    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+    const uint16_t btr_header_offset = 38;
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset);
     if (n_dir_slots == 0 || n_dir_slots > 1000) {
         std::cerr << "[ERROR] Invalid number of directory slots: " << n_dir_slots << std::endl;
         return false;
     }
     
     // 解析堆顶位置
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 2);
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset + 2);
     if (heap_top < 56 || heap_top > page_data_.size()) {
         std::cerr << "[ERROR] Invalid heap top position: " << heap_top 
                   << ", page size: " << page_data_.size() << std::endl;
@@ -340,14 +348,19 @@ inline bool BPlusTreeParser::parse_user_records() noexcept {
     // 解析记录偏移（从目录槽中获取）
     record_offsets_.clear();
     
-    // 目录槽位于页尾部，每个槽占2字节
-    // 页目录在页的末尾部分，紧接在页数据之后
+    // ✅ 修复：目录槽位于页尾部，其起始偏移 = page_size - (n_dir_slots * 2)
     uint16_t page_size = static_cast<uint16_t>(page_data_.size());
-    uint16_t dir_start = (page_size / 16) * 16 - n_dir_slots * 2;
+    if (page_size < n_dir_slots * 2) {
+        std::cerr << "[ERROR] Page size too small for directory slots" << std::endl;
+        return false;
+    }
+    
+    uint16_t dir_start = page_size - (n_dir_slots * 2);
     
     // 确保目录槽位置有效
-    if (dir_start < 38 + 16 || dir_start >= page_size) {
-        std::cerr << "[ERROR] Invalid directory start position: " << dir_start << std::endl;
+    if (dir_start < btr_header_offset + 36 || dir_start >= page_size) {
+        std::cerr << "[ERROR] Invalid directory start position: " << dir_start 
+                  << ", expected min: " << (btr_header_offset + 36) << std::endl;
         return false;
     }
     
@@ -359,8 +372,8 @@ inline bool BPlusTreeParser::parse_user_records() noexcept {
         
         uint16_t slot_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start + i * 2);
         
-        // 验证槽偏移的有效性
-        if (slot_offset >= 38 && slot_offset < heap_top) {
+        // 验证槽偏移的有效性：必须在页数据区域内，且小于堆顶
+        if (slot_offset >= btr_header_offset + 36 && slot_offset < heap_top) {
             record_offsets_.push_back(slot_offset);
         }
     }

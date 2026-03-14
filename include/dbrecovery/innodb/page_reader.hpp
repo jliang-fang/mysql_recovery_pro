@@ -50,7 +50,7 @@ public:
     [[nodiscard]] bool is_valid() const { return is_valid_; }
 
     /**
-     * @brief 校验页校验和（支持 CRC32C / INNODB / NONE）
+     * @brief 校验页校验和（支持 CRC32C / INNODB / NONE / FULL_CKPT）
      *
      * @param page_data 页数据（包含 FIL_HEADER）
      * @return true 校验通过
@@ -60,7 +60,7 @@ public:
             return false; // 页太小，无法校验
         }
         
-        // ✅ 新增：读取存储的校验和（偏移 24-27）
+        // ✅ 修复：读取存储的校验和（偏移 24-27）
         uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
         
         if (stored_checksum == 0 || stored_checksum == 0xFFFFFFFF) {
@@ -68,51 +68,85 @@ public:
             return true;
         }
         
-        // ✅ 新增：计算当前校验和（使用与 MySQL 相同的方法）
+        // ✅ 修复：计算当前校验和（使用与 MySQL 相同的方法）
         std::vector<uint8_t> page_copy = page_data;
         // 临时清零校验和字段以便计算
         for (int i = 0; i < 4; ++i) {
             page_copy[24 + i] = 0;
         }
         
-        uint32_t computed_checksum = compute_crc32c(page_copy);
-        
-        // ✅ 新增：支持多种校验算法（MySQL 8.0 可能使用 INNODB 或 CRC32C）
-        // 检查计算的校验和是否匹配存储的校验和
-        if (computed_checksum == stored_checksum) {
+        uint32_t computed_crc32c = compute_crc32c(page_copy);
+        if (computed_crc32c == stored_checksum) {
+            return true;
+        }
+
+        // ✅ 修复：尝试 INNODB 校验算法（MySQL 5.6/5.7 兼容）
+        uint32_t computed_innodb = compute_innodb_checksum(page_copy);
+        if (computed_innodb == stored_checksum) {
+            return true;
+        }
+
+        // ✅ 修复：尝试 FULL_CKPT 校验算法（MySQL 8.0 默认）
+        uint32_t computed_full_ckpt = compute_full_ckpt_checksum(page_copy);
+        if (computed_full_ckpt == stored_checksum) {
             return true;
         }
         
-        // ✅ 新增：尝试 INNODB 校验算法（如果 CRC32C 不匹配）
-        uint32_t innodb_checksum = compute_innodb_checksum(page_copy);
-        if (innodb_checksum == stored_checksum) {
-            return true;
-        }
-        
-        // ✅ 新增：尝试标准 CRC32 (ISO/Hermann)
-        uint32_t crc32_iso = compute_crc32(page_copy);
-        return (crc32_iso == stored_checksum);
+        // 所有校验均失败
+        return false;
     }
 
     /**
-     * @brief 计算页的 INNODB 校验和
+     * @brief 计算页的 INNODB 校验和（MySQL 5.6/5.7 兼容）
      *
      * @param page_data 页数据（包含 FIL_HEADER）
      * @return uint32_t INNODB 校验和值
      */
     static uint32_t compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
-        // ✅ 实现：使用 MySQL 8.0 的 innobase_get_csum() 算法
-        // 这是 MySQL 官方使用的校验算法
+        // ✅ 修复：使用 MySQL 官方的 innobase_get_csum() 算法
+        // 参考: include/mach0data.h
         
         const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
         size_t len = page_data.size() / 4;
         
-        uint32_t checksum = 0;
+        uint32_t checksum = 0xFFFFFFFF;
         for (size_t i = 0; i < len; ++i) {
-            checksum ^= data[i];
+            checksum ^= mach_read_from_4(data + i);
+            checksum += (checksum >> 16);
+            checksum &= 0xFFFFFFFF;
         }
         
-        return checksum;
+        return (checksum >> 16) ^ (checksum & 0xFFFF);
+    }
+
+    /**
+     * @brief 计算页的 FULL_CKPT 校验和（MySQL 8.0 默认）
+     *
+     * @param page_data 页数据（包含 FIL_HEADER）
+     * @return uint32_t FULL_CKPT 校验和值
+     */
+    static uint32_t compute_full_ckpt_checksum(const std::vector<uint8_t>& page_data) {
+        // ✅ 实现：使用 MySQL 8.0 的 srv_checksum_algorithm=full_crc32 算法
+        // 这是 CRC32C 的一个变种，但处理方式略有不同
+        
+        const uint8_t* data = page_data.data();
+        size_t len = page_data.size();
+
+        uint32_t crc = 0xFFFFFFFF;
+        
+        for (size_t i = 0; i < len; ++i) {
+            if (i >= 24 && i < 28) continue; // Skip checksum field
+            
+            crc = _mm_crc32_u8(crc, data[i]);
+        }
+        
+        return ~crc;
+    }
+
+    // 辅助函数：从字节流中读取 32-bit 值（小端序）
+    static inline uint32_t mach_read_from_4(const uint8_t* b) {
+        return (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
+               ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
     }
 
     /**
