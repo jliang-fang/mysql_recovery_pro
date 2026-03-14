@@ -85,7 +85,7 @@ struct alignas(1) RecordHeader {
     // ✅ 注意：COMPACT 记录头中，next_record 偏移是 little-endian 格式
     // [1] 是低字节 (bits 0-7), [2] 是高字节 (bits 8-15)
     uint16_t get_next_record_offset() const {
-        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1) << 8) | next_rec_off_0);
+        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x3F) << 8) | next_rec_off_0);
     }
 
     bool is_deleted() const { return (info_bits & REC_INFO_DELETED_FLAG) != 0; }

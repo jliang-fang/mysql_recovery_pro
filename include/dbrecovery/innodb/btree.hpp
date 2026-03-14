@@ -152,6 +152,235 @@ private:
     bool parse_user_records() noexcept;
 };
 
+// ==================== 实现部分 ====================
+inline BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
+    : page_data_(page_data) {
+}
+
+inline bool BPlusTreeParser::parse() noexcept {
+    if (page_data_.size() < 38 + 16) { // FIL header + minimal record space
+        return false;
+    }
+    
+    // 解析页头信息
+    if (!parse_header()) {
+        return false;
+    }
+    
+    // 解析 INFIMUM 和 SUPREMUM 记录
+    if (!parse_infimum_supremum()) {
+        return false;
+    }
+    
+    // 解析用户记录
+    if (!parse_user_records()) {
+        return false;
+    }
+    
+    return true;
+}
+
+inline bool BPlusTreeParser::parse_header() noexcept {
+    if (page_data_.size() < 38) {
+        return false;
+    }
+    
+    // 读取 FIL_PAGE_TYPE (offset 24 in page, but offset 12 in header)
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 24);
+    
+    if (page_type == FIL_PAGE_INDEX) {
+        node_type_ = BTreeNodeType::LEAF;
+        
+        // 读取页级别（BTR_PAGE_LEVEL，offset 38+38=76）
+        if (page_data_.size() >= 78) {
+            page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 38);
+        }
+        
+        // 读取 BTR_N_DIR_SLOTS（offset 38+0）
+        if (page_data_.size() >= 40) {
+            n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+        }
+        
+        // 读取 BTR_FORMAT（flags 字段的 bit 7）
+        if (page_data_.size() >= 44) {
+            btr_format_ = page_data_[38 + 2]; // BTR_FORMAT_MASK at offset 40
+        }
+    } else {
+        node_type_ = BTreeNodeType::INVALID;
+        return false;
+    }
+    
+    return true;
+}
+
+inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
+    if (page_data_.size() < 56) { // INFIMUM record at offset 54, minimal size 13
+        return false;
+    }
+    
+    // INFIMUM 记录在偏移 54 处（PAGE_DATA_START = 38 + 16）
+    uint16_t infimum_offset = 54;
+    if (infimum_offset >= page_data_.size()) {
+        return false;
+    }
+    
+    // 检查 INFIMUM 记录标志
+    uint8_t info_bits = page_data_[infimum_offset];
+    if ((info_bits & REC_INFO_MIN_REC_FLAG) == 0) {
+        // 可能格式不正确，但继续尝试解析
+    }
+    
+    return true;
+}
+
+inline bool BPlusTreeParser::parse_user_records() noexcept {
+    // 解析记录目录（directory slots）
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+    if (n_dir_slots == 0 || n_dir_slots > 1000) {
+        return false;
+    }
+    
+    // 解析堆顶位置
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 2);
+    if (heap_top < 56 || heap_top > page_data_.size()) {
+        return false;
+    }
+    
+    // 解析记录偏移（从目录槽中获取）
+    record_offsets_.clear();
+    
+    // 目录槽位于页尾部，每个槽占2字节
+    uint16_t dir_start = (page_data_.size() / 16) * 16 - n_dir_slots * 2;
+    if (dir_start < 38 + 16) {
+        return false;
+    }
+    
+    for (uint16_t i = 0; i < n_dir_slots; ++i) {
+        uint16_t slot_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start + i * 2);
+        if (slot_offset >= 38 && slot_offset < heap_top) {
+            record_offsets_.push_back(slot_offset);
+        }
+    }
+    
+    return !record_offsets_.empty();
+}
+
+inline std::string BPlusTreeParser::parse_field_value(
+    const catalog::ColumnInfo& col,
+    size_t& data_pos,
+    bool is_extern) const {
+    // 简化实现，实际需要根据列类型进行详细解析
+    if (data_pos >= page_data_.size()) {
+        return "";
+    }
+    
+    switch (col.mysql_type_id) {
+        case catalog::mysql_types::TINY:
+            return std::to_string(static_cast<int8_t>(page_data_[data_pos++]));
+        case catalog::mysql_types::SHORT:
+            if (data_pos + 2 > page_data_.size()) return "";
+            return std::to_string(dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos));
+            data_pos += 2;
+            break;
+        case catalog::mysql_types::LONG:
+            if (data_pos + 4 > page_data_.size()) return "";
+            return std::to_string(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
+            data_pos += 4;
+            break;
+        case catalog::mysql_types::LONGLONG:
+            if (data_pos + 8 > page_data_.size()) return "";
+            return std::to_string(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
+            data_pos += 8;
+            break;
+        case catalog::mysql_types::VARCHAR:
+        case catalog::mysql_types::VAR_STRING: {
+            if (data_pos >= page_data_.size()) return "";
+            uint8_t len = page_data_[data_pos++];
+            if (data_pos + len > page_data_.size()) return "";
+            std::string value(reinterpret_cast<const char*>(&page_data_[data_pos]), len);
+            data_pos += len;
+            return value;
+        }
+        case catalog::mysql_types::DATETIME2:
+        case catalog::mysql_types::TIMESTAMP2: {
+            // MySQL 8.0 DATETIME2 编码：前5字节 packed format，后3字节小数部分
+            if (data_pos + 8 > page_data_.size()) return "";
+            
+            uint8_t year_low = page_data_[data_pos++];
+            uint8_t year_high = page_data_[data_pos++];
+            uint8_t month_day = page_data_[data_pos++];
+            uint8_t hour_minute = page_data_[data_pos++];
+            uint8_t second_packed = page_data_[data_pos++];
+            
+            int year = year_low | (year_high << 8);
+            int month = month_day & 0x0F;
+            int day = month_day >> 4;
+            int hour = hour_minute & 0x1F;
+            int minute = (hour_minute >> 2) & 0x3F;
+            int second = second_packed >> 2;
+            
+            char buffer[32];
+            snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+                    year, month, day, hour, minute, second);
+            data_pos += 3; // skip fractional part
+            return std::string(buffer);
+        }
+        default:
+            return "[UNSUPPORTED_TYPE]";
+    }
+    
+    return "";
+}
+
+inline BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
+    PageHealth health;
+    health.is_valid = true;
+    health.status_message = "OK";
+    
+    // 检查页大小
+    if (page_data_.size() < 38 + 16) {
+        health.is_valid = false;
+        health.status_message = "Page too small";
+        return health;
+    }
+    
+    // 检查 INFIMUM 记录
+    uint16_t infimum_offset = 54;
+    if (infimum_offset < page_data_.size()) {
+        uint8_t info_bits = page_data_[infimum_offset];
+        health.has_infimum = (info_bits & REC_INFO_MIN_REC_FLAG) != 0;
+    }
+    
+    // 检查 SUPREMUM 记录
+    if (!record_offsets_.empty()) {
+        uint16_t supremum_offset = record_offsets_.back();
+        if (supremum_offset < page_data_.size()) {
+            uint8_t info_bits = page_data_[supremum_offset];
+            health.has_supremum = ((info_bits & 0x03) == REC_STATUS_SUPREMUM);
+        }
+    }
+    
+    // 检查记录数量
+    if (!record_offsets_.empty()) {
+        health.n_records = static_cast<uint16_t>(record_offsets_.size());
+    }
+    
+    return health;
+}
+
+inline uint64_t BPlusTreeParser::get_sdi_table_id() const {
+    // SDI 页解析：从 FIL_PAGE_SPACE_ID 和 FIL_PAGE_OFFSET 组合
+    if (page_data_.size() < 12) {
+        return 0;
+    }
+    
+    uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 0);
+    uint32_t page_no = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 4);
+    
+    // 组合 space_id 和 page_no 形成唯一标识
+    return (static_cast<uint64_t>(space_id) << 32) | page_no;
+}
+
 /**
  * @brief B+Tree 恢复器
  */

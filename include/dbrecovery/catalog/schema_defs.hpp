@@ -95,7 +95,19 @@ struct TableSchema {
     uint32_t flags = 0;                   // FSP_FLAGS (页空间标志)
     uint32_t auto_inc_value = 0;          // AUTO_INCREMENT 当前值
     
-    void debug_print() const;
+    void debug_print() const {
+        std::cout << "Table: " << table_name << std::endl;
+        std::cout << "Engine: " << engine << ", Row Format: " << row_format 
+                  << ", Page Size: " << page_size << std::endl;
+        std::cout << "Columns:" << std::endl;
+        for (const auto& pair : columns) {
+            const auto& col = pair.second;
+            std::cout << "  [" << pair.first << "] " << col.name 
+                      << " (type=" << col.mysql_type_id << ", nullable=" 
+                      << col.is_nullable << ")" << std::endl;
+        }
+        std::cout << "Indexes: " << indexes.size() << std::endl;
+    }
     
     // ✅ 新增：表结构验证
     bool validate() const {
@@ -232,16 +244,66 @@ struct TableSchema {
     }
     
     // ✅ 新增：序列化为 JSON 字符串（用于 SDI 兼容）
-    std::string to_json_string() const;
+    std::string to_json_string() const {
+        return to_json().dump(2);
+    }
     
     // ✅ 新增：从 JSON 字符串反序列化（用于 SDI 解析）
-    bool from_json_string(const std::string& json_str);
+    bool from_json_string(const std::string& json_str) {
+        try {
+            auto j = nlohmann::json::parse(json_str);
+            return from_json(j);
+        } catch (...) {
+            return false;
+        }
+    }
     
     // ✅ 新增：从 nlohmann/json 对象加载
-    bool from_json(const class json& j);
+    bool from_json(const class json& j) {
+        if (j.contains("name")) {
+            table_name = j["name"].get<std::string>();
+        }
+        
+        if (j.contains("columns") && j["columns"].is_array()) {
+            uint32_t ordinal = 1;
+            for (const auto& col_json : j["columns"]) {
+                catalog::ColumnInfo col;
+                if (col_json.contains("name")) {
+                    col.name = col_json["name"].get<std::string>();
+                }
+                if (col_json.contains("type")) {
+                    col.mysql_type_id = col_json["type"].get<uint32_t>();
+                }
+                if (col_json.contains("is_nullable")) {
+                    col.is_nullable = col_json["is_nullable"].get<bool>();
+                }
+                columns[ordinal++] = col;
+            }
+        }
+        
+        return validate();
+    }
     
     // ✅ 新增：转换为 nlohmann/json 对象
-    json to_json() const;
+    json to_json() const {
+        json j;
+        j["name"] = table_name;
+        j["engine"] = engine;
+        j["row_format"] = row_format;
+        
+        json columns_array = json::array();
+        for (const auto& pair : columns) {
+            json col_json;
+            col_json["ordinal"] = pair.first;
+            col_json["name"] = pair.second.name;
+            col_json["type_id"] = pair.second.mysql_type_id;
+            col_json["is_nullable"] = pair.second.is_nullable;
+            columns_array.push_back(col_json);
+        }
+        j["columns"] = columns_array;
+        
+        return j;
+    }
 };
 
 // MySQL 8.0 类型常量（参考 include/mysql/mysql_type.h）

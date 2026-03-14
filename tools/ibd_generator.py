@@ -155,7 +155,7 @@ def generate_ibd(table_name="users", include_blob=False):
     user_rec.append(len(email_str))
     user_rec.extend(email_str.encode())
     
-    # created_at 字段 (DATETIME2(6), 8 bytes for no precision + 4 bytes for frac)
+    # created_at 字段 (DATETIME2(6), 8 bytes for precision=6)
     import struct
     # ✅ 修复：正确的 DATETIME2 编码（参考 MySQL 8.0 源码 sql/field.cc）
     # 前5字节 packed format: [year_low, year_high, month_day, hour_minute, second_packed]
