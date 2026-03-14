@@ -79,12 +79,16 @@ std::vector<uint8_t> PageReader::read_page(uint32_t page_no) {
             // 忽略未知页类型，但记录警告
             std::cerr << "[WARN] Unknown page type: " << page_type 
                       << " for page " << page_no << std::endl;
-            is_valid_page_type = true; // 允许继续处理
+            is_valid_page_type = false; // 未知页类型不处理
             break;
     }
     
+    if (!is_valid_page_type) {
+        return {}; // 不支持的页类型，返回空
+    }
+    
     // 校验页校验和（如果页类型有效）
-    if (is_valid_page_type && !validate_checksum(buffer)) {
+    if (!validate_checksum(buffer)) {
         std::cerr << "[WARN] Checksum validation failed for page " << page_no 
                   << ", type=" << page_type << std::endl;
         return {}; // 校验失败，返回空

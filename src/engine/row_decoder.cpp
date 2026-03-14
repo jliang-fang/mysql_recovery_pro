@@ -55,7 +55,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         
         // ✅ 修复：正确计算NULL位图索引（只计数可空列）
         if (col.is_nullable && null_bytes_ > 0) {
-            uint32_t col_idx = 0;
+            uint32_t bitmap_index = 0;
             for (const auto& prev_pair : schema.columns) {
                 const auto& prev_col = prev_pair.second;
                 // 只计算在当前列之前定义的可空列
@@ -63,20 +63,20 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                     break; // 已经处理完所有前置列
                 }
                 if (prev_col.is_nullable && !prev_col.is_off_page && prev_col.virtual_gen_store_type == 0) {
-                    col_idx++;
+                    bitmap_index++;
                 }
             }
-            
-            uint32_t byte_idx = col_idx / 8;
-            uint32_t bit_idx = col_idx % 8;
-            
+        
+            uint32_t byte_idx = bitmap_index / 8;
+            uint32_t bit_idx = bitmap_index % 8;
+        
             // ✅ 新增：边界检查确保不会越界访问
             if (byte_idx >= null_bytes_) {
                 std::cerr << "[WARN] NULL bitmap index out of range: " << byte_idx 
                           << " >= " << null_bytes_ << std::endl;
                 return fields; // 跳过此字段
             }
-            
+        
             // ✅ 使用统一的NULL位图解析逻辑（小端序：低位在前）
             if (null_ptr != nullptr && null_ptr + byte_idx < page_base_ + size_) {
                 bool is_null = (null_ptr[byte_idx] & (1U << bit_idx)) != 0;

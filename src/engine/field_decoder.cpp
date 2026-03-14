@@ -6,8 +6,15 @@
 namespace dbrecovery {
 namespace engine {
 
-FieldDecoder::FieldDecoder(const uint8_t* page_base, size_t null_bytes)
-    : page_base_(page_base), null_bytes_(null_bytes) {}
+FieldDecoder::FieldDecoder(const uint8_t* page_base, size_t page_size, size_t null_bytes)
+    : page_base_(page_base), 
+      size_(page_size),
+      null_bytes_(null_bytes) {
+    // ✅ 新增：验证指针有效性
+    if (page_base_ == nullptr && page_size > 0) {
+        throw std::invalid_argument("Page base pointer is null but page_size > 0");
+    }
+}
 
 const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_index, const catalog::ColumnInfo& col_info) const {
     // 根据列类型计算字段长度

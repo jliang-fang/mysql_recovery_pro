@@ -50,22 +50,21 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     
     Offset new_end = offset + static_cast<Offset>(data.size());
     
-    // Check for overlap and handle edge cases
+    // ✅ 简化：检查是否有重叠
     for (const auto& chunk : chunks_) {
-        Offset new_start = offset;
         Offset old_start = chunk.offset;
         Offset old_end = chunk.offset + static_cast<Offset>(chunk.length);
         
         // 完全包含：新块被旧块完全覆盖，拒绝添加
-        if (new_start >= old_start && new_end <= old_end) {
+        if (offset >= old_start && new_end <= old_end) {
             return false;  // 新数据完全在旧数据范围内，无需添加
         }
         
         // 部分重叠：优先保留已有数据（假设旧数据更可靠）
-        if (new_start < old_end && old_start < new_end) {
+        if (offset < old_end && old_start < new_end) {
             // 如果新块的起始位置比旧块早，则允许追加到末尾
-            if (new_start < old_start) {
-                Offset overlap_offset = old_start - new_start;
+            if (offset < old_start) {
+                Offset overlap_offset = old_start - offset;
                 size_t overlap = static_cast<size_t>(overlap_offset);
                 if (overlap >= data.size()) return false; // 完全重叠
                 // 只添加不重叠的部分
