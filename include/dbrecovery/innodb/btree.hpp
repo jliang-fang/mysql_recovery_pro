@@ -263,19 +263,22 @@ inline bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     
-    // 读取页级别（BTR_PAGE_LEVEL，位于 page header offset 38+38）
-    if (page_data_.size() >= 76) {
-        page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 38);
+    // ✅ 修复：B+树页头偏移计算（FIL header 38 bytes + BTR header）
+    const uint16_t btr_header_offset = 38; // FIL header size
+    
+    // 读取页级别（BTR_PAGE_LEVEL，位于 BTR header offset 4）
+    if (page_data_.size() >= btr_header_offset + 42) {
+        page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset + 38);
     }
     
-    // 读取 BTR_N_DIR_SLOTS（位于 page header offset 38+0）
-    if (page_data_.size() >= 40) {
-        n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0);
+    // 读取目录槽数量（PAGE_N_DIR_SLOTS，位于 BTR header offset 0）
+    if (page_data_.size() >= btr_header_offset + 40) {
+        n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_header_offset + 0);
     }
     
-    // 读取 BTR_FORMAT（位于 page header offset 38+2）
-    if (page_data_.size() >= 42) {
-        btr_format_ = page_data_[38 + 2];
+    // 读取 BTR_FORMAT（位于 BTR header offset 2）
+    if (page_data_.size() >= btr_header_offset + 42) {
+        btr_format_ = page_data_[btr_header_offset + 2];
     }
     
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;

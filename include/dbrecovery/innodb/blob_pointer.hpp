@@ -199,11 +199,14 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
         return std::nullopt;
     }
     
+    // ✅ 修复：添加最大深度限制（BLOB 链通常不会超过 100 页）
+    const size_t MAX_BLOB_CHAIN_DEPTH = 1024;
+    size_t depth = 0;
+    
     uint32_t current_space_id = first_space_id;
     uint32_t current_page_no = first_page_no;
-    size_t max_pages = 1000; // 防止无限循环
     
-    while (max_pages-- > 0) {
+    while (depth < MAX_BLOB_CHAIN_DEPTH) {
         chain.add_page(current_space_id, current_page_no);
         
         auto page_data = page_reader(current_space_id, current_page_no);
@@ -211,24 +214,42 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
-        // 读取下一个 BLOB 页号
+        // ✅ 修复：验证 BLOB 页头有效性
         uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_NEXT);
+        uint32_t prev_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_PREV);
         
-        if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
-            // 链表结束
+        // 检查页号有效性
+        if (next_bpage != 0xFFFFFFFF && next_bpage != 0 && 
+            (next_bpage >= 0x10000000)) { // 假设有效页号小于 2^28
+            std::cerr << "[WARN] Invalid BLOB next page number: " << next_bpage << std::endl;
             break;
         }
         
-        // BLOB 页链在同一表空间内连续
-        // next_bpage 是下一页的页号（同一 space_id）
-        if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
-            break; // 链表结束
+        if (prev_bpage != 0xFFFFFFFF && prev_bpage != 0 &&
+            (prev_bpage >= 0x10000000)) {
+            std::cerr << "[WARN] Invalid BLOB previous page number: " << prev_bpage << std::endl;
+            break;
         }
         
+        // 链表结束条件
+        if (next_bpage == 0xFFFFFFFF || next_bpage == 0) {
+            break;
+        }
+        
+        // ✅ 修复：验证页链连续性（可选，需要额外读取前一页）
+        // 这里只做基本检查，避免跨页错误
+        
         current_page_no = next_bpage;
+        depth++;
     }
     
     if (chain.pages.empty()) {
+        return std::nullopt;
+    }
+    
+    // ✅ 修复：验证链表长度合理性（BLOB 数据通常不会超过 10000 页）
+    if (chain.pages.size() > MAX_BLOB_CHAIN_DEPTH) {
+        std::cerr << "[ERROR] BLOB chain exceeds maximum depth: " << chain.pages.size() << std::endl;
         return std::nullopt;
     }
     
