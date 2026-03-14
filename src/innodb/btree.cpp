@@ -8,12 +8,8 @@
 namespace dbrecovery {
 namespace innodb {
 
-// InnoDB 页类型常量（参考 MySQL 8.0 源码 include/fil0fil.h）
-constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
-constexpr uint16_t FIL_PAGE_INDEX        = 9969;   // B+Tree 索引页
-constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;   // Undo 日志页
-constexpr uint16_t FIL_PAGE_SDI          = 9971;   // SDI 元数据页
-constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;   // BLOB页
+// 使用 page_defs.hpp 中定义的常量，避免重复定义
+// #include "dbrecovery/innodb/page_defs.hpp" 已在文件开头包含
 
 // ==================== 辅助函数：字段值解析 ====================
 
@@ -109,10 +105,11 @@ bool BPlusTreeParser::parse() noexcept {
         return false;
     }
     
-    // 解析页类型
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), FIL_PAGE_TYPE);
+    // 解析页类型（使用 page_defs.hpp 中定义的常量）
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_PAGE_TYPE);
     
-    if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI) {
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
+        page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         return false;
     }
     
