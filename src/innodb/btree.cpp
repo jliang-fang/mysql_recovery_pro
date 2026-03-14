@@ -9,7 +9,8 @@ namespace innodb {
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
     : page_data_(page_data), flags_(0), page_level_(0), n_records_(0),
-      next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF), node_type_(BTreeNodeType::LEAF) {
+      next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF), node_type_(BTreeNodeType::LEAF),
+      btr_format_(0) {
 }
 
 bool BPlusTreeParser::parse() noexcept {

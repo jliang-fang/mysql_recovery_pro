@@ -31,6 +31,12 @@ class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
     
+    // ✅ 新增：初始化 btr_format_ 成员变量
+    BPlusTreeParser(const std::vector<uint8_t>& page_data)
+        : page_data_(page_data), flags_(0), page_level_(0), n_records_(0),
+          next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF), node_type_(BTreeNodeType::LEAF),
+          btr_format_(0) {}
+    
     bool parse() noexcept;
     
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
