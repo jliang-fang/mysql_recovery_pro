@@ -46,7 +46,7 @@ private:
 inline FileMapper::FileMapper(FileMapper&& other) noexcept 
     : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
 #ifdef _WIN32
-      , handle_(other.handle_)
+      , handle_(INVALID_HANDLE_VALUE)
 #endif
 {
     // 转移所有权：清空源对象
@@ -54,7 +54,9 @@ inline FileMapper::FileMapper(FileMapper&& other) noexcept
     other.data_ = nullptr;
     other.size_ = 0;
     other.is_valid_ = false;
+    
 #ifdef _WIN32
+    handle_ = other.handle_;
     other.handle_ = INVALID_HANDLE_VALUE;
 #endif
 }
