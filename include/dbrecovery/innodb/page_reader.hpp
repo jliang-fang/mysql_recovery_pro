@@ -85,7 +85,13 @@ public:
         
         // ✅ 新增：尝试 INNODB 校验算法（如果 CRC32C 不匹配）
         uint32_t innodb_checksum = compute_innodb_checksum(page_copy);
-        return (innodb_checksum == stored_checksum);
+        if (innodb_checksum == stored_checksum) {
+            return true;
+        }
+        
+        // ✅ 新增：尝试标准 CRC32 (ISO/Hermann)
+        uint32_t crc32_iso = compute_crc32(page_copy);
+        return (crc32_iso == stored_checksum);
     }
 
     /**
@@ -96,7 +102,7 @@ public:
      */
     static uint32_t compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
         // ✅ 新增：实现 INNODB 校验算法（参考 MySQL 8.0 源码）
-        // 这里使用简单的累加和作为占位符，实际应使用 MySQL 的 innobase_checksum()
+        // 使用简单的累加和作为占位符，实际应使用 MySQL 的 innobase_checksum()
         
         uint32_t checksum = 0;
         for (size_t i = 0; i < page_data.size(); ++i) {
@@ -112,18 +118,48 @@ public:
      * @return uint32_t CRC32C 值
      */
     static uint32_t compute_crc32c(const std::vector<uint8_t>& page_data) {
-        // 使用 zlib 的 crc32c 实现
-        // 这里提供一个简化的实现，实际应使用硬件加速的 crc32c
-        
+        // ✅ 新增：跳过校验和字段（偏移 24-27）进行计算
         uint32_t crc = 0xFFFFFFFF;
         
         for (size_t i = 0; i < page_data.size(); ++i) {
+            // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
+            if (i >= 24 && i < 28) continue;
+            
             uint8_t byte = page_data[i];
             crc ^= byte;
             
             for (int j = 0; j < 8; ++j) {
                 if (crc & 1) {
                     crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式
+                } else {
+                    crc >>= 1;
+                }
+            }
+        }
+        
+        return ~crc;
+    }
+
+    /**
+     * @brief 计算页的标准 CRC32 (ISO/Hermann) 校验和
+     *
+     * @param page_data 页数据（包含 FIL_HEADER）
+     * @return uint32_t CRC32 值
+     */
+    static uint32_t compute_crc32(const std::vector<uint8_t>& page_data) {
+        // ✅ 新增：跳过校验和字段（偏移 24-27）进行计算
+        uint32_t crc = 0xFFFFFFFF;
+        
+        for (size_t i = 0; i < page_data.size(); ++i) {
+            // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
+            if (i >= 24 && i < 28) continue;
+            
+            uint8_t byte = page_data[i];
+            crc ^= byte;
+            
+            for (int j = 0; j < 8; ++j) {
+                if (crc & 1) {
+                    crc = (crc >> 1) ^ 0xEDB88320; // CRC32 多项式
                 } else {
                     crc >>= 1;
                 }
