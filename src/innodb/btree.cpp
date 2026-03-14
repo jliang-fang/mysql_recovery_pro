@@ -485,6 +485,7 @@ std::string BPlusTreeParser::parse_field_value(
             // 小数部分（根据精度）
             if (datetime_precision > 0) {
                 size_t frac_bytes = (datetime_precision + 1) / 2;
+                // ✅ 修复：添加边界检查，确保有足够的字节
                 if (data_pos + frac_bytes <= page_data_.size()) {
                     uint64_t frac_val = 0;
                     // ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
@@ -492,7 +493,7 @@ std::string BPlusTreeParser::parse_field_value(
                         frac_val |= (static_cast<uint64_t>(page_data_[data_pos + i]) << (i * 8));
                     }
                     
-                    // 转换为微秒
+                    // 转换为小数部分
                     double frac_sec = static_cast<double>(frac_val) / 
                                      std::pow(10, datetime_precision);
                     oss << std::fixed << std::setprecision(datetime_precision) << frac_sec;

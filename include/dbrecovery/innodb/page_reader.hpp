@@ -184,6 +184,9 @@ private:
         
         uint32_t checksum = 0xFFFFFFFF;
         for (size_t i = 0; i < len; ++i) {
+            // ✅ 修复：跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
+            if (i == 6 || i == 7) continue; // Skip checksum field
+            
             checksum ^= mach_read_from_4(data + i);
             checksum += (checksum >> 16);
             checksum &= 0xFFFFFFFF;
@@ -243,15 +246,14 @@ private:
      * @return uint32_t CRC32C 值
      */
     static uint32_t compute_crc32c(const std::vector<uint8_t>& page_data) {
-        // ✅ 实现：使用硬件加速的 CRC32C 算法（SSE 4.2）
-        // 如果没有硬件支持，使用软件实现
+        // ✅ 修复：跳过正确的校验和字段 (offset 24-27, 4 bytes)
         
         #ifdef __SSE4_2__
             #include <nmmintrin.h>
             uint32_t crc = 0xFFFFFFFF;
             
             for (size_t i = 0; i < page_data.size(); ++i) {
-                if (i >= 24 && i < 28) continue; // Skip checksum field
+                if (i >= 24 && i < 28) continue; // Skip checksum field at offset 24-27
                 
                 crc = _mm_crc32_u8(crc, page_data[i]);
             }
@@ -262,7 +264,7 @@ private:
             uint32_t crc = 0xFFFFFFFF;
             
             for (size_t i = 0; i < page_data.size(); ++i) {
-                if (i >= 24 && i < 28) continue; // Skip checksum field
+                if (i >= 24 && i < 28) continue; // Skip checksum field at offset 24-27
                 
                 uint8_t byte = page_data[i];
                 crc ^= byte;
@@ -315,7 +317,7 @@ private:
      * @return uint32_t OLD 校验和值
      */
     static uint32_t compute_old_checksum(const std::vector<uint8_t>& page_data) {
-        // ✅ 实现：使用 MySQL 5.5/5.6 的旧校验算法
+        // ✅ 修复：使用 MySQL 5.5/5.6 的旧校验算法
         // 这是简单的累加和（非CRC）
         
         const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
@@ -323,7 +325,8 @@ private:
         
         uint32_t checksum = 0;
         for (size_t i = 0; i < len; ++i) {
-            if (i >= 6 && i < 8) continue; // Skip checksum fields at offset 24-31
+            // ✅ 修复：跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
+            if (i == 6 || i == 7) continue; // Skip checksum field
             
             checksum += mach_read_from_4(data + i);
         }

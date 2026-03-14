@@ -63,7 +63,7 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
     if (this != &other) {
         // 清理当前资源
 #ifdef _WIN32
-        if (data_) {
+        if (data_ && data_ != nullptr) {
             UnmapViewOfFile(data_);
             data_ = nullptr;
         }
@@ -106,7 +106,7 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
 #ifdef _WIN32
         other.handle_ = INVALID_HANDLE_VALUE;
 #else
-        other.data_ = static_cast<uint8_t*>(MAP_FAILED); // 确保其他文件描述符的正确清理
+        other.data_ = static_cast<uint8_t*>(MAP_FAILED);
 #endif
     }
     
