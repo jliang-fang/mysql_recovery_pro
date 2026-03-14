@@ -144,6 +144,7 @@ private:
     uint16_t n_records_ = 0;
     std::vector<uint16_t> record_offsets_;
     uint8_t btr_format_ = 0;  // B+树记录格式标志位 (BTR_FORMAT_MASK)
+    uint16_t flags_ = 0;      // B+树标志位（用于存储行格式等信息）
     
     bool parse_header() noexcept;
     bool parse_infimum_supremum() noexcept;

@@ -157,15 +157,40 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
                 health.has_supremum = true;
             }
         }
+    } else {
+        // 页太小，无法包含完整的记录
+        health.status_message = "Page too small for records";
     }
     
     // 解析页目录
-    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_DIR_SLOTS + 38);
-    health.n_dir_slots = n_dir_slots;
+    if (page_data_.size() >= 38 + 36) { // 确保有足够空间读取页目录
+        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_DIR_SLOTS + 38);
+        health.n_dir_slots = n_dir_slots;
+        
+        // 验证页目录槽数量合理性（至少有INFIMUM和SUPREMUM）
+        if (n_dir_slots < 2) {
+            health.status_message += "Insufficient dir slots; ";
+            health.is_valid = false;
+        }
+    } else {
+        health.status_message += "Page header incomplete; ";
+        health.is_valid = false;
+    }
     
     // 解析堆大小
-    uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_HEAP + 38) & 0x7FFF;
-    health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
+    if (page_data_.size() >= 38 + 4) { // 确保有足够空间读取PAGE_N_HEAP
+        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), PAGE_N_HEAP + 38) & 0x7FFF;
+        health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
+        
+        // 验证堆大小合理性
+        if (n_heap < 2 || n_heap > 16384) {
+            health.status_message += "Invalid heap size: " + std::to_string(n_heap);
+            health.is_valid = false;
+        }
+    } else {
+        health.status_message += "Cannot read heap size; ";
+        health.is_valid = false;
+    }
     
     return health;
 }

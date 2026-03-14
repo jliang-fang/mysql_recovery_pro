@@ -134,6 +134,13 @@ inline std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t
         return std::nullopt; // 无效的 BLOB 指针
     }
     
+    // ✅ 新增：验证偏移和长度的边界检查（防止越界访问）
+    if (ptr.offset >= 16384 || ptr.len > 16384) {
+        std::cerr << "[ERROR] BLOB pointer has invalid offset/len: offset=" 
+                  << ptr.offset << ", len=" << ptr.len << std::endl;
+        return std::nullopt;
+    }
+    
     // ✅ 修复：total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
     if (ptr.total_len == 0) {
         ptr.total_len = ptr.len;
@@ -148,18 +155,6 @@ inline std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t
     if (ptr.total_len > (64ULL * 1024 * 1024 * 1024)) {
         std::cerr << "[ERROR] BLOB total_len exceeds reasonable limit: " << ptr.total_len << std::endl;
         return std::nullopt;
-    }
-    
-    // ✅ 新增：验证偏移和长度的合理性
-    if (ptr.offset >= 16384) {
-        std::cerr << "[ERROR] BLOB pointer has invalid offset: " << ptr.offset << std::endl;
-        return std::nullopt;
-    }
-    
-    // 验证当前页数据长度（允许跨页，所以 len 可以大于 page_size）
-    if (ptr.len > 16384) {
-        std::cerr << "[WARN] BLOB pointer has large len: " << ptr.len 
-                  << ", may be cross-page data." << std::endl;
     }
     
     // ✅ 新增：验证跨页情况
