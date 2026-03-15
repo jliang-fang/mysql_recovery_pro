@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iomanip>
 #include <sstream>
+#include <algorithm>
 
 namespace dbrecovery {
 namespace innodb {
@@ -585,6 +586,28 @@ uint64_t BPlusTreeParser::get_sdi_table_id() const {
     
     // SDI页的表ID在偏移38+20处
     return dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), 58);
+}
+
+// ✅ 新增：CRC32C 校验和计算（供页健康检查使用）
+uint32_t compute_page_crc32c(const std::vector<uint8_t>& page_data) {
+    uint32_t crc = 0xFFFFFFFF;
+    
+    for (size_t i = 0; i < page_data.size(); ++i) {
+        if (i >= 24 && i < 28) continue; // Skip checksum field at offset 24-27
+        
+        uint8_t byte = page_data[i];
+        crc ^= byte;
+        
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    
+    return ~crc;
 }
 
 // ==================== BPlusTreeReconstructor 实现 ====================
