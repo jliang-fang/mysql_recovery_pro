@@ -54,7 +54,7 @@ std::string parse_varchar_value(const uint8_t* data, size_t& pos, size_t max_len
     return result;
 }
 
-std::string parse_int_value(const uint8_t* data, size_t& pos, size_t field_size, bool is_signed, bool is_nullable) {
+std::string parse_int_value(const uint8_t* data, size_t& pos, size_t max_len, size_t field_size, bool is_signed, bool is_nullable) {
     if (is_nullable && pos < max_len && data[pos] == 0xFF) {
         pos++;
         return "NULL";
@@ -62,6 +62,9 @@ std::string parse_int_value(const uint8_t* data, size_t& pos, size_t field_size,
     
     std::ostringstream oss;
     if (field_size == 1) {
+        if (pos >= max_len) {
+            return "";
+        }
         uint8_t val = data[pos];
         pos++;
         if (is_signed) {
@@ -70,6 +73,9 @@ std::string parse_int_value(const uint8_t* data, size_t& pos, size_t field_size,
             oss << static_cast<uint8_t>(val);
         }
     } else if (field_size == 2) {
+        if (pos + 1 >= max_len) {
+            return "";
+        }
         uint16_t val = dbrecovery::innodb::read_le<uint16_t>(data, pos);
         pos += 2;
         if (is_signed) {
@@ -78,6 +84,9 @@ std::string parse_int_value(const uint8_t* data, size_t& pos, size_t field_size,
             oss << val;
         }
     } else if (field_size == 4) {
+        if (pos + 3 >= max_len) {
+            return "";
+        }
         uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data, pos);
         pos += 4;
         if (is_signed) {
@@ -86,6 +95,9 @@ std::string parse_int_value(const uint8_t* data, size_t& pos, size_t field_size,
             oss << val;
         }
     } else if (field_size == 8) {
+        if (pos + 7 >= max_len) {
+            return "";
+        }
         uint64_t val = dbrecovery::innodb::read_le<uint64_t>(data, pos);
         pos += 8;
         if (is_signed) {
@@ -308,18 +320,20 @@ std::string BPlusTreeParser::parse_field_value(
         return "NULL";
     }
     
+    size_t max_len = page_data_.size();
+    
     switch (col.mysql_type_id) {
         case mysql_types::TINY:
-            return parse_int_value(page_data_.data(), data_pos, 1, col.is_signed, false);
+            return parse_int_value(page_data_.data(), data_pos, max_len, 1, col.is_signed, false);
             
         case mysql_types::SHORT:
-            return parse_int_value(page_data_.data(), data_pos, 2, col.is_signed, false);
+            return parse_int_value(page_data_.data(), data_pos, max_len, 2, col.is_signed, false);
             
         case mysql_types::LONG:
-            return parse_int_value(page_data_.data(), data_pos, 4, col.is_signed, false);
+            return parse_int_value(page_data_.data(), data_pos, max_len, 4, col.is_signed, false);
             
         case mysql_types::LONGLONG:
-            return parse_int_value(page_data_.data(), data_pos, 8, col.is_signed, false);
+            return parse_int_value(page_data_.data(), data_pos, max_len, 8, col.is_signed, false);
             
         case mysql_types::INT24:
             // INT24 占用3字节，但读取时需要4字节

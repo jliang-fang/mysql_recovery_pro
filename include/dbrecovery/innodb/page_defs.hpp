@@ -146,6 +146,35 @@ struct alignas(1) Record {
     }
 };
 
+// ==================== MySQL 类型常量 ====================
+namespace mysql_types {
+
+constexpr uint8_t TINY        = 1;
+constexpr uint8_t SHORT       = 2;
+constexpr uint8_t LONG        = 3;
+constexpr uint8_t FLOAT       = 4;
+constexpr uint8_t DOUBLE      = 5;
+constexpr uint8_t LONGLONG    = 8;
+constexpr uint8_t INT24       = 9;
+constexpr uint8_t DATE        = 10;
+constexpr uint8_t TIME        = 11;
+constexpr uint8_t DATETIME    = 12;
+constexpr uint8_t YEAR        = 13;
+constexpr uint8_t VARCHAR     = 15;
+constexpr uint8_t BIT         = 16;
+constexpr uint8_t TIMESTAMP2  = 17;
+constexpr uint8_t DATETIME2   = 18;
+constexpr uint8_t TIME2       = 19;
+constexpr uint8_t JSON        = 245;
+
+// BLOB 类型
+constexpr uint8_t TINY_BLOB   = 250;
+constexpr uint8_t MEDIUM_BLOB = 251;
+constexpr uint8_t LONG_BLOB   = 252;
+constexpr uint8_t BLOB        = 253;
+
+} // namespace mysql_types
+
 } // namespace innodb
 } // namespace dbrecovery
 

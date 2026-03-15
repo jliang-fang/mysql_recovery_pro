@@ -5,6 +5,10 @@
 #include <vector>
 #include <span>
 #include <cstring>
+#include <memory>
+
+#include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/utils/file_mapper.hpp"
 
 namespace dbrecovery {
 namespace innodb {

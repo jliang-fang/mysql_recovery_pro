@@ -128,10 +128,48 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
 }
 
 uint32_t PageReader::compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
-    // 实现 INNODB 校验算法（参考 MySQL 8.0 源码 innobase_checksum()
-    // 使用 CRC32C 作为默认实现，因为 MySQL 8.0 默认使用 CRC32C
+    // 实现 INNODB 校验算法（参考 MySQL 5.6/5.7 源码）
+    // 使用简单的异或累加算法
     
-    return compute_crc32c(page_data);
+    if (page_data.size() < 40) {
+        return 0;
+    }
+    
+    const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
+    size_t len = page_data.size() / 4;
+    
+    uint32_t checksum = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        // 跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
+        if (i == 6 || i == 7) continue;
+        
+        checksum ^= data[i];
+        checksum += (checksum >> 16);
+        checksum &= 0xFFFFFFFF;
+    }
+    
+    return (checksum >> 16) ^ (checksum & 0xFFFF);
+}
+
+uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
+    // 使用软件实现的 CRC32C (Castagnoli) 算法
+    uint32_t crc = 0xFFFFFFFF;
+    
+    for (size_t i = 0; i < page_data.size(); ++i) {
+        // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
+        if (i >= 24 && i < 28) continue;
+        
+        crc ^= static_cast<uint32_t>(page_data[i]);
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    
+    return ~crc;
 }
 
 uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {

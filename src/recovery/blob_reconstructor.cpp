@@ -1,6 +1,8 @@
 #include "dbrecovery/recovery/blob_reconstructor.hpp"
+#include "dbrecovery/recovery/common.hpp"
 #include <cstring>
 #include <algorithm>
+#include <iostream>
 
 namespace dbrecovery {
 namespace recovery {
@@ -37,7 +39,7 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     if (data.empty()) return false;
     
     // ✅ 增强：验证偏移和数据大小的合理性
-    if (offset > 0x100000000ULL) { // 限制最大偏移到4GB
+    if (offset > Common::MAX_FILE_SIZE) {
         std::cerr << "[WARN] Blob chunk offset too large: " << offset << "\n";
         return false;
     }
@@ -50,7 +52,7 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
     
     Offset new_end = offset + static_cast<Offset>(data.size());
     
-    // ✅ 简化：检查是否有重叠
+    // ✅ 增强：检查是否有重叠
     for (const auto& chunk : chunks_) {
         Offset old_start = chunk.offset;
         Offset old_end = chunk.offset + static_cast<Offset>(chunk.length);

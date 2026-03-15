@@ -215,7 +215,7 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
 ) {
     BlobPageChain chain;
     
-    if (!page_reader) {
+    if (!page_reader || first_page_no >= 0xFFFFFFFF) {
         return std::nullopt;
     }
     
@@ -227,10 +227,22 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t current_page_no = first_page_no;
     
     while (depth < MAX_BLOB_CHAIN_DEPTH) {
+        // ✅ 新增：验证页号有效性
+        if (current_page_no >= 0x10000000) { // 假设有效页号小于 2^28
+            std::cerr << "[ERROR] Invalid BLOB page number: " << current_page_no << std::endl;
+            break;
+        }
+        
         chain.add_page(current_space_id, current_page_no);
         
         auto page_data = page_reader(current_space_id, current_page_no);
-        if (!page_data || page_data->size() < 16) {
+        if (!page_data) {
+            std::cerr << "[WARN] Cannot read BLOB page: (" << current_space_id << ", " << current_page_no << ")" << std::endl;
+            break;
+        }
+        
+        if (page_data->size() < 16) {
+            std::cerr << "[ERROR] BLOB page data too small: " << page_data->size() << " bytes" << std::endl;
             break;
         }
         
@@ -288,7 +300,12 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
     for (const auto& page : chain.pages) {
         auto page_data = page_reader(page.first, page.second);
         if (page_data && page_data->size() >= 16) {
-            total_data_len += read_blob_page_data_length(*page_data);
+            size_t len = read_blob_page_data_length(*page_data);
+            if (len == 0 || len > page_data->size() - 16) {
+                std::cerr << "[WARN] Invalid BLOB page data length in chain validation" << std::endl;
+                continue;
+            }
+            total_data_len += len;
         }
     }
     
