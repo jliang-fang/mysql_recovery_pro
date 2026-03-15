@@ -280,14 +280,6 @@ public:
         return checksum;
     }
 
-private:
-    // 辅助函数：从字节流中读取 32-bit 值（小端序）
-    static inline uint32_t mach_read_from_4(const uint8_t* b) {
-        return (uint32_t)b[0] | ((uint32_t)b[1] << 8) |
-               ((uint32_t)b[2] << 16) | ((uint32_t)b[3] << 24);
-    }
-
-private:
     uint64_t file_size_;
     uint32_t page_size_;
     uint32_t total_pages_;

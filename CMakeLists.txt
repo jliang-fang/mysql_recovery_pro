@@ -31,6 +31,7 @@ set(SOURCES
     src/innodb/page_parser.cpp
     src/innodb/page_reader.cpp
     src/innodb/recovery_engine.cpp
+    src/innodb/blob_parser.cpp
     src/innodb/v2/page_parser.cpp
     src/innodb/v2/record_parser.cpp
     src/innodb/btree.cpp

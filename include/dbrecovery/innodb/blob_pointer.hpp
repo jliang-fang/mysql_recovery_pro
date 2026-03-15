@@ -209,17 +209,26 @@ std::optional<BlobPageChain> build_blob_page_chain(
 size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data);
 
 // ==================== 实现部分 ====================
+// 注意：实现已移至 src/innodb/blob_parser.cpp
 
-inline size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
+} // namespace innodb
+} // namespace dbrecovery
+#include "dbrecovery/innodb/blob_pointer.hpp"
+#include <iostream>
+
+namespace dbrecovery {
+namespace innodb {
+
+size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
     if (page_data.size() < BlobPageChain::BTR_BPAGE_LEN + 4) {
         return 0;
     }
     
     // BLOB 页头偏移 8 处是数据长度（4字节）
-    return dbrecovery::innodb::read_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN);
+    return read_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN);
 }
 
-inline std::optional<BlobPageChain> build_blob_page_chain(
+std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_space_id,
     uint32_t first_page_no,
     const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader
@@ -230,7 +239,7 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
         return std::nullopt;
     }
     
-    // ✅ 修复：添加最大深度限制（BLOB 链通常不会超过 100 页）
+    // 添加最大深度限制（BLOB 链通常不会超过 100 页）
     const size_t MAX_BLOB_CHAIN_DEPTH = 1024;
     size_t depth = 0;
     
@@ -238,7 +247,7 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t current_page_no = first_page_no;
     
     while (depth < MAX_BLOB_CHAIN_DEPTH) {
-        // ✅ 新增：验证页号有效性
+        // 验证页号有效性
         if (current_page_no >= 0x10000000) { // 假设有效页号小于 2^28
             std::cerr << "[ERROR] Invalid BLOB page number: " << current_page_no << std::endl;
             break;
@@ -257,12 +266,9 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
-        // ✅ 新增：验证 BLOB 页头校验和（可选，增强数据完整性检查）
-        // 这里可以添加 CRC32 校验逻辑
-        
-        // ✅ 修复：验证 BLOB 页头有效性
-        uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_NEXT);
-        uint32_t prev_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_PREV);
+        // 验证 BLOB 页头有效性
+        uint32_t next_bpage = read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_NEXT);
+        uint32_t prev_bpage = read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_PREV);
         
         // 检查页号有效性
         if (next_bpage != 0xFFFFFFFF && next_bpage != 0 && 
@@ -277,7 +283,7 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
-        // ✅ 新增：读取并验证当前页的数据长度
+        // 读取并验证当前页的数据长度
         size_t current_page_data_len = read_blob_page_data_length(*page_data);
         if (current_page_data_len == 0 || current_page_data_len > page_data->size() - 16) {
             std::cerr << "[WARN] Invalid BLOB page data length: " << current_page_data_len << std::endl;
@@ -289,9 +295,6 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
             break;
         }
         
-        // ✅ 新增：验证页链连续性（可选，需要额外读取前一页）
-        // 这里只做基本检查，避免跨页错误
-        
         current_page_no = next_bpage;
         depth++;
     }
@@ -300,13 +303,13 @@ inline std::optional<BlobPageChain> build_blob_page_chain(
         return std::nullopt;
     }
     
-    // ✅ 修复：验证链表长度合理性（BLOB 数据通常不会超过 10000 页）
+    // 验证链表长度合理性（BLOB 数据通常不会超过 10000 页）
     if (chain.pages.size() > MAX_BLOB_CHAIN_DEPTH) {
         std::cerr << "[ERROR] BLOB chain exceeds maximum depth: " << chain.pages.size() << std::endl;
         return std::nullopt;
     }
     
-    // ✅ 新增：验证总长度一致性（需要读取所有页并累加数据长度）
+    // 验证总长度一致性（需要读取所有页并累加数据长度）
     size_t total_data_len = 0;
     for (const auto& page : chain.pages) {
         auto page_data = page_reader(page.first, page.second);

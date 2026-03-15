@@ -589,26 +589,7 @@ uint64_t BPlusTreeParser::get_sdi_table_id() const {
 }
 
 // ✅ 新增：CRC32C 校验和计算（供页健康检查使用）
-uint32_t compute_page_crc32c(const std::vector<uint8_t>& page_data) {
-    uint32_t crc = 0xFFFFFFFF;
-    
-    for (size_t i = 0; i < page_data.size(); ++i) {
-        if (i >= 24 && i < 28) continue; // Skip checksum field at offset 24-27
-        
-        uint8_t byte = page_data[i];
-        crc ^= byte;
-        
-        for (int j = 0; j < 8; ++j) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    
-    return ~crc;
-}
+// 注意：此函数已移动到 page_reader.hpp，此处删除重复定义
 
 // ==================== BPlusTreeReconstructor 实现 ====================
 
