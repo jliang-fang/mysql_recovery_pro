@@ -421,21 +421,24 @@ inline std::string BPlusTreeParser::parse_field_value(
     switch (col.mysql_type_id) {
         case catalog::mysql_types::TINY:
             return std::to_string(static_cast<int8_t>(page_data_[data_pos++]));
-        case catalog::mysql_types::SHORT:
+        case catalog::mysql_types::SHORT: {
             if (data_pos + 2 > page_data_.size()) return "";
-            return std::to_string(dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos));
+            uint16_t value = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
             data_pos += 2;
-            break;
-        case catalog::mysql_types::LONG:
+            return std::to_string(value);
+        }
+        case catalog::mysql_types::LONG: {
             if (data_pos + 4 > page_data_.size()) return "";
-            return std::to_string(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
+            uint32_t value = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos);
             data_pos += 4;
-            break;
-        case catalog::mysql_types::LONGLONG:
+            return std::to_string(value);
+        }
+        case catalog::mysql_types::LONGLONG: {
             if (data_pos + 8 > page_data_.size()) return "";
-            return std::to_string(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
+            uint64_t value = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
             data_pos += 8;
-            break;
+            return std::to_string(value);
+        }
         case catalog::mysql_types::VARCHAR:
         case catalog::mysql_types::VAR_STRING: {
             if (data_pos >= page_data_.size()) return "";
@@ -462,6 +465,11 @@ inline std::string BPlusTreeParser::parse_field_value(
             int hour = hour_minute & 0x1F;
             int minute = (hour_minute >> 2) & 0x3F;
             int second = second_packed >> 2;
+            
+            // ✅ 修复：正确读取小数部分（小端序）
+            uint32_t frac = page_data_[data_pos] | 
+                           (page_data_[data_pos + 1] << 8) |
+                           (page_data_[data_pos + 2] << 16);
             
             char buffer[64];
             if (frac > 0) {
