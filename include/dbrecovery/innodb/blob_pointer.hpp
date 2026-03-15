@@ -203,10 +203,77 @@ std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_space_id,
     uint32_t first_page_no,
     const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }
-);
+) {
+    BlobPageChain chain;
     
+    // 初始化页链
+    chain.add_page(first_space_id, first_page_no);
+    
+    // 如果没有 page_reader，无法验证连续性，直接返回当前页
+    if (!page_reader) {
+        return chain;
+    }
+    
+    // 遍历 BLOB 页链
+    uint32_t current_space = first_space_id;
+    uint32_t current_page = first_page_no;
+    
+    while (true) {
+        auto page_data = page_reader(current_space, current_page);
+        if (!page_data || page_data->size() < 16) {
+            break; // 无法读取或数据不足
+        }
+        
+        // 读取下一个 BLOB 页号（偏移 0）
+        uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data->data(), BlobPageChain::BTR_BPAGE_NEXT);
+        
+        // 如果 next_bpage 为 0xFFFFFFFF 或与当前页相同，表示链表结束
+        if (next_bpage == 0xFFFFFFFF || next_bpage == current_page) {
+            break;
+        }
+        
+        // 检查是否形成循环（防止无限遍历）
+        if (chain.pages.size() > 1000) { // BLOB 链通常不会太长
+            std::cerr << "[WARN] BLOB chain too long, possible circular reference" << std::endl;
+            break;
+        }
+        
+        // 检查是否已访问过该页（防止循环）
+        bool is_duplicate = false;
+        for (const auto& p : chain.pages) {
+            if (p.first == current_space && p.second == next_bpage) {
+                is_duplicate = true;
+                break;
+            }
+        }
+        
+        if (is_duplicate) {
+            std::cerr << "[WARN] BLOB chain contains circular reference at page (" 
+                      << current_space << ", " << next_bpage << ")" << std::endl;
+            break;
+        }
+        
+        // 添加下一个页到链中
+        chain.add_page(current_space, next_bpage);
+        
+        // 移动到下一页
+        current_page = next_bpage;
+    }
+    
+    return chain;
+}
+
 // ✅ 新增：从 BLOB 页数据中读取实际数据长度
-size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data);
+size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
+    if (page_data.size() < BlobPageChain::BTR_BPAGE_LEN + 4) {
+        return 0;
+    }
+    
+    // 读取数据长度字段（偏移 8）
+    return static_cast<size_t>(dbrecovery::innodb::read_le<uint32_t>(
+        page_data.data(), BlobPageChain::BTR_BPAGE_LEN
+    ));
+}
 
 // ==================== 实现部分 ====================
 // 注意：实现已移至 src/innodb/blob_parser.cpp

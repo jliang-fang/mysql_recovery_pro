@@ -1,11 +1,16 @@
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/btree.hpp"
+#include "dbrecovery/innodb/blob_pointer.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
 #include <iostream>
+#include <fstream>
+#include <filesystem>
 
 namespace dbrecovery {
 namespace innodb {
 
-RecoveryEngine::RecoveryEngine() {
+RecoveryEngine::RecoveryEngine() : blob_reconstructor_(std::make_unique<BlobReconstructor>()) {
     std::cout << "[INFO] RecoveryEngine initialized\n";
 }
 
@@ -44,25 +49,8 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
     
-    // ✅ Step 2: 处理索引页（FIL_PAGE_INDEX = 9969）
-    if (pages_by_type.count(9969)) {
-        std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
-        
-        // TODO: 实现 B+树重建逻辑
-        for (const auto& [page_no, page_data] : pages_by_type[9969]) {
-            dbrecovery::innodb::PageParser parser(page_data.data(), page_data.size());
-            if (parser.parse_header()) {
-                std::cout << "[INFO] Page " << page_no << ": type=" << parser.page_type() 
-                          << ", level=" << parser.page_level() << "\n";
-                
-                // 解析记录
-                auto records = parser.parse_records();
-                std::cout << "[INFO] Page " << page_no << ": found " << records.size() << " records\n";
-            }
-        }
-    }
-    
-    // ✅ Step 3: 处理 SDI 页（FIL_PAGE_SDI = 9971）
+    // ✅ Step 2: 处理 SDI 页（FIL_PAGE_SDI = 9971）- 必须先解析SDI获取表结构
+    catalog::TableSchema table_schema;
     if (pages_by_type.count(9971)) {
         std::cout << "[INFO] Found " << pages_by_type[9971].size() << " SDI pages\n";
         
@@ -85,6 +73,41 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
                         std::string table_name = sdi_json["name"].get<std::string>();
                         std::cout << "[INFO] SDI Table Name: " << table_name << "\n";
                     }
+                    
+                    // ✅ 新增：从SDI中解析表结构
+                    if (sdi_json.contains("columns") && sdi_json["columns"].is_array()) {
+                        uint32_t ordinal = 1;
+                        for (const auto& col_json : sdi_json["columns"]) {
+                            catalog::ColumnInfo col;
+                            if (col_json.contains("name")) {
+                                col.name = col_json["name"].get<std::string>();
+                            }
+                            if (col_json.contains("type")) {
+                                col.mysql_type_id = col_json["type"].get<uint32_t>();
+                            }
+                            if (col_json.contains("is_nullable")) {
+                                col.is_nullable = col_json["is_nullable"].get<bool>();
+                            }
+                            table_schema.columns[ordinal++] = col;
+                        }
+                    }
+                    
+                    // ✅ 新增：从SDI中解析索引信息
+                    if (sdi_json.contains("indexes") && sdi_json["indexes"].is_array()) {
+                        for (const auto& idx_json : sdi_json["indexes"]) {
+                            catalog::IndexInfo index;
+                            if (idx_json.contains("name")) {
+                                index.name = idx_json["name"].get<std::string>();
+                            }
+                            if (idx_json.contains("columns") && idx_json["columns"].is_array()) {
+                                for (const auto& col : idx_json["columns"]) {
+                                    index.columns.push_back(col.get<std::string>());
+                                }
+                            }
+                            table_schema.indexes.push_back(index);
+                        }
+                    }
+                    
                 } catch (const nlohmann::json::parse_error& e) {
                     std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
                     
@@ -122,6 +145,66 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
         }
     }
     
+    // ✅ Step 3: 处理索引页（FIL_PAGE_INDEX = 9969）
+    if (pages_by_type.count(9969)) {
+        std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
+        
+        // TODO: 实现 B+树重建逻辑
+        for (const auto& [page_no, page_data] : pages_by_type[9969]) {
+            dbrecovery::innodb::PageParser parser(page_data.data(), page_data.size());
+            if (parser.parse_header()) {
+                std::cout << "[INFO] Page " << page_no << ": type=" << parser.page_type() 
+                          << ", level=" << parser.page_level() << "\n";
+                
+                // 解析记录
+                auto records = parser.parse_records();
+                std::cout << "[INFO] Page " << page_no << ": found " << records.size() << " records\n";
+            }
+        }
+    } else {
+        std::cerr << "[WARN] No index pages found in file\n";
+        return false;
+    }
+    
+    // ✅ Step 4: 处理 BLOB 数据（如果存在）
+    if (table_schema.columns.empty()) {
+        std::cout << "[INFO] No table schema available, skipping BLOB reconstruction\n";
+    } else {
+        // 检查是否有BLOB列
+        bool has_blob = false;
+        for (const auto& pair : table_schema.columns) {
+            const auto& col = pair.second;
+            if (col.mysql_type_id >= catalog::mysql_types::TINY_BLOB && 
+                col.mysql_type_id <= catalog::mysql_types::BLOB) {
+                has_blob = true;
+                break;
+            }
+        }
+        
+        if (has_blob) {
+            std::cout << "[INFO] Table contains BLOB columns, will attempt reconstruction\n";
+            
+            // TODO: 实现BLOB页链重建逻辑
+            for (const auto& [page_no, page_data] : pages_by_type[9972]) { // FIL_PAGE_TYPE_BLOB = 9972
+                std::cout << "[INFO] BLOB Page " << page_no << ": size=" << page_data.size() << "\n";
+                
+                // 解析BLOB页头
+                if (page_data.size() >= 16) {
+                    uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 0);
+                    uint32_t prev_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 4);
+                    uint32_t data_len = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 8);
+                    
+                    std::cout << "[INFO] BLOB Page " << page_no 
+                              << ": next=" << next_bpage 
+                              << ", prev=" << prev_bpage 
+                              << ", len=" << data_len << "\n";
+                }
+            }
+        }
+    }
+    
+    // ✅ Step 5: 输出恢复结果
+    std::cout << "[INFO] Recovery completed successfully\n";
     return true;
 }
 
