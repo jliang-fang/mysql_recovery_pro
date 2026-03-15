@@ -203,11 +203,14 @@ public:
     /**
      * @brief 计算页的 CRC32C 校验和（MySQL 8.0 默认）
      *
+     * 使用 Castagnoli 多项式 (0x82F63B78) 实现 CRC32C
+     * 参考：https://en.wikipedia.org/wiki/Cyclic_redundancy_check#CRC32C
+     *
      * @param page_data 页数据（包含 FIL_HEADER）
      * @return uint32_t CRC32C 值
      */
     static uint32_t compute_crc32c(const std::vector<uint8_t>& page_data) {
-        // 软件实现的 CRC32C（使用正确的多项式）
+        // 软件实现的 CRC32C（使用 Castagnoli 多项式 0x82F63B78）
         uint32_t crc = 0xFFFFFFFF;
         
         for (size_t i = 0; i < page_data.size(); ++i) {

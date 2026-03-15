@@ -49,7 +49,7 @@ inline FileMapper::FileMapper(FileMapper&& other) noexcept
       , handle_(INVALID_HANDLE_VALUE)
 #endif
 {
-    // 转移所有权：清空源对象
+    // 转移所有权：先保存源对象的值，再清空源对象
     other.fd_ = -1;
     other.data_ = nullptr;
     other.size_ = 0;
@@ -112,6 +112,9 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         other.size_ = 0;
         other.is_valid_ = false;
 #ifdef _WIN32
+        if (other.handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(other.handle_);
+        }
         other.handle_ = INVALID_HANDLE_VALUE;
 #else
         other.data_ = static_cast<uint8_t*>(MAP_FAILED);

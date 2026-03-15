@@ -463,9 +463,14 @@ inline std::string BPlusTreeParser::parse_field_value(
             int minute = (hour_minute >> 2) & 0x3F;
             int second = second_packed >> 2;
             
-            char buffer[32];
-            snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
-                    year, month, day, hour, minute, second);
+            char buffer[64];
+            if (frac > 0) {
+                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%06u",
+                        year, month, day, hour, minute, second, frac);
+            } else {
+                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
+                        year, month, day, hour, minute, second);
+            }
             data_pos += 3; // skip fractional part
             return std::string(buffer);
         }
