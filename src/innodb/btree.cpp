@@ -472,63 +472,6 @@ std::string BPlusTreeParser::parse_field_value(
                    std::to_string(minute) + ":" +
                    std::to_string(second);
         
-        case mysql_types::DATETIME2:
-        case mysql_types::TIMESTAMP2: {
-            // DATETIME2 格式（MySQL 5.6+）
-            if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {
-                data_pos++;
-                return "NULL";
-            }
-            
-            int datetime_precision = col.datetime_precision;
-            if (datetime_precision < 0) datetime_precision = 6; // 默认精度
-            
-            // 前5字节：packed date/time
-            if (data_pos + 5 > page_data_.size()) {
-                return "";
-            }
-            
-            uint8_t year_low = page_data_[data_pos];
-            uint8_t year_high = page_data_[data_pos + 1];
-            uint8_t month_day = page_data_[data_pos + 2];
-            uint8_t hour_minute = page_data_[data_pos + 3];
-            uint8_t second_packed = page_data_[data_pos + 4];
-            
-            int year = (year_high << 8) | year_low;
-            int month = month_day >> 4;
-            int day = month_day & 0x0F;
-            int hour = hour_minute & 0x1F;
-            int minute = hour_minute >> 2;
-            int second = second_packed >> 2;
-            
-            data_pos += 5;
-            
-            std::ostringstream oss;
-            oss << year << "-" << month << "-" << day << " " 
-                << hour << ":" << minute << ":" << second;
-            
-            // 小数部分（根据精度）
-            if (datetime_precision > 0) {
-                size_t frac_bytes = (datetime_precision + 1) / 2;
-                // ✅ 修复：添加边界检查，确保有足够的字节
-                if (data_pos + frac_bytes <= page_data_.size()) {
-                    uint64_t frac_val = 0;
-                    // ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
-                    for (size_t i = 0; i < frac_bytes; ++i) {
-                        frac_val |= (static_cast<uint64_t>(page_data_[data_pos + i]) << (i * 8));
-                    }
-                    
-                    // 转换为小数部分
-                    double frac_sec = static_cast<double>(frac_val) / 
-                                     std::pow(10, datetime_precision);
-                    oss << std::fixed << std::setprecision(datetime_precision) << frac_sec;
-                }
-                data_pos += frac_bytes;
-            }
-            
-            return oss.str();
-        }
-        
         case mysql_types::TIME:
         case mysql_types::TIME2: {
             if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {

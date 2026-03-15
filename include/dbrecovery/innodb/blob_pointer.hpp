@@ -180,18 +180,6 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
         ptr.total_len = ptr.len;
     }
     
-    // ✅ 新增：验证总长度合理性（BLOB 不能超过 64GB，实际通常远小于此）
-    if (ptr.total_len > (64ULL * 1024 * 1024 * 1024)) {
-        std::cerr << "[ERROR] BLOB total_len exceeds reasonable limit: " << ptr.total_len << std::endl;
-        return std::nullopt;
-    }
-    
-    // ✅ 新增：验证总长度合理性（BLOB 不能超过 64GB，实际通常远小于此）
-    if (ptr.total_len > (64ULL * 1024 * 1024 * 1024)) {
-        std::cerr << "[ERROR] BLOB total_len exceeds reasonable limit: " << ptr.total_len << std::endl;
-        return std::nullopt;
-    }
-    
     // ✅ 新增：验证跨页情况
     if (ptr.offset + ptr.len > 16384) {
         std::cerr << "[INFO] BLOB data is cross-page: offset=" << ptr.offset 
