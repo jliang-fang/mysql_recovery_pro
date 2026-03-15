@@ -46,7 +46,7 @@ private:
 inline FileMapper::FileMapper(FileMapper&& other) noexcept 
     : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
 #ifdef _WIN32
-      , handle_(INVALID_HANDLE_VALUE)
+    , handle_(INVALID_HANDLE_VALUE)
 #endif
 {
     // 转移所有权：先保存源对象的值，再清空源对象
