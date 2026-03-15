@@ -6,6 +6,8 @@
 #include <utility>
 #include <set>
 #include <functional>
+#include <iostream>
+#include <cmath>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 

@@ -334,44 +334,6 @@ private:
         return checksum;
     }
 
-    /**
-     * @brief 计算页的 FULL_CKPT 校验和（MySQL 8.0 默认）
-     *
-     * @param page_data 页数据（包含 FIL_HEADER）
-     * @return uint32_t FULL_CKPT 校验和值
-     */
-    static uint32_t compute_full_ckpt_checksum(const std::vector<uint8_t>& page_data) {
-        // ✅ 实现：使用 MySQL 8.0 的 srv_checksum_algorithm=full_crc32 算法
-        // 这是 CRC32C 的一个变种，但处理方式略有不同
-        
-        const uint8_t* data = page_data.data();
-        size_t len = page_data.size();
-
-        uint32_t crc = 0xFFFFFFFF;
-        
-        for (size_t i = 0; i < len; ++i) {
-            if (i >= 24 && i < 28) continue; // Skip checksum field
-            
-            #ifdef __SSE4_2__
-                crc = _mm_crc32_u8(crc, data[i]);
-            #else
-                // 软件实现的 CRC32C（使用正确的多项式）
-                uint8_t byte = data[i];
-                crc ^= byte;
-                
-                for (int j = 0; j < 8; ++j) {
-                    if (crc & 1) {
-                        crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
-                    } else {
-                        crc >>= 1;
-                    }
-                }
-            #endif
-        }
-        
-        return ~crc;
-    }
-
 private:
     int fd_;
     uint64_t file_size_;
