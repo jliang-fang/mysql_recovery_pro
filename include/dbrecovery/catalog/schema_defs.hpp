@@ -53,9 +53,6 @@ struct ColumnInfo {
     
     // ✅ 新增：修复 btree.cpp 中的字段解析逻辑
     bool is_signed = true;         // 数值类型是否有符号（默认true，兼容INT等）
-    int datetime_precision = -1;   // DATETIME/TIMESTAMP 的小数位精度 (0-6)
-    int numeric_scale = -1;        // DECIMAL 的小数位数
-    int numeric_precision = -1;    // 数值类型的总位数
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）

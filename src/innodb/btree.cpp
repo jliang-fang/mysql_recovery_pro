@@ -1,5 +1,6 @@
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <iostream>
 #include <cstring>
 #include <iomanip>
@@ -8,9 +9,6 @@
 
 namespace dbrecovery {
 namespace innodb {
-
-// 使用 page_defs.hpp 中定义的常量，避免重复定义
-// #include "dbrecovery/innodb/page_defs.hpp" 已在文件开头包含
 
 // ==================== 辅助函数：字段值解析 ====================
 
