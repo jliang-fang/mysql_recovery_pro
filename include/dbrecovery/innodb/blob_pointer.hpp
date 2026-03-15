@@ -69,6 +69,23 @@ struct BlobPageChain {
                           << ", actual=" << next_bpage << std::endl;
                 return false; // next_bpage 不匹配，链表断裂
             }
+            
+            // ✅ 新增：验证 BLOB 页头校验和（增强数据完整性检查）
+            if (prev_data->size() >= 24) {
+                uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), 0);
+                // 简单校验：如果校验和非零且与计算值不匹配，则标记为警告
+                if (stored_checksum != 0 && stored_checksum != 0xFFFFFFFF) {
+                    std::vector<uint8_t> page_copy = *prev_data;
+                    for (int j = 0; j < 4; ++j) {
+                        page_copy[j] = 0;
+                    }
+                    uint32_t computed_crc32c = dbrecovery::innodb::PageReader::compute_crc32c(page_copy);
+                    if (computed_crc32c != stored_checksum) {
+                        std::cerr << "[WARN] BLOB page checksum mismatch at (" 
+                                  << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                    }
+                }
+            }
         }
         
         return true;
