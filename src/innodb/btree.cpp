@@ -218,16 +218,27 @@ bool BPlusTreeParser::parse_user_records() noexcept {
     for (uint16_t i = 0; i < n_dir_slots; ++i) {
         uint16_t slot_pos = dir_slot_offset + i * 2;
         if (slot_pos + 2 > page_data_.size()) {
+            std::cerr << "[WARN] BPlusTreeParser: directory slot position out of bounds" << std::endl;
             break;
         }
         
         uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_pos);
-        // ✅ 修复：添加更严格的边界检查
-        if (record_offset >= 38 + 16 && record_offset < heap_top) {
-            // 跳过INFIMUM和SUPREMUM（使用已存储的值）
-            if (record_offset != infimum_offset_ && record_offset != supremum_offset_) {
-                record_offsets_.push_back(record_offset);
-            }
+        // ✅ 增强：添加更严格的边界检查和验证
+        if (record_offset < 38 + 16 || record_offset >= page_data_.size()) {
+            std::cerr << "[WARN] BPlusTreeParser: invalid record offset=" << record_offset 
+                      << " (min=38+16, max=" << page_data_.size() << ")" << std::endl;
+            continue;
+        }
+        
+        if (record_offset >= heap_top) {
+            std::cerr << "[WARN] BPlusTreeParser: record offset=" << record_offset 
+                      << " exceeds heap_top=" << heap_top << std::endl;
+            continue;
+        }
+        
+        // 跳过INFIMUM和SUPREMUM（使用已存储的值）
+        if (record_offset != infimum_offset_ && record_offset != supremum_offset_) {
+            record_offsets_.push_back(record_offset);
         }
     }
     

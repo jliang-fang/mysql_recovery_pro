@@ -73,12 +73,32 @@ struct alignas(1) RecordHeader {
             return std::nullopt;
         }
         
+        // ✅ 新增：验证指针地址有效性
+        const uint8_t* base_ptr = ptr;
+        if (base_ptr == nullptr) {
+            return std::nullopt;
+        }
+        
         RecordHeader header;
         header.info_bits = ptr[0];
         header.next_rec_off_0 = ptr[1];
         header.next_rec_off_1 = ptr[2];
         header.heap_no_0 = ptr[3];
         header.heap_no_1 = ptr[4];
+        
+        // ✅ 新增：验证解析后的值合理性
+        uint16_t next_offset = header.get_next_record_offset();
+        if (next_offset > 16384) { // 假设最大页大小为 16KB
+            std::cerr << "[WARN] RecordHeader: invalid next_record_offset=" << next_offset << std::endl;
+            return std::nullopt;
+        }
+        
+        uint16_t heap_no = header.get_heap_no();
+        if (heap_no > 16384) { // 假设最大堆大小合理
+            std::cerr << "[WARN] RecordHeader: invalid heap_no=" << heap_no << std::endl;
+            return std::nullopt;
+        }
+        
         return header;
     }
 
