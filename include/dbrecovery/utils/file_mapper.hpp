@@ -117,7 +117,7 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         }
         other.handle_ = INVALID_HANDLE_VALUE;
 #else
-        other.data_ = static_cast<uint8_t*>(MAP_FAILED);
+        other.data_ = nullptr; // ✅ 修复：应该设为 nullptr 而不是 MAP_FAILED
 #endif
     }
     

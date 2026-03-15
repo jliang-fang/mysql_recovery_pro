@@ -213,12 +213,17 @@ public:
         // 软件实现的 CRC32C（使用 Castagnoli 多项式 0x82F63B78）
         uint32_t crc = 0xFFFFFFFF;
         
+        const size_t checksum_start = 24;
+        const size_t checksum_end = 28;
+        
         for (size_t i = 0; i < page_data.size(); ++i) {
-            if (i >= 24 && i < 28) continue; // Skip checksum field at offset 24-27
+            // 跳过校验和字段 (offset 24-27)
+            if (i >= checksum_start && i < checksum_end) continue;
             
             uint8_t byte = page_data[i];
             crc ^= byte;
             
+            // 使用查表法优化（这里先保持逐位计算，后续可替换为查表实现）
             for (int j = 0; j < 8; ++j) {
                 if (crc & 1) {
                     crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）

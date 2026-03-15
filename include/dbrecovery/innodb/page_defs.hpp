@@ -181,6 +181,7 @@ constexpr uint8_t TIME        = 11;
 constexpr uint8_t DATETIME    = 12;
 constexpr uint8_t YEAR        = 13;
 constexpr uint8_t VARCHAR     = 15;
+constexpr uint8_t VAR_STRING  = 15; // ✅ 添加：VAR_STRING 是 VARCHAR 的别名
 constexpr uint8_t BIT         = 16;
 constexpr uint8_t TIMESTAMP2  = 17;
 constexpr uint8_t DATETIME2   = 18;
