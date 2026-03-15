@@ -41,13 +41,14 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             
             if (use_two_byte_prefix) {
                 if (rec_ptr + 2 > page_base_ + size_) {
+                    std::cerr << "[ERROR] VARCHAR length prefix out of bounds" << std::endl;
                     return nullptr;
                 }
                 uint16_t len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
                 
                 // ✅ 新增：验证长度前缀的有效性
                 if (len > col_info.column_length) {
-                    std::cerr << "[WARN] VARCHAR length " << len 
+                    std::cerr << "[ERROR] VARCHAR length " << len 
                               << " exceeds column max length " << col_info.column_length << std::endl;
                     return nullptr;
                 }
@@ -56,17 +57,19 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                 
                 // 边界检查
                 if (rec_ptr + field_len > page_base_ + size_) {
+                    std::cerr << "[ERROR] VARCHAR data out of bounds" << std::endl;
                     return nullptr;
                 }
             } else {
                 if (rec_ptr + 1 > page_base_ + size_) {
+                    std::cerr << "[ERROR] VARCHAR length prefix out of bounds" << std::endl;
                     return nullptr;
                 }
                 uint8_t len = rec_ptr[0];
                 
                 // ✅ 新增：验证长度前缀的有效性
                 if (len > col_info.column_length) {
-                    std::cerr << "[WARN] VARCHAR length " << (int)len 
+                    std::cerr << "[ERROR] VARCHAR length " << (int)len 
                               << " exceeds column max length " << col_info.column_length << std::endl;
                     return nullptr;
                 }
@@ -75,6 +78,7 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                 
                 // 边界检查
                 if (rec_ptr + field_len > page_base_ + size_) {
+                    std::cerr << "[ERROR] VARCHAR data out of bounds" << std::endl;
                     return nullptr;
                 }
             }

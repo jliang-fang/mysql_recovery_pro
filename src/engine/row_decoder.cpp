@@ -72,7 +72,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         
             // ✅ 新增：边界检查确保不会越界访问
             if (byte_idx >= null_bytes_) {
-                std::cerr << "[WARN] NULL bitmap index out of range: " << byte_idx 
+                std::cerr << "[ERROR] NULL bitmap index out of range: " << byte_idx 
                           << " >= " << null_bytes_ << std::endl;
                 return fields; // 跳过此字段
             }
@@ -85,6 +85,9 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                     fields.push_back(fv);
                     continue;
                 }
+            } else {
+                std::cerr << "[ERROR] NULL bitmap pointer out of range" << std::endl;
+                return fields;
             }
         }
         
