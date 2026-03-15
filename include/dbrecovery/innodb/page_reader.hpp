@@ -192,7 +192,7 @@ public:
             // 跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
             if (i == 6 || i == 7) continue;
             
-            checksum ^= mach_read_from_4(data + i);
+            checksum ^= dbrecovery::innodb::read_le<uint32_t>(page_data.data(), i * 4);
             checksum += (checksum >> 16);
             checksum &= 0xFFFFFFFF;
         }
