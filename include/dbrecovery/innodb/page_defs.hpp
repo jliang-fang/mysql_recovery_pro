@@ -2,6 +2,8 @@
 #define DBRECOVERY_INNODB_PAGE_DEFS_HPP
 
 #include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
 namespace dbrecovery {
@@ -72,38 +74,17 @@ struct alignas(1) RecordHeader {
         if (!ptr || max_size < 5) {
             return std::nullopt;
         }
-        
-        // ✅ 新增：验证指针地址有效性
-        const uint8_t* base_ptr = ptr;
-        if (base_ptr == nullptr) {
-            return std::nullopt;
-        }
-        
-        RecordHeader header;
+
+        RecordHeader header{};
         header.info_bits = ptr[0];
         header.next_rec_off_0 = ptr[1];
         header.next_rec_off_1 = ptr[2];
         header.heap_no_0 = ptr[3];
         header.heap_no_1 = ptr[4];
-        
-        // ✅ 新增：验证解析后的值合理性
-        uint16_t next_offset = header.get_next_record_offset();
-        if (next_offset > 16384) { // 假设最大页大小为 16KB
-            std::cerr << "[WARN] RecordHeader: invalid next_record_offset=" << next_offset << std::endl;
-            return std::nullopt;
-        }
-        
-        uint16_t heap_no = header.get_heap_no();
-        if (heap_no > 16384) { // 假设最大堆大小合理
-            std::cerr << "[WARN] RecordHeader: invalid heap_no=" << heap_no << std::endl;
-            return std::nullopt;
-        }
-        
+
         return header;
     }
 
-    // ✅ 注意：COMPACT 记录头中，next_record 偏移是 little-endian 格式
-    // [1] 是低字节 (bits 0-7), [2] 是高字节 (bits 8-15)
     uint16_t get_next_record_offset() const {
         return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x3F) << 8) | next_rec_off_0);
     }
@@ -121,10 +102,14 @@ struct alignas(1) RecordHeader {
     }
 
     std::string to_string() const {
-        return "RecordHeader{next=" + std::to_string(get_next_record_offset()) +
-               ", deleted=" + std::to_string(is_deleted()) +
-               ", min_rec=" + std::to_string(is_min_rec()) +
-               ", heap_no=" + std::to_string(get_heap_no()) + "}";
+        std::ostringstream oss;
+        oss << "RecordHeader{next=" << get_next_record_offset()
+            << ", deleted=" << std::boolalpha << is_deleted()
+            << ", min_rec=" << is_min_rec()
+            << ", heap_no=" << get_heap_no()
+            << ", info_bits=0x" << std::hex << static_cast<int>(info_bits) << std::dec
+            << "}";
+        return oss.str();
     }
 };
 
