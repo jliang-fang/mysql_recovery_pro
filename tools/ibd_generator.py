@@ -183,11 +183,11 @@ def generate_ibd(table_name="users", include_blob=False):
     user_rec.append(second_packed)
     
     # Pack fractional part (3 bytes for precision=6)
-    # ✅ 修复：MySQL DATETIME2 小数部分使用大端序存储（高位在前）
+    # ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
     frac_bytes = [
-        (frac >> 16) & 0xFF,
+        (frac >> 0) & 0xFF,
         (frac >> 8) & 0xFF,
-        (frac >> 0) & 0xFF
+        (frac >> 16) & 0xFF
     ]
     user_rec.extend(frac_bytes)
     

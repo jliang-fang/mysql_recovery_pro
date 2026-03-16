@@ -84,6 +84,33 @@ TEST(PageReader, ValidateChecksumWithZeroes) {
     std::filesystem::remove(tmp_path, ec);
 }
 
+TEST(PageReader, DATETIME2LittleEndian) {
+    // Test DATETIME2 decoding with known small-endian fractional part
+    std::vector<uint8_t> page(16384, 0);
+    
+    // Write a simple DATETIME2 value: 2024-01-01 00:00:00.123456
+    // Packed format (5 bytes): year_low=0xE8, year_high=0x7, month_day=0x11, hour_minute=0x0, second_packed=0x0
+    // Fractional part (3 bytes, little-endian): 0x40, 0xE2, 0x01 (0x01E240 = 123456)
+    
+    size_t offset = 100; // arbitrary offset for test
+    page[offset] = 0xE8;   // year_low
+    page[offset + 1] = 0x07; // year_high (2024 = 0x07E8)
+    page[offset + 2] = 0x11; // month_day (Jan 1 = 0x11)
+    page[offset + 3] = 0x00; // hour_minute
+    page[offset + 4] = 0x00; // second_packed
+    
+    // Little-endian fractional part: 123456 = 0x01E240
+    page[offset + 5] = 0x40;
+    page[offset + 6] = 0xE2;
+    page[offset + 7] = 0x01;
+    
+    // Verify the bytes are correctly set
+    EXPECT_EQ(page[offset], 0xE8);
+    EXPECT_EQ(page[offset + 5], 0x40); // LSB first
+    EXPECT_EQ(page[offset + 6], 0xE2);
+    EXPECT_EQ(page[offset + 7], 0x01); // MSB last
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 

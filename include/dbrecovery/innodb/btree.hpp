@@ -197,9 +197,21 @@ public:
                 n_fields = static_cast<uint16_t>(schema.columns.size());
             }
             
+            // 解析 NULL 位图（COMPACT格式：NULL位图在记录头后）
+            size_t data_pos = offset + 5; // 记录头从 offset 开始，第5字节是 info_bits
+            uint32_t nullable_count = 0;
+            for (const auto& pair : schema.columns) {
+                if (pair.second.is_nullable) {
+                    nullable_count++;
+                }
+            }
+            size_t null_bitmap_size = (nullable_count + 7) / 8;
+            data_pos += 1; // 跳过 info_bits
+            // 跳过 NULL 位图
+            data_pos += null_bitmap_size;
+            
             // 解析字段数据
             std::map<std::string, std::string> record;
-            size_t data_pos = offset + 6; // 跳过记录头（5字节header + 1字节n_fields）
             
             // ✅ 统一：根据实际解析的字段数进行循环
             uint16_t parsed_fields = 0;

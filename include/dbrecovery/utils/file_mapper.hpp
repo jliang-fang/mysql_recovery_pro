@@ -63,12 +63,10 @@ inline FileMapper::FileMapper(FileMapper&& other) noexcept
 
 inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
     if (this != &other) {
-        // 清理当前资源
+        // 清理当前资源（仅在当前对象有效时）
 #ifdef _WIN32
         if (data_ && data_ != nullptr) {
-            if (!UnmapViewOfFile(data_)) {
-                std::cerr << "[ERROR] Failed to unmap view of file during move assignment: " << GetLastError() << std::endl;
-            }
+            UnmapViewOfFile(data_);
             data_ = nullptr;
         }
         if (handle_ != INVALID_HANDLE_VALUE) {
@@ -77,21 +75,17 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         }
 #else
         if (data_ && data_ != MAP_FAILED) {
-            if (munmap(data_, size_) != 0) {
-                std::cerr << "[ERROR] Failed to unmap memory during move assignment: " << strerror(errno) << std::endl;
-            }
+            munmap(data_, size_);
             data_ = nullptr;
         }
         
         if (fd_ >= 0) {
-            if (close(fd_) != 0) {
-                std::cerr << "[ERROR] Failed to close file descriptor during move assignment: " << strerror(errno) << std::endl;
-            }
+            close(fd_);
             fd_ = -1;
         }
 #endif
         
-        // 移动资源
+        // 移动资源（直接赋值，不关闭源对象）
         fd_ = other.fd_;
         data_ = other.data_;
         size_ = other.size_;
@@ -106,18 +100,15 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         }
 #endif
         
-        // 清空源对象
+        // 清空源对象（仅重置为初始状态，不关闭资源）
         other.fd_ = -1;
         other.data_ = nullptr;
         other.size_ = 0;
         other.is_valid_ = false;
 #ifdef _WIN32
-        if (other.handle_ != INVALID_HANDLE_VALUE) {
-            CloseHandle(other.handle_);
-        }
         other.handle_ = INVALID_HANDLE_VALUE;
 #else
-        other.data_ = nullptr; // ✅ 修复：应该设为 nullptr 而不是 MAP_FAILED
+        other.data_ = nullptr;
 #endif
     }
     
