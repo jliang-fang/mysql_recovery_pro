@@ -1,9 +1,10 @@
-// /app/mysql8_recovery/src/innodb/v2/redo_parser.cpp (REWRITE)
 #include "dbrecovery/innodb/v2/redo_parser.hpp"
 #include <cstring>
 #include <map>
 
-namespace DBRecovery::InnoDB::v2 {
+namespace dbrecovery {
+namespace innodb {
+namespace v2 {
 
 // ✅ 静态 handler 注册表
 std::map<LogType, RedoParser::MLogHandler> RedoParser::handlers_;
@@ -96,4 +97,6 @@ void RedoParser::parse_mlog_rec_insert(const uint8_t* data, size_t len) {
 // ✅ Getters for recovery engine
 
 
-} // namespace DBRecovery::InnoDB::v2
+} // namespace v2
+} // namespace innodb
+} // namespace dbrecovery
