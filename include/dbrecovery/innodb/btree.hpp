@@ -355,14 +355,21 @@ inline bool BPlusTreeParser::parse_directory() noexcept {
         return false;
     }
     
+    // ✅ 新增：确保目录槽区域在页边界内
     uint16_t dir_start = page_size - (n_dir_slots * 2);
+    if (dir_start < 38 + 16) { // 确保不覆盖页头和数据区
+        std::cerr << "[ERROR] Directory start overlaps with header/data area" << std::endl;
+        return false;
+    }
+    
     for (uint16_t i = 0; i < n_dir_slots; ++i) {
         if (dir_start + i * 2 + 2 > page_data_.size()) {
             continue;
         }
         
         uint16_t slot_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start + i * 2);
-        if (slot_offset >= 54 && slot_offset < heap_top) {
+        // ✅ 新增：严格检查偏移范围
+        if (slot_offset >= 54 && slot_offset < heap_top && slot_offset < page_size - 5) {
             record_offsets_.push_back(slot_offset);
         }
     }
