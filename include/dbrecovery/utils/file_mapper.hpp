@@ -93,6 +93,9 @@ inline FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         
 #ifdef _WIN32
         handle_ = other.handle_;
+        if (data_ == nullptr) {
+            is_valid_ = false;
+        }
 #else
         if (data_ == MAP_FAILED) {
             data_ = nullptr;

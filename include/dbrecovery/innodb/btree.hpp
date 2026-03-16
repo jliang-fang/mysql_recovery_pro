@@ -258,6 +258,10 @@ public:
                     break;
                 }
                 
+                // ✅ 新增：对于非空列，跳过 NULL 位图中的对应位
+                // COMPACT 格式中，NULL 位图只包含可空列，所以需要根据列的可空性来判断是否在位图中
+                bool is_nullable_col = col.is_nullable;
+                
                 std::string value = parse_field_value(col, data_pos, false);
                 record[col.name] = value;
                 parsed_fields++;

@@ -135,8 +135,9 @@ public:
      * @return true 校验通过
      */
     static bool validate_checksum(const std::vector<uint8_t>& page_data) {
-        if (page_data.size() < 50) {
-            return false; // 页太小，无法校验
+        // ✅ 新增：增强边界检查，确保页数据足够大
+        if (page_data.size() < 50 || page_data.size() % 512 != 0) {
+            return false; // 页太小或不是标准页大小
         }
         
         // 读取存储的校验和（偏移 24-27）
