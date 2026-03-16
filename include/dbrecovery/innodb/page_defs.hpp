@@ -40,13 +40,16 @@ constexpr uint16_t BTR_MAX_SIZE         = 50;   // maximum size of a record
 
 constexpr uint8_t REC_INFO_BITS_MASK    = 0x07;   // info bits mask (lowest 3 bits)
 constexpr uint8_t REC_INFO_DELETED_FLAG = 0x08;   // deleted flag (bit 3 of info_bits) - MySQL 8.0 中是 bit 3
-constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // min record flag (bit 1 of info_bits)
+constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x10;   // min record flag (bit 4 of info_bits) - ✅ 修复：MySQL 8.0 中是 bit 4 (REC_MIN_MARK_FLAG)
 constexpr uint8_t REC_INFO_EXTERN_FLAG  = 0x10;   // external pointer flag (bit 4 of info_bits) - BLOB指针标志
 
 constexpr uint8_t REC_STATUS_ORDINARY   = 0x00;   // ordinary record
 constexpr uint8_t REC_STATUS_NODE_PTR   = 0x01;   // node pointer record
-constexpr uint8_t REC_STATUS_INFIMUM    = 0x02;   // infimum system record
-constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record
+constexpr uint8_t REC_STATUS_INFIMUM    = 0x02;   // infimum system record (record type bits)
+constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record (record type bits)
+
+// ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名，用于兼容不同命名习惯
+constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)
 
 // ==================== Page Header Offsets (relative to offset 38) ====================
 constexpr uint16_t PAGE_N_DIR_SLOTS     = 0;  // number of slots in page directory
