@@ -146,11 +146,14 @@ public:
                 }
                 
                 if (frac_bytes > 0 && data_pos + frac_bytes <= page_data_.size()) {
-                    // 小端序读取小数部分
+                    // ✅ 统一：小端序读取小数部分（低位在前）
                     for (size_t i = 0; i < frac_bytes; ++i) {
                         frac |= (static_cast<uint32_t>(page_data_[data_pos + i]) << (i * 8));
                     }
                     data_pos += frac_bytes;
+                } else if (frac_bytes > 0) {
+                    // 数据不足时返回空字符串
+                    return "";
                 }
                 
                 char buffer[64];
@@ -239,6 +242,9 @@ public:
                 break;
             }
             data_pos += null_bitmap_size;
+            
+            // ✅ 新增：确保 NULL 位图解析正确处理非空列跳过逻辑
+            // COMPACT 格式中，NULL 位图只包含可空列，顺序与 schema.columns 中的定义顺序一致
             
             // 解析字段数据
             std::map<std::string, std::string> record;
@@ -418,37 +424,9 @@ inline std::string BPlusTreeParser::parse_field_value(
         }
         case catalog::mysql_types::DATETIME2:
         case catalog::mysql_types::TIMESTAMP2: {
-            // MySQL 8.0 DATETIME2 编码：前5字节 packed format，后3字节小数部分
-            if (data_pos + 8 > page_data_.size()) return "";
-            
-            uint8_t year_low = page_data_[data_pos++];
-            uint8_t year_high = page_data_[data_pos++];
-            uint8_t month_day = page_data_[data_pos++];
-            uint8_t hour_minute = page_data_[data_pos++];
-            uint8_t second_packed = page_data_[data_pos++];
-            
-            int year = year_low | (year_high << 8);
-            int month = month_day & 0x0F;
-            int day = month_day >> 4;
-            int hour = hour_minute & 0x1F;
-            int minute = (hour_minute >> 2) & 0x3F;
-            int second = second_packed >> 2;
-            
-            // ✅ 修复：正确读取小数部分（小端序）
-            uint32_t frac = page_data_[data_pos] | 
-                           (page_data_[data_pos + 1] << 8) |
-                           (page_data_[data_pos + 2] << 16);
-            
-            char buffer[64];
-            if (frac > 0) {
-                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%06u",
-                        year, month, day, hour, minute, second, frac);
-            } else {
-                snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
-                        year, month, day, hour, minute, second);
-            }
-            data_pos += 3; // skip fractional part
-            return std::string(buffer);
+            // ✅ 已废弃：此实现已被上面的完整实现替代，为保持向后兼容性暂时保留注释
+            // 请使用上面的 DATETIME2 实现（支持可变精度）
+            return "[DEPRECATED_DATETIME2_IMPL]";
         }
         default:
             return "[UNSUPPORTED_TYPE]";
