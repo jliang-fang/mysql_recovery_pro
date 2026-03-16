@@ -208,10 +208,11 @@ std::vector<Record> PageParser::parse_records() const {
         rec_info.is_deleted = is_deleted;
 
         // ✅ 修复：解析字段数量（COMPACT格式）
+        // REC_N_FIELDS_MASK = 0xF8 (bit 3-7), REC_N_FIELDS_OFFSET = 3
         if (rec + 5 <= buffer_ + size_) {
-            uint8_t n_fields_high = (info_bits & 0x07); // REC_INFO_BITS_MASK = 0x07
-            uint8_t n_fields_low = (rec[1] >> 4) & 0x0F;
-            rec_info.n_fields = static_cast<uint16_t>((n_fields_high << 4) | n_fields_low);
+            uint8_t n_fields_high = (info_bits & 0xF8) >> 3; // bit 3-7
+            uint8_t n_fields_low = rec[1] >> 4; // bit 4-7 of byte 1
+            rec_info.n_fields = static_cast<uint16_t>((n_fields_high << 4) | (n_fields_low & 0x0F));
         }
 
         records.push_back(rec_info);

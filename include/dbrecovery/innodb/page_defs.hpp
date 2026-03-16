@@ -89,6 +89,7 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_next_record_offset() const {
+        // ✅ 修复：next_record_offset 是 14 位（bit 0-13），高2位是其他标志
         return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x3F) << 8) | next_rec_off_0);
     }
 

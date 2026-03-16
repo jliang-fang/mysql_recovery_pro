@@ -11,13 +11,13 @@ SQLOutputter::~SQLOutputter() = default;
 bool SQLOutputter::export_record(const std::map<std::string, std::string>& record) {
     std::ostringstream oss;
 
-    oss << "INSERT INTO " << table_name_ << " (";
+    oss << "INSERT INTO `" << table_name_ << "` (";
 
     // 构建列名列表
     bool first = true;
     for (const auto& [key, value] : record) {
         if (!first) oss << ", ";
-        oss << key;
+        oss << "`" << key << "`";
         first = false;
     }
 
@@ -28,12 +28,19 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
     for (const auto& [key, value] : record) {
         if (!first) oss << ", ";
 
-        // 转义SQL特殊字符
+        // 转义SQL特殊字符（遵循 MySQL ANSI_QUOTES 模式）
         std::string escaped_value;
         for (char c : value) {
-            if (c == '\'') escaped_value += "''";
-            else if (c == '\\') escaped_value += "\\\\";
-            else escaped_value += c;
+            switch (c) {
+                case '\0': escaped_value += "\\0"; break;
+                case '\n': escaped_value += "\\n"; break;
+                case '\r': escaped_value += "\\r"; break;
+                case '\\': escaped_value += "\\\\"; break;
+                case '\'': escaped_value += "''"; break;
+                case '"': escaped_value += "\"\""; break;
+                case '\x1a': escaped_value += "\\Z"; break; // Ctrl+Z
+                default: escaped_value += c;
+            }
         }
 
         oss << "'" << escaped_value << "'";

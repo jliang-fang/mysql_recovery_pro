@@ -114,8 +114,8 @@ public:
             }
             case catalog::mysql_types::DATETIME2:
             case catalog::mysql_types::TIMESTAMP2: {
-                // MySQL 8.0 DATETIME2 编码：前5字节 packed format，后3字节小数部分（小端序）
-                if (data_pos + 8 > page_data_.size()) return "";
+                // MySQL 8.0 DATETIME2 编码：前5字节 packed format，小数部分根据精度决定
+                if (data_pos + 5 > page_data_.size()) return "";
                 
                 uint8_t year_low = page_data_[data_pos++];
                 uint8_t year_high = page_data_[data_pos++];
@@ -130,16 +130,42 @@ public:
                 int minute = (hour_minute >> 2) & 0x3F;
                 int second = second_packed >> 2;
                 
-                // ✅ 统一：正确读取小数部分（小端序）
-                uint32_t frac = page_data_[data_pos] | 
-                               (page_data_[data_pos + 1] << 8) |
-                               (page_data_[data_pos + 2] << 16);
-                data_pos += 3;
+                // 小数部分：根据精度决定字节数
+                // precision=0-2: 1字节, precision=3-4: 2字节, precision=5-6: 3字节
+                uint32_t frac = 0;
+                int precision = col.datetime_precision;
+                if (precision < 0) precision = 0; // 默认无小数
+                
+                size_t frac_bytes = 0;
+                if (precision <= 2) {
+                    frac_bytes = 1;
+                } else if (precision <= 4) {
+                    frac_bytes = 2;
+                } else {
+                    frac_bytes = 3;
+                }
+                
+                if (frac_bytes > 0 && data_pos + frac_bytes <= page_data_.size()) {
+                    // 小端序读取小数部分
+                    for (size_t i = 0; i < frac_bytes; ++i) {
+                        frac |= (static_cast<uint32_t>(page_data_[data_pos + i]) << (i * 8));
+                    }
+                    data_pos += frac_bytes;
+                }
                 
                 char buffer[64];
-                if (frac > 0) {
-                    snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%06u",
-                            year, month, day, hour, minute, second, frac);
+                if (frac > 0 && precision > 0) {
+                    // 根据精度格式化小数
+                    if (precision <= 2) {
+                        snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%02u",
+                                year, month, day, hour, minute, second, frac);
+                    } else if (precision <= 4) {
+                        snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%04u",
+                                year, month, day, hour, minute, second, frac);
+                    } else {
+                        snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d.%06u",
+                                year, month, day, hour, minute, second, frac);
+                    }
                 } else {
                     snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d",
                             year, month, day, hour, minute, second);
@@ -206,8 +232,12 @@ public:
                 }
             }
             size_t null_bitmap_size = (nullable_count + 7) / 8;
-            data_pos += 1; // 跳过 info_bits
-            // 跳过 NULL 位图
+            
+            // 跳过 info_bits 和 NULL 位图
+            data_pos += 1; // info_bits
+            if (data_pos + null_bitmap_size > page_data_.size()) {
+                break;
+            }
             data_pos += null_bitmap_size;
             
             // 解析字段数据
