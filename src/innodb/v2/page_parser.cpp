@@ -6,16 +6,27 @@ namespace DBRecovery {
 namespace InnoDB {
 namespace v2 {
 
+// ✅ 新增：InnoDB 物理页常量定义（参考 MySQL 8.0 fil0fil.h）
+constexpr size_t FIL_PAGE_SPACE_ID = 0;
+constexpr size_t FIL_PAGE_OFFSET = 4;
+constexpr size_t FIL_PAGE_TYPE = 24; // 修复：原代码错误地使用了 offset 0
+constexpr size_t FIL_PAGE_NEXT = 26;
+constexpr size_t FIL_PAGE_PREV = 20;
+constexpr size_t FIL_PAGE_DATA = 38;
+
 PageParser::PageParser(const uint8_t* buffer, size_t size)
     : buffer_(buffer), size_(size) {}
 
 bool PageParser::parse() noexcept {
-    // 1. 基础校验：页大小至少为最小支持页（4KB），最大64KB
-    if (!buffer_ || size_ < 4096 || size_ > 65536) return false;
+    // 1. 基础校验：页大小必须是标准 InnoDB 页大小之一
+    if (!buffer_ || (size_ != 4096 && size_ != 8192 && size_ != 16384 && 
+                     size_ != 32768 && size_ != 65536)) {
+        return false;
+    }
 
-    // 2. 解析 FIL_PAGE_TYPE (offset 0)
+    // 2. 解析 FIL_PAGE_TYPE (offset 24)
     uint16_t raw_type = 0;
-    std::memcpy(&raw_type, buffer_, sizeof(uint16_t));
+    std::memcpy(&raw_type, buffer_ + FIL_PAGE_TYPE, sizeof(uint16_t));
     type_ = static_cast<PageType>(raw_type);
 
     // 3. 校验页类型合法性（仅允许索引/SDI/BLOB 等恢复相关类型）
@@ -30,7 +41,7 @@ bool PageParser::parse() noexcept {
     }
 
     // 4. 解析 PAGE_HEADER (offset 38 = FIL_PAGE_DATA)
-    const uint8_t* header_ptr = buffer_ + 38;
+    const uint8_t* header_ptr = buffer_ + FIL_PAGE_DATA;
 
     // ✅ 按 MySQL 8.0 官方偏移读取（storage/innobase/include/page0page.h）
     // 所有偏移均相对于 PAGE_HEADER 起始位置（即 buffer_ + 38）
