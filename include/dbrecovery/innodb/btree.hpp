@@ -40,7 +40,7 @@ public:
     [[nodiscard]] uint16_t n_records() const { return n_records_; }
     [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
 
-    // ✅ 新增：页健康状态检查
+    // ✅ 统一：页健康状态检查（消除重复定义）
     struct PageHealth {
         bool is_valid = true;
         std::string status_message;
@@ -53,6 +53,9 @@ public:
         bool has_supremum = false;
         uint16_t n_records = 0;
         uint16_t n_dir_slots = 0;
+        uint16_t page_level = 0;
+        uint32_t next_page = 0;
+        uint32_t prev_page = 0;
     };
     
     [[nodiscard]] PageHealth check_health() const;
@@ -69,7 +72,7 @@ public:
         const catalog::ColumnInfo& col,
         size_t& data_pos,
         bool is_extern) const {
-        // 检查 NULL 值
+        // 检查 NULL 值（COMPACT格式：NULL位图在记录头后）
         if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {
             data_pos++;
             return "NULL";
@@ -127,7 +130,7 @@ public:
                 int minute = (hour_minute >> 2) & 0x3F;
                 int second = second_packed >> 2;
                 
-                // ✅ 修复：正确读取小数部分（小端序）
+                // ✅ 统一：正确读取小数部分（小端序）
                 uint32_t frac = page_data_[data_pos] | 
                                (page_data_[data_pos + 1] << 8) |
                                (page_data_[data_pos + 2] << 16);
@@ -187,7 +190,7 @@ public:
                 continue;
             }
             
-            // ✅ 新增：解析 n_fields 字段数量（位于记录头第5字节）
+            // ✅ 统一：解析 n_fields 字段数量（位于记录头第5字节）
             uint16_t n_fields = page_data_[offset + 5];
             if (n_fields == 0 || n_fields > schema.columns.size()) {
                 // 兼容性处理：如果无法确定字段数，使用schema中的字段数
@@ -198,7 +201,7 @@ public:
             std::map<std::string, std::string> record;
             size_t data_pos = offset + 6; // 跳过记录头（5字节header + 1字节n_fields）
             
-            // ✅ 修复：根据实际解析的字段数进行循环
+            // ✅ 统一：根据实际解析的字段数进行循环
             uint16_t parsed_fields = 0;
             for (const auto& pair : schema.columns) {
                 const auto& col = pair.second;
@@ -218,27 +221,10 @@ public:
         return records;
     }
     
-    // ✅ 新增：格式校验方法
+    // ✅ 统一：格式校验方法
     bool is_compact_format() const {
         return (btr_format_ & 0x80) == 0; // COMPACT 格式标志位为 0
     }
-    
-    // ✅ 新增：页健康状态检查
-    struct PageHealth {
-        bool is_valid = true;
-        std::string status_message;
-        uint32_t checksum_expected = 0;
-        uint32_t checksum_actual = 0;
-        bool checksum_match = false;
-        
-        // B+Tree specific
-        bool has_infimum = false;
-        bool has_supremum = false;
-        uint16_t n_records = 0;
-        uint16_t n_dir_slots = 0;
-    };
-    
-    [[nodiscard]] PageHealth check_health() const;
     
     // ✅ 新增：SDI 页解析支持
     [[nodiscard]] uint64_t get_sdi_table_id() const;
@@ -426,6 +412,9 @@ inline BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     PageHealth health;
     health.is_valid = true;
     health.status_message = "OK";
+    health.page_level = page_level_;
+    health.next_page = next_page_;
+    health.prev_page = prev_page_;
     
     // 检查页大小
     if (page_data_.size() < 38 + 16) {
@@ -434,25 +423,53 @@ inline BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // 检查 INFIMUM 记录
+    // 检查 INFIMUM 记录（固定偏移 54）
     uint16_t infimum_offset = 54;
     if (infimum_offset < page_data_.size()) {
         uint8_t info_bits = page_data_[infimum_offset];
-        health.has_infimum = (info_bits & REC_INFO_MIN_REC_FLAG) != 0;
+        health.has_infimum = ((info_bits & REC_INFO_MIN_REC_FLAG) != 0);
+        
+        // 额外检查：INFIMUM 应该是类型为 REC_STATUS_INFIMUM 的系统记录
+        if (health.has_infimum && ((info_bits & 0x03) != REC_STATUS_INFIMUM)) {
+            health.status_message = "INFIMUM record type mismatch";
+        }
+    } else {
+        health.has_infimum = false;
     }
     
     // 检查 SUPREMUM 记录
     if (!record_offsets_.empty()) {
         uint16_t supremum_offset = record_offsets_.back();
-        if (supremum_offset < page_data_.size()) {
+        if (supremum_offset < page_data_.size() && supremum_offset >= 54) {
             uint8_t info_bits = page_data_[supremum_offset];
             health.has_supremum = ((info_bits & 0x03) == REC_STATUS_SUPREMUM);
+            
+            // 额外检查：SUPREMUM 应该是最大记录
+            if (!health.has_supremum) {
+                health.status_message = "SUPREMUM record type mismatch";
+            }
+        } else {
+            health.has_supremum = false;
         }
+    } else {
+        health.has_supremum = false;
     }
     
     // 检查记录数量
     if (!record_offsets_.empty()) {
         health.n_records = static_cast<uint16_t>(record_offsets_.size());
+        
+        // 额外检查：记录数应该至少包含 INFIMUM 和 SUPREMUM
+        if (health.n_records < 2) {
+            health.status_message = "Insufficient records (should include INFIMUM and SUPREMUM)";
+        }
+    } else {
+        health.n_records = 0;
+    }
+    
+    // 检查页级别（B+树高度）
+    if (page_level_ > 5) { // MySQL 8.0 B+树最大高度通常不超过5
+        health.status_message = "Unreasonably high page level";
     }
     
     return health;
