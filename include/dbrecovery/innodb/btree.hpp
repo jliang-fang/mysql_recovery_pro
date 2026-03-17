@@ -60,6 +60,27 @@ public:
     
     [[nodiscard]] PageHealth check_health() const;
 
+private:
+    /**
+     * @brief 解析单个字段的值（根据列类型）
+     * 
+     * @param col 列定义
+     * @param data_pos 数据位置指针（会更新）
+     * @param is_extern 是否为外部存储（如 BLOB 指针）
+     * @return std::string 解析后的字符串值
+     */
+    std::string parse_field_value(
+        const catalog::ColumnInfo& col, size_t& data_pos, bool is_extern) const;
+
+    /**
+     * @brief 解析页的目录槽（record directory）
+     * 
+     * @return true 目录解析成功
+     * @return false 目录解析失败
+     */
+    bool parse_directory() noexcept;
+
+public:
     /**
      * @brief 解析记录数据（仅支持 COMPACT 格式）
      * 
@@ -213,7 +234,7 @@ inline bool BPlusTreeParser::parse() noexcept {
 
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
     
-    // 解析记录目录（简化版，仅用于测试）
+    // 解析记录目录
     if (!parse_directory()) {
         return false;
     }
