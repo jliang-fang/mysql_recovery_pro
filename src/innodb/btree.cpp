@@ -451,7 +451,7 @@ std::string BPlusTreeParser::parse_field_value(
                 data_pos++;
                 return "NULL";
             }
-            if (data_pos + 5 > page_data_.size()) {
+            if (data_pos + 7 > page_data_.size()) {
                 return "";
             }
             // DATETIME 格式（MySQL 5.6+）：[year_high][year_low][month][day][hour][minute][second]
@@ -529,7 +529,7 @@ std::string BPlusTreeParser::parse_field_value(
             }
             
             // TIME 格式：[sign][hours][minutes][seconds]
-            if (data_pos + 3 > page_data_.size()) {
+            if (data_pos + 4 > page_data_.size()) {
                 return "";
             }
             
@@ -626,6 +626,74 @@ std::string BPlusTreeParser::parse_field_value(
             return oss.str();
     }
 }
+        
+        case mysql_types::BIT:
+            if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {
+                data_pos++;
+                return "NULL";
+            }
+            
+            size_t bit_bytes = (col.column_length + 7) / 8;
+            if (data_pos + bit_bytes > page_data_.size()) {
+                return "";
+            }
+            
+            uint64_t bit_val = 0;
+            for (size_t i = 0; i < bit_bytes; ++i) {
+                bit_val |= (static_cast<uint64_t>(page_data_[data_pos + i]) << (i * 8));
+            }
+            data_pos += bit_bytes;
+            
+            return std::to_string(bit_val);
+        
+        case mysql_types::JSON:
+            // JSON 存储为 BLOB，这里简化处理
+            if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {
+                data_pos++;
+                return "NULL";
+            }
+            
+            // 简单读取前几个字节作为示例
+            size_t json_len = std::min(col.column_length, static_cast<uint32_t>(100));
+            if (data_pos + json_len > page_data_.size()) {
+                json_len = page_data_.size() - data_pos;
+            }
+            
+            std::string result;
+            for (size_t i = 0; i < json_len; ++i) {
+                char c = static_cast<char>(page_data_[data_pos]);
+                if (c >= 32 && c <= 126) {
+                    result += c;
+                } else {
+                    result += ".";
+                }
+                data_pos++;
+            }
+            
+            return result + "...";
+        
+        default:
+            // BLOB/TEXT 类型
+            if (col.mysql_type_id >= mysql_types::TINY_BLOB && 
+                col.mysql_type_id <= mysql_types::BLOB) {
+                // 简单处理：返回指针信息
+                std::ostringstream oss;
+                oss << "BLOB_POINTER(space=" << page_data_[data_pos] 
+                    << ",page=" << page_data_[data_pos + 1] << ")";
+                data_pos += 4; // 跳过4字节指针
+                return oss.str();
+            }
+            
+            // 其他类型：返回十六进制表示
+            std::ostringstream oss;
+            oss << "0x";
+            for (size_t i = 0; i < col.column_length && data_pos < page_data_.size(); ++i) {
+                oss << std::hex << std::setfill('0') << std::setw(2) 
+                    << static_cast<int>(page_data_[data_pos++]);
+            }
+            return oss.str();
+    }
+}
 
 uint64_t BPlusTreeParser::get_sdi_table_id() const {
     if (page_data_.size() < 58) {
@@ -633,7 +701,8 @@ uint64_t BPlusTreeParser::get_sdi_table_id() const {
     }
     
     // SDI页的表ID在偏移38+20处
-    return dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), 58);
+    uint64_t table_id = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), 38 + 20);
+    return table_id;
 }
 
 // ✅ 新增：CRC32C 校验和计算（供页健康检查使用）
