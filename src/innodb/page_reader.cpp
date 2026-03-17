@@ -8,9 +8,23 @@ namespace innodb {
 // ==================== PageReader 静态工具类实现 ====================
 
 bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
-    // ✅ 新增：增强边界检查，确保页数据足够大
-    if (page_data.size() < 50 || page_data.size() % 512 != 0) {
-        return false; // 页太小或不是标准页大小
+    // ✅ 增强：严格边界检查
+    if (page_data.size() < 38 + 16) { // FIL header (38) + minimal record space
+        return false;
+    }
+    
+    // ✅ 新增：验证页大小是标准 InnoDB 页大小的倍数
+    static constexpr std::array<size_t, 5> valid_page_sizes = {4096, 8192, 16384, 32768, 65536};
+    bool is_valid_size = false;
+    for (size_t ps : valid_page_sizes) {
+        if (page_data.size() == ps) {
+            is_valid_size = true;
+            break;
+        }
+    }
+    if (!is_valid_size) {
+        std::cerr << "[WARN] Invalid page size: " << page_data.size() << std::endl;
+        return false;
     }
     
     // 读取页类型（偏移 38+12=50）

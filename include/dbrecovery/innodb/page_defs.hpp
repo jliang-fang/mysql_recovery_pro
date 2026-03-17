@@ -17,16 +17,38 @@ using dbrecovery::innodb::read_le;
 // ==================== InnoDB File Header Constants ====================
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
 
-constexpr uint16_t FIL_PAGE_TYPE        = 12;   // offset in FIL_HEADER
-constexpr uint16_t TYPE_OFFSET          = 12;   // alias for FIL_PAGE_TYPE
+/// @brief Offset of page type within FIL Header (absolute offset = 38 + 12 = 50)
+constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 12;
+/// @brief Alias for FIL_PAGE_TYPE_OFFSET
+constexpr uint16_t TYPE_OFFSET          = 12;   // alias for FIL_PAGE_TYPE_OFFSET
+/// @brief Offset of page number within FIL Header (absolute offset = 38 + 4 = 42)
 constexpr uint16_t FIL_PAGE_OFFSET      = 4;    // offset of page number (4 bytes at offset 4)
+/// @brief Offset of LSN within FIL Header (absolute offset = 38 + 8 = 46)
 constexpr uint16_t FIL_PAGE_LSN         = 8;    // LSN of last change (8 bytes at offset 8)
+/// @brief Offset of space ID within FIL Header (absolute offset = 38 + 0 = 38)
 constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;    // tablespace ID (4 bytes at offset 0, but not standard)
 
-// Page types (FIL_PAGE_TYPE value)
+// ✅ 新增：页类型值定义
+/// @brief B+Tree index page type
 constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x2041 — B+Tree index page
+/// @brief Undo log page type
 constexpr uint16_t FIL_PAGE_UNDO_LOG    = 9970;  // 0x2042 — Undo log page
+/// @brief Freshly allocated page type
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
+/// @brief SDI (Space Descriptor Index) page type
+constexpr uint16_t FIL_PAGE_SDI         = 9971;  // 0x2043 — SDI metadata page
+/// @brief BLOB page type
+constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 9972;  // 0x2044 — BLOB page
+/// @brief Compressed page type
+constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x2045 — Compressed page
+
+// ✅ 新增：页类型读取辅助函数
+inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
+    return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_OFFSET);
+}
+
+// Page types (FIL_PAGE_TYPE value)
+// ✅ 已移至上面的定义块中，保留向后兼容性
 
 // InnoDB 常量
 constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
