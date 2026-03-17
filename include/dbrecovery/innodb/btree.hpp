@@ -312,21 +312,26 @@ inline bool BPlusTreeParser::parse() noexcept {
         return false;
     }
 
-    // 解析页类型（FIL_PAGE_TYPE at offset 24）
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 24);
-    if (page_type != FIL_PAGE_INDEX) {
+    // ✅ 修复：使用正确的偏移计算页类型
+    // FIL_PAGE_TYPE 在 page_defs.hpp 中定义为 12，但实际偏移是 38+12=50
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + dbrecovery::innodb::FIL_PAGE_TYPE);
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
+        page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         node_type_ = BTreeNodeType::INVALID;
         return false;
     }
 
-    // 解析页级别（FIL_PAGE_LEVEL at offset 24+4=28）
-    page_level_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 28);
+    // ✅ 修复：使用正确的偏移计算页级别
+    // FIL_PAGE_LEVEL at offset 38+4=42
+    page_level_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 4);
     
-    // 解析下一页（PAGE_NEXT at offset 26）
-    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 26);
+    // ✅ 修复：使用正确的偏移计算下一页
+    // PAGE_NEXT at offset 38+26=64
+    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
     
-    // 解析前一页（PAGE_PREV at offset 20）
-    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 20);
+    // ✅ 修复：使用正确的偏移计算前一页
+    // PAGE_PREV at offset 38+20=58
+    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
 
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
     
