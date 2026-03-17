@@ -106,13 +106,20 @@ struct BlobPointer {
     
     bool is_complete() const {
         // ✅ 增强：验证 BLOB 指针的完整性
-        if (total_len == 0 || chain_pages.empty()) {
+        if (chain_pages.empty()) {
             return false;
         }
-        
-        // 验证链表长度与总长度的一致性（粗略检查）
-        // 实际长度需要读取每个页并累加数据长度
-        if (chain_pages.size() > 1 && total_len <= len) {
+
+        // total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度，视为有效
+        if (total_len == 0) {
+            if (len == 0) { // 单页 BLOB 长度为 0 是无效的
+                std::cerr << "[ERROR] BLOB pointer has zero length on single page" << std::endl;
+                return false;
+            }
+            return true; // 单页 BLOB，长度有效
+        }
+
+        if (total_len <= len && chain_pages.size() > 1) {
             std::cerr << "[WARN] BLOB chain has multiple pages but total_len <= single_page_len" << std::endl;
         }
         
@@ -137,20 +144,20 @@ struct BlobPointer {
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
 std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20) {
     if (!data || data_size < 16) return std::nullopt;
-    
+        
     // BLOB 指针格式（20字节）：
     // [0-3]:  space_id
     // [4-7]:  page_no (first BLOB 页)
     // [8-11]: offset (数据在页内的偏移)
     // [12-15]: len (当前页的数据长度)
     // [16-19]: total_len (BLOB 总长度，某些版本可能省略)
-    
+        
     BlobPointer ptr;
     ptr.space_id = dbrecovery::innodb::read_le<uint32_t>(data, 0);
     ptr.page_no = dbrecovery::innodb::read_le<uint32_t>(data, 4);
     ptr.offset = dbrecovery::innodb::read_le<uint32_t>(data, 8);
     ptr.len = dbrecovery::innodb::read_le<uint32_t>(data, 12);
-    
+        
     // ✅ 修复：尝试读取总长度（需要额外4字节）
     if (data_size >= 20) {
         ptr.total_len = dbrecovery::innodb::read_le<uint32_t>(data, 16);
@@ -158,20 +165,20 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
         // 如果数据不足，保持默认值（len）
         ptr.total_len = ptr.len;
     }
-    
+        
     // 验证 BLOB 指针的有效性
     if (ptr.space_id == 0xFFFFFFFF || ptr.page_no == 0xFFFFFFFF) {
         return std::nullopt; // 无效的 BLOB 指针
     }
-    
+        
     // ✅ 新增：验证偏移和长度的边界检查（防止越界访问）
     if (ptr.offset >= 16384 || ptr.len > 16384) {
         std::cerr << "[ERROR] BLOB pointer has invalid offset/len: offset=" 
                   << ptr.offset << ", len=" << ptr.len << std::endl;
         return std::nullopt;
     }
-    
-    // ✅ 修复：total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
+        
+    // ✅ 统一：total_len == 0 表示完整指针（无溢出页），此时 len 就是总长度
     if (ptr.total_len == 0) {
         ptr.total_len = ptr.len;
     } else if (ptr.len > ptr.total_len) {
@@ -180,16 +187,16 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
         // 某些情况下 len 可能大于 total_len（如页内截断），以 len 为准
         ptr.total_len = ptr.len;
     }
-    
+        
     // ✅ 新增：验证跨页情况
     if (ptr.offset + ptr.len > 16384) {
         std::cerr << "[INFO] BLOB data is cross-page: offset=" << ptr.offset 
                   << ", len=" << ptr.len << ", page_size=16384." << std::endl;
     }
-    
+        
     // 初始化页链（至少包含当前页）
     ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
-    
+        
     return ptr;
 }
 
