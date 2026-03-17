@@ -13,120 +13,21 @@ namespace dbrecovery {
 namespace innodb {
 
 /**
- * @brief PageReader: 从 .ibd 文件中读取 InnoDB 页
+ * @brief PageReader: InnoDB 页校验和计算与验证工具类
  *
  * 提供以下能力：
- * - 读取指定偏移的页数据
  * - 校验页校验和（CRC32C, INNODB, NONE）
- * - 解析页类型（FIL_PAGE_INDEX, FIL_PAGE_SDI 等）
+ * - 计算各种校验和算法
+ *
+ * 此类为纯静态工具类，不持有任何状态。
  */
 class PageReader {
 public:
-    explicit PageReader(const std::string& file_path)
-        : page_size_(16384), total_pages_(0), is_valid_(false) {
-        
-        mapper_ = std::make_unique<FileMapper>(file_path);
-        if (!mapper_->is_valid()) {
-            return;
-        }
-        
-        // 计算总页数
-        file_size_ = mapper_->size();
-        total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
-        
-        is_valid_ = (total_pages_ > 0);
-    }
-
-    ~PageReader() = default;
-
-    // 禁止拷贝
+    // 禁止实例化
+    PageReader() = delete;
+    ~PageReader() = delete;
     PageReader(const PageReader&) = delete;
     PageReader& operator=(const PageReader&) = delete;
-
-    /**
-     * @brief 读取指定页号的数据（带校验）
-     *
-     * @param page_no 页号（从0开始）
-     * @return std::vector<uint8_t> 页数据，失败返回空
-     */
-    std::vector<uint8_t> read_page(uint32_t page_no) {
-        if (!is_valid_ || total_pages_ == 0) {
-            return {};
-        }
-        
-        // 计算页在文件中的偏移
-        uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
-        if (offset >= file_size_) {
-            return {};
-        }
-        
-        // 读取一页数据
-        std::vector<uint8_t> page_data(page_size_);
-        const uint8_t* data = mapper_->data() + offset;
-        std::memcpy(page_data.data(), data, page_size_);
-        
-        // 校验校验和
-        if (!validate_checksum(page_data)) {
-            std::cerr << "[WARN] Page " << page_no << " checksum validation failed" << std::endl;
-            return {};
-        }
-        
-        return page_data;
-    }
-
-    /**
-     * @brief 读取指定页号的数据（不校验）
-     *
-     * @param page_no 页号（从0开始）
-     * @return std::vector<uint8_t> 页数据，失败返回空
-     */
-    std::vector<uint8_t> read_page_raw(uint32_t page_no) {
-        if (!is_valid_ || total_pages_ == 0) {
-            return {};
-        }
-        
-        // 计算页在文件中的偏移
-        uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
-        if (offset >= file_size_) {
-            return {};
-        }
-        
-        // 读取一页数据
-        std::vector<uint8_t> page_data(page_size_);
-        const uint8_t* data = mapper_->data() + offset;
-        std::memcpy(page_data.data(), data, page_size_);
-        
-        return page_data;
-    }
-
-    /**
-     * @brief 获取文件总页数
-     *
-     * @return uint32_t 总页数
-     */
-    uint32_t get_total_pages() const { return total_pages_; }
-
-    /**
-     * @brief 获取文件大小（字节）
-     *
-     * @return uint64_t 文件大小
-     */
-    uint64_t get_file_size() const { return file_size_; }
-
-    /**
-     * @brief 获取页大小
-     *
-     * @return uint32_t 页大小
-     */
-    uint32_t get_page_size() const { return page_size_; }
-
-    /**
-     * @brief 获取文件有效性状态
-     *
-     * @return true 文件有效且已成功初始化
-     * @return false 文件无效或初始化失败
-     */
-    [[nodiscard]] bool is_valid() const { return is_valid_; }
 
     /**
      * @brief 校验页校验和（支持 CRC32C / INNODB / NONE）
@@ -297,7 +198,72 @@ public:
         
         return checksum;
     }
+};
 
+/**
+ * @brief InnoDBFileReader: 管理 .ibd 文件并提供页读取服务
+ *
+ * 此类负责文件的打开、内存映射，并使用 PageReader 工具类来验证数据。
+ */
+class InnoDBFileReader {
+public:
+    explicit InnoDBFileReader(const std::string& file_path);
+    ~InnoDBFileReader();
+
+    // 禁止拷贝
+    InnoDBFileReader(const InnoDBFileReader&) = delete;
+    InnoDBFileReader& operator=(const InnoDBFileReader&) = delete;
+
+    // 支持移动语义
+    InnoDBFileReader(InnoDBFileReader&& other) noexcept;
+    InnoDBFileReader& operator=(InnoDBFileReader&& other) noexcept;
+
+    /**
+     * @brief 读取指定页号的数据（带校验）
+     *
+     * @param page_no 页号（从0开始）
+     * @return std::vector<uint8_t> 页数据，失败返回空
+     */
+    std::vector<uint8_t> read_page(uint32_t page_no);
+
+    /**
+     * @brief 读取指定页号的数据（不校验）
+     *
+     * @param page_no 页号（从0开始）
+     * @return std::vector<uint8_t> 页数据，失败返回空
+     */
+    std::vector<uint8_t> read_page_raw(uint32_t page_no);
+
+    /**
+     * @brief 获取文件总页数
+     *
+     * @return uint32_t 总页数
+     */
+    uint32_t get_total_pages() const { return total_pages_; }
+
+    /**
+     * @brief 获取文件大小（字节）
+     *
+     * @return uint64_t 文件大小
+     */
+    uint64_t get_file_size() const { return file_size_; }
+
+    /**
+     * @brief 获取页大小
+     *
+     * @return uint32_t 页大小
+     */
+    uint32_t get_page_size() const { return page_size_; }
+
+    /**
+     * @brief 获取文件有效性状态
+     *
+     * @return true 文件有效且已成功初始化
+     * @return false 文件无效或初始化失败
+     */
+    [[nodiscard]] bool is_valid() const { return is_valid_; }
+
+private:
     uint64_t file_size_;
     uint32_t page_size_;
     uint32_t total_pages_;
