@@ -58,6 +58,11 @@ inline FileMapper::FileMapper(FileMapper&& other) noexcept
 #ifdef _WIN32
     handle_ = other.handle_;
     other.handle_ = INVALID_HANDLE_VALUE;
+#else
+    if (data_ == MAP_FAILED) {
+        data_ = nullptr;
+        is_valid_ = false;
+    }
 #endif
 }
 
