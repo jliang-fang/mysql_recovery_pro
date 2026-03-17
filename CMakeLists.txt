@@ -56,13 +56,13 @@ target_link_libraries(mysql8_recover dbrecovery_innodb)
 enable_testing()
 
 # Unit tests
+enable_testing()
+
 find_package(GTest QUIET)
 if(GTEST_FOUND)
-    add_executable(test_page_reader test/test_page_reader.cpp)
-    target_link_libraries(test_page_reader dbrecovery_innodb GTest::GTest GTest::Main)
-    gtest_discover_tests(test_page_reader)
+    add_subdirectory(tests)
     
-    # 添加测试数据生成脚本
+    # 添加测试数据生成脚本作为全局测试
     add_test(NAME generate_test_data COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/ibd_generator.py test_table)
 else()
     message(WARNING "GoogleTest not found — tests disabled")
