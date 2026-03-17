@@ -59,13 +59,19 @@ bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
     
-    // ✅ 修复：使用正确的偏移计算
+    // ✅ 修复：使用正确的偏移计算（参考 page_defs.hpp）
     // FIL_HEADER_SIZE = 38, BTR_N_LEVELS_OFFSET = 4 (relative to B+ tree header)
     // So absolute offset for PAGE_LEVEL is 38 + 4 = 42
+    // ✅ 新增：使用 uint16_t 读取以匹配 page_level_ 类型（实际 InnoDB 中为 2 字节）
     page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
     
-    // Flags are at BTR_N_LEVELS_OFFSET + 2 = 6 relative to B+ tree header
+    // Flags are at BTR_N_LEVELS_OFFSET + 2 = 6 relative to B+ tree header (BTR_SPACE_ID = 0, BTR_N_LEVELS = 4)
     flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 6);
+    
+    // ✅ 新增：验证页级别合理性（MySQL 8.0 B+树最大高度通常不超过5）
+    if (page_level_ > 5) {
+        std::cerr << "[WARN] BPlusTreeParser: Unreasonably high page level: " << page_level_ << std::endl;
+    }
     
     // 判断节点类型
     if (page_level_ == 0) {
@@ -79,6 +85,17 @@ bool BPlusTreeParser::parse_header() noexcept {
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
     
+    // ✅ 新增：验证页链连续性（仅对非叶子节点有意义）
+    if (node_type_ != BTreeNodeType::LEAF) {
+        if (prev_page_ != 0xFFFFFFFF && next_page_ != 0xFFFFFFFF) {
+            // 内部节点应有前驱和后继
+        } else if (prev_page_ == 0xFFFFFFFF && next_page_ == 0xFFFFFFFF) {
+            // 根节点可能没有前后页
+        } else {
+            std::cerr << "[WARN] BPlusTreeParser: Inconsistent page chain for internal node" << std::endl;
+        }
+    }
+    
     return true;
 }
 
@@ -87,19 +104,39 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
         return false;
     }
     
-    // INFIMUM 记录偏移（固定为54）
+    // INFIMUM 记录偏移（固定为54，参考 page_defs.hpp）
     infimum_offset_ = 54;
     if (infimum_offset_ + 13 > page_data_.size()) {
+        std::cerr << "[ERROR] BPlusTreeParser: INFIMUM record out of bounds" << std::endl;
         return false;
     }
     
-    // SUPREMUM 记录偏移
-    supremum_offset_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_offset_ + 1);
+    // ✅ 新增：验证 INFIMUM 记录头（必须是 REC_STATUS_INFIMUM = 0x02）
+    uint8_t infimum_info_bits = page_data_[infimum_offset_];
+    if ((infimum_info_bits & 0x03) != REC_STATUS_INFIMUM) {
+        std::cerr << "[ERROR] BPlusTreeParser: INFIMUM record type mismatch. Expected 0x02, got 0x"
+                  << std::hex << static_cast<int>(infimum_info_bits & 0x03) << std::dec << std::endl;
+        return false;
+    }
+    
+    // SUPREMUM 记录偏移（位于 INFIMUM 记录头的 next_record_offset 字段）
+    uint16_t infimum_next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_offset_ + 1);
+    supremum_offset_ = infimum_next_offset & 0x3FFF; // ✅ 修复：next_record_offset 是 15 位
+    
     if (supremum_offset_ == 0 || supremum_offset_ >= page_data_.size()) {
+        std::cerr << "[ERROR] BPlusTreeParser: SUPREMUM offset invalid: " << supremum_offset_ << std::endl;
         return false;
     }
     
-    // 记录偏移列表
+    // ✅ 新增：验证 SUPREMUM 记录头（必须是 REC_STATUS_SUPREMUM = 0x03）
+    uint8_t supremum_info_bits = page_data_[supremum_offset_];
+    if ((supremum_info_bits & 0x03) != REC_STATUS_SUPREMUM) {
+        std::cerr << "[ERROR] BPlusTreeParser: SUPREMUM record type mismatch. Expected 0x03, got 0x"
+                  << std::hex << static_cast<int>(supremum_info_bits & 0x03) << std::dec << std::endl;
+        return false;
+    }
+    
+    // 记录偏移列表（按页目录顺序）
     record_offsets_.push_back(infimum_offset_);
     record_offsets_.push_back(supremum_offset_);
     
@@ -112,35 +149,48 @@ bool BPlusTreeParser::parse_user_records() noexcept {
     }
     
     // 解析页目录槽
-    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_DIR_SLOTS + 38);
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0); // PAGE_N_DIR_SLOTS
     if (n_dir_slots < 2) { // 至少有INFIMUM和SUPREMUM
+        std::cerr << "[ERROR] BPlusTreeParser: Insufficient directory slots: " << n_dir_slots << std::endl;
         return false;
     }
     
-    // 解析每个记录偏移
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_HEAP_TOP + 38);
-    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_HEAP + 38) & 0x7FFF;
+    // 解析堆顶位置
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 2); // PAGE_HEAP_TOP
+    if (heap_top < 56 || heap_top > page_data_.size()) {
+        std::cerr << "[ERROR] BPlusTreeParser: Invalid heap top: " << heap_top << std::endl;
+        return false;
+    }
     
-    // 从页目录中解析记录偏移
-    uint16_t dir_slot_offset = 38 + 36; // PAGE_DIRECTORY 开始位置
+    n_records_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4) & 0x7FFF; // PAGE_N_HEAP
+    
+    // ✅ 新增：验证堆大小合理性（至少包含 INFIMUM/SUPREMUM）
+    if (n_records_ < 2 || n_records_ > 16384) {
+        std::cerr << "[ERROR] BPlusTreeParser: Invalid heap size: " << n_records_ << std::endl;
+        return false;
+    }
+    
+    // ✅ 修复：从页目录中解析记录偏移（正确位置在页末尾）
+    // PAGE_DIRECTORY 位于页末尾，倒数第2*n_dir_slots字节处
+    uint16_t dir_start = static_cast<uint16_t>(page_data_.size()) - (n_dir_slots * 2);
+    if (dir_start < 38 + 16) { // 确保不覆盖页头和数据区
+        std::cerr << "[ERROR] BPlusTreeParser: Directory overlaps with header/data area" << std::endl;
+        return false;
+    }
+    
     for (uint16_t i = 0; i < n_dir_slots; ++i) {
-        uint16_t slot_pos = dir_slot_offset + i * 2;
+        uint16_t slot_pos = dir_start + i * 2;
         if (slot_pos + 2 > page_data_.size()) {
             std::cerr << "[WARN] BPlusTreeParser: directory slot position out of bounds" << std::endl;
             break;
         }
         
         uint16_t record_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_pos);
-        // ✅ 增强：添加更严格的边界检查和验证
-        if (record_offset < 38 + 16 || record_offset >= page_data_.size()) {
-            std::cerr << "[WARN] BPlusTreeParser: invalid record offset=" << record_offset 
-                      << " (min=38+16, max=" << page_data_.size() << ")" << std::endl;
-            continue;
-        }
         
-        if (record_offset >= heap_top) {
-            std::cerr << "[WARN] BPlusTreeParser: record offset=" << record_offset 
-                      << " exceeds heap_top=" << heap_top << std::endl;
+        // ✅ 增强：添加更严格的边界检查和验证
+        if (record_offset < 38 + 16 || record_offset >= heap_top) {
+            std::cerr << "[WARN] BPlusTreeParser: invalid record offset=" << record_offset 
+                      << " (min=38+16, max=heap_top=" << heap_top << ")" << std::endl;
             continue;
         }
         
@@ -150,7 +200,7 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         }
     }
     
-    return true;
+    return !record_offsets_.empty();
 }
 
 BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
