@@ -88,20 +88,32 @@ struct BlobPageChain {
             }
             
             // ✅ 新增：验证 BLOB 页头校验和（增强数据完整性检查）
-            if (prev_data->size() >= 24) {
-                uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), 0);
-                // 简单校验：如果校验和非零且与计算值不匹配，则标记为警告
-                if (stored_checksum != 0 && stored_checksum != 0xFFFFFFFF) {
+            // 注意：BLOB 页也是标准 InnoDB 页，校验和位于 FIL Header 的偏移 24-27 (即页起始位置 + 24)
+            if (prev_data->size() >= 62) { // 确保有足够空间读取到校验和字段
+                uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), 24);
+                
+                // 标准 InnoDB 校验模式：NONE (0 或 0xFFFFFFFF) 视为有效
+                if (stored_checksum == 0 || stored_checksum == 0xFFFFFFFF) {
+                    // 校验和未启用，跳过验证
+                } else {
+                    // 创建页副本并清零校验和字段（偏移 24-27）
                     std::vector<uint8_t> page_copy = *prev_data;
                     for (int j = 0; j < 4; ++j) {
-                        page_copy[j] = 0;
+                        page_copy[24 + j] = 0;
                     }
+                    
                     uint32_t computed_crc32c = dbrecovery::innodb::PageReader::compute_crc32c(page_copy);
                     if (computed_crc32c != stored_checksum) {
                         std::cerr << "[WARN] BLOB page checksum mismatch at (" 
-                                  << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                                  << prev_page.first << ", " << prev_page.second 
+                                  << "), stored=" << stored_checksum 
+                                  << ", computed=" << computed_crc32c << std::endl;
                     }
                 }
+            } else {
+                // 页太小，无法包含完整的 FIL Header
+                std::cerr << "[WARN] BLOB page too small for checksum validation at (" 
+                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
             }
         }
         
