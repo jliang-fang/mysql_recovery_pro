@@ -154,6 +154,8 @@ public:
             
             // ✅ 统一：根据实际解析的字段数进行循环
             uint16_t parsed_fields = 0;
+            size_t nullable_idx = 0; // NULL 位图中的索引
+            
             for (const auto& pair : schema.columns) {
                 const auto& col = pair.second;
                 
@@ -164,6 +166,26 @@ public:
                 // ✅ 新增：对于非空列，跳过 NULL 位图中的对应位
                 // COMPACT 格式中，NULL 位图只包含可空列，所以需要根据列的可空性来判断是否在位图中
                 bool is_nullable_col = col.is_nullable;
+                
+                // 检查当前列是否在 NULL 位图中（仅当它是可空列时）
+                if (is_nullable_col) {
+                    // 检查 NULL 位图中的对应位
+                    size_t byte_idx = nullable_idx / 8;
+                    size_t bit_idx = nullable_idx % 8;
+                    
+                    if (data_pos + byte_idx < page_data_.size()) {
+                        uint8_t bitmap_byte = page_data_[data_pos - null_bitmap_size + byte_idx];
+                        bool is_null = (bitmap_byte & (1 << bit_idx)) != 0;
+                        
+                        if (is_null) {
+                            record[col.name] = "NULL";
+                            nullable_idx++;
+                            parsed_fields++;
+                            continue; // 跳过字段值解析
+                        }
+                    }
+                    nullable_idx++;
+                }
                 
                 std::string value = parse_field_value(col, data_pos, false);
                 record[col.name] = value;
