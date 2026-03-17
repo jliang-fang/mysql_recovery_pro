@@ -10,6 +10,7 @@
 #include <cmath>
 
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_reader.hpp"
 
 namespace dbrecovery {
 namespace innodb {

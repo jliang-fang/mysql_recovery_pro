@@ -265,8 +265,10 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
         return false;
     }
     
-    // 解析记录（这里需要表结构，暂时返回）
-    records_ = parser.parse_records(catalog::TableSchema());
+    // TODO: 实现完整的记录解析逻辑
+    // 这里需要表结构信息来正确解析字段类型和长度
+    // 暂时返回空记录列表
+    records_.clear();
     
     return true;
 }

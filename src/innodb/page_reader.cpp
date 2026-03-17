@@ -44,6 +44,12 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
     if (computed_old == stored_checksum) {
         return true;
     }
+    
+    // 尝试 CRC32 标准校验算法
+    uint32_t computed_crc32 = compute_crc32(page_copy);
+    if (computed_crc32 == stored_checksum) {
+        return true;
+    }
 
     // 所有校验均失败
     return false;
@@ -106,8 +112,12 @@ uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {
     // 使用标准 CRC32 算法（MySQL 5.6/5.7 可能使用）
     uint32_t crc = 0xFFFFFFFF;
     
+    const size_t checksum_start = 24;
+    const size_t checksum_end = 28;
+    
     for (size_t i = 0; i < page_data.size(); ++i) {
-        if (i >= 24 && i < 28) continue; // Skip checksum field
+        // 跳过校验和字段 (offset 24-27)
+        if (i >= checksum_start && i < checksum_end) continue;
         
         uint8_t byte = page_data[i];
         crc ^= byte;
@@ -128,15 +138,15 @@ uint32_t PageReader::compute_old_checksum(const std::vector<uint8_t>& page_data)
     // 使用 MySQL 5.5/5.6 的旧校验算法
     // 这是简单的累加和（非CRC）
     
-    const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
-    size_t len = page_data.size() / 4;
+    const size_t checksum_start = 24;
+    const size_t checksum_end = 28;
     
     uint32_t checksum = 0;
-    for (size_t i = 0; i < len; ++i) {
-        // 跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
-        if (i == 6 || i == 7) continue;
+    for (size_t i = 0; i < page_data.size(); ++i) {
+        // 跳过校验和字段 (offset 24-27)
+        if (i >= checksum_start && i < checksum_end) continue;
         
-        checksum += dbrecovery::innodb::read_le<uint32_t>(page_data.data(), i * 4);
+        checksum += page_data[i];
     }
     
     return checksum;
