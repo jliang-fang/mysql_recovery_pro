@@ -5,9 +5,14 @@
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <optional>
+#include "dbrecovery/innodb/mach_read.hpp"
 
 namespace dbrecovery {
 namespace innodb {
+
+// ✅ 新增：使用 mach_read 中的 read_le 函数
+using dbrecovery::innodb::read_le;
 
 // ==================== InnoDB File Header Constants ====================
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
@@ -89,9 +94,9 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_next_record_offset() const {
-        // ✅ 修复：next_record_offset 是 14 位（bit 0-13），高2位是其他标志
-        // bit 0-7 来自 next_rec_off_0, bit 8-13 来自 next_rec_off_1 的低6位
-        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1) << 8) | next_rec_off_0) & 0x3FFF;
+        // ✅ 修复：next_record_offset 是 15 位（bit 0-14），高1位是其他标志
+        // bit 0-7 来自 next_rec_off_0, bit 8-14 来自 next_rec_off_1 的低7位
+        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x7F) << 8) | next_rec_off_0);
     }
 
     bool is_deleted() const { 
@@ -103,8 +108,8 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_heap_no() const {
-        // ✅ 修复：heap_no 是 14 位（bit 0-13），高2位是其他标志
-        return static_cast<uint16_t>((static_cast<uint16_t>(heap_no_1) << 8) | heap_no_0) & 0x3FFF;
+        // ✅ 修复：heap_no 是 15 位（bit 0-14），高1位是其他标志
+        return static_cast<uint16_t>((static_cast<uint16_t>(heap_no_1 & 0x7F) << 8) | heap_no_0);
     }
 
     std::string to_string() const {
@@ -113,7 +118,7 @@ struct alignas(1) RecordHeader {
             << ", deleted=" << std::boolalpha << is_deleted()
             << ", min_rec=" << is_min_rec()
             << ", heap_no=" << get_heap_no()
-            << ", info_bits=0x" << std::hex << static_cast<int>(info_bits) << std::dec
+            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec
             << "}";
         return oss.str();
     }
@@ -128,6 +133,22 @@ struct alignas(1) PageHeader {
     uint16_t garbage_end;   // PAGE_GARBAGE_END (optional)
     uint16_t last_insert;   // PAGE_LAST_INSERT (optional)
     
+    static std::optional<PageHeader> parse(const uint8_t* ptr, size_t max_size = 12) {
+        if (!ptr || max_size < 12) {
+            return std::nullopt;
+        }
+
+        PageHeader header{};
+        header.n_dir_slots = read_le<uint16_t>(ptr, 0);
+        header.heap_top = read_le<uint16_t>(ptr, 2);
+        header.n_heap = read_le<uint16_t>(ptr, 4) & 0x7FFF;
+        header.free_offset = read_le<uint16_t>(ptr, 6);
+        header.garbage_end = read_le<uint16_t>(ptr, 8);
+        header.last_insert = read_le<uint16_t>(ptr, 10);
+
+        return header;
+    }
+
     std::string to_string() const {
         return "PageHeader{n_dir_slots=" + std::to_string(n_dir_slots) +
                ", heap_top=" + std::to_string(heap_top) +
@@ -147,13 +168,34 @@ struct alignas(1) Record {
     uint8_t info_bits;        // 原始 info_bits 用于进一步分析
     uint16_t n_fields;        // 字段数量（COMPACT格式）
     
+    static std::optional<Record> parse(const uint8_t* ptr, size_t offset, size_t max_size = 6) {
+        if (!ptr || max_size < 6) {
+            return std::nullopt;
+        }
+
+        RecordHeader header = RecordHeader::parse(ptr, max_size).value_or(RecordHeader{});
+        
+        Record record{};
+        record.offset = static_cast<uint16_t>(offset);
+        record.next_offset = header.get_next_record_offset();
+        record.is_deleted = header.is_deleted();
+        record.heap_no = header.get_heap_no();
+        record.info_bits = header.info_bits;
+        // n_fields 需要额外解析（位于第5字节）
+        if (max_size >= 6) {
+            record.n_fields = ptr[5];
+        }
+
+        return record;
+    }
+
     std::string to_string() const {
         return "Record{offset=" + std::to_string(offset) +
                ", next=" + std::to_string(next_offset) +
-               ", deleted=" + std::to_string(is_deleted) +
-               ", heap_no=" + std::to_string(heap_no) +
-               ", info_bits=0x" + std::hex + std::to_string(info_bits) + std::dec +
-               ", n_fields=" + std::to_string(n_fields) + "}";
+               ", deleted=" << std::boolalpha << is_deleted << std::noboolalpha <<
+               ", heap_no=" << std::to_string(heap_no) <<
+               ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec <<
+               ", n_fields=" << std::to_string(n_fields) + "}";
     }
 };
 
