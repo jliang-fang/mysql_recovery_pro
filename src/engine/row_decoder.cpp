@@ -58,14 +58,18 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint32_t bitmap_index = 0;
             for (const auto& prev_pair : schema.columns) {
                 const auto& prev_col = prev_pair.second;
-                // 只计算在当前列之前定义的可空列
-                if (prev_pair.first >= pair.first) {
+                // 只计算在当前列之前定义的可空列（包括当前列）
+                if (prev_pair.first > pair.first) {
                     break; // 已经处理完所有前置列
                 }
-                if (prev_col.is_nullable && !prev_col.is_off_page && prev_col.virtual_gen_store_type == 0) {
+                if (prev_col.is_nullable && !prev_col.is_off_page && 
+                    prev_col.virtual_gen_store_type == 0) {
                     bitmap_index++;
                 }
             }
+            
+            // 减1是因为上面循环包含了当前列，但我们需要的是之前的可空列数量
+            bitmap_index--;
         
             uint32_t byte_idx = bitmap_index / 8;
             uint32_t bit_idx = bitmap_index % 8;
