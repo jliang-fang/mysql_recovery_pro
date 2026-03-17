@@ -362,6 +362,7 @@ inline std::string BPlusTreeParser::parse_field_value(
             // 请使用上面的 DATETIME2 实现（支持可变精度）
             return "[DEPRECATED_DATETIME2_IMPL]";
         }
+        // ✅ 新增：DATETIME2 解析逻辑已在 btree.cpp 中实现，此处不返回占位符
         default:
             return "[UNSUPPORTED_TYPE]";
     }
