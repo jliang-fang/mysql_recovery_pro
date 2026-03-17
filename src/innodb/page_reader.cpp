@@ -1,28 +1,21 @@
 #include "dbrecovery/innodb/page_reader.hpp"
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <cstring>
-
-#ifdef _WIN32
-#  include <windows.h>
-#else
-#  include <sys/mman.h>
-#endif
+#include <iostream>
 
 namespace dbrecovery {
 namespace innodb {
 
-PageReader::PageReader(const std::string& file_path)
-    : fd_(-1), file_size_(0), page_size_(16384), total_pages_(0), is_valid_(false) {
+// ==================== InnoDBFileReader 实现 ====================
+
+InnoDBFileReader::InnoDBFileReader(const std::string& file_path)
+    : page_size_(16384), total_pages_(0), is_valid_(false) {
     
-    utils::FileMapper mapper(file_path);
-    if (!mapper.is_valid()) {
+    mapper_ = std::make_unique<FileMapper>(file_path);
+    if (!mapper_->is_valid()) {
         return;
     }
 
-    file_data_ = std::make_unique<std::vector<uint8_t>>(mapper.data(), mapper.data() + mapper.size());
-    file_size_ = file_data_->size();
+    // 计算总页数
+    file_size_ = mapper_->size();
     
     // InnoDB 支持多种页大小：4KB/8KB/16KB/32KB/64KB
     // 优先从文件大小推断页大小（假设文件是完整页的倍数）
@@ -41,156 +34,78 @@ PageReader::PageReader(const std::string& file_path)
     }
     
     total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
-    is_valid_ = true;
+    is_valid_ = (total_pages_ > 0);
 }
 
-PageReader::~PageReader() {}
+InnoDBFileReader::~InnoDBFileReader() = default;
 
-std::vector<uint8_t> PageReader::read_page(uint32_t page_no) {
-    if (!is_valid_ || page_no >= total_pages_) return {};
-    
-    std::vector<uint8_t> buffer(page_size_);
-    off_t offset = static_cast<off_t>(page_no) * page_size_;
-    
-    // 从内存映射中复制数据
-    if (offset + page_size_ > file_data_->size()) {
+InnoDBFileReader::InnoDBFileReader(InnoDBFileReader&& other) noexcept
+    : file_size_(other.file_size_), page_size_(other.page_size_), total_pages_(other.total_pages_),
+      mapper_(std::move(other.mapper_)), is_valid_(other.is_valid_) {
+    other.file_size_ = 0;
+    other.page_size_ = 16384;
+    other.total_pages_ = 0;
+    other.is_valid_ = false;
+}
+
+InnoDBFileReader& InnoDBFileReader::operator=(InnoDBFileReader&& other) noexcept {
+    if (this != &other) {
+        file_size_ = other.file_size_;
+        page_size_ = other.page_size_;
+        total_pages_ = other.total_pages_;
+        mapper_ = std::move(other.mapper_);
+        is_valid_ = other.is_valid_;
+
+        other.file_size_ = 0;
+        other.page_size_ = 16384;
+        other.total_pages_ = 0;
+        other.is_valid_ = false;
+    }
+    return *this;
+}
+
+std::vector<uint8_t> InnoDBFileReader::read_page(uint32_t page_no) {
+    if (!is_valid_ || total_pages_ == 0) {
         return {};
     }
     
-    std::copy(file_data_->begin() + offset, 
-              file_data_->begin() + offset + page_size_, 
-              buffer.begin());
-    
-    // ✅ 增强：校验页类型和校验和
-    // 读取页类型（偏移 12）
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(buffer.data(), 12);
-    
-    // 验证页类型有效性
-    bool is_valid_page_type = false;
-    switch (page_type) {
-        case dbrecovery::innodb::FIL_PAGE_INDEX:
-        case dbrecovery::innodb::FIL_PAGE_SDI:
-        case dbrecovery::innodb::FIL_PAGE_TYPE_BLOB:
-        case dbrecovery::innodb::FIL_PAGE_UNDO_LOG:
-        case dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED:
-            is_valid_page_type = true;
-            break;
-        default:
-            // 忽略未知页类型，但记录警告
-            std::cerr << "[WARN] Unknown page type: " << page_type 
-                      << " for page " << page_no << std::endl;
-            is_valid_page_type = false; // 未知页类型不处理
-            break;
+    // 计算页在文件中的偏移
+    uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
+    if (offset >= file_size_) {
+        return {};
     }
     
-    if (!is_valid_page_type) {
-        return {}; // 不支持的页类型，返回空
+    // 读取一页数据
+    std::vector<uint8_t> page_data(page_size_);
+    const uint8_t* data = mapper_->data() + offset;
+    std::memcpy(page_data.data(), data, page_size_);
+    
+    // 校验校验和
+    if (!PageReader::validate_checksum(page_data)) {
+        std::cerr << "[WARN] Page " << page_no << " checksum validation failed" << std::endl;
+        return {};
     }
     
-    // 校验页校验和（如果页类型有效）
-    if (!validate_checksum(buffer)) {
-        std::cerr << "[WARN] Checksum validation failed for page " << page_no 
-                  << ", type=" << page_type << std::endl;
-        return {}; // 校验失败，返回空
-    }
-    
-    return buffer;
+    return page_data;
 }
 
-bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
-    if (page_data.size() < 40) return false;
-
-    // InnoDB 校验和位于 FIL_PAGE_CHECKSUM (偏移 24-27)
-    uint32_t stored_csum = dbrecovery::innodb::read_le<uint32_t>(
-        page_data.data(), 24
-    );
-    
-    // 如果校验和为 0 或 0xFFFFFFFF，可能表示未启用校验或使用其他算法
-    if (stored_csum == 0 || stored_csum == 0xFFFFFFFF) {
-        return true; // 允许 NONE 校验和
+std::vector<uint8_t> InnoDBFileReader::read_page_raw(uint32_t page_no) {
+    if (!is_valid_ || total_pages_ == 0) {
+        return {};
     }
     
-    // MySQL 8.0 默认使用 CRC32C (Castagnoli) 算法
-    uint32_t computed_csum = compute_crc32c(page_data);
-
-    // ✅ 新增：支持 INNODB 校验和（旧版本兼容）
-    if (stored_csum == computed_csum) {
-        return true;
+    // 计算页在文件中的偏移
+    uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
+    if (offset >= file_size_) {
+        return {};
     }
     
-    // 尝试 CRC32 (ISO/Hermann) 作为备选
-    uint32_t computed_crc32 = compute_crc32(page_data);
-    if (stored_csum == computed_crc32) {
-        return true;
-    }
+    // 读取一页数据
+    std::vector<uint8_t> page_data(page_size_);
+    const uint8_t* data = mapper_->data() + offset;
+    std::memcpy(page_data.data(), data, page_size_);
     
-    return false;
-}
-
-uint32_t PageReader::compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
-    // 实现 INNODB 校验算法（参考 MySQL 5.6/5.7 源码）
-    // 使用简单的异或累加算法
-    
-    if (page_data.size() < 40) {
-        return 0;
-    }
-    
-    const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
-    size_t len = page_data.size() / 4;
-    
-    uint32_t checksum = 0xFFFFFFFF;
-    for (size_t i = 0; i < len; ++i) {
-        // 跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
-        if (i == 6 || i == 7) continue;
-        
-        checksum ^= data[i];
-        checksum += (checksum >> 16);
-        checksum &= 0xFFFFFFFF;
-    }
-    
-    return (checksum >> 16) ^ (checksum & 0xFFFF);
-}
-
-uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
-    // 使用软件实现的 CRC32C (Castagnoli) 算法
-    uint32_t crc = 0xFFFFFFFF;
-    
-    for (size_t i = 0; i < page_data.size(); ++i) {
-        // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
-        if (i >= 24 && i < 28) continue;
-        
-        crc ^= static_cast<uint32_t>(page_data[i]);
-        for (int j = 0; j < 8; ++j) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    
-    return ~crc;
-}
-
-uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {
-    // 使用标准 CRC32 (ISO/Hermann) 算法
-    uint32_t crc = 0xFFFFFFFF;
-    
-    for (size_t i = 0; i < page_data.size(); ++i) {
-        // Skip the checksum field at offset 24-27 (FIL_PAGE_CHECKSUM)
-        if (i >= 24 && i < 28) continue;
-        
-        crc ^= static_cast<uint32_t>(page_data[i]);
-        for (int j = 0; j < 8; ++j) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    
-    return ~crc;
+    return page_data;
 }
 
 } // namespace innodb
