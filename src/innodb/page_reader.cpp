@@ -256,5 +256,20 @@ std::vector<uint8_t> InnoDBFileReader::read_page_raw(uint32_t page_no) {
     return page_data;
 }
 
+std::span<const uint8_t> InnoDBFileReader::get_page_view(uint32_t page_no) {
+    if (!is_valid_ || total_pages_ == 0) {
+        return {};
+    }
+    
+    // 计算页在文件中的偏移
+    uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
+    if (offset >= file_size_) {
+        return {};
+    }
+    
+    const uint8_t* data = mapper_->data() + offset;
+    return std::span<const uint8_t>(data, page_size_);
+}
+
 } // namespace innodb
 } // namespace dbrecovery

@@ -168,7 +168,7 @@ struct alignas(1) Record {
     uint16_t n_fields;        // 字段数量（COMPACT格式）
     
     static std::optional<Record> parse(const uint8_t* ptr, size_t offset, size_t max_size = 6) {
-        if (!ptr || max_size < 6) {
+        if (!ptr || max_size < 5) {
             return std::nullopt;
         }
 
@@ -180,9 +180,12 @@ struct alignas(1) Record {
         record.is_deleted = header.is_deleted();
         record.heap_no = header.get_heap_no();
         record.info_bits = header.info_bits;
+        
         // n_fields 需要额外解析（位于第5字节）
         if (max_size >= 6) {
             record.n_fields = ptr[5];
+        } else {
+            record.n_fields = 0; // 默认值
         }
 
         return record;

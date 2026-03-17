@@ -29,7 +29,10 @@ struct BlobPageChain {
     }
 
     bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) const {
-        if (pages.empty()) return false;
+        if (pages.empty()) {
+            std::cerr << "[ERROR] BLOB chain is empty" << std::endl;
+            return false;
+        }
         
         // 检查是否有重复页
         std::set<std::pair<uint32_t, uint32_t>> seen;
@@ -54,14 +57,27 @@ struct BlobPageChain {
             
             // 读取前一个页的 BLOB 头以验证 next_bpage 字段
             auto prev_data = page_reader(prev_page.first, prev_page.second);
-            if (!prev_data || prev_data->size() < 16) {
+            if (!prev_data) {
                 std::cerr << "[WARN] Cannot read BLOB page header for validation: (" 
                           << prev_page.first << ", " << prev_page.second << ")" << std::endl;
-                continue; // 无法读取或数据不足，跳过验证
+                continue; // 无法读取，跳过验证
+            }
+            
+            if (prev_data->size() < 16) {
+                std::cerr << "[WARN] BLOB page header too small: (" 
+                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                continue; // 数据不足，跳过验证
             }
             
             // 读取 next_bpage 字段（偏移 0）
             uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
+            
+            if (next_bpage == 0xFFFFFFFF) {
+                // 链表提前结束，标记为警告但不失败
+                std::cerr << "[WARN] BLOB chain ends prematurely at page (" 
+                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                break;
+            }
             
             if (next_bpage != curr_page.second) {
                 std::cerr << "[ERROR] BLOB chain断裂 at page (" 

@@ -110,6 +110,14 @@ public:
     std::vector<uint8_t> read_page_raw(uint32_t page_no);
 
     /**
+     * @brief 获取指定页号的数据视图（零拷贝，不校验）
+     *
+     * @param page_no 页号（从0开始）
+     * @return std::span<const uint8_t> 页数据视图，失败返回空span
+     */
+    std::span<const uint8_t> get_page_view(uint32_t page_no);
+
+    /**
      * @brief 获取文件总页数
      *
      * @return uint32_t 总页数
