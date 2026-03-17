@@ -33,7 +33,11 @@ public:
     
     bool parse() noexcept;
     
+    [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
+
+private:
+    bool valid_page_type_ = false;
     [[nodiscard]] uint32_t page_level() const { return page_level_; }
     [[nodiscard]] uint32_t next_page() const { return next_page_; }
     [[nodiscard]] uint32_t prev_page() const { return prev_page_; }

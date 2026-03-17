@@ -118,8 +118,7 @@ struct alignas(1) RecordHeader {
             << ", deleted=" << std::boolalpha << is_deleted() << std::noboolalpha
             << ", min_rec=" << is_min_rec()
             << ", heap_no=" << get_heap_no()
-            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec
-            << "}";
+            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec << "}";
         return oss.str();
     }
 };

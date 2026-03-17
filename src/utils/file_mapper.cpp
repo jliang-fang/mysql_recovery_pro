@@ -131,17 +131,15 @@ FileMapper::~FileMapper() {
 FileMapper::FileMapper(FileMapper&& other) noexcept 
     : fd_(other.fd_), data_(other.data_), size_(other.size_), is_valid_(other.is_valid_)
 #ifdef _WIN32
-    , handle_(INVALID_HANDLE_VALUE)
+      , handle_(other.handle_)
 #endif
 {
-    // 转移所有权：先保存源对象的值，再清空源对象
+    // 重置源对象状态，防止双重释放
     other.fd_ = -1;
     other.data_ = nullptr;
     other.size_ = 0;
     other.is_valid_ = false;
-    
 #ifdef _WIN32
-    handle_ = other.handle_;
     other.handle_ = INVALID_HANDLE_VALUE;
 #endif
 }
