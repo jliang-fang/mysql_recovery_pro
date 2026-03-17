@@ -115,7 +115,7 @@ struct alignas(1) RecordHeader {
     std::string to_string() const {
         std::ostringstream oss;
         oss << "RecordHeader{next=" << get_next_record_offset()
-            << ", deleted=" << std::boolalpha << is_deleted()
+            << ", deleted=" << std::boolalpha << is_deleted() << std::noboolalpha
             << ", min_rec=" << is_min_rec()
             << ", heap_no=" << get_heap_no()
             << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec
@@ -190,12 +190,14 @@ struct alignas(1) Record {
     }
 
     std::string to_string() const {
-        return "Record{offset=" + std::to_string(offset) +
-               ", next=" + std::to_string(next_offset) +
-               ", deleted=" << std::boolalpha << is_deleted << std::noboolalpha <<
-               ", heap_no=" << std::to_string(heap_no) <<
-               ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec <<
-               ", n_fields=" << std::to_string(n_fields) + "}";
+        std::ostringstream oss;
+        oss << "Record{offset=" << offset
+            << ", next=" << next_offset
+            << ", deleted=" << std::boolalpha << is_deleted << std::noboolalpha
+            << ", heap_no=" << heap_no
+            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec
+            << ", n_fields=" << n_fields << "}";
+        return oss.str();
     }
 };
 
