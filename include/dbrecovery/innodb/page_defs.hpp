@@ -90,7 +90,8 @@ struct alignas(1) RecordHeader {
 
     uint16_t get_next_record_offset() const {
         // ✅ 修复：next_record_offset 是 14 位（bit 0-13），高2位是其他标志
-        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x3F) << 8) | next_rec_off_0);
+        // bit 0-7 来自 next_rec_off_0, bit 8-13 来自 next_rec_off_1 的低6位
+        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1) << 8) | next_rec_off_0) & 0x3FFF;
     }
 
     bool is_deleted() const { 
@@ -102,7 +103,8 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_heap_no() const {
-        return static_cast<uint16_t>((((uint16_t)(heap_no_1 & 0x3F)) << 8) | heap_no_0);
+        // ✅ 修复：heap_no 是 14 位（bit 0-13），高2位是其他标志
+        return static_cast<uint16_t>((static_cast<uint16_t>(heap_no_1) << 8) | heap_no_0) & 0x3FFF;
     }
 
     std::string to_string() const {
