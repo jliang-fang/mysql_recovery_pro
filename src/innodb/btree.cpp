@@ -30,8 +30,8 @@ bool BPlusTreeParser::parse() noexcept {
     }
     
     // ✅ 修复：使用正确的偏移计算页类型
-    // FIL_PAGE_TYPE 在 page_defs.hpp 中定义为 12，但实际偏移是 38+12=50
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + dbrecovery::innodb::FIL_PAGE_TYPE);
+    // FIL_PAGE_TYPE_OFFSET 在 page_defs.hpp 中定义为 12，绝对偏移 = 38 + 12 = 50
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + dbrecovery::innodb::FIL_PAGE_TYPE_OFFSET);
     
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
         page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
