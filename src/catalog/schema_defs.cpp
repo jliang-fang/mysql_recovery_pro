@@ -1,5 +1,6 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <iostream>
 #include <sstream>
 #include <algorithm>
@@ -9,6 +10,14 @@
 
 namespace dbrecovery {
 namespace catalog {
+
+// 行格式常量定义
+namespace row_formats {
+    constexpr uint32_t REDUNDANT = 0;
+    constexpr uint32_t COMPACT = 1;
+    constexpr uint32_t DYNAMIC = 2;
+    constexpr uint32_t COMPRESSED = 3;
+}
 
 void TableSchema::debug_print() const {
     std::cout << "Table: " << table_name 

@@ -34,6 +34,8 @@ bool PageParser::parse_header() {
     }
     
     // ✅ 添加：校验页大小范围
+    constexpr size_t UNIV_PAGE_SIZE_MIN = 4096;
+    constexpr size_t UNIV_PAGE_SIZE_MAX = 65536;
     if (size_ < UNIV_PAGE_SIZE_MIN || size_ > UNIV_PAGE_SIZE_MAX) {
         std::cerr << "[WARN] Invalid page size: " << size_ << "\n";
         return false;
@@ -63,6 +65,11 @@ bool PageParser::parse_header() {
     }
 
     // ✅ Step 2: 校验页类型（支持索引页、SDI页和Undo日志页）
+    constexpr uint16_t FIL_PAGE_INDEX = 9969;  // B+Tree index page
+    constexpr uint16_t FIL_PAGE_UNDO_LOG = 9970;  // Undo log page
+    constexpr uint16_t FIL_PAGE_SDI = 9971;  // SDI metadata page
+    constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
+    
     if (page_type_ != FIL_PAGE_INDEX && 
         page_type_ != FIL_PAGE_UNDO_LOG && 
         page_type_ != FIL_PAGE_SDI &&
