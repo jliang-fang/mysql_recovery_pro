@@ -60,9 +60,12 @@ bool BPlusTreeParser::parse_header() noexcept {
     }
     
     // ✅ 修复：使用正确的偏移计算
-    // BTR_N_LEVELS = 38, flags 在 BTR_N_LEVELS + 2 = 40
-    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + BTR_N_LEVELS);
-    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + BTR_N_LEVELS + 2);
+    // FIL_HEADER_SIZE = 38, BTR_N_LEVELS_OFFSET = 4 (relative to B+ tree header)
+    // So absolute offset for PAGE_LEVEL is 38 + 4 = 42
+    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
+    
+    // Flags are at BTR_N_LEVELS_OFFSET + 2 = 6 relative to B+ tree header
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 6);
     
     // 判断节点类型
     if (page_level_ == 0) {
@@ -72,8 +75,9 @@ bool BPlusTreeParser::parse_header() noexcept {
     }
     
     // 读取页链信息（使用正确的偏移）
-    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
-    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 30);
+    // PAGE_PREV_OFFSET = 20, PAGE_NEXT_OFFSET = 26 (relative to B+ tree header)
+    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
+    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
     
     return true;
 }

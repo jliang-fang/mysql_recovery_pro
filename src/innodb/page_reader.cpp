@@ -13,6 +13,14 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
         return false; // 页太小或不是标准页大小
     }
     
+    // 读取页类型（偏移 38+12=50）
+    uint16_t page_type = read_le<uint16_t>(page_data.data(), 38 + 12);
+    
+    // ✅ 新增：SDI 页通常不启用校验和，直接返回 true
+    if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
+        return true;
+    }
+    
     // 读取存储的校验和（偏移 24-27）
     uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
     

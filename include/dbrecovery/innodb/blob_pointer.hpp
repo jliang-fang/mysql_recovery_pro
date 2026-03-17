@@ -52,7 +52,10 @@ struct BlobPageChain {
             
             if (prev_page.first != curr_page.first) {
                 // 不同表空间，跳过连续性检查（允许跨表空间BLOB）
-                continue;
+                std::cerr << "[WARN] BLOB chain crosses tablespace from (" 
+                          << prev_page.first << ", " << prev_page.second << ") to ("
+                          << curr_page.first << ", " << curr_page.second << ")" << std::endl;
+                continue; // 继续处理后续页对
             }
             
             // 读取前一个页的 BLOB 头以验证 next_bpage 字段
