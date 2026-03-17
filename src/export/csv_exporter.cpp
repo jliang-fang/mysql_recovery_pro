@@ -20,22 +20,30 @@ bool CSVExporter::export_record(const std::map<std::string, std::string>& record
 
         auto it = record.find(headers_[i]);
         if (it != record.end()) {
-            // 转义CSV字段中的逗号和引号
+            // ✅ 新增：处理 NULL 值
             std::string value = it->second;
-            bool needs_quotes = value.find(',') != std::string::npos ||
-                               value.find('"') != std::string::npos ||
-                               value.find('\n') != std::string::npos;
-
-            if (needs_quotes) {
-                oss << "\"";
-                for (char c : value) {
-                    if (c == '"') oss << "\"\"";
-                    else oss << c;
-                }
-                oss << "\"";
+            if (value == "NULL") {
+                oss << "";  // CSV 中 NULL 表示为空字符串
             } else {
-                oss << value;
+                // 转义CSV字段中的逗号和引号
+                bool needs_quotes = value.find(',') != std::string::npos ||
+                                   value.find('"') != std::string::npos ||
+                                   value.find('\n') != std::string::npos;
+
+                if (needs_quotes) {
+                    oss << "\"";
+                    for (char c : value) {
+                        if (c == '"') oss << "\"\"";
+                        else oss << c;
+                    }
+                    oss << "\"";
+                } else {
+                    oss << value;
+                }
             }
+        } else {
+            // 字段不存在，输出空字符串
+            oss << "";
         }
     }
 

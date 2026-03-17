@@ -356,6 +356,7 @@ std::string BPlusTreeParser::parse_field_value(
             }
             uint32_t val24 = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos) & 0xFFFFFF;
             data_pos += 3;
+            // ✅ 修复：检查 bit 23（符号位），而非 bit 24
             if (col.is_signed && (val24 & 0x800000)) {
                 val24 |= 0xFF000000; // 符号扩展
             }
@@ -470,6 +471,55 @@ std::string BPlusTreeParser::parse_field_value(
                    std::to_string(hour) + ":" +
                    std::to_string(minute) + ":" +
                    std::to_string(second);
+        
+        case mysql_types::DATETIME2:
+        case mysql_types::TIMESTAMP2: {
+            if (col.is_nullable && data_pos < page_data_.size() && page_data_[data_pos] == 0xFF) {
+                data_pos++;
+                return "NULL";
+            }
+            
+            // DATETIME2 格式（MySQL 8.0+）：前5字节 packed format + 小数部分
+            if (data_pos + 8 > page_data_.size()) {
+                return "";
+            }
+            
+            uint8_t year_low = page_data_[data_pos];
+            uint8_t year_high = page_data_[data_pos + 1];
+            uint8_t month_day = page_data_[data_pos + 2];
+            uint8_t hour_minute = page_data_[data_pos + 3];
+            uint8_t second_packed = page_data_[data_pos + 4];
+            
+            int year = (year_high << 8) | year_low;
+            int month = month_day & 0x0F;
+            int day = month_day >> 4;
+            int hour = hour_minute & 0x1F;
+            int minute = hour_minute >> 2;
+            int second = second_packed >> 2;
+            
+            // 小数部分（3字节，小端序）
+            uint32_t frac = page_data_[data_pos + 5] |
+                           (page_data_[data_pos + 6] << 8) |
+                           (page_data_[data_pos + 7] << 16);
+            
+            data_pos += 8;
+            
+            std::ostringstream oss;
+            oss << year << "-" << std::setfill('0') << std::setw(2) << month 
+                << "-" << std::setfill('0') << std::setw(2) << day << " "
+                << std::setfill('0') << std::setw(2) << hour << ":"
+                << std::setfill('0') << std::setw(2) << minute << ":"
+                << std::setfill('0') << std::setw(2) << second;
+            
+            if (col.column_length > 0) {
+                // 格式化小数部分（根据精度）
+                char frac_str[10];
+                snprintf(frac_str, sizeof(frac_str), ".%06u", frac);
+                oss << frac_str;
+            }
+            
+            return oss.str();
+        }
         
         case mysql_types::TIME:
         case mysql_types::TIME2: {
