@@ -50,6 +50,20 @@ TEST(PageHeader, ToString) {
     EXPECT_NE(str.find("n_dir_slots=10"), std::string::npos);
 }
 
+// ==================== Record 格式化测试（新增）====================
+TEST(Record, ToStringFormatting) {
+    std::vector<uint8_t> data(6, 0);
+    write_le<uint16_t>(data.data(), 0, 5);   // next_record_offset
+    data[4] = 0x02;                          // heap_no low byte
+    
+    auto record = Record::parse(data.data(), 38, 6);
+    EXPECT_TRUE(record.has_value());
+    
+    std::string str = record->to_string();
+    // 验证 info_bits 格式化为两位十六进制（补零）
+    EXPECT_NE(str.find("info_bits=0x"), std::string::npos);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 

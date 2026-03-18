@@ -83,9 +83,25 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32
     // 读取页类型（偏移 38+12=50）
     uint16_t page_type = read_le<uint16_t>(page_data.data(), 38 + 12);
     
-    // ✅ 新增：SDI 页通常不启用校验和，直接返回 true
+    // ✅ 新增：SDI 页通常不启用校验和，但需检查是否为加密表空间
     if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
-        return true;
+        uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
+        // 如果存储的校验和非零且非全1，则需要验证（加密表空间场景）
+        if (stored_checksum != 0 && stored_checksum != 0xFFFFFFFF) {
+            std::vector<uint8_t> page_copy = page_data;
+            for (int i = 0; i < 4; ++i) {
+                page_copy[24 + i] = 0;
+            }
+            uint32_t computed_crc32c = compute_crc32c(page_copy);
+            if (computed_crc32c == stored_checksum) {
+                if (out_computed) *out_computed = computed_crc32c;
+                return true;
+            }
+            std::cerr << "[WARN] SDI page checksum mismatch. Stored=" << stored_checksum 
+                      << ", CRC32C=" << computed_crc32c << std::endl;
+            return false;
+        }
+        return true; // NONE 模式或未初始化
     }
     
     // 读取存储的校验和（偏移 24-27）
