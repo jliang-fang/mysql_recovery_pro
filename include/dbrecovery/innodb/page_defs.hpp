@@ -6,6 +6,7 @@
 #include <sstream>
 #include <string>
 #include <optional>
+#include <array>
 #include "dbrecovery/innodb/mach_read.hpp"
 
 namespace dbrecovery {
