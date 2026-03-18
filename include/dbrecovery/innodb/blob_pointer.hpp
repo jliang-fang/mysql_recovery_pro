@@ -34,6 +34,12 @@ struct BlobPageChain {
             return false;
         }
         
+        // ✅ 修复：如果没有 page_reader，无法验证链表连续性，返回更安全的默认值
+        if (!page_reader) {
+            std::cerr << "[WARN] BLOB chain validation skipped: no page_reader provided" << std::endl;
+            return false; // 更安全的默认行为：未知状态视为无效
+        }
+        
         // 检查是否有重复页
         std::set<std::pair<uint32_t, uint32_t>> seen;
         for (const auto& p : pages) {
