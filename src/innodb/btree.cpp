@@ -240,7 +240,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     // 解析页目录
     if (page_data_.size() >= 38 + 36) { // 确保有足够空间读取页目录
-        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_DIR_SLOTS + 38);
+        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_DIR_SLOTS);
         health.n_dir_slots = n_dir_slots;
         
         // 验证页目录槽数量合理性（至少有INFIMUM和SUPREMUM）
@@ -250,8 +250,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
         
         // ✅ 新增：计算空闲空间
-        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_HEAP_TOP + 38);
-        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_FREE + 38);
+        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_HEAP_TOP);
+        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_FREE);
         if (heap_top >= free_offset) {
             health.free_space = heap_top - free_offset;
         }
@@ -262,7 +262,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     // 解析堆大小
     if (page_data_.size() >= 38 + 4) { // 确保有足够空间读取PAGE_N_HEAP
-        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_HEAP + 38) & 0x7FFF;
+        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_HEAP) & 0x7FFF;
         health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
         
         // 验证堆大小合理性

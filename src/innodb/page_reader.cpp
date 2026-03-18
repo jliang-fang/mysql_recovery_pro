@@ -1,9 +1,62 @@
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <iostream>
 #include <array>
+#include <cstring> // for std::memcpy
 
 namespace dbrecovery {
 namespace innodb {
+
+// ==================== 辅助函数：校验和计算 ====================
+static uint32_t compute_crc32c_internal(const std::vector<uint8_t>& page_data) {
+    static const std::array<uint32_t, 256> crc_table = []() -> std::array<uint32_t, 256> {
+        std::array<uint32_t, 256> table;
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t crc = i;
+            for (int j = 0; j < 8; ++j) {
+                if (crc & 1) {
+                    crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
+                } else {
+                    crc >>= 1;
+                }
+            }
+            table[i] = crc;
+        }
+        return table;
+    }();
+
+    uint32_t crc = 0xFFFFFFFF;
+
+    const size_t checksum_start = 24;
+    const size_t checksum_end = 28;
+
+    for (size_t i = 0; i < page_data.size(); ++i) {
+        // 跳过校验和字段 (offset 24-27)
+        if (i >= checksum_start && i < checksum_end) continue;
+
+        uint8_t byte = page_data[i];
+        crc = crc_table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
+    }
+
+    return ~crc;
+}
+
+static uint32_t compute_innodb_checksum_internal(const std::vector<uint8_t>& page_data) {
+    const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
+    size_t len = page_data.size() / 4;
+
+    uint32_t checksum = 0xFFFFFFFF;
+    for (size_t i = 0; i < len; ++i) {
+        // 跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
+        if (i == 6 || i == 7) continue;
+
+        checksum ^= dbrecovery::innodb::read_le<uint32_t>(page_data.data(), i * 4);
+        checksum += (checksum >> 16);
+        checksum &= 0xFFFFFFFF;
+    }
+
+    return (checksum >> 16) ^ (checksum & 0xFFFF);
+}
 
 // ==================== PageReader 静态工具类实现 ====================
 
@@ -108,37 +161,11 @@ uint32_t PageReader::compute_innodb_checksum(const std::vector<uint8_t>& page_da
 }
 
 uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
-    // 预计算 CRC32C 查表（仅首次调用时执行）
-    static const std::array<uint32_t, 256> crc_table = []() -> std::array<uint32_t, 256> {
-        std::array<uint32_t, 256> table;
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t crc = i;
-            for (int j = 0; j < 8; ++j) {
-                if (crc & 1) {
-                    crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
-                } else {
-                    crc >>= 1;
-                }
-            }
-            table[i] = crc;
-        }
-        return table;
-    }();
-    
-    uint32_t crc = 0xFFFFFFFF;
-    
-    const size_t checksum_start = 24;
-    const size_t checksum_end = 28;
-    
-    for (size_t i = 0; i < page_data.size(); ++i) {
-        // 跳过校验和字段 (offset 24-27)
-        if (i >= checksum_start && i < checksum_end) continue;
-        
-        uint8_t byte = page_data[i];
-        crc = crc_table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
-    }
-    
-    return ~crc;
+    return compute_crc32c_internal(page_data);
+}
+
+uint32_t PageReader::compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
+    return compute_innodb_checksum_internal(page_data);
 }
 
 uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {

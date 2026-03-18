@@ -29,25 +29,6 @@ UndoLogParser::UndoLogParser() {}
 
 UndoLogParser::~UndoLogParser() = default;
 
-// 辅助函数：小端序读取
-static inline uint16_t read_uint16_le(const uint8_t* data, size_t& pos) {
-    uint16_t val = dbrecovery::innodb::read_le<uint16_t>(data, pos);
-    pos += 2;
-    return val;
-}
-
-static inline uint32_t read_uint32_le(const uint8_t* data, size_t& pos) {
-    uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data, pos);
-    pos += 4;
-    return val;
-}
-
-static inline uint64_t read_uint64_le(const uint8_t* data, size_t& pos) {
-    uint64_t val = dbrecovery::innodb::read_le<uint64_t>(data, pos);
-    pos += 8;
-    return val;
-}
-
 std::optional<UndoLogRecord> UndoLogParser::parse_record(const uint8_t* data, size_t len) {
     if (!data || len < 20) {
         return std::nullopt;
