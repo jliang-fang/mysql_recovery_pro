@@ -12,6 +12,21 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 
+// 辅助函数：小端序写入（用于测试代码）
+template<typename T>
+inline void write_le(uint8_t* ptr, size_t offset, T value) noexcept(false) {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "T must be an unsigned integral type");
+    
+    if (ptr == nullptr) {
+        throw std::invalid_argument("Pointer is null in write_le");
+    }
+    
+    uint8_t* p = ptr + offset;
+    for (size_t i = 0; i < sizeof(T); ++i) {
+        p[i] = static_cast<uint8_t>((value >> (i * 8)) & 0xFF);
+    }
+}
+
 namespace dbrecovery {
 namespace innodb {
 
@@ -287,12 +302,6 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
     ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
         
     return ptr;
-}
-
-// ✅ 新增：从页数据中解析 BLOB 指针（20字节）
-inline std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data) {
-    if (data.size() < 16) return std::nullopt;
-    return parse_blob_pointer(data.data(), data.size());
 }
 
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
