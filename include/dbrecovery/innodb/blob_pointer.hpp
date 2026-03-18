@@ -355,8 +355,78 @@ std::vector<uint8_t> read_blob_data_from_chain(
     return blob_data;
 }
 
-// ==================== 实现部分 ====================
-// 注意：实现已移至 src/innodb/blob_parser.cpp
+// ==================== 单元测试入口（供 GTest 调用）====================
+#ifdef DBRECOVERY_ENABLE_TESTS
+#include <gtest/gtest.h>
+#include "dbrecovery/innodb/blob_pointer.hpp"
+
+namespace dbrecovery {
+namespace innodb {
+
+// 测试读取 BLOB 页数据长度（正常情况）
+TEST(BlobParserTest, ReadBlobPageDataLengthValid) {
+    std::vector<uint8_t> page_data(16384, 0);
+    // 设置数据长度字段（偏移 8）为 100
+    write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN, 100);
+
+    EXPECT_EQ(read_blob_page_data_length(page_data), 100);
+}
+
+// 测试读取 BLOB 页数据长度（页太小）
+TEST(BlobParserTest, ReadBlobPageDataLengthTooSmall) {
+    std::vector<uint8_t> page_data(10, 0); // 小于最小大小
+
+    EXPECT_EQ(read_blob_page_data_length(page_data), 0);
+}
+
+// 测试读取 BLOB 页数据长度（长度过大）
+TEST(BlobParserTest, ReadBlobPageDataLengthTooLarge) {
+    std::vector<uint8_t> page_data(16384, 0);
+    // 设置数据长度字段为超过最大值
+    write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN, 16384);
+
+    EXPECT_EQ(read_blob_page_data_length(page_data), 0);
+}
+
+// 测试从 BLOB 页链读取完整数据（正常情况）
+TEST(BlobParserTest, ReadBlobDataFromChainValid) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        if (space_id == 0 && page_no == 100) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 设置数据长度字段（偏移 8）为 50
+            write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN, 50);
+            // 填充一些测试数据（从偏移 54 开始）
+            for (int i = 0; i < 50; ++i) {
+                page_data[54 + i] = static_cast<uint8_t>(i % 256);
+            }
+            return page_data;
+        }
+        return std::nullopt;
+    };
+
+    auto result = read_blob_data_from_chain(chain, 50, page_reader);
+    EXPECT_EQ(result.size(), 50);
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_EQ(result[i], static_cast<uint8_t>(i % 256));
+    }
+}
+
+// 测试从 BLOB 页链读取完整数据（total_len 过大）
+TEST(BlobParserTest, ReadBlobDataFromChainTotalLenTooLarge) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+
+    auto page_reader = [](uint32_t, uint32_t) { return std::nullopt; };
+
+    // total_len 超过 64GB
+    auto result = read_blob_data_from_chain(chain, 128ULL * 1024 * 1024 * 1024, page_reader);
+    EXPECT_TRUE(result.empty());
+}
 
 } // namespace innodb
 } // namespace dbrecovery
+
+#endif // DBRECOVERY_ENABLE_TESTS
