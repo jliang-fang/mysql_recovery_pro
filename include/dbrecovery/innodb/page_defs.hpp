@@ -17,15 +17,18 @@ using dbrecovery::innodb::read_le;
 // ==================== InnoDB File Header Constants ====================
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
 
-/// @brief Offset of page type within FIL Header (absolute offset = 38 + 12 = 50)
+/// @brief Offset of page type within FIL Header (relative to page start = 12)
 constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 12;
 /// @brief Alias for FIL_PAGE_TYPE_OFFSET
 constexpr uint16_t TYPE_OFFSET          = 12;   // alias for FIL_PAGE_TYPE_OFFSET
-/// @brief Offset of page number within FIL Header (absolute offset = 38 + 4 = 42)
+/// @brief Absolute offset of page type within a page (38 + 12 = 50)
+constexpr uint16_t FIL_PAGE_TYPE        = 12;   // absolute offset of page type (FIL_HEADER_SIZE=38 is added by caller)
+
+/// @brief Offset of page number within FIL Header (relative to page start = 4)
 constexpr uint16_t FIL_PAGE_OFFSET      = 4;    // offset of page number (4 bytes at offset 4)
-/// @brief Offset of LSN within FIL Header (absolute offset = 38 + 8 = 46)
+/// @brief Absolute offset of LSN within a page (38 + 8 = 46)
 constexpr uint16_t FIL_PAGE_LSN         = 8;    // LSN of last change (8 bytes at offset 8)
-/// @brief Offset of space ID within FIL Header (absolute offset = 38 + 0 = 38)
+/// @brief Offset of space ID within FIL Header (relative to page start = 0)
 constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;    // tablespace ID (4 bytes at offset 0, but not standard)
 
 // ✅ 新增：页类型值定义
@@ -42,7 +45,7 @@ constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 9972;  // 0x2044 — BLOB page
 /// @brief Compressed page type
 constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x2045 — Compressed page
 
-// ✅ 新增：页类型读取辅助函数
+// ✅ 新增：页类型读取辅助函数（使用绝对偏移）
 inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
     return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_OFFSET);
 }
@@ -57,9 +60,10 @@ constexpr size_t UNIV_PAGE_SIZE_MAX     = 65536; // 最大页大小 (64KB)
 
 // ==================== B+Tree Header Constants ====================
 // From MySQL 8.0.36: include/page0page.h
-constexpr uint16_t BTR_N_LEVELS         = 38;   // number of levels in the tree
-constexpr uint16_t BTR_IND_PAGE_OFFSET  = 42;   // offset of the index id
-constexpr uint16_t BTR_MAX_SIZE         = 50;   // maximum size of a record
+// BTR_HEADER starts at offset 38 (after FIL_HEADER)
+constexpr uint16_t BTR_N_LEVELS         = 38 + 4;   // number of levels in the tree (absolute offset)
+constexpr uint16_t BTR_IND_PAGE_OFFSET  = 38 + 6;   // offset of the index id (absolute offset)
+constexpr uint16_t BTR_MAX_SIZE         = 50;       // maximum size of a record
 
 // ==================== Record Header Constants (COMPACT format) ====================
 // From MySQL 8.0.36: include/page0page.h
@@ -78,15 +82,26 @@ constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record (rec
 // ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名，用于兼容不同命名习惯
 constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)
 
-// ==================== Page Header Offsets (relative to offset 38) ====================
-constexpr uint16_t PAGE_N_DIR_SLOTS     = 0;  // number of slots in page directory
-constexpr uint16_t PAGE_HEAP_TOP        = 2;  // heap top offset
-constexpr uint16_t PAGE_N_HEAP          = 4;  // number of records in heap (15-bit)
-constexpr uint16_t PAGE_FREE            = 6;  // start of free list
-constexpr uint16_t PAGE_GARBAGE_END     = 8;  // end of garbage
-constexpr uint16_t PAGE_LAST_INSERT     = 10; // last insert offset
-constexpr uint16_t PAGE_DIRECTION       = 12; // direction of inserts
-constexpr uint16_t PAGE_N_DIRECT_PAGES  = 14; // number of direct pages (non-leaf)
+// ==================== Page Header Offsets (relative to FIL_HEADER_SIZE=38) ====================
+constexpr uint16_t PAGE_N_DIR_SLOTS     = 38 + 0;  // number of slots in page directory (absolute offset)
+constexpr uint16_t PAGE_HEAP_TOP        = 38 + 2;  // heap top offset (absolute offset)
+constexpr uint16_t PAGE_N_HEAP          = 38 + 4;  // number of records in heap (15-bit) (absolute offset)
+constexpr uint16_t PAGE_FREE            = 38 + 6;  // start of free list (absolute offset)
+constexpr uint16_t PAGE_GARBAGE_END     = 38 + 8;  // end of garbage (absolute offset)
+constexpr uint16_t PAGE_LAST_INSERT     = 38 + 10; // last insert offset (absolute offset)
+constexpr uint16_t PAGE_DIRECTION       = 38 + 12; // direction of inserts (absolute offset)
+constexpr uint16_t PAGE_N_DIRECT_PAGES  = 38 + 14; // number of direct pages (non-leaf) (absolute offset)
+
+// ==================== Page Header Offsets (relative to page start, for compatibility) ====================
+// These are the offsets used in btree.cpp and other places
+constexpr uint16_t PAGE_N_DIR_SLOTS_REL = 0;
+constexpr uint16_t PAGE_HEAP_TOP_REL    = 2;
+constexpr uint16_t PAGE_N_HEAP_REL      = 4;
+constexpr uint16_t PAGE_FREE_REL        = 6;
+constexpr uint16_t PAGE_GARBAGE_END_REL = 8;
+constexpr uint16_t PAGE_LAST_INSERT_REL = 10;
+constexpr uint16_t PAGE_DIRECTION_REL   = 12;
+constexpr uint16_t PAGE_N_DIRECT_PAGES_REL = 14;
 
 // ==================== Record Header Structure (COMPACT format) ====================
 // Layout: [1 byte info_bits] + [4 bytes next_record_offset]
