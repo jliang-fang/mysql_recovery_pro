@@ -7,7 +7,7 @@ namespace innodb {
 
 // ==================== PageReader 静态工具类实现 ====================
 
-bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
+bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32_t* out_stored, uint32_t* out_computed) {
     // ✅ 增强：严格边界检查
     if (page_data.size() < 38 + 16) { // FIL header (38) + minimal record space
         return false;
@@ -37,7 +37,8 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
     
     // 读取存储的校验和（偏移 24-27）
     uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
-    
+    if (out_stored) *out_stored = stored_checksum;
+
     if (stored_checksum == 0 || stored_checksum == 0xFFFFFFFF) {
         // NONE 校验模式或未初始化的校验和
         return true;
@@ -52,28 +53,38 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data) {
 
     uint32_t computed_crc32c = compute_crc32c(page_copy);
     if (computed_crc32c == stored_checksum) {
+        if (out_computed) *out_computed = computed_crc32c;
         return true;
     }
 
     // 尝试 INNODB 校验算法（MySQL 5.6/5.7 兼容）
     uint32_t computed_innodb = compute_innodb_checksum(page_copy);
     if (computed_innodb == stored_checksum) {
+        if (out_computed) *out_computed = computed_innodb;
         return true;
     }
 
     // 尝试 OLD 校验算法（旧版本兼容）
     uint32_t computed_old = compute_old_checksum(page_copy);
     if (computed_old == stored_checksum) {
+        if (out_computed) *out_computed = computed_old;
         return true;
     }
     
     // 尝试 CRC32 标准校验算法
     uint32_t computed_crc32 = compute_crc32(page_copy);
     if (computed_crc32 == stored_checksum) {
+        if (out_computed) *out_computed = computed_crc32;
         return true;
     }
 
-    // 所有校验均失败
+    // 所有校验均失败，输出详细错误信息
+    std::cerr << "[ERROR] Page checksum mismatch. Stored=" << stored_checksum 
+              << ", CRC32C=" << computed_crc32c 
+              << ", INNODB=" << computed_innodb 
+              << ", OLD=" << computed_old 
+              << ", CRC32=" << computed_crc32 << std::endl;
+    if (out_computed) *out_computed = computed_crc32c; // 默认返回 CRC32C
     return false;
 }
 

@@ -142,12 +142,12 @@ public:
             }
             size_t null_bitmap_size = (nullable_count + 7) / 8;
             
-            // 跳过 info_bits 和 NULL 位图
+            // ✅ 修复：跳过 info_bits 后，data_pos 应该指向 NULL 位图的开头
             data_pos += 1; // info_bits
+            
             if (data_pos + null_bitmap_size > page_data_.size()) {
                 break;
             }
-            data_pos += null_bitmap_size;
             
             // ✅ 新增：确保 NULL 位图解析正确处理非空列跳过逻辑
             // COMPACT 格式中，NULL 位图只包含可空列，顺序与 schema.columns 中的定义顺序一致
@@ -167,17 +167,16 @@ public:
                 }
                 
                 // ✅ 新增：对于非空列，跳过 NULL 位图中的对应位
-                // COMPACT 格式中，NULL 位图只包含可空列，所以需要根据列的可空性来判断是否在位图中
                 bool is_nullable_col = col.is_nullable;
                 
                 // 检查当前列是否在 NULL 位图中（仅当它是可空列时）
                 if (is_nullable_col) {
-                    // 检查 NULL 位图中的对应位
+                    // ✅ 修复：data_pos 现在指向 NULL 位图的开头，直接使用
                     size_t byte_idx = nullable_idx / 8;
                     size_t bit_idx = nullable_idx % 8;
                     
                     if (data_pos + byte_idx < page_data_.size()) {
-                        uint8_t bitmap_byte = page_data_[data_pos - null_bitmap_size + byte_idx];
+                        uint8_t bitmap_byte = page_data_[data_pos + byte_idx];
                         bool is_null = (bitmap_byte & (1 << bit_idx)) != 0;
                         
                         if (is_null) {
@@ -188,6 +187,11 @@ public:
                         }
                     }
                     nullable_idx++;
+                }
+                
+                // ✅ 修复：移动 data_pos 到字段数据的起始位置（跳过 NULL 位图）
+                if (is_nullable_col && nullable_idx == 0) {
+                    data_pos += null_bitmap_size;
                 }
                 
                 std::string value = parse_field_value(col, data_pos, false);
