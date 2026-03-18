@@ -306,3 +306,38 @@ std::span<const uint8_t> InnoDBFileReader::get_page_view(uint32_t page_no) {
 
 } // namespace innodb
 } // namespace dbrecovery
+
+// ==================== 单元测试入口（供 GTest 调用）====================
+#ifdef DBRECOVERY_ENABLE_TESTS
+#include <gtest/gtest.h>
+
+namespace dbrecovery {
+namespace innodb {
+
+TEST(PageReaderTest, ValidateChecksumNone) {
+    std::vector<uint8_t> page(16384, 0);
+    // 设置页类型为 B+Tree (FIL_PAGE_INDEX=9969)
+    write_le<uint16_t>(page.data(), 50, FIL_PAGE_INDEX);
+    // 校验和字段清零（NONE 模式）
+    for (int i = 24; i < 28; ++i) page[i] = 0;
+    
+    EXPECT_TRUE(PageReader::validate_checksum(page));
+}
+
+TEST(PageReaderTest, ValidateChecksumCRC32C) {
+    std::vector<uint8_t> page(16384, 0);
+    // 设置页类型为 B+Tree
+    write_le<uint16_t>(page.data(), 50, FIL_PAGE_INDEX);
+    
+    // 计算 CRC32C 并写入
+    uint32_t crc = PageReader::compute_crc32c(page);
+    for (int i = 0; i < 4; ++i) {
+        page[24 + i] = (crc >> (i * 8)) & 0xFF;
+    }
+    
+    EXPECT_TRUE(PageReader::validate_checksum(page));
+}
+
+} // namespace innodb
+} // namespace dbrecovery
+#endif // DBRECOVERY_ENABLE_TESTS
