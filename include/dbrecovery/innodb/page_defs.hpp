@@ -62,9 +62,14 @@ constexpr size_t UNIV_PAGE_SIZE_MAX     = 65536; // 最大页大小 (64KB)
 // ==================== B+Tree Header Constants ====================
 // From MySQL 8.0.36: include/page0page.h
 // BTR_HEADER starts at offset 38 (after FIL_HEADER)
-constexpr uint16_t BTR_N_LEVELS         = 38 + 4;   // number of levels in the tree (absolute offset)
-constexpr uint16_t BTR_IND_PAGE_OFFSET  = 38 + 6;   // offset of the index id (absolute offset)
+// ✅ 修复：使用相对偏移（相对于B+树头），而不是绝对偏移
+constexpr uint16_t BTR_N_LEVELS         = 4;        // number of levels in the tree (relative to BTR header)
+constexpr uint16_t BTR_IND_PAGE_OFFSET  = 6;        // offset of the index id (relative to BTR header)
 constexpr uint16_t BTR_MAX_SIZE         = 50;       // maximum size of a record
+
+// ✅ 新增：绝对偏移常量（用于直接读取页数据）
+constexpr uint16_t BTR_N_LEVELS_ABS     = 38 + 4;   // absolute offset for page_level
+constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = 38 + 6; // absolute offset for index id
 
 // ==================== Record Header Constants (COMPACT format) ====================
 // From MySQL 8.0.36: include/page0page.h
