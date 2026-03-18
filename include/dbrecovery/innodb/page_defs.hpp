@@ -89,26 +89,39 @@ constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record (rec
 // 在 MySQL 8.0 源码中，该位被命名为 REC_MIN_MARK_FLAG（位于 info_bits 的 bit 4）
 constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)
 
-// ==================== Page Header Offsets (relative to FIL_HEADER_SIZE=38) ====================
-constexpr uint16_t PAGE_N_DIR_SLOTS     = 38 + 0;  // number of slots in page directory (absolute offset)
-constexpr uint16_t PAGE_HEAP_TOP        = 38 + 2;  // heap top offset (absolute offset)
-constexpr uint16_t PAGE_N_HEAP          = 38 + 4;  // number of records in heap (15-bit) (absolute offset)
-constexpr uint16_t PAGE_FREE            = 38 + 6;  // start of free list (absolute offset)
-constexpr uint16_t PAGE_GARBAGE_END     = 38 + 8;  // end of garbage (absolute offset)
-constexpr uint16_t PAGE_LAST_INSERT     = 38 + 10; // last insert offset (absolute offset)
-constexpr uint16_t PAGE_DIRECTION       = 38 + 12; // direction of inserts (absolute offset)
-constexpr uint16_t PAGE_N_DIRECT_PAGES  = 38 + 14; // number of direct pages (non-leaf) (absolute offset)
+// ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
+// These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).
+// They match the InnoDB source code definitions in include/page0page.h
+constexpr uint16_t FIL_PAGE_OFFSET_N_DIR_SLOTS   = 38 + 0;  // PAGE_N_DIR_SLOTS: number of slots in page directory
+constexpr uint16_t FIL_PAGE_OFFSET_HEAP_TOP      = 38 + 2;  // PAGE_HEAP_TOP: heap top offset
+constexpr uint16_t FIL_PAGE_OFFSET_N_HEAP        = 38 + 4;  // PAGE_N_HEAP: number of records in heap (15-bit)
+constexpr uint16_t FIL_PAGE_OFFSET_FREE          = 38 + 6;  // PAGE_FREE: start of free list
+constexpr uint16_t FIL_PAGE_OFFSET_GARBAGE_END   = 38 + 8;  // PAGE_GARBAGE_END: end of garbage
+constexpr uint16_t FIL_PAGE_OFFSET_LAST_INSERT   = 38 + 10; // PAGE_LAST_INSERT: last insert offset
+constexpr uint16_t FIL_PAGE_OFFSET_DIRECTION     = 38 + 12; // PAGE_DIRECTION: direction of inserts
+constexpr uint16_t FIL_PAGE_OFFSET_N_DIRECT_PAGES= 38 + 14; // PAGE_N_DIRECT_PAGES: number of direct pages (non-leaf)
 
-// ==================== Page Header Offsets (relative to page start, for compatibility) ====================
-// These are the offsets used in btree.cpp and other places
-constexpr uint16_t PAGE_N_DIR_SLOTS_REL = 0;
-constexpr uint16_t PAGE_HEAP_TOP_REL    = 2;
-constexpr uint16_t PAGE_N_HEAP_REL      = 4;
-constexpr uint16_t PAGE_FREE_REL        = 6;
-constexpr uint16_t PAGE_GARBAGE_END_REL = 8;
-constexpr uint16_t PAGE_LAST_INSERT_REL = 10;
-constexpr uint16_t PAGE_DIRECTION_REL   = 12;
-constexpr uint16_t PAGE_N_DIRECT_PAGES_REL = 14;
+// ==================== Page Header Offsets (relative to B+Tree header, for compatibility with InnoDB source) ====================
+// These are the offsets from the start of the B+Tree header (which is at FIL_HEADER_SIZE=38).
+// They match the InnoDB source code definitions in include/page0page.h (e.g., BTR_N_LEVELS = 4)
+constexpr uint16_t BTR_PAGE_OFFSET_N_DIR_SLOTS   = 0;
+constexpr uint16_t BTR_PAGE_OFFSET_HEAP_TOP      = 2;
+constexpr uint16_t BTR_PAGE_OFFSET_N_HEAP        = 4;
+constexpr uint16_t BTR_PAGE_OFFSET_FREE          = 6;
+constexpr uint16_t BTR_PAGE_OFFSET_GARBAGE_END   = 8;
+constexpr uint16_t BTR_PAGE_OFFSET_LAST_INSERT   = 10;
+constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION     = 12;
+constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
+
+// ==================== Alias for backward compatibility and clarity ====================
+#define PAGE_N_DIR_SLOTS FIL_PAGE_OFFSET_N_DIR_SLOTS
+#define PAGE_HEAP_TOP    FIL_PAGE_OFFSET_HEAP_TOP
+#define PAGE_N_HEAP      FIL_PAGE_OFFSET_N_HEAP
+#define PAGE_FREE        FIL_PAGE_OFFSET_FREE
+#define PAGE_GARBAGE_END FIL_PAGE_OFFSET_GARBAGE_END
+#define PAGE_LAST_INSERT FIL_PAGE_OFFSET_LAST_INSERT
+#define PAGE_DIRECTION   FIL_PAGE_OFFSET_DIRECTION
+#define PAGE_N_DIRECT_PAGES FIL_PAGE_OFFSET_N_DIRECT_PAGES
 
 // ==================== Record Header Structure (COMPACT format) ====================
 // Layout: [1 byte info_bits] + [4 bytes next_record_offset]
