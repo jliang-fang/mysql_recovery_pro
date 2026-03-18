@@ -480,12 +480,46 @@ std::span<const uint8_t> InnoDBFileReader::get_page_view(uint32_t page_no) {
 } // namespace innodb
 } // namespace dbrecovery
 
-// ==================== 单元测试入口（供 GTest 调用）====================
+// ==================== BlobPointer 单元测试（新增）====================
 #ifdef DBRECOVERY_ENABLE_TESTS
 #include <gtest/gtest.h>
 
 namespace dbrecovery {
 namespace innodb {
+
+TEST(BlobPointerTest, IsValidSinglePageValid) {
+    BlobPointer ptr;
+    ptr.chain_pages.emplace_back(0, 100);
+    ptr.total_len = 50;
+    ptr.len = 50;
+
+    EXPECT_TRUE(ptr.is_complete());
+}
+
+TEST(BlobPointerTest, IsValidEmptyChain) {
+    BlobPointer ptr;
+    // chain_pages 为空
+
+    EXPECT_FALSE(ptr.is_complete());
+}
+
+TEST(BlobPointerTest, IsValidTotalLenTooLarge) {
+    BlobPointer ptr;
+    ptr.chain_pages.emplace_back(0, 100);
+    ptr.total_len = 128ULL * 1024 * 1024 * 1024; // >64GB
+    ptr.len = 50;
+
+    EXPECT_FALSE(ptr.is_complete());
+}
+
+TEST(BlobPointerTest, IsValidZeroLengthSinglePage) {
+    BlobPointer ptr;
+    ptr.chain_pages.emplace_back(0, 100);
+    ptr.total_len = 0;
+    ptr.len = 0; // 单页 BLOB 长度为 0 是无效的
+
+    EXPECT_FALSE(ptr.is_complete());
+}
 
 TEST(PageReaderTest, ValidateChecksumNone) {
     std::vector<uint8_t> page(16384, 0);

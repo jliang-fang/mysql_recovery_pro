@@ -138,6 +138,7 @@ struct BlobPointer {
     bool is_complete() const {
         // ✅ 增强：验证 BLOB 指针的完整性
         if (chain_pages.empty()) {
+            std::cerr << "[ERROR] BLOB chain is empty" << std::endl;
             return false;
         }
 
@@ -167,6 +168,9 @@ struct BlobPointer {
             std::cerr << "[ERROR] BLOB total_len exceeds reasonable limit: " << total_len << std::endl;
             return false;
         }
+
+        // ✅ 新增：验证链表总长度与各页数据长度之和的一致性（需要 page_reader）
+        // 注意：此检查依赖于实际读取 BLOB 页数据，暂不在此处实现，留作后续扩展点
         
         return true;
     }
