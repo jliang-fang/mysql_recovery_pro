@@ -177,10 +177,10 @@ struct alignas(1) RecordHeader {
     std::string to_string() const {
         std::ostringstream oss;
         oss << "RecordHeader{next=" << get_next_record_offset()
-            << ", deleted=" << std::boolalpha << is_deleted() << std::noboolalpha
+            << ", deleted=" << is_deleted()
             << ", min_rec=" << is_min_rec()
             << ", heap_no=" << get_heap_no()
-            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec << "}";
+            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec;
         return oss.str();
     }
 };

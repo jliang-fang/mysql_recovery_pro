@@ -163,11 +163,9 @@ struct BlobPageChain {
         return true;
     }
 
-    // ✅ 新增：验证页链完整性（带 page_reader 回调）
-    bool validate_with_reader(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader,
-                              bool strict_mode = true) const {
-        return is_valid(page_reader, strict_mode);
-    }
+    // ✅ 新增：验证页链完整性（带 page_reader 回调）—— 已内联实现，此处移除以避免链接错误
+    // bool validate_with_reader(...) const { ... }  // 删除此方法的定义
+
 };
 
 // ✅ BLOB 指针结构（20字节）
