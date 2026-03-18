@@ -28,19 +28,14 @@ struct BlobPageChain {
         pages.emplace_back(space_id, page_no);
     }
 
-    bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) const {
+    bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }, 
+                  bool strict_mode = true) const {
         if (pages.empty()) {
             std::cerr << "[ERROR] BLOB chain is empty" << std::endl;
             return false;
         }
         
-        // ✅ 修复：如果没有 page_reader，无法验证链表连续性，返回更安全的默认值
-        if (!page_reader) {
-            std::cerr << "[WARN] BLOB chain validation skipped: no page_reader provided" << std::endl;
-            return false; // 更安全的默认行为：未知状态视为无效
-        }
-        
-        // 检查是否有重复页
+        // 检查是否有重复页（在任何模式下都必须检查）
         std::set<std::pair<uint32_t, uint32_t>> seen;
         for (const auto& p : pages) {
             if (seen.count(p)) {
@@ -49,6 +44,18 @@ struct BlobPageChain {
                 return false;
             }
             seen.insert(p);
+        }
+        
+        // 如果不是严格模式，且没有 page_reader，则返回 true（允许宽松恢复）
+        if (!strict_mode && !page_reader) {
+            std::cerr << "[INFO] BLOB chain validation skipped (non-strict mode): no page_reader provided" << std::endl;
+            return true; // 宽松模式下允许无校验通过
+        }
+        
+        // 如果没有 page_reader 但处于严格模式，返回 false（必须验证）
+        if (!page_reader) {
+            std::cerr << "[WARN] BLOB chain validation skipped: no page_reader provided" << std::endl;
+            return false; // 更安全的默认行为：未知状态视为无效
         }
         
         // 验证链表连续性（需要实际读取 BLOB 页头验证）
@@ -67,15 +74,27 @@ struct BlobPageChain {
             // 读取前一个页的 BLOB 头以验证 next_bpage 字段
             auto prev_data = page_reader(prev_page.first, prev_page.second);
             if (!prev_data) {
-                std::cerr << "[WARN] Cannot read BLOB page header for validation: (" 
-                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
-                continue; // 无法读取，跳过验证
+                if (strict_mode) {
+                    std::cerr << "[ERROR] Cannot read BLOB page header for validation: (" 
+                              << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                    return false; // 严格模式下无法读取视为失败
+                } else {
+                    std::cerr << "[WARN] Cannot read BLOB page header for validation (non-strict): (" 
+                              << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                    continue; // 宽松模式下跳过验证
+                }
             }
             
             if (prev_data->size() < 16) {
-                std::cerr << "[WARN] BLOB page header too small: (" 
-                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
-                continue; // 数据不足，跳过验证
+                if (strict_mode) {
+                    std::cerr << "[ERROR] BLOB page header too small: (" 
+                              << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                    return false; // 严格模式下数据不足视为失败
+                } else {
+                    std::cerr << "[WARN] BLOB page header too small (non-strict): (" 
+                              << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                    continue; // 宽松模式下跳过验证
+                }
             }
             
             // 读取 next_bpage 字段（偏移 0）
