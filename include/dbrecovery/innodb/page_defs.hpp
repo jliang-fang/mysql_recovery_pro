@@ -89,6 +89,10 @@ constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record (rec
 // 在 MySQL 8.0 源码中，该位被命名为 REC_MIN_MARK_FLAG（位于 info_bits 的 bit 4）
 constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)
 
+// ✅ 修复：明确记录头标志位的位掩码定义
+// REC_INFO_STATUS_MASK 是最低3位（0x07），用于区分 INFIMUM/SUPREMUM/ORDINARY/Node Pointer
+constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;
+
 // ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
 // These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).
 // They match the InnoDB source code definitions in include/page0page.h
@@ -151,7 +155,7 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_next_record_offset() const {
-        // next_record_offset 是 15 位（bit 0-14），高1位是其他标志
+        // ✅ 修复：next_record_offset 是 15 位（bit 0-14），高1位是其他标志
         // bit 0-7 来自 next_rec_off_0, bit 8-14 来自 next_rec_off_1 的低7位
         return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x7F) << 8) | next_rec_off_0);
     }
