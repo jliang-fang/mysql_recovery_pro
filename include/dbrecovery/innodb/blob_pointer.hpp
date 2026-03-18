@@ -382,9 +382,17 @@ size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
     }
     
     // 读取数据长度字段（偏移 8）
-    return static_cast<size_t>(dbrecovery::innodb::read_le<uint32_t>(
+    uint32_t len = dbrecovery::innodb::read_le<uint32_t>(
         page_data.data(), BlobPageChain::BTR_BPAGE_LEN
-    ));
+    );
+    
+    // ✅ 增强：验证长度合理性（不超过页大小减去页头）
+    static constexpr size_t MAX_BLOB_PAGE_DATA_SIZE = 16384 - 16; // 标准 16KB 页减去 16 字节 BLOB 头
+    if (len > MAX_BLOB_PAGE_DATA_SIZE) {
+        return 0;
+    }
+    
+    return static_cast<size_t>(len);
 }
 
 // ✅ 新增：从 BLOB 页链中读取完整数据

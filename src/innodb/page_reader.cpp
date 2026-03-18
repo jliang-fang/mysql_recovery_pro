@@ -223,10 +223,19 @@ std::vector<uint8_t> InnoDBFileReader::read_page(uint32_t page_no) {
         return {};
     }
     
-    // 读取一页数据
+    // 读取一页数据（原始数据）
     std::vector<uint8_t> page_data(page_size_);
     const uint8_t* data = mapper_->data() + offset;
     std::memcpy(page_data.data(), data, page_size_);
+    
+    // ✅ 新增：页类型校验
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 38 + 12);
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
+        page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
+        page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+        std::cerr << "[WARN] Page " << page_no << " has invalid type: " << page_type << std::endl;
+        return {};
+    }
     
     // 校验校验和
     if (!PageReader::validate_checksum(page_data)) {
