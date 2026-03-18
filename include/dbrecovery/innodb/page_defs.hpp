@@ -169,9 +169,14 @@ struct alignas(1) PageHeader {
     uint16_t free_offset;   // PAGE_FREE
     uint16_t garbage_end;   // PAGE_GARBAGE_END (optional)
     uint16_t last_insert;   // PAGE_LAST_INSERT (optional)
-    
-    static std::optional<PageHeader> parse(const uint8_t* ptr, size_t max_size = 12) {
-        if (!ptr || max_size < 12) {
+
+    // ✅ 新增：PAGE_DIRECTION 和 PAGE_N_DIRECT_PAGES 也属于页头的一部分
+    uint16_t direction;     // PAGE_DIRECTION
+    uint16_t n_direct_pages;// PAGE_N_DIRECT_PAGES
+
+    static std::optional<PageHeader> parse(const uint8_t* ptr, size_t max_size = 38) {
+        // ✅ 修复：最小大小应为 38 字节（FIL_HEADER_SIZE）
+        if (!ptr || max_size < 14) { // 至少需要读取到 PAGE_N_DIRECT_PAGES (38+14=52)
             return std::nullopt;
         }
 
@@ -182,17 +187,23 @@ struct alignas(1) PageHeader {
         header.free_offset = read_le<uint16_t>(ptr, 6);
         header.garbage_end = read_le<uint16_t>(ptr, 8);
         header.last_insert = read_le<uint16_t>(ptr, 10);
+        header.direction = read_le<uint16_t>(ptr, 12);
+        header.n_direct_pages = read_le<uint16_t>(ptr, 14);
 
         return header;
     }
 
     std::string to_string() const {
-        return "PageHeader{n_dir_slots=" + std::to_string(n_dir_slots) +
-               ", heap_top=" + std::to_string(heap_top) +
-               ", n_heap=" + std::to_string(n_heap) +
-               ", free_offset=" + std::to_string(free_offset) +
-               ", garbage_end=" + std::to_string(garbage_end) +
-               ", last_insert=" + std::to_string(last_insert) + "}";
+        std::ostringstream oss;
+        oss << "PageHeader{n_dir_slots=" << n_dir_slots
+            << ", heap_top=" << heap_top
+            << ", n_heap=" << n_heap
+            << ", free_offset=" << free_offset
+            << ", garbage_end=" << garbage_end
+            << ", last_insert=" << last_insert
+            << ", direction=" << direction
+            << ", n_direct_pages=" << n_direct_pages << "}";
+        return oss.str();
     }
 };
 

@@ -214,8 +214,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
     
-    // 解析页类型
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_PAGE_TYPE);
+    // ✅ 新增：使用正确的偏移计算页类型（参考 page_defs.hpp）
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + dbrecovery::innodb::FIL_PAGE_TYPE_OFFSET);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         health.is_valid = false;
         health.status_message = "Invalid page type: " + std::to_string(page_type);
@@ -240,7 +240,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     // 解析页目录
     if (page_data_.size() >= 38 + 36) { // 确保有足够空间读取页目录
-        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_DIR_SLOTS);
+        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 0); // PAGE_N_DIR_SLOTS
         health.n_dir_slots = n_dir_slots;
         
         // 验证页目录槽数量合理性（至少有INFIMUM和SUPREMUM）
@@ -250,8 +250,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
         
         // ✅ 新增：计算空闲空间
-        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_HEAP_TOP);
-        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_FREE);
+        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 2); // PAGE_HEAP_TOP
+        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 6); // PAGE_FREE
         if (heap_top >= free_offset) {
             health.free_space = heap_top - free_offset;
         }
@@ -262,7 +262,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     
     // 解析堆大小
     if (page_data_.size() >= 38 + 4) { // 确保有足够空间读取PAGE_N_HEAP
-        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::PAGE_N_HEAP) & 0x7FFF;
+        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4) & 0x7FFF;
         health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
         
         // 验证堆大小合理性
@@ -278,8 +278,6 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     return health;
 }
 
-// 已删除重复的 parse_field_value 实现
-
 uint64_t BPlusTreeParser::get_sdi_table_id() const {
     if (page_data_.size() < 58) {
         return 0;
@@ -289,9 +287,6 @@ uint64_t BPlusTreeParser::get_sdi_table_id() const {
     uint64_t table_id = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), 38 + 20);
     return table_id;
 }
-
-// ✅ 新增：CRC32C 校验和计算（供页健康检查使用）
-// 注意：此函数已移动到 page_reader.hpp，此处删除重复定义
 
 // ==================== BPlusTreeReconstructor 实现 ====================
 

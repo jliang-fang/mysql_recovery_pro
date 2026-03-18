@@ -1,51 +1,53 @@
 #include <gtest/gtest.h>
-#include "dbrecovery/innodb/page_reader.hpp"
-#include "dbrecovery/tests/test_utils.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 
 namespace dbrecovery {
 namespace innodb {
 
-TEST(PageReader, ComputeCRC32CCorrectness) {
-    // 使用已知结果的测试向量
-    std::vector<uint8_t> test_data(16384, 0);
-    
-    // 填充一些数据（跳过校验和字段）
-    for (size_t i = 0; i < test_data.size(); ++i) {
-        if (i < 24 || i >= 28) { // 跳过 offset 24-27 的校验和字段
-            test_data[i] = static_cast<uint8_t>(i % 256);
-        }
-    }
+// ==================== PageHeader 解析测试 ====================
 
-    uint32_t crc = PageReader::compute_crc32c(test_data);
-    
-    // 这是一个参考值（实际应根据标准 CRC32C 算法计算）
-    // 对于全零数据，CRC32C 应为 0xFFFFFFFF
-    EXPECT_NE(crc, 0) << "CRC32C should not be zero for non-zero data";
+TEST(PageHeader, ParseTruncatedData) {
+    // 创建一个只有 10 字节的截断数据
+    std::vector<uint8_t> data(10, 0);
+    write_le<uint16_t>(data.data(), 0, 5);   // n_dir_slots
+    write_le<uint16_t>(data.data(), 2, 100); // heap_top
+
+    auto header = PageHeader::parse(data.data(), data.size());
+    EXPECT_FALSE(header.has_value()) << "Truncated page header should not be parsed";
 }
 
-TEST(PageReader, ValidateChecksumWithZero) {
-    std::vector<uint8_t> page_data(16384, 0);
+TEST(PageHeader, ParseFullHeader) {
+    // 创建一个完整的页头数据 (38 字节)
+    std::vector<uint8_t> data(38, 0);
     
-    // 存储的校验和为 0 (NONE 模式)
-    write_le<uint32_t>(page_data.data(), 24, 0);
+    write_le<uint16_t>(data.data(), 0, 5);   // n_dir_slots
+    write_le<uint16_t>(data.data(), 2, 100); // heap_top
+    write_le<uint16_t>(data.data(), 4, 10);  // n_heap
+    write_le<uint16_t>(data.data(), 6, 50);  // free_offset
+    write_le<uint16_t>(data.data(), 8, 60);  // garbage_end
+    write_le<uint16_t>(data.data(), 10, 70); // last_insert
+    write_le<uint16_t>(data.data(), 12, 8);  // direction
+    write_le<uint16_t>(data.data(), 14, 0);  // n_direct_pages
 
-    bool result = PageReader::validate_checksum(page_data);
-    EXPECT_TRUE(result) << "Page with zero checksum should be valid";
+    auto header = PageHeader::parse(data.data(), data.size());
+    
+    EXPECT_TRUE(header.has_value()) << "Full page header should be parsed";
+    EXPECT_EQ(header->n_dir_slots, 5);
+    EXPECT_EQ(header->heap_top, 100);
+    EXPECT_EQ(header->free_offset, 50);
+    EXPECT_EQ(header->direction, 8);
 }
 
-TEST(PageHeader, ParseBasicFields) {
-    std::vector<uint8_t> page(16384, 0);
-    
-    // 设置一些页头字段
-    write_le<uint16_t>(page.data(), 38 + 0, 5);   // PAGE_N_DIR_SLOTS = 5
-    write_le<uint16_t>(page.data(), 38 + 2, 100); // PAGE_HEAP_TOP = 100
-    write_le<uint16_t>(page.data(), 38 + 4, 10);  // PAGE_N_HEAP = 10
+TEST(PageHeader, ToString) {
+    std::vector<uint8_t> data(38, 0);
+    write_le<uint16_t>(data.data(), 0, 10); // n_dir_slots
 
-    uint16_t n_dir_slots = read_le<uint16_t>(page.data(), 38 + 0);
-    uint16_t heap_top = read_le<uint16_t>(page.data(), 38 + 2);
-    
-    EXPECT_EQ(n_dir_slots, 5);
-    EXPECT_EQ(heap_top, 100);
+    auto header = PageHeader::parse(data.data(), data.size());
+    EXPECT_TRUE(header.has_value());
+
+    std::string str = header->to_string();
+    EXPECT_NE(str.find("n_dir_slots=10"), std::string::npos);
 }
 
 } // namespace innodb
