@@ -228,16 +228,19 @@ struct alignas(1) Record {
             return std::nullopt;
         }
 
-        RecordHeader header = RecordHeader::parse(ptr, max_size).value_or(RecordHeader{});
-        
+        auto header_opt = RecordHeader::parse(ptr, max_size);
+        if (!header_opt.has_value()) {
+            return std::nullopt;
+        }
+
         Record record{};
         record.offset = static_cast<uint16_t>(offset);
-        record.next_offset = header.get_next_record_offset();
-        record.is_deleted = header.is_deleted();
-        record.heap_no = header.get_heap_no();
-        record.info_bits = header.info_bits;
+        record.next_offset = header_opt->get_next_record_offset();
+        record.is_deleted = header_opt->is_deleted();
+        record.heap_no = header_opt->get_heap_no();
+        record.info_bits = header_opt->info_bits;
         
-        // n_fields 需要额外解析（位于第5字节）
+        // n_fields 需要额外解析（位于第5字节，即偏移 5）
         if (max_size >= 6) {
             record.n_fields = ptr[5];
         } else {
