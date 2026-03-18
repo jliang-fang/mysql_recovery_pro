@@ -86,6 +86,7 @@ constexpr uint8_t REC_STATUS_INFIMUM    = 0x02;   // infimum system record (reco
 constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record (record type bits)
 
 // ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名，用于兼容不同命名习惯
+// 在 MySQL 8.0 源码中，该位被命名为 REC_MIN_MARK_FLAG（位于 info_bits 的 bit 4）
 constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)
 
 // ==================== Page Header Offsets (relative to FIL_HEADER_SIZE=38) ====================
@@ -137,7 +138,7 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_next_record_offset() const {
-        // ✅ 修复：next_record_offset 是 15 位（bit 0-14），高1位是其他标志
+        // next_record_offset 是 15 位（bit 0-14），高1位是其他标志
         // bit 0-7 来自 next_rec_off_0, bit 8-14 来自 next_rec_off_1 的低7位
         return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x7F) << 8) | next_rec_off_0);
     }
@@ -147,11 +148,12 @@ struct alignas(1) RecordHeader {
     }
     
     bool is_min_rec() const { 
+        // ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名
         return (info_bits & REC_INFO_MIN_REC_FLAG) != 0; 
     }
 
     uint16_t get_heap_no() const {
-        // ✅ 修复：heap_no 是 15 位（bit 0-14），高1位是其他标志
+        // heap_no 是 15 位（bit 0-14），高1位是其他标志
         return static_cast<uint16_t>((static_cast<uint16_t>(heap_no_1 & 0x7F) << 8) | heap_no_0);
     }
 
@@ -180,8 +182,8 @@ struct alignas(1) PageHeader {
     uint16_t n_direct_pages;// PAGE_N_DIRECT_PAGES
 
     static std::optional<PageHeader> parse(const uint8_t* ptr, size_t max_size = 38) {
-        // ✅ 修复：最小大小应为 38 字节（FIL_HEADER_SIZE）
-        if (!ptr || max_size < 14) { // 至少需要读取到 PAGE_N_DIRECT_PAGES (38+14=52)
+        // ✅ 修复：max_size 是相对于 ptr 的偏移，至少需要 16 字节才能读取到 PAGE_N_DIRECT_PAGES
+        if (!ptr || max_size < 16) {
             return std::nullopt;
         }
 
