@@ -16,8 +16,8 @@ namespace innodb {
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
     : page_data_(page_data), 
-      flags_(0), 
-      page_level_(0), 
+      flags_(0xFFFF), // ✅ 修复：初始化为 0xFFFF 表示未解析
+      page_level_(0xFFFFFFFF), // ✅ 修复：初始化为 0xFFFFFFFF 表示未解析
       n_records_(0),
       next_page_(0xFFFFFFFF), 
       prev_page_(0xFFFFFFFF), 
