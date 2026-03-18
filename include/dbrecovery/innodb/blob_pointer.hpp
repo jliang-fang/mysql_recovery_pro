@@ -147,6 +147,12 @@ struct BlobPageChain {
         
         return true;
     }
+
+    // ✅ 新增：验证页链完整性（带 page_reader 回调）
+    bool validate_with_reader(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader,
+                              bool strict_mode = true) const {
+        return is_valid(page_reader, strict_mode);
+    }
 };
 
 // ✅ BLOB 指针结构（20字节）
@@ -199,6 +205,27 @@ struct BlobPointer {
         
         return true;
     }
+
+    // ✅ 新增：深度校验方法（带 page_reader 回调）
+    bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; },
+                  bool strict_mode = true) const {
+        if (!is_complete()) {
+            return false;
+        }
+
+        // 如果没有 page_reader，仅做基础校验
+        if (!page_reader) {
+            return true;
+        }
+
+        // 构建页链并验证
+        BlobPageChain chain;
+        for (const auto& p : chain_pages) {
+            chain.add_page(p.first, p.second);
+        }
+
+        return chain.validate_with_reader(page_reader, strict_mode);
+    }
 };
 
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
@@ -232,7 +259,8 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
     }
         
     // ✅ 新增：验证偏移和长度的边界检查（防止越界访问）
-    if (ptr.offset >= 16384 || ptr.len > 16384) {
+    static constexpr uint32_t MAX_PAGE_SIZE = 65536; // 支持最大页大小（包括压缩页）
+    if (ptr.offset >= MAX_PAGE_SIZE || ptr.len > MAX_PAGE_SIZE) {
         std::cerr << "[ERROR] BLOB pointer has invalid offset/len: offset=" 
                   << ptr.offset << ", len=" << ptr.len << std::endl;
         return std::nullopt;
@@ -249,15 +277,22 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
     }
         
     // ✅ 新增：验证跨页情况
-    if (ptr.offset + ptr.len > 16384) {
+    static constexpr uint32_t DEFAULT_PAGE_SIZE = 16384; // 标准 InnoDB 页大小
+    if (ptr.offset + ptr.len > DEFAULT_PAGE_SIZE) {
         std::cerr << "[INFO] BLOB data is cross-page: offset=" << ptr.offset 
-                  << ", len=" << ptr.len << ", page_size=16384." << std::endl;
+                  << ", len=" << ptr.len << ", page_size=" << DEFAULT_PAGE_SIZE << "." << std::endl;
     }
         
     // 初始化页链（至少包含当前页）
     ptr.chain_pages.emplace_back(ptr.space_id, ptr.page_no);
         
     return ptr;
+}
+
+// ✅ 新增：从页数据中解析 BLOB 指针（20字节）
+inline std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>& data) {
+    if (data.size() < 16) return std::nullopt;
+    return parse_blob_pointer(data.data(), data.size());
 }
 
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）

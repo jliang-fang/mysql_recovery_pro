@@ -22,7 +22,7 @@ target_link_libraries(test_undo_log PRIVATE dbrecovery_innodb dbrecovery_test_ut
 gtest_discover_tests(test_undo_log)
 
 # Blob pointer tests
-add_executable(test_blob_pointer test_blob_pointer.cpp)
+add_executable(test_blob_pointer test_blob_pointer.cpp tests/innodb/blob_pointer_test.cpp)
 target_link_libraries(test_blob_pointer PRIVATE dbrecovery_innodb dbrecovery_test_utils GTest::GTest GTest::Main)
 gtest_discover_tests(test_blob_pointer)
 
