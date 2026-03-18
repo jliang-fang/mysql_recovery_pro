@@ -507,6 +507,47 @@ TEST(BlobParserTest, ReadBlobDataFromChainTotalLenTooLarge) {
     EXPECT_TRUE(result.empty());
 }
 
+// 测试 is_complete() 在 total_len == 0 且 len > 0 的情况
+TEST(BlobPointerTest, IsValidZeroTotalLenAndNonZeroLen) {
+    BlobPointer ptr;
+    ptr.chain_pages.emplace_back(0, 100);
+    ptr.total_len = 0; // 表示未设置
+    ptr.len = 50;
+
+    EXPECT_TRUE(ptr.is_complete());
+}
+
+// 测试 is_complete() 在 total_len < len 的情况（页内截断）
+TEST(BlobPointerTest, IsValidTotalLenLessThanLen) {
+    BlobPointer ptr;
+    ptr.chain_pages.emplace_back(0, 100);
+    ptr.total_len = 30; // 小于 len
+    ptr.len = 50;
+
+    EXPECT_TRUE(ptr.is_complete()); // 应记录警告但返回 true
+}
+
+// 测试 has_circular_reference() 检测循环引用
+TEST(BlobPageChainTest, HasCircularReference) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 101);
+    chain.add_page(0, 102);
+    chain.add_page(0, 100); // 循环引用
+
+    EXPECT_TRUE(chain.has_circular_reference());
+}
+
+// 测试 has_circular_reference() 在无循环时返回 false
+TEST(BlobPageChainTest, NoCircularReference) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 101);
+    chain.add_page(0, 102);
+
+    EXPECT_FALSE(chain.has_circular_reference());
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
