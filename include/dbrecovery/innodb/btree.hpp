@@ -390,9 +390,14 @@ inline bool BPlusTreeParser::parse_header() noexcept {
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
     
-    // 读取 BTR_FORMAT 和 flags
-    btr_format_ = page_data_[38 + 15]; // 假设在页头偏移 15 处
-    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 22);
+    // 读取 flags (BTR_SPACE_ID, BTR_N_LEVELS, BTR_FORMAT)
+    // 根据 page_defs.hpp，BTR_HEADER 从偏移 38 开始
+    // BTR_SPACE_ID = 0 (4 bytes), BTR_N_LEVELS = 4 (2 bytes), BTR_FLAGS = 6 (2 bytes)
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 6);
+    
+    // BTR_FORMAT 是 flags 的一部分，通过位掩码提取
+    // BTR_FORMAT_MASK = 0x80, 表示是否为 DYNAMIC/COMPRESSED 格式
+    btr_format_ = (flags_ & 0x80) >> 7;
     
     return true;
 }

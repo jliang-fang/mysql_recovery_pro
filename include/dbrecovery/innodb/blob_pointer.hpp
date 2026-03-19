@@ -246,7 +246,7 @@ struct BlobPointer {
             chain.add_page(p.first, p.second);
         }
 
-        return chain.validate_with_reader(page_reader, strict_mode);
+        return chain.is_valid(page_reader, strict_mode);
     }
 };
 
