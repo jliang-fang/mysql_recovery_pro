@@ -90,6 +90,17 @@ TEST(BPlusTreeParser, ParseValidLeafPageFull) {
     EXPECT_EQ(parser.node_type(), dbrecovery::innodb::BTreeNodeType::LEAF);
 }
 
+// ✅ 新增：测试页类型读取辅助函数
+TEST(PageHeader, GetPageType) {
+    std::vector<uint8_t> page(16384, 0);
+    
+    // 设置页类型为 FIL_PAGE_INDEX (9969)
+    write_le<uint16_t>(page.data(), 50, FIL_PAGE_INDEX);
+    
+    uint16_t type = get_page_type(page.data());
+    EXPECT_EQ(type, FIL_PAGE_INDEX);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
