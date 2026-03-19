@@ -31,8 +31,8 @@ class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
     
-    // ✅ 修复：实现核心的 parse 方法
-    bool parse() noexcept override;
+    // ✅ 修复：实现核心的 parse 方法，移除 noexcept 以支持错误传播
+    bool parse();
     
     [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
@@ -342,24 +342,28 @@ inline BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
       page_level_(0xFFFFFFFF), next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF) {
 }
 
-// ✅ 修复：实现核心的 parse 方法
-inline bool BPlusTreeParser::parse() noexcept {
+// ✅ 修复：实现核心的 parse 方法，移除 noexcept 以支持错误传播
+inline bool BPlusTreeParser::parse() {
     if (page_data_.size() < 38 + 16) { // FIL header (38) + minimal record space
+        std::cerr << "[ERROR] Page too small for parsing" << std::endl;
         return false;
     }
 
     // 解析页头信息
     if (!parse_header()) {
+        std::cerr << "[ERROR] Failed to parse page header" << std::endl;
         return false;
     }
     
     // 解析 INFIMUM/SUPREMUM 系统记录
     if (!parse_infimum_supremum()) {
+        std::cerr << "[ERROR] Failed to parse infimum/supremum records" << std::endl;
         return false;
     }
     
     // 解析用户记录
     if (!parse_user_records()) {
+        std::cerr << "[ERROR] Failed to parse user records" << std::endl;
         return false;
     }
 
@@ -703,6 +707,73 @@ inline uint64_t BPlusTreeParser::get_sdi_table_id() const {
     // 组合 space_id 和 page_no 形成唯一标识
     return (static_cast<uint64_t>(space_id) << 32) | page_no;
 }
+
+// ==================== 单元测试入口（供 GTest 调用）====================
+#ifdef DBRECOVERY_ENABLE_TESTS
+#include <gtest/gtest.h>
+#include <vector>
+
+namespace dbrecovery {
+namespace innodb {
+
+// 测试 BPlusTreeParser 在页太小时返回 false
+TEST(BPlusTreeParserTest, ParseTooSmallPage) {
+    std::vector<uint8_t> page_data(50, 0); // 小于最小大小 (38 + 16 = 54)
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_FALSE(parser.parse());
+}
+
+// 测试 BPlusTreeParser 在页头信息无效时返回 false
+TEST(BPlusTreeParserTest, ParseInvalidPageHeader) {
+    std::vector<uint8_t> page_data(1024, 0);
+    
+    // 设置一个无效的页类型（非 FIL_PAGE_INDEX/SDI/UNDO_LOG）
+    write_le<uint16_t>(page_data.data(), 38 + 12, 0xFFFF);
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_FALSE(parser.parse());
+}
+
+// 测试 BPlusTreeParser 在 INFIMUM/SUPREMUM 记录无效时返回 false
+TEST(BPlusTreeParserTest, ParseInvalidInfimumSupremum) {
+    std::vector<uint8_t> page_data(1024, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_INDEX);
+    
+    // 设置堆顶位置（使 INFIMUM/SUPREMUM 解析失败）
+    write_le<uint16_t>(page_data.data(), 38 + 4, 50); // heap_top = 50
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_FALSE(parser.parse());
+}
+
+// 测试 BPlusTreeParser 在正常情况下返回 true
+TEST(BPlusTreeParserTest, ParseValidPage) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_INDEX);
+    
+    // 设置堆顶位置（足够大以包含 INFIMUM 和 SUPREMUM）
+    write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
+    
+    // 设置有效的 INFIMUM 记录（偏移 54）
+    page_data[54] = REC_INFO_MIN_REC_FLAG;
+    write_le<uint16_t>(page_data.data(), 55, 100); // next_record_offset
+    
+    // 设置有效的 SUPREMUM 记录
+    page_data[99] = REC_STATUS_SUPREMUM;
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+}
+
+} // namespace innodb
+} // namespace dbrecovery
+
+#endif // DBRECOVERY_ENABLE_TESTS
 
 /**
  * @brief B+Tree 恢复器
