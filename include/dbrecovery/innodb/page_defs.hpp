@@ -14,20 +14,22 @@ namespace innodb {
 
 // ==================== InnoDB File Header Constants ====================
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
+// FIL_HEADER_SIZE = 38 bytes
 
-/// @brief Offset of page type within FIL Header (relative to page start = 12)
+/// @brief Offset of page type within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 12;
-/// @brief Alias for FIL_PAGE_TYPE_OFFSET
-constexpr uint16_t TYPE_OFFSET          = 12;   // alias for FIL_PAGE_TYPE_OFFSET
-/// @brief Absolute offset of page type within a page (38 + 12 = 50)
-constexpr uint16_t FIL_PAGE_TYPE        = 12;   // absolute offset of page type (FIL_HEADER_SIZE=38 is added by caller)
+/// @brief Absolute offset of page type within a page (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 50)
+constexpr uint16_t FIL_PAGE_TYPE_ABS    = 38 + 12; // 50
+/// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
+constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
-/// @brief Offset of page number within FIL Header (relative to page start = 4)
-constexpr uint16_t FIL_PAGE_OFFSET      = 4;    // offset of page number (4 bytes at offset 4)
-/// @brief Absolute offset of LSN within a page (38 + 8 = 46)
-constexpr uint16_t FIL_PAGE_LSN         = 8;    // LSN of last change (8 bytes at offset 8)
-/// @brief Offset of space ID within FIL Header (relative to page start = 0)
-constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;    // tablespace ID (4 bytes at offset 0, but not standard)
+/// @brief Offset of page number within FIL Header (relative to start of FIL header)
+constexpr uint16_t FIL_PAGE_OFFSET      = 4;
+/// @brief Absolute offset of LSN within a page (FIL_HEADER_SIZE + 8 = 46)
+constexpr uint16_t FIL_PAGE_LSN_ABS     = 38 + 8; // 46
+
+/// @brief Offset of space ID within FIL Header (relative to start of FIL header)
+constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;
 
 // ✅ 新增：页类型值定义
 /// @brief B+Tree index page type
@@ -43,9 +45,9 @@ constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 9972;  // 0x2044 — BLOB page
 /// @brief Compressed page type
 constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x2045 — Compressed page
 
-// ✅ 新增：页类型读取辅助函数（使用绝对偏移）
+// ✅ 新增：页类型读取辅助函数（使用绝对偏移，更直观）
 inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
-    return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_OFFSET);
+    return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_ABS);
 }
 
 // InnoDB 常量

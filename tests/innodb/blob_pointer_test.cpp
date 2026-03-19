@@ -95,7 +95,9 @@ TEST(BlobPageChainTest, IsValidValid) {
     auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
         if (space_id == 0 && page_no == 100) {
             std::vector<uint8_t> page_data(16384, 0);
-            // 设置数据长度字段（偏移 8）为 50
+            // 设置页类型为 FIL_PAGE_TYPE_BLOB (9972)
+            write_le<uint16_t>(page_data.data(), 12, dbrecovery::innodb::FIL_PAGE_TYPE_BLOB);
+            // 设置数据长度字段（偏移 BTR_BPAGE_LEN = 8）为 50
             write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN, 50);
             return page_data;
         }
@@ -103,6 +105,23 @@ TEST(BlobPageChainTest, IsValidValid) {
     };
 
     EXPECT_TRUE(chain.is_valid(page_reader, true));
+}
+
+// 测试 BlobPageChain::is_valid() BLOB页头过短
+TEST(BlobPageChainTest, IsValidHeaderTooShort) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        if (space_id == 0 && page_no == 100) {
+            // 创建一个只有 32 字节的极小页，不足以包含完整的 FIL Header
+            std::vector<uint8_t> page_data(32, 0);
+            return page_data;
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_FALSE(chain.is_valid(page_reader, true));
 }
 
 // 测试 BlobPageChain::is_valid() 空链
