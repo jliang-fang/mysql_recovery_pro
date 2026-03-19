@@ -60,9 +60,7 @@ target_link_libraries(mysql8_recover dbrecovery_innodb)
 
 enable_testing()
 
-# Unit tests
-enable_testing()
-
+# Unit tests (C++ GTest)
 find_package(GTest QUIET)
 if(GTEST_FOUND)
     add_subdirectory(tests)
@@ -70,8 +68,15 @@ if(GTEST_FOUND)
     # 添加测试数据生成脚本作为全局测试
     add_test(NAME generate_test_data COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/ibd_generator.py test_table)
 else()
-    message(WARNING "GoogleTest not found — tests disabled")
+    message(WARNING "GoogleTest not found — C++ tests disabled")
 endif()
+
+# Python tests
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(
+    NAME python_ibd_generator_tests
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/test/test_ibd_generator.py
+)
 
 # 静态分析配置
 option(ENABLE_CLANG_TIDY "Enable clang-tidy static analysis" OFF)
