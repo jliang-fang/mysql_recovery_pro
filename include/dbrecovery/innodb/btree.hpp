@@ -66,6 +66,8 @@ private:
     [[nodiscard]] PageHealth check_health() const;
 
 private:
+    uint16_t page_type_ = 0; // ✅ 新增：存储页类型，供 SDI 页判断使用
+
     /**
      * @brief 解析单个字段的值（根据列类型）
      * 
@@ -277,6 +279,12 @@ inline bool BPlusTreeParser::parse() {
         return false;
     }
     
+    // ✅ 新增：SDI 页特殊处理（无需解析记录）
+    if (page_type_ == dbrecovery::innodb::FIL_PAGE_SDI) {
+        node_type_ = BTreeNodeType::LEAF; // SDI 页视为叶子页
+        return true;
+    }
+    
     // 解析 INFIMUM/SUPREMUM 系统记录
     if (!parse_infimum_supremum()) {
         std::cerr << "[ERROR] Failed to parse infimum/supremum records" << std::endl;
@@ -302,10 +310,10 @@ inline bool BPlusTreeParser::parse_header() noexcept {
     }
     
     // 读取页类型
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 12);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
-        page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
-        page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+    page_type_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 12);
+    if (page_type_ != dbrecovery::innodb::FIL_PAGE_INDEX && 
+        page_type_ != dbrecovery::innodb::FIL_PAGE_SDI &&
+        page_type_ != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
         return false;
     }
     
