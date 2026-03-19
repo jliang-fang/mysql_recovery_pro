@@ -12,9 +12,6 @@
 namespace dbrecovery {
 namespace innodb {
 
-// ✅ 新增：使用 mach_read 中的 read_le 函数
-using dbrecovery::innodb::read_le;
-
 // ==================== InnoDB File Header Constants ====================
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
 
@@ -50,9 +47,6 @@ constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x2045 — Compressed page
 inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
     return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_OFFSET);
 }
-
-// Page types (FIL_PAGE_TYPE value)
-// ✅ 已移至上面的定义块中，保留向后兼容性
 
 // InnoDB 常量
 constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
@@ -92,6 +86,9 @@ constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_
 // ✅ 修复：明确记录头标志位的位掩码定义
 // REC_INFO_STATUS_MASK 是最低3位（0x07），用于区分 INFIMUM/SUPREMUM/ORDINARY/Node Pointer
 constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;
+
+// ✅ 新增：BLOB 指针标志位常量
+constexpr uint8_t REC_INFO_EXTERN_FLAG  = 0x20;   // external pointer flag (bit 5 of info_bits)
 
 // ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
 // These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).

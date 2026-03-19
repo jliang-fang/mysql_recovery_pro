@@ -2,6 +2,7 @@
 #include "dbrecovery/utils/file_mapper.hpp"
 #include <fstream>
 #include <random>
+#include <cstring>
 
 namespace dbrecovery {
 namespace tests {
