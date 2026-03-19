@@ -133,10 +133,26 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32
         return true;
     }
 
+    // ✅ 新增：尝试 MySQL 8.0 默认的 NEW_CRC32C 算法（与 CRC32C 相同，但可能有不同实现）
+    uint32_t computed_new_crc32c = compute_crc32c(page_copy);
+    if (computed_new_crc32c == stored_checksum) {
+        if (out_computed) *out_computed = computed_new_crc32c;
+        return true;
+    }
+
+    // ✅ 新增：尝试 MySQL 8.0 的 INNODB 算法（与旧版略有不同）
+    uint32_t computed_innodb_80 = compute_innodb_checksum(page_copy);
+    if (computed_innodb_80 == stored_checksum) {
+        if (out_computed) *out_computed = computed_innodb_80;
+        return true;
+    }
+
     // 所有校验均失败，输出详细错误信息
     std::cerr << "[ERROR] Page checksum mismatch. Stored=" << stored_checksum 
               << ", CRC32C=" << computed_crc32c 
-              << ", INNODB=" << computed_innodb << std::endl;
+              << ", INNODB=" << computed_innodb
+              << ", NEW_CRC32C=" << computed_new_crc32c
+              << ", INNODB_80=" << computed_innodb_80 << std::endl;
     if (out_computed) *out_computed = computed_crc32c; // 默认返回 CRC32C
     return false;
 }
@@ -343,6 +359,63 @@ TEST(PageReaderTest, ValidateChecksumCRC32C) {
     }
     
     EXPECT_TRUE(PageReader::validate_checksum(page));
+}
+
+// 测试页链断裂检测（BlobPageChain）
+TEST(BlobPageChainTest, DetectBrokenChain) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 200); // 假设 200 不是 100 的下一个页
+
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        if (space_id == 0 && page_no == 100) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 设置 next_bpage 为 999（不是 200），模拟断裂
+            write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_NEXT, 999);
+            return page_data;
+        }
+        if (space_id == 0 && page_no == 200) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 正确的 BLOB 页头
+            write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_LEN, 50);
+            return page_data;
+        }
+        return std::nullopt;
+    };
+
+    EXPECT_FALSE(chain.is_valid(page_reader, true)); // 严格模式下应返回 false
+}
+
+// 测试页链循环引用检测（BlobPageChain）
+TEST(BlobPageChainTest, DetectCircularReference) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 200);
+    chain.add_page(0, 300);
+    chain.add_page(0, 100); // 循环引用
+
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        std::vector<uint8_t> page_data(16384, 0);
+        if (page_no == 100) {
+            write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_NEXT, 200);
+        } else if (page_no == 200) {
+            write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_NEXT, 300);
+        } else if (page_no == 300) {
+            write_le<uint32_t>(page_data.data(), BlobPageChain::BTR_BPAGE_NEXT, 100); // 指向 100，形成循环
+        }
+        return page_data;
+    };
+
+    EXPECT_FALSE(chain.is_valid(page_reader, true)); // 严格模式下应返回 false
+}
+
+// 测试页链中重复页检测（BlobPageChain）
+TEST(BlobPageChainTest, DetectDuplicatePages) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 100); // 重复页
+
+    EXPECT_FALSE(chain.has_circular_reference()); // has_circular_reference 应检测到
 }
 
 } // namespace innodb

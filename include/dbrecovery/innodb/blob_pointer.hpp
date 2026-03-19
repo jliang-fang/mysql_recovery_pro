@@ -61,9 +61,18 @@ struct BlobPageChain {
         }
         
         // 验证链表连续性（需要实际读取 BLOB 页头验证）
+        std::set<std::pair<uint32_t, uint32_t>> visited_pages;
         for (size_t i = 1; i < pages.size(); ++i) {
             const auto& prev_page = pages[i-1];
             const auto& curr_page = pages[i];
+            
+            // 检查循环引用（在遍历过程中检测）
+            if (visited_pages.count(curr_page)) {
+                std::cerr << "[ERROR] BLOB chain contains circular reference at page (" 
+                          << curr_page.first << ", " << curr_page.second << ")" << std::endl;
+                return false; // 严格模式下循环引用视为失败
+            }
+            visited_pages.insert(prev_page);
             
             if (prev_page.first != curr_page.first) {
                 // 不同表空间，跳过连续性检查（允许跨表空间BLOB）
@@ -173,12 +182,14 @@ struct BlobPageChain {
         return true;
     }
 
-    // ✅ 新增：检测循环引用
+    // ✅ 新增：检测循环引用（增强版）
     bool has_circular_reference() const {
+        if (pages.size() <= 1) return false;
+        
         std::set<std::pair<uint32_t, uint32_t>> seen;
         for (const auto& p : pages) {
             if (seen.count(p)) {
-                return true;
+                return true; // 检测到重复页，即存在循环
             }
             seen.insert(p);
         }
