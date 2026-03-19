@@ -100,6 +100,11 @@ private:
 private:
     std::vector<uint8_t> page_data_;
     BTreeNodeType node_type_ = BTreeNodeType::INVALID;
+    uint32_t page_level_ = 0;
+    uint32_t next_page_ = 0xFFFFFFFF;
+    uint32_t prev_page_ = 0xFFFFFFFF;
+    uint16_t n_records_ = 0;
+    std::vector<uint16_t> record_offsets_;
     uint8_t btr_format_ = 0;  // B+树记录格式标志位 (BTR_FORMAT_MASK)
     uint16_t flags_ = 0;      // B+树标志位（用于存储行格式等信息）
     
@@ -247,93 +252,10 @@ private:
     // INFIMUM/SUPREMUM 记录偏移
     uint16_t infimum_offset_ = 54;
     uint16_t supremum_offset_ = 0;
-    
-    bool parse_header() noexcept {
-        // 解析页头信息（简化版）
-        if (page_data_.size() < 38 + 16) {
-            return false;
-        }
-        
-        // 读取页类型
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 12);
-        if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
-            page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
-            page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
-            return false;
-        }
-        
-        // 读取页级别
-        page_level_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 4);
-        
-        // 读取下一页和前一页
-        next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
-        prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
-        
-        // 读取 BTR_FORMAT 和 flags
-        btr_format_ = page_data_[38 + 15]; // 假设在页头偏移 15 处
-        flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 22);
-        
-        return true;
-    }
-    
-    bool parse_infimum_supremum() noexcept {
-        // 解析 INFIMUM 和 SUPREMUM 记录（固定偏移）
-        if (page_data_.size() < 54 + 5) {
-            return false;
-        }
-        
-        infimum_offset_ = 54;
-        uint8_t info_bits_infimum = page_data_[infimum_offset_];
-        if ((info_bits_infimum & dbrecovery::innodb::REC_INFO_MIN_REC_FLAG) == 0) {
-            // INFIMUM 记录格式不正确
-            return false;
-        }
-        
-        // 解析 SUPREMUM 记录（通常在堆顶附近）
-        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
-        if (heap_top < 54 || heap_top + 5 > page_data_.size()) {
-            return false;
-        }
-        
-        supremum_offset_ = heap_top - 5;
-        uint8_t info_bits_supremum = page_data_[supremum_offset_];
-        if ((info_bits_supremum & 0x03) != dbrecovery::innodb::REC_STATUS_SUPREMUM) {
-            // SUPREMUM 记录格式不正确
-            return false;
-        }
-        
-        return true;
-    }
-    
-    bool parse_user_records() noexcept {
-        // 解析用户记录（从 INFIMUM 之后开始）
-        if (page_data_.size() < infimum_offset_ + 5) {
-            return false;
-        }
-        
-        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
-        size_t current_offset = infimum_offset_;
-        
-        while (current_offset < heap_top - 5) {
-            // 检查是否为 SUPREMUM
-            if (current_offset == supremum_offset_) {
-                break;
-            }
-            
-            uint8_t info_bits = page_data_[current_offset];
-            uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + current_offset + 1, 0) & 0x3FFF;
-            
-            if (next_offset <= current_offset || next_offset >= page_data_.size()) {
-                // 下一个偏移无效
-                break;
-            }
-            
-            record_offsets_.push_back(static_cast<uint16_t>(current_offset));
-            current_offset = next_offset;
-        }
-        
-        return !record_offsets_.empty();
-    }
+
+    inline bool parse_header() noexcept;
+    inline bool parse_infimum_supremum() noexcept;
+    inline bool parse_user_records() noexcept;
 };
 
 // ==================== 实现部分 ====================
@@ -762,6 +684,48 @@ TEST(BPlusTreeParserTest, ParseValidPage) {
     // 设置有效的 INFIMUM 记录（偏移 54）
     page_data[54] = REC_INFO_MIN_REC_FLAG;
     write_le<uint16_t>(page_data.data(), 55, 100); // next_record_offset
+    
+    // 设置有效的 SUPREMUM 记录
+    page_data[99] = REC_STATUS_SUPREMUM;
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+}
+
+// 测试 BPlusTreeParser 在解析 SDI 页时返回 true
+TEST(BPlusTreeParserTest, ParseSDIPage) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的 SDI 页类型
+    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_SDI);
+    
+    // 设置堆顶位置
+    write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
+    
+    // 设置有效的 INFIMUM 记录（偏移 54）
+    page_data[54] = REC_INFO_MIN_REC_FLAG;
+    write_le<uint16_t>(page_data.data(), 55, 100);
+    
+    // 设置有效的 SUPREMUM 记录
+    page_data[99] = REC_STATUS_SUPREMUM;
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+}
+
+// 测试 BPlusTreeParser 在解析 Undo Log 页时返回 true
+TEST(BPlusTreeParserTest, ParseUndoLogPage) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的 Undo Log 页类型
+    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_UNDO_LOG);
+    
+    // 设置堆顶位置
+    write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
+    
+    // 设置有效的 INFIMUM 记录（偏移 54）
+    page_data[54] = REC_INFO_MIN_REC_FLAG;
+    write_le<uint16_t>(page_data.data(), 55, 100);
     
     // 设置有效的 SUPREMUM 记录
     page_data[99] = REC_STATUS_SUPREMUM;
