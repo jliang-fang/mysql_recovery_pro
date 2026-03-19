@@ -24,7 +24,7 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
       node_type_(BTreeNodeType::INVALID) {
 }
 
-bool BPlusTreeParser::parse() noexcept {
+bool BPlusTreeParser::parse() noexcept(false) {
     if (page_data_.size() < 38 + 16) { // FIL header (38) + minimal page header space
         return false;
     }

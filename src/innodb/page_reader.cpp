@@ -141,25 +141,6 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32
     return false;
 }
 
-uint32_t PageReader::compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
-    // 使用 MySQL 官方的 innobase_get_csum() 算法
-    
-    const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
-    size_t len = page_data.size() / 4;
-    
-    uint32_t checksum = 0xFFFFFFFF;
-    for (size_t i = 0; i < len; ++i) {
-        // 跳过校验和字段 (offset 24-27, which is 6th and 7th uint32_t)
-        if (i == 6 || i == 7) continue;
-        
-        checksum ^= dbrecovery::innodb::read_le<uint32_t>(page_data.data(), i * 4);
-        checksum += (checksum >> 16);
-        checksum &= 0xFFFFFFFF;
-    }
-    
-    return (checksum >> 16) ^ (checksum & 0xFFFF);
-}
-
 uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
     return compute_crc32c_internal(page_data);
 }
