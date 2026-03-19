@@ -78,7 +78,8 @@ bool BlobPageChain::is_valid(const std::function<std::optional<std::vector<uint8
         }
         
         // ✅ 新增：验证页类型必须是 FIL_PAGE_TYPE_BLOB (9972)
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(prev_data->data(), 38 + 12);
+        // 修复：页类型位于 FIL Header 偏移 12（绝对偏移），而非 38+12=50
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(prev_data->data(), 12);
         if (page_type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
             std::cerr << "[ERROR] BLOB page type mismatch at (" 
                       << prev_page.first << ", " << prev_page.second 

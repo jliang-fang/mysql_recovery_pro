@@ -12,21 +12,6 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 
-// 辅助函数：小端序写入（用于测试代码）
-template<typename T>
-inline void write_le(uint8_t* ptr, size_t offset, T value) noexcept(false) {
-    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "T must be an unsigned integral type");
-    
-    if (ptr == nullptr) {
-        throw std::invalid_argument("Pointer is null in write_le");
-    }
-    
-    uint8_t* p = ptr + offset;
-    for (size_t i = 0; i < sizeof(T); ++i) {
-        p[i] = static_cast<uint8_t>((value >> (i * 8)) & 0xFF);
-    }
-}
-
 namespace dbrecovery {
 namespace innodb {
 

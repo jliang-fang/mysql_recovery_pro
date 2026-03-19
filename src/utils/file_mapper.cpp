@@ -148,7 +148,7 @@ FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
     if (this != &other) {
         // 清理当前资源（仅在当前对象有效时）
 #ifdef _WIN32
-        if (data_ && data_ != nullptr) {
+        if (data_) {
             UnmapViewOfFile(data_);
             data_ = nullptr;
         }
@@ -176,14 +176,6 @@ FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
         
 #ifdef _WIN32
         handle_ = other.handle_;
-        if (data_ == nullptr) {
-            is_valid_ = false;
-        }
-#else
-        if (data_ == MAP_FAILED) {
-            data_ = nullptr;
-            is_valid_ = false;
-        }
 #endif
         
         // 清空源对象（仅重置为初始状态，不关闭资源）
