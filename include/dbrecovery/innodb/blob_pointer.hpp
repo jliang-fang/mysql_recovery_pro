@@ -34,10 +34,12 @@ namespace innodb {
 struct BlobPageChain {
     std::vector<std::pair<uint32_t, uint32_t>> pages; // (space_id, page_no)
     
-    // BLOB 页头偏移常量
-    static constexpr size_t BTR_BPAGE_NEXT = 0;   // 下一个 BLOB 页号（4字节）
-    static constexpr size_t BTR_BPAGE_PREV = 4;   // 上一个 BLOB 页号（4字节）
-    static constexpr size_t BTR_BPAGE_LEN  = 8;   // 数据长度（4字节）
+    // BLOB 页头偏移常量（参考 MySQL 8.0 源码 include/btr0btr.h 和 fil0fil.h）
+    // BLOB 页是标准 InnoDB 页，FIL Header 占用前 38 字节
+    // BLOB 头位于 FIL Header 之后，即偏移 38
+    static constexpr size_t BTR_BPAGE_NEXT = 38 + 0;   // 下一个 BLOB 页号（4字节），绝对偏移
+    static constexpr size_t BTR_BPAGE_PREV = 38 + 4;   // 上一个 BLOB 页号（4字节），绝对偏移
+    static constexpr size_t BTR_BPAGE_LEN  = 38 + 8;   // 数据长度（4字节），绝对偏移
 
     void add_page(uint32_t space_id, uint32_t page_no) {
         pages.emplace_back(space_id, page_no);
@@ -86,33 +88,56 @@ struct BlobPageChain {
                 continue; // 继续处理后续页对
             }
             
-            // 读取前一个页的 BLOB 头以验证 next_bpage 字段
+            // 读取前一个页的完整数据以验证类型和链表连续性
             auto prev_data = page_reader(prev_page.first, prev_page.second);
             if (!prev_data) {
                 if (strict_mode) {
-                    std::cerr << "[ERROR] Cannot read BLOB page header for validation: (" 
+                    std::cerr << "[ERROR] Cannot read BLOB page for validation: (" 
                               << prev_page.first << ", " << prev_page.second << ")" << std::endl;
                     return false; // 严格模式下无法读取视为失败
                 } else {
-                    std::cerr << "[WARN] Cannot read BLOB page header for validation (non-strict): (" 
+                    std::cerr << "[WARN] Cannot read BLOB page for validation (non-strict): (" 
                               << prev_page.first << ", " << prev_page.second << ")" << std::endl;
                     continue; // 宽松模式下跳过验证
                 }
             }
             
-            if (prev_data->size() < 16) {
-                if (strict_mode) {
-                    std::cerr << "[ERROR] BLOB page header too small: (" 
-                              << prev_page.first << ", " << prev_page.second << ")" << std::endl;
-                    return false; // 严格模式下数据不足视为失败
-                } else {
-                    std::cerr << "[WARN] BLOB page header too small (non-strict): (" 
-                              << prev_page.first << ", " << prev_page.second << ")" << std::endl;
-                    continue; // 宽松模式下跳过验证
+            // ✅ 新增：严格校验页大小（必须是标准 InnoDB 页大小）
+            static constexpr std::array<size_t, 5> valid_page_sizes = {4096, 8192, 16384, 32768, 65536};
+            bool is_valid_size = false;
+            for (size_t ps : valid_page_sizes) {
+                if (prev_data->size() == ps) {
+                    is_valid_size = true;
+                    break;
                 }
             }
+            if (!is_valid_size) {
+                std::cerr << "[ERROR] BLOB page has invalid size: " << prev_data->size() 
+                          << " at (" << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                if (strict_mode) return false;
+                continue;
+            }
             
-            // 读取 next_bpage 字段（偏移 0）
+            // ✅ 新增：验证页类型必须是 FIL_PAGE_TYPE_BLOB (9972)
+            uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(prev_data->data(), 38 + 12);
+            if (page_type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+                std::cerr << "[ERROR] BLOB page type mismatch at (" 
+                          << prev_page.first << ", " << prev_page.second 
+                          << "): expected=" << dbrecovery::innodb::FIL_PAGE_TYPE_BLOB
+                          << ", actual=" << page_type << std::endl;
+                if (strict_mode) return false;
+                continue;
+            }
+            
+            // ✅ 新增：验证 BLOB 页头偏移边界（确保有足够空间读取 BLOB 头）
+            if (prev_data->size() < BTR_BPAGE_LEN + 4) {
+                std::cerr << "[ERROR] BLOB page header too small for BLOB fields at (" 
+                          << prev_page.first << ", " << prev_page.second << ")" << std::endl;
+                if (strict_mode) return false;
+                continue;
+            }
+            
+            // 读取 next_bpage 字段（绝对偏移 BTR_BPAGE_NEXT）
             uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(prev_data->data(), BTR_BPAGE_NEXT);
             
             if (next_bpage == 0xFFFFFFFF) {
