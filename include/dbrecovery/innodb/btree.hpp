@@ -31,19 +31,20 @@ class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
     
-    bool parse() noexcept;
+    // ✅ 修复：实现核心的 parse 方法
+    bool parse() noexcept override;
     
     [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
 
 private:
     bool valid_page_type_ = false;
-    [[nodiscard]] uint32_t page_level() const { return page_level_; }
-    [[nodiscard]] uint32_t next_page() const { return next_page_; }
-    [[nodiscard]] uint32_t prev_page() const { return prev_page_; }
-    [[nodiscard]] uint16_t n_records() const { return n_records_; }
-    [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
-
+    uint32_t page_level_ = 0xFFFFFFFF;
+    uint32_t next_page_ = 0xFFFFFFFF;
+    uint32_t prev_page_ = 0xFFFFFFFF;
+    uint16_t n_records_ = 0;
+    std::vector<uint16_t> record_offsets_;
+    
     // ✅ 统一：页健康状态检查（消除重复定义）
     struct PageHealth {
         bool is_valid = true;
@@ -86,6 +87,25 @@ private:
      * @return false 目录解析失败
      */
     bool parse_directory() noexcept;
+    
+    // ✅ 新增：解析页头信息
+    bool parse_header() noexcept;
+    
+    // ✅ 新增：解析 INFIMUM/SUPREMUM 系统记录
+    bool parse_infimum_supremum() noexcept;
+    
+    // ✅ 新增：解析用户记录
+    bool parse_user_records() noexcept;
+
+private:
+    std::vector<uint8_t> page_data_;
+    BTreeNodeType node_type_ = BTreeNodeType::INVALID;
+    uint8_t btr_format_ = 0;  // B+树记录格式标志位 (BTR_FORMAT_MASK)
+    uint16_t flags_ = 0;      // B+树标志位（用于存储行格式等信息）
+    
+    // INFIMUM/SUPREMUM 记录偏移
+    uint16_t infimum_offset_ = 54;
+    uint16_t supremum_offset_ = 0;
 
 public:
     /**
@@ -322,42 +342,120 @@ inline BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
       page_level_(0xFFFFFFFF), next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF) {
 }
 
+// ✅ 修复：实现核心的 parse 方法
 inline bool BPlusTreeParser::parse() noexcept {
     if (page_data_.size() < 38 + 16) { // FIL header (38) + minimal record space
         return false;
     }
 
-    // ✅ 修复：使用正确的偏移计算页类型
-    // FIL_PAGE_TYPE 在 page_defs.hpp 中定义为 12（相对于 FIL_HEADER 的偏移）
-    // 绝对偏移 = 38 (FIL_HEADER_SIZE) + 12 = 50
+    // 解析页头信息
+    if (!parse_header()) {
+        return false;
+    }
+    
+    // 解析 INFIMUM/SUPREMUM 系统记录
+    if (!parse_infimum_supremum()) {
+        return false;
+    }
+    
+    // 解析用户记录
+    if (!parse_user_records()) {
+        return false;
+    }
+
+    node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
+    
+    return true;
+}
+
+// ✅ 新增：解析页头信息
+inline bool BPlusTreeParser::parse_header() noexcept {
+    // 解析页头信息（简化版）
+    if (page_data_.size() < 38 + 16) {
+        return false;
+    }
+    
+    // 读取页类型
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 12);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
         page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
-        node_type_ = BTreeNodeType::INVALID;
         return false;
     }
-
-    // ✅ 修复：使用正确的偏移计算页级别
-    // FIL_PAGE_LEVEL at offset 38+4=42 (relative to page start)
+    
+    // 读取页级别
     page_level_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 4);
     
-    // ✅ 修复：使用正确的偏移计算下一页
-    // PAGE_NEXT at offset 38+26=64 (relative to page start)
+    // 读取下一页和前一页
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
-    
-    // ✅ 修复：使用正确的偏移计算前一页
-    // PAGE_PREV at offset 38+20=58 (relative to page start)
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
-
-    node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
     
-    // 解析记录目录
-    if (!parse_directory()) {
+    // 读取 BTR_FORMAT 和 flags
+    btr_format_ = page_data_[38 + 15]; // 假设在页头偏移 15 处
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 22);
+    
+    return true;
+}
+
+// ✅ 新增：解析 INFIMUM/SUPREMUM 系统记录
+inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
+    // 解析 INFIMUM 和 SUPREMUM 记录（固定偏移）
+    if (page_data_.size() < 54 + 5) {
         return false;
     }
-
+    
+    infimum_offset_ = 54;
+    uint8_t info_bits_infimum = page_data_[infimum_offset_];
+    if ((info_bits_infimum & dbrecovery::innodb::REC_INFO_MIN_REC_FLAG) == 0) {
+        // INFIMUM 记录格式不正确
+        return false;
+    }
+    
+    // 解析 SUPREMUM 记录（通常在堆顶附近）
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
+    if (heap_top < 54 || heap_top + 5 > page_data_.size()) {
+        return false;
+    }
+    
+    supremum_offset_ = heap_top - 5;
+    uint8_t info_bits_supremum = page_data_[supremum_offset_];
+    if ((info_bits_supremum & 0x03) != dbrecovery::innodb::REC_STATUS_SUPREMUM) {
+        // SUPREMUM 记录格式不正确
+        return false;
+    }
+    
     return true;
+}
+
+// ✅ 新增：解析用户记录
+inline bool BPlusTreeParser::parse_user_records() noexcept {
+    // 解析用户记录（从 INFIMUM 之后开始）
+    if (page_data_.size() < infimum_offset_ + 5) {
+        return false;
+    }
+    
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
+    size_t current_offset = infimum_offset_;
+    
+    while (current_offset < heap_top - 5) {
+        // 检查是否为 SUPREMUM
+        if (current_offset == supremum_offset_) {
+            break;
+        }
+        
+        uint8_t info_bits = page_data_[current_offset];
+        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + current_offset + 1, 0) & 0x3FFF;
+        
+        if (next_offset <= current_offset || next_offset >= page_data_.size()) {
+            // 下一个偏移无效
+            break;
+        }
+        
+        record_offsets_.push_back(static_cast<uint16_t>(current_offset));
+        current_offset = next_offset;
+    }
+    
+    return !record_offsets_.empty();
 }
 
 inline bool BPlusTreeParser::parse_directory() noexcept {

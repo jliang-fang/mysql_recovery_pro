@@ -45,6 +45,51 @@ TEST(BPlusTreeParser, ParseEmptyData) {
     EXPECT_FALSE(parser.parse());
 }
 
+// ✅ 新增：测试一个完整的、有效的叶子页解析
+TEST(BPlusTreeParser, ParseValidLeafPageFull) {
+    // 创建一个 16KB 的页数据
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置 FIL Header (偏移 0-37)
+    write_le<uint32_t>(page_data.data(), 0, 9969);   // FIL_PAGE_SPACE_ID = 0
+    write_le<uint32_t>(page_data.data(), 4, 0);      // Checksum1
+    write_le<uint64_t>(page_data.data(), 8, 0);      // LSN
+    write_le<uint16_t>(page_data.data(), 16, 0);     // Page offset = 0
+    write_le<uint16_t>(page_data.data(), 18, 0xFFFF); // Previous page (none)
+    write_le<uint16_t>(page_data.data(), 20, 0xFFFF); // Next page (none)
+    
+    // 设置页类型为 FIL_PAGE_INDEX (9969) at offset 38+12=50
+    write_le<uint16_t>(page_data.data(), 50, 9969);
+    
+    // 设置 BTR Header (偏移 38+4=42)
+    write_le<uint16_t>(page_data.data(), 42, 0);     // PAGE_LEVEL = 0 (leaf)
+    write_le<uint16_t>(page_data.data(), 38, 5);     // PAGE_N_DIR_SLOTS
+    write_le<uint16_t>(page_data.data(), 40, 100);   // PAGE_HEAP_TOP
+    
+    // 设置目录槽和记录（简化版）
+    // INFIMUM 记录 at offset 54
+    page_data[54] = 0x02; // info_bits: REC_INFO_MIN_REC_FLAG (bit 4)
+    write_le<uint16_t>(page_data.data(), 55, 70);   // next_record_offset
+    
+    // 用户记录
+    page_data[70] = 0x00; // info_bits
+    write_le<uint16_t>(page_data.data(), 71, 86);   // next_record_offset
+    
+    // SUPREMUM 记录 at offset 86
+    page_data[86] = 0x03; // REC_STATUS_SUPREMUM
+    write_le<uint16_t>(page_data.data(), 87, 0xFFFF); // end of chain
+    
+    // 设置目录槽 (在页尾部)
+    size_t dir_start = 16384 - 5 * 2; // 5 slots * 2 bytes each
+    write_le<uint16_t>(page_data.data(), dir_start + 0, 54);  // INFIMUM
+    write_le<uint16_t>(page_data.data(), dir_start + 2, 70);  // User Record
+    write_le<uint16_t>(page_data.data(), dir_start + 4, 86);  // SUPREMUM
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    EXPECT_EQ(parser.node_type(), dbrecovery::innodb::BTreeNodeType::LEAF);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
