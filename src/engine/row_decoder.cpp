@@ -58,8 +58,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             uint32_t bitmap_index = 0;
             for (const auto& prev_pair : schema.columns) {
                 const auto& prev_col = prev_pair.second;
-                // 只计算在当前列之前定义的可空列（包括当前列）
-                if (prev_pair.first > pair.first) {
+                // 只计算在当前列之前定义的可空列（不包括当前列）
+                if (prev_pair.first >= pair.first) {
                     break; // 已经处理完所有前置列
                 }
                 if (prev_col.is_nullable && !prev_col.is_off_page && 
@@ -67,9 +67,6 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                     bitmap_index++;
                 }
             }
-            
-            // 减1是因为上面循环包含了当前列，但我们需要的是之前的可空列数量
-            bitmap_index--;
         
             uint32_t byte_idx = bitmap_index / 8;
             uint32_t bit_idx = bitmap_index % 8;
@@ -409,8 +406,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                     size_t frac_bytes = (precision + 1) / 2;
                     uint64_t frac_val = 0;
                     for (size_t i = 0; i < frac_bytes; ++i) {
-                        // ✅ 修复：MySQL DATETIME2 小数部分使用大端序存储（高位在前）
-                        frac_val = (frac_val << 8) | data_ptr[5 + i];
+                        // ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
+                        frac_val |= static_cast<uint64_t>(data_ptr[5 + i]) << (i * 8);
                     }
                     
                     // 转换为微秒
