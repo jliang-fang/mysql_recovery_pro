@@ -53,6 +53,10 @@ inline void write_le(uint8_t* ptr, size_t offset, T value) noexcept(false) {
     } else if constexpr (sizeof(T) == 2) {
         p[0] = static_cast<uint8_t>(value & 0xFF);
         p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    } else if constexpr (sizeof(T) == 3) { // ✅ 新增：支持 uint24
+        p[0] = static_cast<uint8_t>(value & 0xFF);
+        p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        p[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
     } else if constexpr (sizeof(T) == 4) {
         p[0] = static_cast<uint8_t>(value & 0xFF);
         p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
@@ -87,6 +91,8 @@ inline T read_be(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
         return *p;
     } else if constexpr (sizeof(T) == 2) {
         return (static_cast<T>(p[0]) << 8) | static_cast<T>(p[1]);
+    } else if constexpr (sizeof(T) == 3) { // ✅ 新增：支持 uint24 big-endian
+        return (static_cast<T>(p[0]) << 16) | (static_cast<T>(p[1]) << 8) | static_cast<T>(p[2]);
     } else if constexpr (sizeof(T) == 4) {
         return (static_cast<T>(p[0]) << 24) | (static_cast<T>(p[1]) << 16) |
                (static_cast<T>(p[2]) << 8) | static_cast<T>(p[3]);
@@ -139,6 +145,10 @@ public:
         } else if constexpr (sizeof(T) == 2) {
             p[0] = static_cast<uint8_t>((value >> 8) & 0xFF);
             p[1] = static_cast<uint8_t>(value & 0xFF);
+        } else if constexpr (sizeof(T) == 3) { // ✅ 新增：支持 uint24 big-endian
+            p[0] = static_cast<uint8_t>((value >> 16) & 0xFF);
+            p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+            p[2] = static_cast<uint8_t>(value & 0xFF);
         } else if constexpr (sizeof(T) == 4) {
             p[0] = static_cast<uint8_t>((value >> 24) & 0xFF);
             p[1] = static_cast<uint8_t>((value >> 16) & 0xFF);
