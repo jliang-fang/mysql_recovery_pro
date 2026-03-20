@@ -59,6 +59,12 @@ bool BPlusTreeParser::parse() noexcept(false) {
         return false;
     }
     
+    // ✅ 新增：解析用户记录（从目录槽中获取偏移后）
+    if (!parse_user_records()) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to parse user records" << std::endl;
+        return false;
+    }
+    
     return true;
 }
 
