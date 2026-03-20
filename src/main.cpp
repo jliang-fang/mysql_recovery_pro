@@ -25,7 +25,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ✅ 新增：测试阶乘函数功能
+    // ✅ 统一使用 C++17 兼容的预计算表（项目要求 C++17 标准）
+    // 已在 utils/math_helper.hpp 中实现，此处直接调用 utils::factorial()
     uint32_t n = 5;
     std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::factorial(n) << std::endl;
     
@@ -34,6 +35,9 @@ int main(int argc, char** argv) {
         std::cerr << "[ERROR] Factorial function verification failed" << std::endl;
         return 1;
     }
+    
+    // ✅ 确保项目中不存在 get_factorial() 等重复实现
+    // 所有阶乘计算应统一使用 dbrecovery::utils::factorial<T>()
     
     // 检查文件是否存在
     std::ifstream f(ibd_path);
