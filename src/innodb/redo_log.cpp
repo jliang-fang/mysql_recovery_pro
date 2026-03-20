@@ -1,4 +1,5 @@
 #include "dbrecovery/innodb/redo_log.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <fstream>
 #include <iostream>
 
@@ -17,15 +18,19 @@ std::optional<RedoLogRecord> RedoLogParser::parse_record(const uint8_t* data, si
     RedoLogRecord record;
     size_t pos = 0;
 
-    // 解析记录类型
-    record.r_type = read_uint16_le(data, pos);
+    // ✅ 修复：使用 mach_read.hpp 中的模板函数
+    record.r_type = dbrecovery::innodb::read_le<uint16_t>(data, pos);
+    pos += 2;
 
     // 解析表空间ID和页号
-    record.r_sapce_id = read_uint16_le(data, pos);
-    record.r_page_no = read_uint32_le(data, pos);
+    record.r_space_id = dbrecovery::innodb::read_le<uint32_t>(data, pos);
+    pos += 4;
+    record.r_page_no = dbrecovery::innodb::read_le<uint32_t>(data, pos);
+    pos += 4;
 
     // 解析记录数据长度
-    uint16_t data_len = read_uint16_le(data, pos);
+    uint16_t data_len = dbrecovery::innodb::read_le<uint16_t>(data, pos);
+    pos += 2;
 
     if (pos + data_len > len) {
         return std::nullopt;
@@ -37,8 +42,10 @@ std::optional<RedoLogRecord> RedoLogParser::parse_record(const uint8_t* data, si
 
     // 解析事务相关字段（如果存在）
     if (pos + 16 <= len) {
-        record.r_trx_id = read_uint64_le(data, pos);
-        record.r_roll_ptr = read_uint64_le(data, pos);
+        record.r_trx_id = dbrecovery::innodb::read_le<uint64_t>(data, pos);
+        pos += 8;
+        record.r_roll_ptr = dbrecovery::innodb::read_le<uint64_t>(data, pos);
+        pos += 8;
     }
 
     return record;

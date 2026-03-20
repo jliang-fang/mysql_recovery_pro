@@ -33,10 +33,7 @@ private:
     bool is_valid_ = true;
 };
 
-// 辅助函数：小端序读取（在 undo_log.cpp 中实现）
-uint16_t read_uint16_le(const uint8_t* data, size_t& pos);
-uint32_t read_uint32_le(const uint8_t* data, size_t& pos);
-uint64_t read_uint64_le(const uint8_t* data, size_t& pos);
+// ✅ 修复：这些函数已在 mach_read.hpp 中实现，此处删除重复声明
 
 } // namespace innodb
 } // namespace dbrecovery

@@ -1,29 +1,4 @@
-#include "dbrecovery/innodb/undo_log.hpp"
-#include "dbrecovery/innodb/mach_read.hpp"
-#include <fstream>
-#include <iostream>
-
-namespace dbrecovery {
-namespace innodb {
-
-// 辅助函数：小端序读取
-static inline uint16_t read_uint16_le(const uint8_t* data, size_t& pos) {
-    uint16_t val = dbrecovery::innodb::read_le<uint16_t>(data, pos);
-    pos += 2;
-    return val;
-}
-
-static inline uint32_t read_uint32_le(const uint8_t* data, size_t& pos) {
-    uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data, pos);
-    pos += 4;
-    return val;
-}
-
-static inline uint64_t read_uint64_le(const uint8_t* data, size_t& pos) {
-    uint64_t val = dbrecovery::innodb::read_le<uint64_t>(data, pos);
-    pos += 8;
-    return val;
-}
+// ✅ 删除：这些函数已在 mach_read.hpp 中实现，此处无需重复定义
 
 UndoLogParser::UndoLogParser() {}
 
