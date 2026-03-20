@@ -151,7 +151,35 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     return true;
 }
 
-// ✅ 修复：已废弃，不再需要。所有记录解析统一通过 parse_directory() 完成。
+bool BPlusTreeParser::parse_user_records() noexcept {
+    // 解析用户记录（从 INFIMUM 之后开始）
+    if (page_data_.size() < infimum_offset_ + 5) {
+        return false;
+    }
+    
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
+    size_t current_offset = infimum_offset_;
+    
+    while (current_offset < heap_top - 5) {
+        // 检查是否为 SUPREMUM
+        if (current_offset == supremum_offset_) {
+            break;
+        }
+        
+        uint8_t info_bits = page_data_[current_offset];
+        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + current_offset + 1, 0) & 0x3FFF;
+        
+        if (next_offset <= current_offset || next_offset >= page_data_.size()) {
+            // 下一个偏移无效
+            break;
+        }
+        
+        record_offsets_.push_back(static_cast<uint16_t>(current_offset));
+        current_offset = next_offset;
+    }
+    
+    return !record_offsets_.empty();
+}
 
 BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     PageHealth health;

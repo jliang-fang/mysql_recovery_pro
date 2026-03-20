@@ -90,6 +90,46 @@ TEST(BPlusTreeParser, ParseValidLeafPageFull) {
     EXPECT_EQ(parser.node_type(), dbrecovery::innodb::BTreeNodeType::LEAF);
 }
 
+// ✅ 新增：测试解析包含多条用户记录的叶子页
+TEST(BPlusTreeParser, ParseLeafPageWithMultipleRecords) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置页头信息
+    write_le<uint16_t>(page_data.data(), 50, 9969);   // Page type
+    write_le<uint16_t>(page_data.data(), 42, 0);      // PAGE_LEVEL = 0 (leaf)
+    write_le<uint16_t>(page_data.data(), 38, 6);      // PAGE_N_DIR_SLOTS
+    write_le<uint16_t>(page_data.data(), 40, 150);    // PAGE_HEAP_TOP
+    
+    // INFIMUM 记录 at offset 54
+    page_data[54] = 0x02; 
+    write_le<uint16_t>(page_data.data(), 55, 70);
+    
+    // 用户记录 1 at offset 70
+    page_data[70] = 0x00;
+    write_le<uint16_t>(page_data.data(), 71, 86);
+    
+    // 用户记录 2 at offset 86
+    page_data[86] = 0x00;
+    write_le<uint16_t>(page_data.data(), 87, 102);
+    
+    // SUPREMUM 记录 at offset 102
+    page_data[102] = 0x03;
+    write_le<uint16_t>(page_data.data(), 103, 0xFFFF);
+    
+    // 设置目录槽 (在页尾部)
+    size_t dir_start = 16384 - 6 * 2; 
+    write_le<uint16_t>(page_data.data(), dir_start + 0, 54);  // INFIMUM
+    write_le<uint16_t>(page_data.data(), dir_start + 2, 70);  // User Record 1
+    write_le<uint16_t>(page_data.data(), dir_start + 4, 86);  // User Record 2
+    write_le<uint16_t>(page_data.data(), dir_start + 6, 102); // SUPREMUM
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 验证解析出的记录数量（INFIMUM + 2 users + SUPREMUM = 4）
+    EXPECT_EQ(parser.record_offsets().size(), 4);
+}
+
 // ✅ 新增：测试页类型读取辅助函数
 TEST(PageHeader, GetPageType) {
     std::vector<uint8_t> page(16384, 0);
