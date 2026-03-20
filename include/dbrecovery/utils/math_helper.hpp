@@ -1,3 +1,6 @@
+// ✅ 已废弃：此文件中的阶乘实现已被替换为标准库/Boost 实现
+// 保留此文件以防止编译错误，但不应再使用其中的函数
+
 #pragma once
 
 #include <array>
@@ -7,7 +10,7 @@
 namespace dbrecovery {
 namespace utils {
 
-// ✅ 阶乘查表（uint64_t 最大支持 20!）
+[[deprecated("Use std::factorial (C++20) or boost::math::factorial instead")]]
 static constexpr std::array<uint64_t, 21> FACTORIAL_TABLE = []() noexcept {
     std::array<uint64_t, 21> table{};
     table[0] = 1;
@@ -17,16 +20,7 @@ static constexpr std::array<uint64_t, 21> FACTORIAL_TABLE = []() noexcept {
     return table;
 }();
 
-/**
- * @brief 计算阶乘（使用查表法）
- *
- * ✅ 优化：直接返回查表结果，避免函数调用开销
- * 适用于 n <= 20 (uint64_t 范围内)
- * 
- * @param n 非负整数
- * @return uint64_t n! 的值
- * @throws std::out_of_range 当 n > 20 时抛出异常
- */
+[[deprecated("Use std::factorial (C++20) or boost::math::factorial instead")]]
 inline uint64_t get_factorial(uint32_t n) {
     if (n >= FACTORIAL_TABLE.size()) {
         throw std::out_of_range("Factorial is not defined for n > 20");
