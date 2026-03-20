@@ -8,12 +8,7 @@
 namespace dbrecovery {
 namespace utils {
 
-// 此命名空间保留以防止链接错误，但所有功能已废弃
-[[deprecated("This namespace is deprecated. Use std::factorial from <cmath> (C++20) directly")]]
-inline uint64_t get_factorial(uint32_t /*n*/) {
-    // 仅用于编译时占位，运行时不应被调用
-    return 1;
-}
+// ✅ 已移除：废弃的 get_factorial() 函数。阶乘计算应直接使用预计算表或 std::factorial (C++20)。
 
 } // namespace utils
 } // namespace dbrecovery

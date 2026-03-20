@@ -11,12 +11,7 @@ namespace fs = std::filesystem;
 int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
     
-#if __cplusplus >= 202100L
-    // ✅ C++20 及以上：使用标准库 std::factorial
-    uint32_t n = 5;
-    std::cout << "Factorial of " << n << " is: " << static_cast<uint64_t>(std::factorial(n)) << std::endl;
-#else
-    // ✅ C++17 兼容：使用简单预计算表（内联实现，避免调用废弃函数）
+    // ✅ 统一使用 C++17 兼容的预计算表（项目要求 C++17 标准）
     uint32_t n = 5;
     constexpr std::array<uint64_t, 21> factorial_table = []() noexcept {
         std::array<uint64_t, 21> table{};
@@ -27,7 +22,6 @@ int main(int argc, char** argv) {
         return table;
     }();
     std::cout << "Factorial of " << n << " is: " << factorial_table[n] << std::endl;
-#endif
 
     dbrecovery::utils::CliParser parser(argc, argv);
     

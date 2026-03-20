@@ -7,23 +7,19 @@
 namespace dbrecovery {
 namespace tests {
 
-// ✅ 新增：测试 C++20 std::factorial 与预计算表的一致性
+// ✅ 测试预计算阶乘表（C++17 兼容）
 TEST(UtilsTest, FactorialConsistency) {
-#if __cplusplus >= 202100L
-    for (uint32_t i = 0; i <= 20; ++i) {
-        EXPECT_EQ(static_cast<uint64_t>(std::factorial(i)), 
-                  []() noexcept { std::array<uint64_t, 21> t{}; t[0]=1; for(uint32_t j=1;j<=20;++j)t[j]=t[j-1]*j; return t; }()[i]);
-    }
-#else
     constexpr std::array<uint64_t, 21> table = []() noexcept {
         std::array<uint64_t, 21> t{};
         t[0] = 1;
         for (uint32_t i = 1; i <= 20; ++i) t[i] = t[i-1] * i;
         return t;
     }();
+    
+    EXPECT_EQ(table[0], 1);
     EXPECT_EQ(table[5], 120);
     EXPECT_EQ(table[10], 3628800);
-#endif
+    EXPECT_EQ(table[20], 2432902008176640000ULL);
 }
 
 // ✅ 注意：get_factorial() 已废弃，不应在此处使用。如需测试阶乘，请直接内联计算。
