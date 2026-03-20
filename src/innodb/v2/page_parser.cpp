@@ -27,22 +27,27 @@ bool PageParser::parse() noexcept {
     // 2. 解析 FIL_PAGE_TYPE (offset 24)
     uint16_t raw_type = 0;
     std::memcpy(&raw_type, buffer_ + FIL_PAGE_TYPE, sizeof(uint16_t));
-    type_ = static_cast<PageType>(raw_type);
-
-    // 3. 校验页类型合法性（仅允许索引/SDI/BLOB 等恢复相关类型）
-    switch (type_) {
-        case PageType::FIL_PAGE_INDEX:
-        case PageType::FIL_PAGE_SDI:
-        case PageType::FIL_PAGE_TYPE_BLOB:
+    
+    // ✅ 新增：使用 dbrecovery::innodb 命名空间中的统一页类型常量
+    bool is_valid_type = false;
+    switch (raw_type) {
+        case dbrecovery::innodb::FIL_PAGE_INDEX:
+        case dbrecovery::innodb::FIL_PAGE_SDI:
+        case dbrecovery::innodb::FIL_PAGE_TYPE_BLOB:
             // ✅ 新增：兼容旧版 FIL_PAGE_RTREE（9970），但标记为废弃
-            if (type_ == PageType::FIL_PAGE_RTREE) {
-                std::cerr << "[WARN] Page type FIL_PAGE_RTREE (9970) is deprecated in MySQL 8.0, "
+            if (raw_type == 9970) { // FIL_PAGE_RTREE / deprecated
+                std::cerr << "[WARN] Page type 9970 (FIL_PAGE_RTREE) is deprecated in MySQL 8.0, "
                              "use FIL_PAGE_UNDO_LOG instead." << std::endl;
             }
+            is_valid_type = true;
             break;
         default:
             // 非数据页（如 UNDO、SYS）暂不解析
-            return false;
+            break;
+    }
+    
+    if (!is_valid_type) {
+        return false;
     }
 
     // 4. 解析 PAGE_HEADER (offset 38 = FIL_PAGE_DATA)
