@@ -16,9 +16,17 @@ int main(int argc, char** argv) {
     uint32_t n = 5;
     std::cout << "Factorial of " << n << " is: " << static_cast<uint64_t>(std::factorial(n)) << std::endl;
 #else
-    // ✅ C++17 fallback：使用预计算表（通过 math_helper.hpp）
+    // ✅ C++17 兼容：使用简单预计算表（内联实现，避免调用废弃函数）
     uint32_t n = 5;
-    std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::get_factorial(n) << std::endl;
+    constexpr std::array<uint64_t, 21> factorial_table = []() noexcept {
+        std::array<uint64_t, 21> table{};
+        table[0] = 1;
+        for (uint32_t i = 1; i <= 20; ++i) {
+            table[i] = table[i-1] * i;
+        }
+        return table;
+    }();
+    std::cout << "Factorial of " << n << " is: " << factorial_table[n] << std::endl;
 #endif
 
     dbrecovery::utils::CliParser parser(argc, argv);
