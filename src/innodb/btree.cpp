@@ -26,6 +26,7 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
 
 bool BPlusTreeParser::parse() noexcept(false) {
     if (page_data_.size() < 38 + 16) { // FIL header (38) + minimal page header space
+        std::cerr << "[ERROR] BPlusTreeParser: Page too small" << std::endl;
         return false;
     }
     
@@ -36,24 +37,26 @@ bool BPlusTreeParser::parse() noexcept(false) {
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
         page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+        std::cerr << "[ERROR] BPlusTreeParser: Invalid page type " << page_type << std::endl;
         return false;
     }
     
     // 解析B+树头
     if (!parse_header()) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to parse B+ tree header" << std::endl;
         return false;
     }
     
     // 解析INFIMUM和SUPREMUM记录
     if (!parse_infimum_supremum()) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to parse infimum/supremum records" << std::endl;
         return false;
     }
     
-    // 解析用户记录（从页目录中获取）
+    // ✅ 修复：核心逻辑，使用页目录解析用户记录，移除废弃的 fallback
     if (!parse_directory()) {
-        std::cerr << "[WARN] BPlusTreeParser: Failed to parse directory, attempting fallback" << std::endl;
-        // 尝试简单解析：从 INFIMUM 开始遍历 next_record_offset
-        return parse_user_records_simple();
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to parse directory, cannot recover records reliably" << std::endl;
+        return false;
     }
     
     return true;
@@ -148,68 +151,7 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     return true;
 }
 
-bool BPlusTreeParser::parse_user_records() noexcept {
-    // ✅ 修复：此函数已废弃，由 parse_directory() 替代
-    // 保留作为 fallback 实现（当目录解析失败时）
-    if (page_data_.size() < infimum_offset_ + 13) {
-        return false;
-    }
-    
-    uint16_t current_offset = infimum_offset_;
-    while (true) {
-        if (current_offset + 5 > page_data_.size()) {
-            break;
-        }
-        
-        uint8_t info_bits = page_data_[current_offset];
-        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + current_offset + 1, 0) & 0x3FFF;
-        
-        if (next_offset <= current_offset || next_offset >= page_data_.size()) {
-            break;
-        }
-        
-        // 跳过 SUPREMUM
-        if (current_offset == supremum_offset_) {
-            break;
-        }
-        
-        record_offsets_.push_back(current_offset);
-        current_offset = next_offset;
-    }
-    
-    return !record_offsets_.empty();
-}
-
-// ✅ 新增：简单解析函数，用于 fallback 场景
-bool BPlusTreeParser::parse_user_records_simple() noexcept {
-    if (page_data_.size() < infimum_offset_ + 13) {
-        return false;
-    }
-    
-    uint16_t current_offset = infimum_offset_;
-    while (true) {
-        if (current_offset + 5 > page_data_.size()) {
-            break;
-        }
-        
-        uint8_t info_bits = page_data_[current_offset];
-        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + current_offset + 1, 0) & 0x3FFF;
-        
-        if (next_offset <= current_offset || next_offset >= page_data_.size()) {
-            break;
-        }
-        
-        // 跳过 SUPREMUM
-        if (current_offset == supremum_offset_) {
-            break;
-        }
-        
-        record_offsets_.push_back(current_offset);
-        current_offset = next_offset;
-    }
-    
-    return !record_offsets_.empty();
-}
+// ✅ 修复：已废弃，不再需要。所有记录解析统一通过 parse_directory() 完成。
 
 BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     PageHealth health;
