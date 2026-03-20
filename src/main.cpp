@@ -1,6 +1,7 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <cmath>  // C++20 std::factorial (预留头文件)
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
@@ -12,16 +13,12 @@ int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
     
     // ✅ 统一使用 C++17 兼容的预计算表（项目要求 C++17 标准）
-    uint32_t n = 5;
-    constexpr std::array<uint64_t, 21> factorial_table = []() noexcept {
+    constexpr auto factorial_table = []() noexcept {
         std::array<uint64_t, 21> table{};
         table[0] = 1;
-        for (uint32_t i = 1; i <= 20; ++i) {
-            table[i] = table[i-1] * i;
-        }
+        for (uint32_t i = 1; i <= 20; ++i) table[i] = table[i-1] * i;
         return table;
     }();
-    std::cout << "Factorial of " << n << " is: " << factorial_table[n] << std::endl;
 
     dbrecovery::utils::CliParser parser(argc, argv);
     
@@ -35,6 +32,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // ✅ 新增：测试阶乘表功能
+    uint32_t n = 5;
+    std::cout << "Factorial of " << n << " is: " << factorial_table[n] << std::endl;
+    
+    // 验证预计算结果（用于 CI/CD 测试）
+    if (factorial_table[5] != 120 || factorial_table[10] != 3628800) {
+        std::cerr << "[ERROR] Factorial table initialization failed" << std::endl;
+        return 1;
+    }
+    
     // 检查文件是否存在
     std::ifstream f(ibd_path);
     if (!f.good()) {

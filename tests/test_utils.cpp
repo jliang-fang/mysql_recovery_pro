@@ -9,20 +9,19 @@ namespace tests {
 
 // ✅ 测试预计算阶乘表（C++17 兼容）
 TEST(UtilsTest, FactorialConsistency) {
-    constexpr std::array<uint64_t, 21> table = []() noexcept {
-        std::array<uint64_t, 21> t{};
-        t[0] = 1;
-        for (uint32_t i = 1; i <= 20; ++i) t[i] = t[i-1] * i;
-        return t;
+    // 使用与 src/main.cpp 相同的预计算表实现
+    constexpr auto factorial_table = []() noexcept {
+        std::array<uint64_t, 21> table{};
+        table[0] = 1;
+        for (uint32_t i = 1; i <= 20; ++i) table[i] = table[i-1] * i;
+        return table;
     }();
     
-    EXPECT_EQ(table[0], 1);
-    EXPECT_EQ(table[5], 120);
-    EXPECT_EQ(table[10], 3628800);
-    EXPECT_EQ(table[20], 2432902008176640000ULL);
+    EXPECT_EQ(factorial_table[0], 1);
+    EXPECT_EQ(factorial_table[5], 120);
+    EXPECT_EQ(factorial_table[10], 3628800);
+    EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
-
-// ✅ 注意：get_factorial() 已废弃，不应在此处使用。如需测试阶乘，请直接内联计算。
 
 std::vector<uint8_t> load_page_from_ibd(const std::string& ibd_path, uint32_t page_no) {
     utils::FileMapper mapper(ibd_path);
