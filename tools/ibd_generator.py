@@ -2,7 +2,6 @@
 """InnoDB .ibd 文件生成器，用于创建测试用的 InnoDB 页结构"""
 
 import json
-import math
 import zlib
 
 # ==================== 常量定义 ====================
@@ -39,13 +38,6 @@ FIL_PAGE_SDI          = 9971   # SDI 元数据页
 FIL_PAGE_TYPE_BLOB    = 9972   # BLOB页
 
 # ==================== 辅助函数 ====================
-def get_factorial(n):
-    """计算 n 的阶乘，使用 Python 标准库 math.factorial"""
-    if n < 0:
-        raise ValueError("factorial is not defined for negative numbers")
-    return math.factorial(n)
-
-
 def write_le_uint32(data, offset, value):
     """在指定偏移处写入小端序的 32 位无符号整数"""
     data[offset]     = (value >> 0) & 0xFF
