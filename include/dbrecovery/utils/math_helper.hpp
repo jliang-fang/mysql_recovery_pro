@@ -3,7 +3,8 @@
 
 #include <cstdint>
 #include <array>
-#include <cmath>  // C++20 std::factorial
+#include <stdexcept>
+#include <type_traits>
 
 namespace dbrecovery {
 namespace utils {
@@ -15,8 +16,10 @@ namespace utils {
  */
 #if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
 
-template <typename T>
-constexpr T factorial(T n) noexcept {
+template <typename T = uint64_t>
+constexpr T factorial(T n) noexcept(false) {
+    static_assert(std::is_integral_v<T>, "factorial requires integral type");
+    if (n > 20) throw std::overflow_error("factorial: input too large for 64-bit result");
     return std::factorial(n);
 }
 
@@ -27,17 +30,13 @@ constexpr T factorial(T n) noexcept {
  *
  * 20! 是 uint64_t 能表示的最大阶乘值
  */
-constexpr std::array<uint64_t, 21> factorial_table = []() noexcept {
-    std::array<uint64_t, 21> table{};
-    table[0] = 1;
-    for (uint32_t i = 1; i <= 20; ++i) {
-        table[i] = table[i-1] * i;
-    }
-    return table;
-}();
-
-inline uint64_t factorial(uint32_t n) noexcept {
-    return factorial_table[n];
+template <typename T = uint64_t>
+constexpr T factorial(T n) noexcept(false) {
+    static_assert(std::is_integral_v<T>, "factorial requires integral type");
+    if (n > 20) throw std::overflow_error("factorial: input too large for 64-bit result");
+    
+    constexpr std::array<uint64_t, 21> table{1,1,2,6,24,120,720,5040,40320,362880,3628800,39916800,479001600,6227020800,87178291200,1307674368000,20922789888000,355687428096000,6402373705728000,121645100408832000,2432902008176640000};
+    return static_cast<T>(table[n]);
 }
 
 #endif  // C++20 检测
