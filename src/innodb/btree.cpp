@@ -115,7 +115,7 @@ bool BPlusTreeParser::parse_header() noexcept {
     return true;
 }
 
-bool BPlusTreeParser::parse_infimum_supremum() noexcept {
+bool BPlusTreeParser::parse_infimum_supremum() {
     if (page_data_.size() < 100) {
         return false;
     }
@@ -159,7 +159,7 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
     return true;
 }
 
-bool BPlusTreeParser::parse_user_records() noexcept {
+bool BPlusTreeParser::parse_user_records() {
     // 解析用户记录（从 INFIMUM 之后开始）
     if (page_data_.size() < infimum_offset_ + 5) {
         return false;

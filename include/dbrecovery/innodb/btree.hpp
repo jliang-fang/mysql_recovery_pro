@@ -31,8 +31,8 @@ class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
     
-    // ✅ 修复：实现核心的 parse 方法，移除 noexcept 以支持错误传播
-    bool parse() noexcept(false);
+    // ✅ 统一异常规范：所有解析方法均不标记 noexcept，确保异常可传播
+    bool parse();
     
     [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
