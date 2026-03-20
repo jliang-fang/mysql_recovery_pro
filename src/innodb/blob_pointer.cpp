@@ -1,10 +1,9 @@
 #include "dbrecovery/innodb/blob_pointer.hpp"
-#include <iostream>
 
 namespace dbrecovery {
 namespace innodb {
 
-// ✅ 已移除：实现已迁移到 blob_pointer.cpp，避免重复定义
+// ✅ 保留空命名空间结构，用于未来可能的非内联函数实现
 
 } // namespace innodb
 } // namespace dbrecovery
