@@ -8,7 +8,7 @@ namespace dbrecovery {
 namespace utils {
 
 /**
- * @brief 计算阶乘（安全实现，使用循环）
+ * @brief 计算阶乘（使用 std::tgamma 函数实现）
  *
  * 适用于 n <= 20 (uint64_t 范围内)
  * 
@@ -20,11 +20,9 @@ inline uint64_t factorial(uint32_t n) {
         throw std::overflow_error("Factorial result exceeds uint64_t range");
     }
     
-    uint64_t result = 1;
-    for (uint32_t i = 2; i <= n; ++i) {
-        result *= i;
-    }
-    return result;
+    // 使用 std::tgamma(n+1) 计算阶乘，等价于 n!
+    // std::tgamma(x) 计算的是 (x-1)!
+    return static_cast<uint64_t>(std::tgamma(static_cast<double>(n + 1)));
 }
 
 } // namespace utils
