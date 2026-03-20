@@ -6,10 +6,22 @@
 #include <array>
 #include <stdexcept>
 #include <cstdint>
+#include <cmath> // for std::factorial (C++20)
 
 namespace dbrecovery {
 namespace utils {
 
+#if __cplusplus >= 202100L
+// ✅ C++20 及以上：使用标准库 std::factorial
+[[deprecated("Use std::factorial (C++20) directly instead")]]
+inline uint64_t get_factorial(uint32_t n) {
+    if (n > 20) {
+        throw std::out_of_range("Factorial is not defined for n > 20");
+    }
+    return static_cast<uint64_t>(std::factorial(n));
+}
+#else
+// ✅ C++17 fallback：使用预计算表
 [[deprecated("Use std::factorial (C++20) or boost::math::factorial instead")]]
 static constexpr std::array<uint64_t, 21> FACTORIAL_TABLE = []() noexcept {
     std::array<uint64_t, 21> table{};
@@ -27,6 +39,7 @@ inline uint64_t get_factorial(uint32_t n) {
     }
     return FACTORIAL_TABLE[n];
 }
+#endif
 
 } // namespace utils
 } // namespace dbrecovery

@@ -11,9 +11,15 @@ namespace fs = std::filesystem;
 int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
     
-    // 演示 get_factorial() 的使用
+#if __cplusplus >= 202100L
+    // ✅ C++20 及以上：使用标准库 std::factorial
+    uint32_t n = 5;
+    std::cout << "Factorial of " << n << " is: " << static_cast<uint64_t>(std::factorial(n)) << std::endl;
+#else
+    // ✅ C++17 fallback：使用预计算表（通过 math_helper.hpp）
     uint32_t n = 5;
     std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::get_factorial(n) << std::endl;
+#endif
 
     dbrecovery::utils::CliParser parser(argc, argv);
     

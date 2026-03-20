@@ -7,6 +7,8 @@
 namespace dbrecovery {
 namespace tests {
 
+// ✅ 注意：get_factorial() 已废弃，不应在此处使用。如需测试阶乘，请直接内联计算。
+
 std::vector<uint8_t> load_page_from_ibd(const std::string& ibd_path, uint32_t page_no) {
     utils::FileMapper mapper(ibd_path);
     if (!mapper.is_valid()) {
