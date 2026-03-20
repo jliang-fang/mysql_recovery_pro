@@ -11,7 +11,7 @@ namespace fs = std::filesystem;
 int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
     
-    // ✅ 新增：演示 get_factorial() 的使用
+    // 演示 get_factorial() 的使用
     uint32_t n = 5;
     std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::get_factorial(n) << std::endl;
 

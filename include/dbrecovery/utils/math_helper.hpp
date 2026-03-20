@@ -5,6 +5,10 @@
 #include <cstdint>
 #include <cmath> // For std::factorial in C++23
 
+#if __cplusplus >= 202302L
+#  include <numeric> // For std::factorial (C++23)
+#endif
+
 namespace dbrecovery {
 namespace utils {
 
@@ -19,9 +23,9 @@ static constexpr std::array<uint64_t, 21> FACTORIAL_TABLE = []() noexcept {
 }();
 
 /**
- * @brief 计算阶乘（使用查表法实现）
+ * @brief 计算阶乘（使用查表法或 std::factorial 实现）
  *
- * ✅ 重构：避免浮点精度损失，O(1) 时间复杂度
+ * ✅ 重构：优先使用 C++23 的 std::factorial，回退到查表法
  * 适用于 n <= 20 (uint64_t 范围内)
  * 
  * @param n 非负整数
@@ -30,12 +34,21 @@ static constexpr std::array<uint64_t, 21> FACTORIAL_TABLE = []() noexcept {
 inline uint64_t factorial(uint32_t n) {
     static_assert(FACTORIAL_TABLE.size() == 21, "FACTORIAL_TABLE must have 21 entries (0! to 20!)");
     
+#if __cplusplus >= 202302L
+    if constexpr (std::is_constant_evaluated()) {
+        // 编译期计算使用查表法（std::factorial 在编译期可能不可用）
+        return FACTORIAL_TABLE[n];
+    } else {
+        // 运行时优先使用 std::factorial
+        return std::factorial(n);
+    }
+#else
+    // C++23 之前使用查表法
     if (n >= FACTORIAL_TABLE.size()) {
         throw std::overflow_error("Factorial result exceeds uint64_t range (n > 20)");
     }
-    
-    // ✅ 直接查表，无精度损失
     return FACTORIAL_TABLE[n];
+#endif
 }
 
 // ✅ 新增：get_factorial() 包装函数，以满足原始请求
