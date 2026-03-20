@@ -12,8 +12,8 @@ TEST(BPlusTreeParser, ParseValidLeafPage) {
     // 创建一个有效的叶子页
     std::vector<uint8_t> page_data(16384, 0);
     
-    // 设置页类型为 FIL_PAGE_INDEX (9969)
-    write_le<uint16_t>(page_data.data(), 50, FIL_PAGE_INDEX);
+    // ✅ 新增：使用统一的页类型常量
+    write_le<uint16_t>(page_data.data(), 50, dbrecovery::innodb::FIL_PAGE_INDEX);
     
     // 设置页级别为 0（叶子节点）
     write_le<uint16_t>(page_data.data(), 42, 0);

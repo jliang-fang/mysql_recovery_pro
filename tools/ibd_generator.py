@@ -31,11 +31,23 @@ MYSQL_TYPE_TIME2       = 19
 MYSQL_TYPE_JSON        = 245
 
 # InnoDB 页类型常量（参考 MySQL 8.0 源码 include/fil0fil.h）
+# ✅ 新增：与 C++ 头文件 page_defs.hpp 保持一致
 FIL_PAGE_TYPE_ALLOCATED = 0
-FIL_PAGE_INDEX        = 9969   # B+Tree 索引页
-FIL_PAGE_UNDO_LOG     = 9970   # Undo 日志页
-FIL_PAGE_SDI          = 9971   # SDI 元数据页
-FIL_PAGE_TYPE_BLOB    = 9972   # BLOB页
+FIL_PAGE_INDEX        = 9969   # B+Tree 索引页 (0x2041)
+FIL_PAGE_UNDO_LOG     = 9970   # Undo 日志页 (0x2042) — MySQL 8.0 中替代了旧版的 FIL_PAGE_RTREE
+FIL_PAGE_SDI          = 9971   # SDI 元数据页 (0x2043)
+FIL_PAGE_TYPE_BLOB    = 9972   # BLOB页 (0x2044)
+FIL_PAGE_COMPRESSED   = 9973   # 压缩页 (0x2045)
+
+# ✅ 新增：页类型字符串映射（用于调试）
+PAGE_TYPE_NAMES = {
+    FIL_PAGE_TYPE_ALLOCATED: "ALLOCATED",
+    FIL_PAGE_INDEX:        "INDEX",
+    FIL_PAGE_UNDO_LOG:     "UNDO_LOG",
+    FIL_PAGE_SDI:          "SDI",
+    FIL_PAGE_TYPE_BLOB:    "BLOB",
+    FIL_PAGE_COMPRESSED:   "COMPRESSED"
+}
 
 # ==================== 辅助函数 ====================
 def write_le_uint32(data, offset, value):

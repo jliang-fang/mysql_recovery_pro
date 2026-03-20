@@ -34,6 +34,11 @@ bool PageParser::parse() noexcept {
         case PageType::FIL_PAGE_INDEX:
         case PageType::FIL_PAGE_SDI:
         case PageType::FIL_PAGE_TYPE_BLOB:
+            // ✅ 新增：兼容旧版 FIL_PAGE_RTREE（9970），但标记为废弃
+            if (type_ == PageType::FIL_PAGE_RTREE) {
+                std::cerr << "[WARN] Page type FIL_PAGE_RTREE (9970) is deprecated in MySQL 8.0, "
+                             "use FIL_PAGE_UNDO_LOG instead." << std::endl;
+            }
             break;
         default:
             // 非数据页（如 UNDO、SYS）暂不解析

@@ -31,7 +31,7 @@ constexpr uint16_t FIL_PAGE_LSN_ABS     = 38 + 8; // 46
 /// @brief Offset of space ID within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;
 
-// ✅ 新增：页类型值定义
+// ✅ 新增：页类型值定义（MySQL 8.0 官方定义，参考 include/fil0fil.h）
 /// @brief B+Tree index page type
 constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x2041 — B+Tree index page
 /// @brief Undo log page type
@@ -48,6 +48,19 @@ constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x2045 — Compressed page
 // ✅ 新增：页类型读取辅助函数（使用绝对偏移，更直观）
 inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
     return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_ABS);
+}
+
+// ✅ 新增：页类型字符串化辅助函数（用于调试输出）
+inline std::string page_type_to_string(uint16_t type) {
+    switch (type) {
+        case FIL_PAGE_INDEX:       return "FIL_PAGE_INDEX";
+        case FIL_PAGE_UNDO_LOG:    return "FIL_PAGE_UNDO_LOG";
+        case FIL_PAGE_TYPE_ALLOCATED: return "FIL_PAGE_TYPE_ALLOCATED";
+        case FIL_PAGE_SDI:         return "FIL_PAGE_SDI";
+        case FIL_PAGE_TYPE_BLOB:   return "FIL_PAGE_TYPE_BLOB";
+        case FIL_PAGE_COMPRESSED:  return "FIL_PAGE_COMPRESSED";
+        default:                   return "UNKNOWN";
+    }
 }
 
 // InnoDB 常量

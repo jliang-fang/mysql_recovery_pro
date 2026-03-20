@@ -34,10 +34,12 @@ bool BPlusTreeParser::parse() noexcept(false) {
     // FIL_PAGE_TYPE_OFFSET 在 page_defs.hpp 中定义为 12，绝对偏移 = 38 + 12 = 50
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + dbrecovery::innodb::FIL_PAGE_TYPE_OFFSET);
     
+    // ✅ 新增：使用统一的页类型常量进行比较
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && 
         page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
-        std::cerr << "[ERROR] BPlusTreeParser: Invalid page type " << page_type << std::endl;
+        std::cerr << "[ERROR] BPlusTreeParser: Invalid page type " << page_type 
+                  << " (" << dbrecovery::innodb::page_type_to_string(page_type) << ")" << std::endl;
         return false;
     }
     
