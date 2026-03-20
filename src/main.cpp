@@ -4,12 +4,17 @@
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
+#include "dbrecovery/utils/math_helper.hpp"
 
 namespace fs = std::filesystem;
 
 int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
     
+    // ✅ 新增：演示 get_factorial() 的使用
+    uint32_t n = 5;
+    std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::get_factorial(n) << std::endl;
+
     dbrecovery::utils::CliParser parser(argc, argv);
     
     // Parse arguments
@@ -17,17 +22,11 @@ int main(int argc, char** argv) {
     std::string output_dir = parser.get_option("output", "/tmp/recovered");
     uint64_t table_id = 0;
     
-    try {
-        table_id = std::stoull(parser.get_option("table-id", "0"));
-    } catch (...) {
-        std::cerr << "[WARN] Invalid table-id, using default\n";
-    }
-    
     if (ibd_path.empty()) {
-        std::cout << "Usage: mysql8_recover --ibd=/path/to/table.ibd [--output=/tmp/recovered] [--table-id=42]\n";
+        std::cerr << "Usage: " << argv[0] << " --ibd=<path_to_ibd_file> [--output=<dir>] [--table-id=<id>]" << std::endl;
         return 1;
     }
-    
+
     // 检查文件是否存在
     std::ifstream f(ibd_path);
     if (!f.good()) {
