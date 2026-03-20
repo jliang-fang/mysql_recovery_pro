@@ -93,11 +93,11 @@ private:
     // ✅ 新增：解析页头信息
     bool parse_header() noexcept;
     
-    // ✅ 新增：解析 INFIMUM/SUPREMUM 系统记录
-    bool parse_infimum_supremum() noexcept;
+    // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
+    bool parse_infimum_supremum();
     
-    // ✅ 新增：解析用户记录
-    bool parse_user_records() noexcept;
+    // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
+    bool parse_user_records();
 
 private:
     std::vector<uint8_t> page_data_;
@@ -255,9 +255,9 @@ private:
     uint16_t infimum_offset_ = 54;
     uint16_t supremum_offset_ = 0;
 
-    inline bool parse_header() noexcept;
-    inline bool parse_infimum_supremum() noexcept;
-    inline bool parse_user_records() noexcept;
+    bool parse_header() noexcept;
+    bool parse_infimum_supremum();
+    bool parse_user_records();
 };
 
 // ==================== 实现部分 ====================
@@ -303,7 +303,7 @@ inline bool BPlusTreeParser::parse() {
 }
 
 // ✅ 新增：解析页头信息
-inline bool BPlusTreeParser::parse_header() noexcept {
+bool BPlusTreeParser::parse_header() noexcept {
     // 解析页头信息（简化版）
     if (page_data_.size() < 38 + 16) {
         return false;
@@ -337,7 +337,7 @@ inline bool BPlusTreeParser::parse_header() noexcept {
 }
 
 // ✅ 新增：解析 INFIMUM/SUPREMUM 系统记录
-inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
+bool BPlusTreeParser::parse_infimum_supremum() {
     // 解析 INFIMUM 和 SUPREMUM 记录（固定偏移）
     if (page_data_.size() < 54 + 5) {
         return false;
@@ -367,7 +367,7 @@ inline bool BPlusTreeParser::parse_infimum_supremum() noexcept {
 }
 
 // ✅ 新增：解析用户记录
-inline bool BPlusTreeParser::parse_user_records() noexcept {
+bool BPlusTreeParser::parse_user_records() {
     // 解析用户记录（从 INFIMUM 之后开始）
     if (page_data_.size() < infimum_offset_ + 5) {
         return false;
