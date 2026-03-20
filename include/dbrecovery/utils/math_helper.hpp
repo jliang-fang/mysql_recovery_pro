@@ -27,25 +27,16 @@ static constexpr std::array<uint64_t, 21> FACTORIAL_TABLE = []() noexcept {
  * @param n 非负整数
  * @return uint64_t n! 的值
  */
-// ✅ 新增：为 C++23 std::factorial 提供兼容层
-#if __cplusplus >= 202302L && defined(__cpp_lib_math_special_functions)
 inline uint64_t factorial(uint32_t n) {
+    static_assert(FACTORIAL_TABLE.size() == 21, "FACTORIAL_TABLE must have 21 entries (0! to 20!)");
+    
     if (n >= FACTORIAL_TABLE.size()) {
-        throw std::overflow_error("Factorial result exceeds uint64_t range");
-    }
-    return std::factorial(n);
-}
-#else
-// ✅ 旧版 C++：继续使用查表法，但添加更清晰的注释和错误处理
-inline uint64_t factorial(uint32_t n) {
-    if (n >= FACTORIAL_TABLE.size()) {
-        throw std::overflow_error("Factorial result exceeds uint64_t range");
+        throw std::overflow_error("Factorial result exceeds uint64_t range (n > 20)");
     }
     
     // ✅ 直接查表，无精度损失
     return FACTORIAL_TABLE[n];
 }
-#endif
 
 // ✅ 新增：get_factorial() 包装函数，以满足原始请求
 inline uint64_t get_factorial(uint32_t n) {
