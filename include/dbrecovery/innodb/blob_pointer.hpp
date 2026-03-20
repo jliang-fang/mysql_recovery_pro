@@ -30,8 +30,9 @@ struct BlobPageChain {
         pages.emplace_back(space_id, page_no);
     }
 
+    // ✅ 新增：声明 is_valid 方法，实现移至 blob_pointer.cpp
     bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }, 
-                  bool strict_mode = true) const {
+                  bool strict_mode = true) const;
         if (pages.empty()) {
             std::cerr << "[ERROR] BLOB chain is empty" << std::endl;
             return false;
