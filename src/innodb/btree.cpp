@@ -71,18 +71,18 @@ bool BPlusTreeParser::parse() noexcept(false) {
 }
 
 bool BPlusTreeParser::parse_header() noexcept {
-    if (page_data_.size() < 38 + 24) { // 确保有足够空间读取到 PAGE_NEXT
+    if (page_data_.size() < FIL_HEADER_SIZE + 24) { // 确保有足够空间读取到 PAGE_NEXT
         return false;
     }
     
-    // ✅ 修复：使用正确的偏移计算（参考 page_defs.hpp）
-    // FIL_HEADER_SIZE = 38, BTR_N_LEVELS_OFFSET = 4 (relative to B+ tree header)
-    // So absolute offset for PAGE_LEVEL is 38 + 4 = 42
+    // ✅ 使用 page_defs.hpp 中定义的常量
+    // BTR_N_LEVELS_OFFSET = 4 (relative to B+ tree header, which starts at FIL_HEADER_SIZE)
+    // So absolute offset for PAGE_LEVEL is FIL_HEADER_SIZE + 4 = 42
     // ✅ 新增：使用 uint16_t 读取以匹配 page_level_ 类型（实际 InnoDB 中为 2 字节）
-    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
+    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), FIL_HEADER_SIZE + BTR_N_LEVELS);
     
     // Flags are at BTR_N_LEVELS_OFFSET + 2 = 6 relative to B+ tree header (BTR_SPACE_ID = 0, BTR_N_LEVELS = 4)
-    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 6);
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), FIL_HEADER_SIZE + 6);
     
     // ✅ 新增：验证页级别合理性（MySQL 8.0 B+树最大高度通常不超过5）
     if (page_level_ > 5) {
@@ -98,8 +98,8 @@ bool BPlusTreeParser::parse_header() noexcept {
     
     // 读取页链信息（使用正确的偏移）
     // PAGE_PREV_OFFSET = 20, PAGE_NEXT_OFFSET = 26 (relative to B+ tree header)
-    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
-    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
+    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), FIL_HEADER_SIZE + 20);
+    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), FIL_HEADER_SIZE + 26);
     
     // ✅ 新增：验证页链连续性（仅对非叶子节点有意义）
     if (node_type_ != BTreeNodeType::LEAF) {
@@ -120,8 +120,8 @@ bool BPlusTreeParser::parse_infimum_supremum() {
         return false;
     }
     
-    // INFIMUM 记录偏移（固定为54，参考 page_defs.hpp）
-    infimum_offset_ = 54;
+    // ✅ 使用 page_defs.hpp 中定义的常量
+    infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
     if (infimum_offset_ + 13 > page_data_.size()) {
         std::cerr << "[ERROR] BPlusTreeParser: INFIMUM record out of bounds" << std::endl;
         return false;
@@ -160,12 +160,8 @@ bool BPlusTreeParser::parse_infimum_supremum() {
 }
 
 bool BPlusTreeParser::parse_user_records() {
-    // 解析用户记录（从 INFIMUM 之后开始）
-    if (page_data_.size() < infimum_offset_ + 5) {
-        return false;
-    }
-    
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
+    // ✅ 使用 page_defs.hpp 中定义的常量
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), FIL_HEADER_SIZE + PAGE_HEAP_TOP_OFFSET);
     size_t current_offset = infimum_offset_;
     
     while (current_offset < heap_top - 5) {

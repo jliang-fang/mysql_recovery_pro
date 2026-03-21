@@ -16,17 +16,20 @@ namespace innodb {
 // From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
 // FIL_HEADER_SIZE = 38 bytes
 
+/// @brief Size of the FIL header (fixed at 38 bytes)
+constexpr uint16_t FIL_HEADER_SIZE      = 38;
+
 /// @brief Offset of page type within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 12;
 /// @brief Absolute offset of page type within a page (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 50)
-constexpr uint16_t FIL_PAGE_TYPE_ABS    = 38 + 12; // 50
+constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET; // 50
 /// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
 constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
 /// @brief Offset of page number within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_OFFSET      = 4;
 /// @brief Absolute offset of LSN within a page (FIL_HEADER_SIZE + 8 = 46)
-constexpr uint16_t FIL_PAGE_LSN_ABS     = 38 + 8; // 46
+constexpr uint16_t FIL_PAGE_LSN_ABS     = FIL_HEADER_SIZE + 8; // 46
 
 /// @brief Offset of space ID within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;

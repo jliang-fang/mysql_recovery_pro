@@ -12,17 +12,17 @@ TEST(BPlusTreeParser, ParseValidLeafPage) {
     // 创建一个有效的叶子页
     std::vector<uint8_t> page_data(16384, 0);
     
-    // ✅ 新增：使用统一的页类型常量
-    write_le<uint16_t>(page_data.data(), 50, dbrecovery::innodb::FIL_PAGE_INDEX);
+    // ✅ 使用 page_defs.hpp 中定义的常量
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
     
     // 设置页级别为 0（叶子节点）
-    write_le<uint16_t>(page_data.data(), 42, 0);
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::BTR_N_LEVELS_ABS, 0);
     
     // 设置目录槽数量
-    write_le<uint16_t>(page_data.data(), 38, 5);  // n_dir_slots
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + PAGE_N_DIR_SLOTS_OFFSET, 5);  // n_dir_slots
     
     // 设置堆顶位置
-    write_le<uint16_t>(page_data.data(), 40, 100);  // heap_top
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + PAGE_HEAP_TOP_OFFSET, 100);  // heap_top
     
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
