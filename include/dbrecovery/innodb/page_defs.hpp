@@ -105,6 +105,11 @@ constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
 /// This is dynamic and should be read from page header, but for reference:
 constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder
 
+// ✅ 新增：页目录槽相关常量（用于解析）
+constexpr uint16_t PAGE_N_DIR_SLOTS_SIZE   = 2;  // size of n_dir_slots field
+constexpr uint16_t PAGE_HEAP_TOP_SIZE      = 2;  // size of heap_top field
+constexpr uint16_t PAGE_N_HEAP_SIZE        = 2;  // size of n_heap field
+
 // ==================== Record Header Constants (COMPACT format) ====================
 // From MySQL 8.0.36: include/page0page.h
 // REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT, extra_bytes = 5 + n_nullable * 1
