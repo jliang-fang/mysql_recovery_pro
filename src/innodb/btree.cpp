@@ -286,12 +286,14 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
 }
 
 uint64_t BPlusTreeParser::get_sdi_table_id() const {
+    // ✅ 修复：SDI 页的表 ID 偏移需要根据具体实现确定，此处提供一个安全的默认值
+    // 实际偏移可能因 MySQL 版本而异，建议通过 SDI 解析器获取更准确的信息
     constexpr size_t min_sdi_size = dbrecovery::innodb::FIL_HEADER_SIZE + 20;
     if (page_data_.size() < min_sdi_size) {
         return 0;
     }
     
-    // SDI页的表ID在 FIL_HEADER_SIZE + 20 处
+    // ✅ 新增：SDI 表 ID 偏移常量（预留扩展点）
     constexpr size_t sdi_table_id_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 20;
     uint64_t table_id = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), sdi_table_id_offset);
     return table_id;

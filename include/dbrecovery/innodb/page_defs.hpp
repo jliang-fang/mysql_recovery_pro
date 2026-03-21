@@ -165,7 +165,8 @@ constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
 constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
 /// @brief Absolute offset of SUPREMUM record within Page Data (typically at heap_top - 5)
 /// This is dynamic and should be read from page header, but for reference:
-constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder
+/// Note: In practice, this is calculated as `heap_top - 5` where heap_top is read from the page header.
+constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder (dynamic)
 
 // ==================== Alias for backward compatibility and clarity ====================
 #define PAGE_N_DIR_SLOTS FIL_PAGE_OFFSET_N_DIR_SLOTS
