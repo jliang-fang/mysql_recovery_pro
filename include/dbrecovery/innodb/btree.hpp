@@ -252,7 +252,7 @@ private:
     uint16_t flags_ = 0;      // B+树标志位（用于存储行格式等信息）
     
     // INFIMUM/SUPREMUM 记录偏移
-    uint16_t infimum_offset_ = 54;
+    uint16_t infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
     uint16_t supremum_offset_ = 0;
 
     bool parse_header() noexcept;
@@ -305,29 +305,27 @@ inline bool BPlusTreeParser::parse() {
 // ✅ 新增：解析页头信息
 bool BPlusTreeParser::parse_header() noexcept {
     // 解析页头信息（简化版）
-    if (page_data_.size() < 38 + 16) {
+    if (page_data_.size() < dbrecovery::innodb::FIL_HEADER_SIZE + 16) {
         return false;
     }
     
-    // 读取页类型
-    page_type_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 12);
+    // ✅ 修复：使用 page_defs.hpp 中定义的常量
+    page_type_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
     if (page_type_ != dbrecovery::innodb::FIL_PAGE_INDEX && 
         page_type_ != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type_ != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
         return false;
     }
     
-    // 读取页级别
-    page_level_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 4);
+    // ✅ 修复：使用正确的偏移读取页级别
+    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_N_LEVELS);
     
-    // 读取下一页和前一页
-    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 26);
-    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), 38 + 20);
+    // ✅ 修复：使用正确的偏移读取下一页和前一页
+    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 26);
+    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 20);
     
-    // 读取 flags (BTR_SPACE_ID, BTR_N_LEVELS, BTR_FORMAT)
-    // 根据 page_defs.hpp，BTR_HEADER 从偏移 38 开始
-    // BTR_SPACE_ID = 0 (4 bytes), BTR_N_LEVELS = 4 (2 bytes), BTR_FLAGS = 6 (2 bytes)
-    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 6);
+    // ✅ 修复：使用正确的偏移读取 flags
+    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 6);
     
     // BTR_FORMAT 是 flags 的一部分，通过位掩码提取
     // BTR_FORMAT_MASK = 0x80, 表示是否为 DYNAMIC/COMPRESSED 格式
