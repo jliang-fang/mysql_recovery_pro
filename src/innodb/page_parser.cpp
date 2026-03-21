@@ -33,9 +33,10 @@ bool PageParser::parse_header() {
         return false;
     }
     
-    // ✅ 添加：校验页大小范围
+    // ✅ 新增：定义页大小常量，确保与 page_defs.hpp 保持一致
     constexpr size_t UNIV_PAGE_SIZE_MIN = 4096;
     constexpr size_t UNIV_PAGE_SIZE_MAX = 65536;
+    
     if (size_ < UNIV_PAGE_SIZE_MIN || size_ > UNIV_PAGE_SIZE_MAX) {
         std::cerr << "[WARN] Invalid page size: " << size_ << "\n";
         return false;
