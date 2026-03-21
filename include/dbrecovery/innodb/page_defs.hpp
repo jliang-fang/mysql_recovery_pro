@@ -73,15 +73,37 @@ constexpr size_t UNIV_PAGE_SIZE_MAX     = 65536; // 最大页大小 (64KB)
 
 // ==================== B+Tree Header Constants ====================
 // From MySQL 8.0.36: include/page0page.h
-// BTR_HEADER starts at offset 38 (after FIL_HEADER)
+// BTR_HEADER starts at offset FIL_HEADER_SIZE (after FIL_HEADER)
 // ✅ 修复：使用相对偏移（相对于B+树头），而不是绝对偏移
 constexpr uint16_t BTR_N_LEVELS         = 4;        // number of levels in the tree (relative to BTR header)
 constexpr uint16_t BTR_IND_PAGE_OFFSET  = 6;        // offset of the index id (relative to BTR header)
 constexpr uint16_t BTR_MAX_SIZE         = 50;       // maximum size of a record
 
 // ✅ 新增：绝对偏移常量（用于直接读取页数据）
-constexpr uint16_t BTR_N_LEVELS_ABS     = 38 + 4;   // absolute offset for page_level
-constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = 38 + 6; // absolute offset for index id
+constexpr uint16_t BTR_N_LEVELS_ABS     = FIL_HEADER_SIZE + 4;   // absolute offset for page_level
+constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = FIL_HEADER_SIZE + 6; // absolute offset for index id
+
+// ==================== Page Header Constants (relative to FIL_HEADER_SIZE) ====================
+// From MySQL 8.0.36: include/page0page.h
+// PAGE_N_DIR_SLOTS, PAGE_HEAP_TOP, etc., are relative to the start of page data (after FIL header)
+
+/// @brief Offset of PAGE_N_DIR_SLOTS within Page Header (relative to FIL_HEADER_SIZE)
+constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = 0;
+/// @brief Offset of PAGE_HEAP_TOP within Page Header (relative to FIL_HEADER_SIZE)
+constexpr uint16_t PAGE_HEAP_TOP_OFFSET    = 2;
+/// @brief Offset of PAGE_N_HEAP within Page Header (relative to FIL_HEADER_SIZE)
+constexpr uint16_t PAGE_N_HEAP_OFFSET      = 4;
+/// @brief Offset of PAGE_FREE within Page Header (relative to FIL_HEADER_SIZE)
+constexpr uint16_t PAGE_FREE_OFFSET        = 6;
+
+// ==================== Record Constants ====================
+/// @brief Offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
+/// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
+/// For simplicity and clarity, we define the absolute offset directly.
+constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
+/// @brief Offset of SUPREMUM record within Page Data (typically at heap_top - 5)
+/// This is dynamic and should be read from page header, but for reference:
+constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder
 
 // ==================== Record Header Constants (COMPACT format) ====================
 // From MySQL 8.0.36: include/page0page.h
