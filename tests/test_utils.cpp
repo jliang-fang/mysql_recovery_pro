@@ -23,6 +23,31 @@ TEST(UtilsTest, FactorialConsistency) {
     EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
 
+// ✅ 新增：测试 sint24（有符号24位整数）读取
+TEST(MachReadTest, ReadSInt24Positive) {
+    uint8_t data[3] = {0x34, 0x12, 0x00}; // 小端序: 0x001234 = 4660
+    int32_t val = dbrecovery::innodb::read_le<int32_t>(data);
+    EXPECT_EQ(val, 4660);
+}
+
+TEST(MachReadTest, ReadSInt24Negative) {
+    uint8_t data[3] = {0x34, 0xDE, 0xFF}; // 小端序: 0xFFFFDE34 (符号扩展后) = -7500
+    int32_t val = dbrecovery::innodb::read_le<int32_t>(data);
+    EXPECT_EQ(val, -7500);
+}
+
+TEST(MachReadTest, ReadSInt24MinValue) {
+    uint8_t data[3] = {0x00, 0x00, 0x80}; // 最小负值: 0xFF800000 (符号扩展后) = -32768
+    int32_t val = dbrecovery::innodb::read_le<int32_t>(data);
+    EXPECT_EQ(val, -32768);
+}
+
+TEST(MachReadTest, ReadSInt24MaxValue) {
+    uint8_t data[3] = {0xFF, 0xFF, 0x7F}; // 最大正值: 0x007FFFFF = 8388607
+    int32_t val = dbrecovery::innodb::read_le<int32_t>(data);
+    EXPECT_EQ(val, 8388607);
+}
+
 // ✅ 新增：测试 VARCHAR 列偏移计算（P0-7 修复）
 TEST(TableSchemaTest, GetColumnOffsetWithVarchar) {
     catalog::TableSchema schema;
