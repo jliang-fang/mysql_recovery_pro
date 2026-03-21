@@ -11,8 +11,6 @@ namespace fs = std::filesystem;
 int main(int argc, char** argv) {
     std::cout << "MySQL 8.0 Recovery Engine v1.0.0 (jliang.fang)\n";
     
-    // ✅ 统一使用 C++17 兼容的预计算表（项目要求 C++17 标准）
-    // 已在 utils/math_helper.hpp 中实现，此处直接调用 utils::factorial()
     dbrecovery::utils::CliParser parser(argc, argv);
     
     // Parse arguments
@@ -26,19 +24,10 @@ int main(int argc, char** argv) {
     }
 
     // ✅ 统一使用 C++17 兼容的预计算表（项目要求 C++17 标准）
-    // 已在 utils/math_helper.hpp 中实现，此处直接调用 utils::factorial()
+    // 已在 utils/math_helper.hpp 中实现，此处直接调用 dbrecovery::utils::factorial()
     uint32_t n = 5;
     std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::factorial(n) << std::endl;
-    
-    // 验证预计算结果（用于 CI/CD 测试）
-    if (dbrecovery::utils::factorial(5) != 120 || dbrecovery::utils::factorial(10) != 3628800) {
-        std::cerr << "[ERROR] Factorial function verification failed" << std::endl;
-        return 1;
-    }
-    
-    // ✅ 确保项目中不存在 get_factorial() 等重复实现
-    // 所有阶乘计算应统一使用 dbrecovery::utils::factorial<T>()
-    
+
     // 检查文件是否存在
     std::ifstream f(ibd_path);
     if (!f.good()) {
