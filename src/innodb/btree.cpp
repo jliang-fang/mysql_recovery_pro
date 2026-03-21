@@ -97,9 +97,9 @@ bool BPlusTreeParser::parse_header() noexcept {
     // 判断节点类型
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
     
-    // 读取页链信息（使用正确的偏移）
-    const size_t prev_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 20;
-    const size_t next_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 26;
+    // ✅ 修复：使用常量定义的偏移读取页链信息（prev_page 和 next_page）
+    const size_t prev_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 20; // BTR_PAGE_PREV
+    const size_t next_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 26; // BTR_PAGE_NEXT
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), prev_page_offset);
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), next_page_offset);
     
