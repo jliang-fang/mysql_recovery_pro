@@ -26,7 +26,7 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
 
 bool BPlusTreeParser::parse() noexcept(false) {
     // ✅ 修复：使用 page_defs.hpp 中定义的常量进行边界检查
-    const size_t min_page_size = dbrecovery::innodb::FIL_HEADER_SIZE + 16; // FIL header (38) + minimal page header space
+    constexpr size_t min_page_size = dbrecovery::innodb::FIL_HEADER_SIZE + 16; // FIL header (38) + minimal page header space
     if (page_data_.size() < min_page_size) {
         std::cerr << "[ERROR] BPlusTreeParser: Page too small. Required: " << min_page_size 
                   << ", Actual: " << page_data_.size() << std::endl;
@@ -34,7 +34,7 @@ bool BPlusTreeParser::parse() noexcept(false) {
     }
     
     // ✅ 修复：使用正确的偏移计算页类型，引用 page_defs.hpp 中的常量
-    const size_t page_type_offset = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
+    constexpr size_t page_type_offset = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset);
     
     // ✅ 新增：使用统一的页类型常量进行比较
@@ -118,9 +118,9 @@ bool BPlusTreeParser::parse_header() noexcept {
 }
 
 bool BPlusTreeParser::parse_infimum_supremum() {
-    const size_t infimum_abs = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
-    // ✅ 修复：使用常量定义的最小大小，而不是硬编码 100
-    const size_t min_size_for_infimum = infimum_abs + 13; // INFIMUM record header (5) + type byte (1) + next_offset (2) + padding (5)
+    constexpr size_t infimum_abs = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    // ✅ 修复：使用常量定义的最小大小，而不是硬编码
+    constexpr size_t min_size_for_infimum = infimum_abs + 13; // INFIMUM record header (5) + type byte (1) + next_offset (2) + padding (5)
     
     if (page_data_.size() < min_size_for_infimum) {
         std::cerr << "[ERROR] BPlusTreeParser: Page too small for INFIMUM/SUPREMUM. Required: " 
@@ -139,7 +139,7 @@ bool BPlusTreeParser::parse_infimum_supremum() {
     }
     
     // SUPREMUM 记录偏移（位于 INFIMUM 记录头的 next_record_offset 字段）
-    const size_t infimum_next_offset_pos = infimum_abs + 1;
+    constexpr size_t infimum_next_offset_pos = infimum_abs + 1;
     uint16_t infimum_next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_next_offset_pos);
     supremum_offset_ = static_cast<uint16_t>(infimum_next_offset & 0x3FFF); // ✅ 修复：next_record_offset 是 15 位
     
@@ -165,11 +165,11 @@ bool BPlusTreeParser::parse_infimum_supremum() {
 }
 
 bool BPlusTreeParser::parse_user_records() {
-    const size_t heap_top_pos = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET;
+    constexpr size_t heap_top_pos = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET;
     uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), heap_top_pos);
     
-    // ✅ 修复：使用常量定义的最小安全偏移，而不是硬编码
-    const size_t min_safe_offset = infimum_offset_ + 5;
+    // ✅ 修复：使用常量定义的最小安全偏移
+    constexpr size_t min_safe_offset = infimum_offset_ + 5;
     size_t current_offset = infimum_offset_;
     
     while (current_offset < heap_top - 5) {
@@ -179,7 +179,7 @@ bool BPlusTreeParser::parse_user_records() {
         }
         
         uint8_t info_bits = page_data_[current_offset];
-        const size_t next_offset_pos = current_offset + 1;
+        constexpr size_t next_offset_pos = current_offset + 1;
         uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), next_offset_pos) & 0x3FFF;
         
         if (next_offset <= current_offset || next_offset >= page_data_.size()) {
@@ -199,14 +199,16 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     health.is_valid = true;
     
     // 检查页大小
-    if (page_data_.size() < dbrecovery::innodb::FIL_HEADER_SIZE) {
+    constexpr size_t min_page_size_for_header = dbrecovery::innodb::FIL_HEADER_SIZE;
+    if (page_data_.size() < min_page_size_for_header) {
         health.is_valid = false;
         health.status_message = "Page size too small";
         return health;
     }
     
     // ✅ 新增：使用正确的偏移计算页类型（参考 page_defs.hpp）
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::FIL_PAGE_TYPE_OFFSET);
+    constexpr size_t page_type_offset_in_header = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::FIL_PAGE_TYPE_OFFSET;
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_in_header);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         health.is_valid = false;
         health.status_message = "Invalid page type: " + std::to_string(page_type);
@@ -214,8 +216,9 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     }
     
     // 检查INFIMUM和SUPREMUM记录
-    if (page_data_.size() >= 100) {
-        uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    constexpr size_t min_size_for_records = 100;
+    if (page_data_.size() >= min_size_for_records) {
+        constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
         if (infimum_offset + 13 <= page_data_.size()) {
             health.has_infimum = true;
             
@@ -230,8 +233,10 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     }
     
     // 解析页目录
-    if (page_data_.size() >= dbrecovery::innodb::FIL_HEADER_SIZE + 36) { // 确保有足够空间读取页目录
-        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET); // PAGE_N_DIR_SLOTS
+    constexpr size_t min_size_for_directory = dbrecovery::innodb::FIL_HEADER_SIZE + 36; // 确保有足够空间读取页目录
+    if (page_data_.size() >= min_size_for_directory) {
+        constexpr size_t n_dir_slots_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET;
+        uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), n_dir_slots_offset);
         health.n_dir_slots = n_dir_slots;
         
         // 验证页目录槽数量合理性（至少有INFIMUM和SUPREMUM）
@@ -241,10 +246,13 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
         
         // ✅ 新增：计算空闲空间
-        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET); // PAGE_HEAP_TOP
-        uint16_t free_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_FREE_OFFSET); // PAGE_FREE
-        if (heap_top >= free_offset) {
-            health.free_space = heap_top - free_offset;
+        constexpr size_t heap_top_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET;
+        uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), heap_top_offset);
+        
+        constexpr size_t free_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_FREE_OFFSET;
+        uint16_t free_value = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), free_offset);
+        if (heap_top >= free_value) {
+            health.free_space = heap_top - free_value;
         }
     } else {
         health.status_message += "Page header incomplete; ";
@@ -252,8 +260,10 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     }
     
     // 解析堆大小
-    if (page_data_.size() >= dbrecovery::innodb::FIL_HEADER_SIZE + 4) { // 确保有足够空间读取PAGE_N_HEAP
-        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_HEAP_OFFSET) & 0x7FFF;
+    constexpr size_t min_size_for_heap = dbrecovery::innodb::FIL_HEADER_SIZE + 4; // 确保有足够空间读取PAGE_N_HEAP
+    if (page_data_.size() >= min_size_for_heap) {
+        constexpr size_t n_heap_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_HEAP_OFFSET;
+        uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), n_heap_offset) & 0x7FFF;
         health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
         
         // 验证堆大小合理性
@@ -270,12 +280,14 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
 }
 
 uint64_t BPlusTreeParser::get_sdi_table_id() const {
-    if (page_data_.size() < 58) {
+    constexpr size_t min_sdi_size = dbrecovery::innodb::FIL_HEADER_SIZE + 20;
+    if (page_data_.size() < min_sdi_size) {
         return 0;
     }
     
-    // SDI页的表ID在偏移38+20处
-    uint64_t table_id = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), 38 + 20);
+    // SDI页的表ID在 FIL_HEADER_SIZE + 20 处
+    constexpr size_t sdi_table_id_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 20;
+    uint64_t table_id = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), sdi_table_id_offset);
     return table_id;
 }
 
