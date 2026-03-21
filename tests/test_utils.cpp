@@ -23,6 +23,44 @@ TEST(UtilsTest, FactorialConsistency) {
     EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
 
+// ✅ 新增：测试 VARCHAR 列偏移计算（P0-7 修复）
+TEST(TableSchemaTest, GetColumnOffsetWithVarchar) {
+    catalog::TableSchema schema;
+    schema.table_name = "test_table";
+    schema.engine = "InnoDB";
+    schema.row_format = catalog::row_formats::DYNAMIC;
+    
+    // 添加三列：INT (4), VARCHAR(100), VARCHAR(300)
+    catalog::ColumnInfo col1, col2, col3;
+    col1.name = "id"; col1.mysql_type_id = catalog::mysql_types::LONG; col1.is_nullable = false;
+    schema.columns[1] = col1;
+    
+    col2.name = "name"; col2.mysql_type_id = catalog::mysql_types::VARCHAR; 
+    col2.column_length = 100; col2.is_nullable = true;
+    schema.columns[2] = col2;
+    
+    col3.name = "description"; col3.mysql_type_id = catalog::mysql_types::VARCHAR;
+    col3.column_length = 300; col3.is_nullable = true;
+    schema.columns[3] = col3;
+    
+    // 验证偏移计算
+    auto offset1 = schema.get_column_offset("id");
+    EXPECT_TRUE(offset1.has_value());
+    EXPECT_EQ(*offset1, 0);
+    
+    auto offset2 = schema.get_column_offset("name");
+    EXPECT_TRUE(offset2.has_value());
+    // VARCHAR(100) * 4 (utf8mb4) = 400 bytes > 255, so +2 prefix
+    // INT = 4, VARCHAR(100) = 400 + 2 = 402
+    EXPECT_EQ(*offset2, 4);
+    
+    auto offset3 = schema.get_column_offset("description");
+    EXPECT_TRUE(offset3.has_value());
+    // VARCHAR(300) * 4 = 1200 bytes > 255, so +2 prefix
+    // previous offset (4) + VARCHAR(100) size (402) = 406
+    EXPECT_EQ(*offset3, 406);
+}
+
 std::vector<uint8_t> load_page_from_ibd(const std::string& ibd_path, uint32_t page_no) {
     utils::FileMapper mapper(ibd_path);
     if (!mapper.is_valid()) {
