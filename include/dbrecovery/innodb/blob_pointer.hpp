@@ -61,6 +61,9 @@ struct BlobPointer {
     // ✅ 新增：BLOB 页链信息
     std::vector<std::pair<uint32_t, uint32_t>> chain_pages; // (space_id, page_no)
     
+    // ✅ 新增：构造函数初始化 chain_pages
+    BlobPointer() : space_id(0), page_no(0), offset(0), len(0), total_len(0) {}
+    
     bool is_complete() const {
         // ✅ 增强：验证 BLOB 指针的完整性
         if (chain_pages.empty()) {
