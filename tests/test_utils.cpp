@@ -23,6 +23,18 @@ TEST(UtilsTest, FactorialConsistency) {
     EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
 
+// ✅ 新增：测试 std::factorial (C++20)
+TEST(UtilsTest, FactorialWithStd) {
+    // 验证与预计算表结果一致
+    EXPECT_EQ(dbrecovery::utils::factorial(0), 1);
+    EXPECT_EQ(dbrecovery::utils::factorial(5), 120);
+    EXPECT_EQ(dbrecovery::utils::factorial(10), 3628800);
+    EXPECT_EQ(dbrecovery::utils::factorial(20), 2432902008176640000ULL);
+    
+    // 验证异常处理
+    EXPECT_THROW(dbrecovery::utils::factorial(21), std::overflow_error);
+}
+
 // ✅ 新增：测试 sint24（有符号24位整数）读取
 TEST(MachReadTest, ReadSInt24Positive) {
     uint8_t data[3] = {0x34, 0x12, 0x00}; // 小端序: 0x001234 = 4660

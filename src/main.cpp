@@ -23,7 +23,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ✅ 统一使用 C++17 兼容的预计算表（项目要求 C++17 标准）
+    // ✅ 统一使用 C++20 兼容的预计算表（项目要求 C++20 标准）
     // 已在 utils/math_helper.hpp 中实现，此处直接调用 dbrecovery::utils::factorial()
     uint32_t n = 5;
     std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::factorial(n) << std::endl;
