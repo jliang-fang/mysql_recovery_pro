@@ -159,6 +159,14 @@ constexpr uint16_t BTR_PAGE_OFFSET_LAST_INSERT   = 10;
 constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION     = 12;
 constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
 
+// ==================== Record Offset Constants (absolute offsets from page start) ====================
+/// @brief Absolute offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
+/// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
+constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
+/// @brief Absolute offset of SUPREMUM record within Page Data (typically at heap_top - 5)
+/// This is dynamic and should be read from page header, but for reference:
+constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder
+
 // ==================== Alias for backward compatibility and clarity ====================
 #define PAGE_N_DIR_SLOTS FIL_PAGE_OFFSET_N_DIR_SLOTS
 #define PAGE_HEAP_TOP    FIL_PAGE_OFFSET_HEAP_TOP
