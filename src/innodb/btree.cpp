@@ -86,7 +86,7 @@ bool BPlusTreeParser::parse_header() noexcept {
     // ✅ 新增：使用 uint16_t 读取以匹配 page_level_ 类型（实际 InnoDB 中为 2 字节）
     page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_n_levels_abs);
     
-    const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 6;
+    const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_HEAP_TOP; // 修复：使用常量定义的偏移
     flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), flags_offset);
     
     // ✅ 新增：验证页级别合理性（MySQL 8.0 B+树最大高度通常不超过5）
@@ -98,8 +98,8 @@ bool BPlusTreeParser::parse_header() noexcept {
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
     
     // ✅ 修复：使用常量定义的偏移读取页链信息（prev_page 和 next_page）
-    const size_t prev_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 20; // BTR_PAGE_PREV
-    const size_t next_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 26; // BTR_PAGE_NEXT
+    const size_t prev_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_FREE; // 修复：使用常量定义的偏移
+    const size_t next_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_DIRECTION; // 修复：使用常量定义的偏移
     prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), prev_page_offset);
     next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), next_page_offset);
     
