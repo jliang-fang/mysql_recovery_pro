@@ -236,6 +236,46 @@ TEST(BPlusTreeParser, CheckDirectorySlotsBoundary) {
     EXPECT_EQ(offsets.size(), 2); // 只应包含 INFIMUM 和 SUPREMUM
 }
 
+// ✅ 新增：测试使用常量而非硬编码偏移（验证 P0-1 修复）
+TEST(BPlusTreeParser, UseConstantsInsteadOfHardcodedOffsets) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 使用常量设置页头
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::BTR_N_LEVELS_ABS, 0); // PAGE_LEVEL = 0
+    
+    // 使用常量设置目录槽和堆顶
+    constexpr uint16_t heap_top = 100;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, heap_top);
+    
+    // 使用常量设置 INFIMUM 记录
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, heap_top - 5);
+    
+    // 使用常量设置 SUPREMUM 记录
+    constexpr uint16_t supremum_offset = heap_top - 5;
+    page_data[supremum_offset] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), supremum_offset + 1, 0xFFFF);
+    
+    // 使用常量设置目录槽
+    constexpr uint16_t n_dir_slots = 2;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET, n_dir_slots);
+    
+    size_t dir_start = 16384 - n_dir_slots * 2;
+    write_le<uint16_t>(page_data.data(), dir_start + 0, infimum_offset);
+    write_le<uint16_t>(page_data.data(), dir_start + 2, supremum_offset);
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 验证解析出的记录偏移与常量一致
+    auto offsets = parser.record_offsets();
+    EXPECT_EQ(offsets.size(), 2);
+    EXPECT_EQ(offsets[0], infimum_offset);
+    EXPECT_EQ(offsets[1], supremum_offset);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
