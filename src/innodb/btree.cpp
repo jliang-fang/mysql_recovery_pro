@@ -180,12 +180,27 @@ bool BPlusTreeParser::parse_user_records() {
 
         // ✅ 新增：记录头大小校验（至少需要 5 字节）
         if (current_offset + 5 > page_data_.size()) {
-            std::cerr << "[ERROR] BPlusTreeParser: Record header too small at offset " << current_offset << std::endl;
+            std::cerr << "[ERROR] BPlusTreeParser: Record header too small at offset " << current_offset 
+                      << ", page_size=" << page_data_.size() << std::endl;
+            break;
+        }
+
+        // ✅ 新增：在读取记录头之前，先进行边界检查
+        if (current_offset >= page_data_.size()) {
+            std::cerr << "[ERROR] BPlusTreeParser: Record offset out of bounds at " << current_offset << std::endl;
             break;
         }
 
         uint8_t info_bits = page_data_[current_offset];
         constexpr size_t next_offset_pos = current_offset + 1;
+
+        // ✅ 新增：确保 next_record_offset 字段在页边界内
+        if (next_offset_pos + 1 >= page_data_.size()) {
+            std::cerr << "[ERROR] BPlusTreeParser: next_record_offset field out of bounds at offset " 
+                      << current_offset << std::endl;
+            break;
+        }
+
         uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), next_offset_pos) & 0x3FFF;
 
         if (next_offset <= current_offset || next_offset >= page_data_.size()) {
