@@ -396,19 +396,19 @@ bool BPlusTreeParser::parse_user_records() {
 }
 
 inline bool BPlusTreeParser::parse_directory() noexcept {
-    // 简化实现：假设页头信息在偏移 38 处
-    if (page_data_.size() < 38 + 16) {
+    // 简化实现：假设页头信息在偏移 FIL_HEADER_SIZE 处
+    if (page_data_.size() < dbrecovery::innodb::FIL_HEADER_SIZE + 16) {
         return false;
     }
     
-    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38);
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE);
     if (n_dir_slots == 0 || n_dir_slots > 1000) {
         std::cerr << "[ERROR] Invalid directory slots: " << n_dir_slots << std::endl;
         return false;
     }
     
     // 解析堆顶位置
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 40);
+    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 2);
     if (heap_top < 56 || heap_top > page_data_.size()) {
         std::cerr << "[ERROR] Invalid heap top: " << heap_top << std::endl;
         return false;
@@ -424,7 +424,7 @@ inline bool BPlusTreeParser::parse_directory() noexcept {
     
     // ✅ 新增：确保目录槽区域在页边界内
     uint16_t dir_start = page_size - (n_dir_slots * 2);
-    if (dir_start < 38 + 16) { // 确保不覆盖页头和数据区
+    if (dir_start < dbrecovery::innodb::FIL_HEADER_SIZE + 16) { // 确保不覆盖页头和数据区
         std::cerr << "[ERROR] Directory start overlaps with header/data area" << std::endl;
         return false;
     }
@@ -436,7 +436,9 @@ inline bool BPlusTreeParser::parse_directory() noexcept {
         
         uint16_t slot_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), dir_start + i * 2);
         // ✅ 新增：严格检查偏移范围
-        if (slot_offset >= 54 && slot_offset < heap_top && slot_offset < page_size - 5) {
+        if (slot_offset >= dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS && 
+            slot_offset < heap_top && 
+            slot_offset < page_size - 5) {
             record_offsets_.push_back(slot_offset);
         }
     }
