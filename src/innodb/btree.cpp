@@ -22,6 +22,8 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
       next_page_(0xFFFFFFFF), 
       prev_page_(0xFFFFFFFF), 
       node_type_(BTreeNodeType::INVALID) {
+    // ✅ 新增：初始化 INFIMUM/SUPREMUM 偏移常量
+    infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
 }
 
 bool BPlusTreeParser::parse() noexcept(false) {
