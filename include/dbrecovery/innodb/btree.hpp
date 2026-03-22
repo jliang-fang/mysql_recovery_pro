@@ -36,6 +36,9 @@ public:
     
     [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
+    
+    // ✅ 新增：提供 record_offsets 的公共访问器（供测试使用）
+    [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
 
 private:
     bool valid_page_type_ = false;

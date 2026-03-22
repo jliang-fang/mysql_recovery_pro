@@ -166,54 +166,8 @@ bool BPlusTreeParser::parse_infimum_supremum() {
     return true;
 }
 
-bool BPlusTreeParser::parse_user_records() {
-    constexpr size_t heap_top_pos = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET;
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), heap_top_pos);
-
-    // ✅ 修复：使用常量定义的最小安全偏移
-    constexpr size_t min_safe_offset = infimum_offset_ + 5;
-    size_t current_offset = infimum_offset_;
-
-    // ✅ 新增：记录头格式校验函数（防止解析损坏记录）
-    auto validate_record_header = [this](size_t offset) -> bool {
-        if (offset + 5 > page_data_.size()) return false;
-        uint8_t info_bits = page_data_[offset];
-        // 检查保留位是否为 0（InnoDB 要求 info_bits 的高 5 位必须为 0）
-        if ((info_bits & 0b11111000) != 0) return false;
-        // 检查 next_record_offset 字段是否有效
-        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), offset + 1) & 0x3FFF;
-        if (next_offset <= offset || next_offset >= page_data_.size()) return false;
-        return true;
-    };
-
-    while (current_offset < heap_top - 5) {
-        // ✅ 新增：记录头格式校验
-        if (!validate_record_header(current_offset)) {
-            std::cerr << "[WARN] BPlusTreeParser: Invalid record header at offset " << current_offset << ", stopping parsing" << std::endl;
-            break;
-        }
-
-        // 检查是否为 SUPREMUM
-        if (current_offset == supremum_offset_) {
-            break;
-        }
-
-        uint8_t info_bits = page_data_[current_offset];
-        constexpr size_t next_offset_pos = current_offset + 1;
-
-        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), next_offset_pos) & 0x3FFF;
-
-        if (next_offset <= current_offset || next_offset >= page_data_.size()) {
-            // 下一个偏移无效
-            break;
-        }
-
-        record_offsets_.push_back(static_cast<uint16_t>(current_offset));
-        current_offset = next_offset;
-    }
-
-    return !record_offsets_.empty();
-}
+// ✅ 修复：移除重复的 parse_user_records 实现（已在头文件中声明为 private）
+// 此处仅保留 check_health 的实现
 
 BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     PageHealth health;
