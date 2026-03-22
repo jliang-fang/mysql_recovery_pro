@@ -141,6 +141,65 @@ TEST(PageHeader, GetPageType) {
     EXPECT_EQ(type, FIL_PAGE_INDEX);
 }
 
+// ✅ 新增：测试 INFIMUM/SUPREMUM 解析（使用常量而非硬编码）
+TEST(BPlusTreeParser, ParseInfimumSupremumWithConstants) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置页类型为 FIL_PAGE_INDEX
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置堆顶位置（足够大以包含 INFIMUM 和 SUPREMUM）
+    constexpr uint16_t heap_top = 100;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, heap_top);
+    
+    // 设置有效的 INFIMUM 记录（使用常量偏移）
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM; // info_bits
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, heap_top - 5); // next_record_offset
+    
+    // 设置有效的 SUPREMUM 记录
+    constexpr uint16_t supremum_offset = heap_top - 5;
+    page_data[supremum_offset] = dbrecovery::innodb::REC_STATUS_SUPREMUM; // info_bits
+    write_le<uint16_t>(page_data.data(), supremum_offset + 1, 0xFFFF); // end of chain
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 验证解析出的记录偏移与常量一致
+    auto offsets = parser.record_offsets();
+    EXPECT_EQ(offsets.size(), 2);
+    EXPECT_EQ(offsets[0], infimum_offset);
+    EXPECT_EQ(offsets[1], supremum_offset);
+}
+
+// ✅ 新增：测试无效记录头被拒绝（防止解析损坏数据）
+TEST(BPlusTreeParser, RejectInvalidRecordHeader) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置页类型为 FIL_PAGE_INDEX
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    constexpr uint16_t heap_top = 200;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, heap_top);
+    
+    // 设置有效的 INFIMUM 记录
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, heap_top - 5);
+    
+    // 设置无效的用户记录（info_bits 高位非零）
+    constexpr uint16_t invalid_record_offset = 70;
+    page_data[invalid_record_offset] = 0xFF; // 无效 info_bits
+    write_le<uint16_t>(page_data.data(), invalid_record_offset + 1, heap_top);
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse()); // 解析应成功，但跳过无效记录
+    
+    auto offsets = parser.record_offsets();
+    // 只应包含 INFIMUM 和 SUPREMUM
+    EXPECT_EQ(offsets.size(), 2);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 

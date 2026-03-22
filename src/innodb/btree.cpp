@@ -172,34 +172,32 @@ bool BPlusTreeParser::parse_user_records() {
     constexpr size_t min_safe_offset = infimum_offset_ + 5;
     size_t current_offset = infimum_offset_;
 
+    // ✅ 新增：记录头格式校验函数（防止解析损坏记录）
+    auto validate_record_header = [this](size_t offset) -> bool {
+        if (offset + 5 > page_data_.size()) return false;
+        uint8_t info_bits = page_data_[offset];
+        // 检查保留位是否为 0（InnoDB 要求 info_bits 的高 5 位必须为 0）
+        if ((info_bits & 0b11111000) != 0) return false;
+        // 检查 next_record_offset 字段是否有效
+        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), offset + 1) & 0x3FFF;
+        if (next_offset <= offset || next_offset >= page_data_.size()) return false;
+        return true;
+    };
+
     while (current_offset < heap_top - 5) {
+        // ✅ 新增：记录头格式校验
+        if (!validate_record_header(current_offset)) {
+            std::cerr << "[WARN] BPlusTreeParser: Invalid record header at offset " << current_offset << ", stopping parsing" << std::endl;
+            break;
+        }
+
         // 检查是否为 SUPREMUM
         if (current_offset == supremum_offset_) {
             break;
         }
 
-        // ✅ 新增：记录头大小校验（至少需要 5 字节）
-        if (current_offset + 5 > page_data_.size()) {
-            std::cerr << "[ERROR] BPlusTreeParser: Record header too small at offset " << current_offset 
-                      << ", page_size=" << page_data_.size() << std::endl;
-            break;
-        }
-
-        // ✅ 新增：在读取记录头之前，先进行边界检查
-        if (current_offset >= page_data_.size()) {
-            std::cerr << "[ERROR] BPlusTreeParser: Record offset out of bounds at " << current_offset << std::endl;
-            break;
-        }
-
         uint8_t info_bits = page_data_[current_offset];
         constexpr size_t next_offset_pos = current_offset + 1;
-
-        // ✅ 新增：确保 next_record_offset 字段在页边界内
-        if (next_offset_pos + 1 >= page_data_.size()) {
-            std::cerr << "[ERROR] BPlusTreeParser: next_record_offset field out of bounds at offset " 
-                      << current_offset << std::endl;
-            break;
-        }
 
         uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), next_offset_pos) & 0x3FFF;
 
