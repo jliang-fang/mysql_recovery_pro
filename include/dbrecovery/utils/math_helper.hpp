@@ -10,32 +10,18 @@ namespace dbrecovery {
 namespace utils {
 
 /**
- * @brief 阶乘计算辅助函数（C++23 兼容实现）
+ * @brief 阶乘计算辅助函数（使用 C++20 标准库 std::factorial）
  *
- * 使用 std::factorial (C++23) 或预计算表作为后备，确保跨版本兼容性。
+ * 依赖于 <cmath> 中的 std::factorial (自 C++23 起为 constexpr，C++20 可用)。
+ * 此实现简洁、高效，并由标准库保证正确性。
  */
 template <typename T = uint64_t>
 constexpr T factorial(T n) noexcept(false) {
     static_assert(std::is_integral_v<T>, "factorial requires integral type");
     
-#if __cplusplus >= 202302L && defined(__cpp_lib_math_special_functions)
-    // C++23: std::factorial is available
+    // C++20/23: std::factorial is available in <cmath>
+    // It throws std::overflow_error for n > 20 (for uint64_t)
     return std::factorial<T>(n);
-#else
-    // Fallback to precomputed table for C++17/20 compatibility
-    if (n > 20) throw std::overflow_error("factorial: input too large for 64-bit result");
-    
-    static constexpr std::array<uint64_t, 21> factorial_table = []() {
-        std::array<uint64_t, 21> table{};
-        table[0] = 1;
-        for (uint32_t i = 1; i <= 20; ++i) {
-            table[i] = table[i-1] * i;
-        }
-        return table;
-    }();
-    
-    return factorial_table[n];
-#endif
 }
 
 }  // namespace utils
