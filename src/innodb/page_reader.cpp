@@ -58,6 +58,23 @@ static uint32_t compute_innodb_checksum_internal(const std::vector<uint8_t>& pag
     return (checksum >> 16) ^ (checksum & 0xFFFF);
 }
 
+static uint32_t compute_old_checksum_internal(const std::vector<uint8_t>& page_data) {
+    // MySQL 5.5/5.6 OLD 校验和算法
+    const uint16_t* data = reinterpret_cast<const uint16_t*>(page_data.data());
+    size_t len = page_data.size() / 2;
+
+    uint32_t checksum = 0;
+    for (size_t i = 0; i < len; ++i) {
+        // 跳过校验和字段 (offset 24-27, which is 12th and 13th uint16_t)
+        if (i == 12 || i == 13) continue;
+
+        checksum += dbrecovery::innodb::read_le<uint16_t>(page_data.data(), i * 2);
+        checksum = (checksum & 0xFFFFFFFF) + (checksum >> 32);
+    }
+
+    return (checksum & 0xFFFFFFFF) + (checksum >> 32);
+}
+
 // ==================== PageReader 静态工具类实现 ====================
 
 bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32_t* out_stored, uint32_t* out_computed) {

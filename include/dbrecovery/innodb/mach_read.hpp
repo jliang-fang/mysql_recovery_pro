@@ -34,9 +34,10 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
             if (val & 0x800000) {
                 val |= 0xFF000000;
             }
+            return static_cast<T>(static_cast<int32_t>(val));
+        } else {
+            return static_cast<T>(val & 0xFFFFFF);
         }
-        
-        return static_cast<T>(val & 0xFFFFFF);
     } else if constexpr (sizeof(T) == 4) {
         uint32_t val = static_cast<uint32_t>(p[0]) | 
                       (static_cast<uint32_t>(p[1]) << 8) |
