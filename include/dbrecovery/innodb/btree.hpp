@@ -253,7 +253,7 @@ private:
     
     // INFIMUM/SUPREMUM 记录偏移
     uint16_t infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
-    uint16_t supremum_offset_ = 0; // ✅ 修复：初始化为 0，实际值在 parse_infimum_supremum() 中计算
+    uint16_t supremum_offset_ = 0; // 实际值在 parse_infimum_supremum() 中计算
 
     bool parse_header() noexcept;
     bool parse_infimum_supremum();
