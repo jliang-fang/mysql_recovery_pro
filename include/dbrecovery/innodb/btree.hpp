@@ -246,6 +246,69 @@ public:
 private:
     std::vector<uint8_t> page_data_;
     BTreeNodeType node_type_ = BTreeNodeType::INVALID;
+    uint32_t page_level_ = 0xFFFFFFFF;
+    uint32_t next_page_ = 0xFFFFFFFF;
+    uint32_t prev_page_ = 0xFFFFFFFF;
+    uint16_t n_records_ = 0;
+    std::vector<uint16_t> record_offsets_;
+    
+    // ✅ 统一：页健康状态检查（消除重复定义）
+    struct PageHealth {
+        bool is_valid = true;
+        std::string status_message;
+        uint32_t checksum_expected = 0;
+        uint32_t checksum_actual = 0;
+        bool checksum_match = false;
+        
+        // B+Tree specific
+        bool has_infimum = false;
+        bool has_supremum = false;
+        uint16_t n_records = 0;
+        uint16_t n_dir_slots = 0;
+        uint16_t page_level = 0;
+        uint32_t next_page = 0;
+        uint32_t prev_page = 0;
+    };
+    
+    [[nodiscard]] PageHealth check_health() const;
+
+private:
+    uint16_t page_type_ = 0; // ✅ 新增：存储页类型，供 SDI 页判断使用
+
+    /**
+     * @brief 解析单个字段的值（根据列类型）
+     * 
+     * @param col 列定义
+     * @param data_pos 数据位置指针（会更新）
+     * @param is_extern 是否为外部存储（如 BLOB 指针）
+     * @return std::string 解析后的字符串值
+     */
+    std::string parse_field_value(
+        const catalog::ColumnInfo& col, size_t& data_pos, bool is_extern) const;
+
+    // ✅ 新增：DATETIME2 字段解析辅助函数
+    std::string parse_datetime2_value(uint8_t precision, size_t& data_pos) const;
+
+    /**
+     * @brief 解析页的目录槽（record directory）
+     * 
+     * @return true 目录解析成功
+     * @return false 目录解析失败
+     */
+    bool parse_directory() noexcept;
+    
+    // ✅ 新增：解析页头信息
+    bool parse_header() noexcept;
+    
+    // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
+    bool parse_infimum_supremum();
+    
+    // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
+    bool parse_user_records();
+
+private:
+    std::vector<uint8_t> page_data_;
+    BTreeNodeType node_type_ = BTreeNodeType::INVALID;
     uint32_t page_level_ = 0;
     uint32_t next_page_ = 0xFFFFFFFF;
     uint32_t prev_page_ = 0xFFFFFFFF;
@@ -262,12 +325,6 @@ private:
     bool parse_infimum_supremum();
     bool parse_user_records();
 };
-
-// ==================== 实现部分 ====================
-inline BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
-    : page_data_(page_data), node_type_(BTreeNodeType::INVALID),
-      page_level_(0xFFFFFFFF), next_page_(0xFFFFFFFF), prev_page_(0xFFFFFFFF) {
-}
 
 // ✅ 修复：实现核心的 parse 方法，移除 noexcept 以支持错误传播
 inline bool BPlusTreeParser::parse() {
@@ -337,66 +394,7 @@ bool BPlusTreeParser::parse_header() noexcept {
     return true;
 }
 
-// ✅ 新增：解析 INFIMUM/SUPREMUM 系统记录
-bool BPlusTreeParser::parse_infimum_supremum() {
-    // 解析 INFIMUM 和 SUPREMUM 记录（固定偏移）
-    if (page_data_.size() < 54 + 5) {
-        return false;
-    }
-    
-    infimum_offset_ = 54;
-    uint8_t info_bits_infimum = page_data_[infimum_offset_];
-    if ((info_bits_infimum & dbrecovery::innodb::REC_INFO_MIN_REC_FLAG) == 0) {
-        // INFIMUM 记录格式不正确
-        return false;
-    }
-    
-    // 解析 SUPREMUM 记录（通常在堆顶附近）
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
-    if (heap_top < 54 || heap_top + 5 > page_data_.size()) {
-        return false;
-    }
-    
-    supremum_offset_ = heap_top - 5;
-    uint8_t info_bits_supremum = page_data_[supremum_offset_];
-    if ((info_bits_supremum & 0x03) != dbrecovery::innodb::REC_STATUS_SUPREMUM) {
-        // SUPREMUM 记录格式不正确
-        return false;
-    }
-    
-    return true;
-}
-
-// ✅ 新增：解析用户记录
-bool BPlusTreeParser::parse_user_records() {
-    // 解析用户记录（从 INFIMUM 之后开始）
-    if (page_data_.size() < infimum_offset_ + 5) {
-        return false;
-    }
-    
-    uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), 38 + 4);
-    size_t current_offset = infimum_offset_;
-    
-    while (current_offset < heap_top - 5) {
-        // 检查是否为 SUPREMUM
-        if (current_offset == supremum_offset_) {
-            break;
-        }
-        
-        uint8_t info_bits = page_data_[current_offset];
-        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + current_offset + 1, 0) & 0x3FFF;
-        
-        if (next_offset <= current_offset || next_offset >= page_data_.size()) {
-            // 下一个偏移无效
-            break;
-        }
-        
-        record_offsets_.push_back(static_cast<uint16_t>(current_offset));
-        current_offset = next_offset;
-    }
-    
-    return !record_offsets_.empty();
-}
+// ✅ 新增：解析 INFIMUM/SUPREMUM 系统记录（已在 .cpp 中实现）
 
 inline bool BPlusTreeParser::parse_directory() noexcept {
     // 简化实现：假设页头信息在偏移 FIL_HEADER_SIZE 处
