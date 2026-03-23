@@ -125,7 +125,7 @@ def create_sdi_page(table_name):
     
     return bytes(page)
 
-def generate_ibd(table_name="users", include_blob=False):
+def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False):
     """Generate a minimal .ibd file with SDI + B+ tree with optional test data"""
     pages = []
     
@@ -145,65 +145,99 @@ def generate_ibd(table_name="users", include_blob=False):
     write_le_uint16(infimum, 1, 56)  # next_record_offset
     record_data.extend(infimum)
     
-    # 用户记录示例：id=1, name='test'
-    user_rec = bytearray()
-    user_rec.append(0x00)  # info_bits (普通记录)
-    user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
-    write_le_uint16(user_rec, 1, 56 + len(record_data) + 2)  # next_record_offset
-    
-    # NULL 位图（假设所有列都非空）
-    user_rec.extend(b'\x00')  # 1 byte null bitmap
-    
-    # id 字段 (LONGLONG, 8 bytes)
-    write_le_uint64(user_rec, len(user_rec), 1)
-    
-    # name 字段 (VARCHAR, 前缀长度 1 字节)
-    name_str = "test"
-    user_rec.append(len(name_str))
-    user_rec.extend(name_str.encode())
-    
-    # email 字段 (VARCHAR, 可为空，这里设为非空)
-    email_str = "test@example.com"
-    user_rec.append(len(email_str))
-    user_rec.extend(email_str.encode())
-    
-    # created_at 字段 (DATETIME2(6), 8 bytes for precision=6)
-    import struct
-    # ✅ 修复：正确的 DATETIME2 编码（参考 MySQL 8.0 源码 sql/field.cc）
-    # 前5字节 packed format: [year_low, year_high, month_day, hour_minute, second_packed]
-    # 后3字节小数部分 (precision=6)
-    
-    year = 2024
-    month = 1
-    day = 1
-    hour = 0
-    minute = 0
-    second = 0
-    frac = 0
-    
-    # Pack date/time into 5 bytes
-    year_low = year & 0xFF
-    year_high = (year >> 8) & 0xFF
-    month_day = ((day << 4) | month) & 0xFF
-    hour_minute = ((minute & 0x3F) << 2) | (hour & 0x1F)
-    second_packed = ((second & 0x3F) << 2) | ((frac >> 16) & 0x03)
-    
-    user_rec.append(year_low)
-    user_rec.append(year_high)
-    user_rec.append(month_day)
-    user_rec.append(hour_minute)
-    user_rec.append(second_packed)
-    
-    # Pack fractional part (3 bytes for precision=6)
-    # ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
-    frac_bytes = [
-        (frac >> 0) & 0xFF,
-        (frac >> 8) & 0xFF,
-        (frac >> 16) & 0xFF
-    ]
-    user_rec.extend(frac_bytes)
-    
-    record_data.extend(user_rec)
+    if include_blob:
+        # 用户记录示例：包含 BLOB 字段
+        user_rec = bytearray()
+        user_rec.append(0x00)  # info_bits (普通记录)
+        user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
+        
+        # NULL 位图（假设所有列都非空）
+        user_rec.extend(b'\x00')  # 1 byte null bitmap
+        
+        # id 字段 (LONGLONG, 8 bytes)
+        write_le_uint64(user_rec, len(user_rec), 1)
+        
+        # name 字段 (VARCHAR, 前缀长度 1 字节)
+        name_str = "test"
+        user_rec.append(len(name_str))
+        user_rec.extend(name_str.encode())
+        
+        if multi_page_blob:
+            # 多页 BLOB 指针（20字节）：space_id=0, page_no=100, offset=0, len=50, total_len=200
+            write_le_uint32(user_rec, len(user_rec), 0)   # space_id
+            write_le_uint32(user_rec, len(user_rec), 100) # page_no (first BLOB页)
+            write_le_uint32(user_rec, len(user_rec), 0)   # offset
+            write_le_uint32(user_rec, len(user_rec), 50)  # len (当前页)
+            write_le_uint32(user_rec, len(user_rec), 200) # total_len (跨两页)
+        else:
+            # 单页 BLOB 指针（20字节）：space_id=0, page_no=100, offset=0, len=50, total_len=50
+            write_le_uint32(user_rec, len(user_rec), 0)   # space_id
+            write_le_uint32(user_rec, len(user_rec), 100) # page_no
+            write_le_uint32(user_rec, len(user_rec), 0)   # offset
+            write_le_uint32(user_rec, len(user_rec), 50)  # len
+            write_le_uint32(user_rec, len(user_rec), 50)  # total_len
+        
+        record_data.extend(user_rec)
+    else:
+        # 用户记录示例：id=1, name='test'
+        user_rec = bytearray()
+        user_rec.append(0x00)  # info_bits (普通记录)
+        user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
+        write_le_uint16(user_rec, 1, 56 + len(record_data) + 2)  # next_record_offset
+        
+        # NULL 位图（假设所有列都非空）
+        user_rec.extend(b'\x00')  # 1 byte null bitmap
+        
+        # id 字段 (LONGLONG, 8 bytes)
+        write_le_uint64(user_rec, len(user_rec), 1)
+        
+        # name 字段 (VARCHAR, 前缀长度 1 字节)
+        name_str = "test"
+        user_rec.append(len(name_str))
+        user_rec.extend(name_str.encode())
+        
+        # email 字段 (VARCHAR, 可为空，这里设为非空)
+        email_str = "test@example.com"
+        user_rec.append(len(email_str))
+        user_rec.extend(email_str.encode())
+        
+        # created_at 字段 (DATETIME2(6), 8 bytes for precision=6)
+        import struct
+        # ✅ 修复：正确的 DATETIME2 编码（参考 MySQL 8.0 源码 sql/field.cc）
+        # 前5字节 packed format: [year_low, year_high, month_day, hour_minute, second_packed]
+        # 后3字节小数部分 (precision=6)
+        
+        year = 2024
+        month = 1
+        day = 1
+        hour = 0
+        minute = 0
+        second = 0
+        frac = 0
+        
+        # Pack date/time into 5 bytes
+        year_low = year & 0xFF
+        year_high = (year >> 8) & 0xFF
+        month_day = ((day << 4) | month) & 0xFF
+        hour_minute = ((minute & 0x3F) << 2) | (hour & 0x1F)
+        second_packed = ((second & 0x3F) << 2) | ((frac >> 16) & 0x03)
+        
+        user_rec.append(year_low)
+        user_rec.append(year_high)
+        user_rec.append(month_day)
+        user_rec.append(hour_minute)
+        user_rec.append(second_packed)
+        
+        # Pack fractional part (3 bytes for precision=6)
+        # ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
+        frac_bytes = [
+            (frac >> 0) & 0xFF,
+            (frac >> 8) & 0xFF,
+            (frac >> 16) & 0xFF
+        ]
+        user_rec.extend(frac_bytes)
+        
+        record_data.extend(user_rec)
     
     # SUPREMUM 记录
     supremum = bytearray(5)

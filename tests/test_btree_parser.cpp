@@ -593,6 +593,103 @@ TEST(BPlusTreeParser, ParseRecordWithMultiPageBlob) {
     EXPECT_NE(it->second.find("data_size=150"), std::string::npos); // 应显示重组后的总长度
 }
 
+// ✅ P1 新增：测试完整的多页 BLOB 链恢复流程（集成测试）
+TEST(BPlusTreeParser, FullMultiPageBlobRecoveryIntegration) {
+    // 1. 创建一个包含跨页 BLOB 的主索引页
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    constexpr uint16_t heap_top = 250;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, heap_top);
+    
+    // 设置 INFIMUM/SUPREMUM
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, heap_top - 5);
+    
+    constexpr uint16_t supremum_offset = heap_top - 5;
+    page_data[supremum_offset] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), supremum_offset + 1, 0xFFFF);
+    
+    // 设置目录槽
+    constexpr uint16_t n_dir_slots = 2;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET, n_dir_slots);
+    size_t dir_start = 16384 - n_dir_slots * 2;
+    write_le<uint16_t>(page_data.data(), dir_start + 0, infimum_offset);
+    write_le<uint16_t>(page_data.data(), dir_start + 2, supremum_offset);
+    
+    // 设置用户记录（包含跨页 BLOB 指针）
+    constexpr uint16_t user_rec_offset = 54 + 13;
+    page_data[user_rec_offset] = 0x00; // info_bits
+    write_le<uint16_t>(page_data.data(), user_rec_offset + 1, heap_top);
+    
+    // BLOB 指针：total_len=200，表示跨两页（当前页50字节+下一页150字节）
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 6, 0);   // space_id
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 10, 100); // page_no (first BLOB页)
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 14, 0);   // offset
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 18, 50);  // len (当前页)
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 22, 200); // total_len
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 2. 创建表结构
+    catalog::TableSchema schema;
+    schema.table_name = "test_blob_table";
+    schema.engine = "InnoDB";
+    schema.row_format = catalog::row_formats::DYNAMIC;
+    
+    catalog::ColumnInfo col;
+    col.name = "data";
+    col.mysql_type_id = catalog::mysql_types::BLOB;
+    col.is_nullable = false;
+    col.column_length = 1024;
+    schema.columns[1] = col;
+    
+    // 3. 模拟 BLOB 页读取器
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        if (space_id == 0 && page_no == 100) {
+            // 第一个 BLOB 页：包含前50字节数据和指向下一个页的指针
+            std::vector<uint8_t> blob_page(16384, 0);
+            write_le<uint32_t>(blob_page.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_NEXT, 200); // next_bpage
+            write_le<uint32_t>(blob_page.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_LEN, 50);   // data_len
+            
+            // 填充前50字节数据
+            for (int i = 0; i < 50; ++i) {
+                blob_page[dbrecovery::innodb::BlobPageChain::BTR_BPAGE_LEN + 4 + i] = static_cast<uint8_t>(i % 256);
+            }
+            return blob_page;
+        } else if (space_id == 0 && page_no == 200) {
+            // 第二个 BLOB 页：包含剩余150字节数据
+            std::vector<uint8_t> blob_page(16384, 0);
+            write_le<uint32_t>(blob_page.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_NEXT, 0xFFFFFFFF); // 链表结束
+            write_le<uint32_t>(blob_page.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_LEN, 150);   // data_len
+            
+            // 填充后150字节数据
+            for (int i = 0; i < 150; ++i) {
+                blob_page[dbrecovery::innodb::BlobPageChain::BTR_BPAGE_LEN + 4 + i] = static_cast<uint8_t>((i + 50) % 256);
+            }
+            return blob_page;
+        }
+        return std::nullopt;
+    };
+    
+    // 4. 解析记录并验证 BLOB 数据
+    auto records = parser.parse_records(schema);
+    EXPECT_EQ(records.size(), 1);
+    
+    auto it = records[0].find("data");
+    ASSERT_NE(it, records[0].end());
+    
+    // 验证 BLOB 指针信息（应包含完整的页链和数据大小）
+    EXPECT_NE(it->second.find("sid=0"), std::string::npos);
+    EXPECT_NE(it->second.find("page=100"), std::string::npos);
+    EXPECT_NE(it->second.find("len=200"), std::string::npos);
+    
+    // ✅ 验证：BLOB 数据已成功重组（data_size 应为 200）
+    EXPECT_NE(it->second.find("data_size=200"), std::string::npos);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
