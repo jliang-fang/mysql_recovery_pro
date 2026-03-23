@@ -22,7 +22,7 @@ constexpr uint16_t FIL_HEADER_SIZE      = 38;
 /// @brief Offset of page type within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 12;
 /// @brief Absolute offset of page type within a page (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 50)
-constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET; // 50
+constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET; // 38 + 12 = 50
 /// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
 constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
@@ -70,6 +70,19 @@ inline std::string page_type_to_string(uint16_t type) {
     }
 }
 
+// ✅ 新增：页类型字符串化辅助函数（用于调试输出）
+inline std::string page_type_to_string(uint16_t type) {
+    switch (type) {
+        case FIL_PAGE_INDEX:       return "FIL_PAGE_INDEX";
+        case FIL_PAGE_UNDO_LOG:    return "FIL_PAGE_UNDO_LOG";
+        case FIL_PAGE_TYPE_ALLOCATED: return "FIL_PAGE_TYPE_ALLOCATED";
+        case FIL_PAGE_SDI:         return "FIL_PAGE_SDI";
+        case FIL_PAGE_TYPE_BLOB:   return "FIL_PAGE_TYPE_BLOB";
+        case FIL_PAGE_COMPRESSED:  return "FIL_PAGE_COMPRESSED";
+        default:                   return "UNKNOWN";
+    }
+}
+
 // InnoDB 常量
 constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
 constexpr size_t UNIV_PAGE_SIZE_MIN     = 4096;  // 最小页大小 (4KB)
@@ -84,8 +97,8 @@ constexpr uint16_t BTR_IND_PAGE_OFFSET  = 6;        // offset of the index id (r
 constexpr uint16_t BTR_MAX_SIZE         = 50;       // maximum size of a record
 
 // ✅ 新增：绝对偏移常量（用于直接读取页数据）
-constexpr uint16_t BTR_N_LEVELS_ABS     = FIL_HEADER_SIZE + 4;   // absolute offset for page_level
-constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = FIL_HEADER_SIZE + 6; // absolute offset for index id
+constexpr uint16_t BTR_N_LEVELS_ABS     = FIL_HEADER_SIZE + 4;   // absolute offset for page_level (38+4=42)
+constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = FIL_HEADER_SIZE + 6; // absolute offset for index id (38+6=44)
 
 // ==================== Page Header Constants (relative to FIL_HEADER_SIZE) ====================
 // From MySQL 8.0.36: include/page0page.h
@@ -107,7 +120,8 @@ constexpr uint16_t PAGE_FREE_OFFSET        = 6;
 constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
 /// @brief Offset of SUPREMUM record within Page Data (typically at heap_top - 5)
 /// This is dynamic and should be read from page header, but for reference:
-constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder
+/// Note: In practice, this is calculated as `heap_top - 5` where heap_top is read from the page header.
+constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder (dynamic)
 
 // ✅ 新增：页目录槽相关常量（用于解析）
 constexpr uint16_t PAGE_N_DIR_SLOTS_SIZE   = 2;  // size of n_dir_slots field
@@ -135,6 +149,39 @@ constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_
 // ✅ 修复：明确记录头标志位的位掩码定义
 // REC_INFO_STATUS_MASK 是最低3位（0x07），用于区分 INFIMUM/SUPREMUM/ORDINARY/Node Pointer
 constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;
+
+// ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
+// These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).
+// They match the InnoDB source code definitions in include/page0page.h
+constexpr uint16_t FIL_PAGE_OFFSET_N_DIR_SLOTS   = 38 + 0;  // PAGE_N_DIR_SLOTS: number of slots in page directory
+constexpr uint16_t FIL_PAGE_OFFSET_HEAP_TOP      = 38 + 2;  // PAGE_HEAP_TOP: heap top offset
+constexpr uint16_t FIL_PAGE_OFFSET_N_HEAP        = 38 + 4;  // PAGE_N_HEAP: number of records in heap (15-bit)
+constexpr uint16_t FIL_PAGE_OFFSET_FREE          = 38 + 6;  // PAGE_FREE: start of free list
+constexpr uint16_t FIL_PAGE_OFFSET_GARBAGE_END   = 38 + 8;  // PAGE_GARBAGE_END: end of garbage
+constexpr uint16_t FIL_PAGE_OFFSET_LAST_INSERT   = 38 + 10; // PAGE_LAST_INSERT: last insert offset
+constexpr uint16_t FIL_PAGE_OFFSET_DIRECTION     = 38 + 12; // PAGE_DIRECTION: direction of inserts
+constexpr uint16_t FIL_PAGE_OFFSET_N_DIRECT_PAGES= 38 + 14; // PAGE_N_DIRECT_PAGES: number of direct pages (non-leaf)
+
+// ==================== Page Header Offsets (relative to B+Tree header, for compatibility with InnoDB source) ====================
+// These are the offsets from the start of the B+Tree header (which is at FIL_HEADER_SIZE=38).
+// They match the InnoDB source code definitions in include/page0page.h (e.g., BTR_N_LEVELS = 4)
+constexpr uint16_t BTR_PAGE_OFFSET_N_DIR_SLOTS   = 0;
+constexpr uint16_t BTR_PAGE_OFFSET_HEAP_TOP      = 2;
+constexpr uint16_t BTR_PAGE_OFFSET_N_HEAP        = 4;
+constexpr uint16_t BTR_PAGE_OFFSET_FREE          = 6;
+constexpr uint16_t BTR_PAGE_OFFSET_GARBAGE_END   = 8;
+constexpr uint16_t BTR_PAGE_OFFSET_LAST_INSERT   = 10;
+constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION     = 12;
+constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
+
+// ==================== Record Offset Constants (absolute offsets from page start) ====================
+/// @brief Absolute offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
+/// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
+constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
+/// @brief Absolute offset of SUPREMUM record within Page Data (typically at heap_top - 5)
+/// This is dynamic and should be read from page header, but for reference:
+/// Note: In practice, this is calculated as `heap_top - 5` where heap_top is read from the page header.
+constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder (dynamic)
 
 // ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
 // These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).

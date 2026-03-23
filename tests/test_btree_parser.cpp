@@ -19,9 +19,11 @@ TEST(BPlusTreeParser, ParseValidLeafPage) {
     write_le<uint16_t>(page_data.data(), dbrecovery::innodb::BTR_N_LEVELS_ABS, 0);
     
     // 设置目录槽数量
+    constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = 0;
     write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + PAGE_N_DIR_SLOTS_OFFSET, 5);  // n_dir_slots
     
     // 设置堆顶位置
+    constexpr uint16_t PAGE_HEAP_TOP_OFFSET = 2;
     write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + PAGE_HEAP_TOP_OFFSET, 100);  // heap_top
     
     BPlusTreeParser parser(page_data);
@@ -59,16 +61,24 @@ TEST(BPlusTreeParser, ParseValidLeafPageFull) {
     write_le<uint16_t>(page_data.data(), 20, 0xFFFF); // Next page (none)
     
     // 设置页类型为 FIL_PAGE_INDEX (9969) at offset 38+12=50
-    write_le<uint16_t>(page_data.data(), 50, 9969);
+    constexpr uint16_t FIL_PAGE_TYPE_ABS = 50;
+    write_le<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, 9969);
     
     // 设置 BTR Header (偏移 38+4=42)
-    write_le<uint16_t>(page_data.data(), 42, 0);     // PAGE_LEVEL = 0 (leaf)
-    write_le<uint16_t>(page_data.data(), 38, 5);     // PAGE_N_DIR_SLOTS
-    write_le<uint16_t>(page_data.data(), 40, 100);   // PAGE_HEAP_TOP
+    constexpr uint16_t BTR_N_LEVELS_ABS = 42;
+    write_le<uint16_t>(page_data.data(), BTR_N_LEVELS_ABS, 0);     // PAGE_LEVEL = 0 (leaf)
+    
+    constexpr uint16_t FIL_HEADER_SIZE = 38;
+    constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = 0;
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + PAGE_N_DIR_SLOTS_OFFSET, 5);     // PAGE_N_DIR_SLOTS
+    
+    constexpr uint16_t PAGE_HEAP_TOP_OFFSET = 2;
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + PAGE_HEAP_TOP_OFFSET, 100);   // PAGE_HEAP_TOP
     
     // 设置目录槽和记录（简化版）
     // INFIMUM 记录 at offset 54
-    page_data[54] = 0x02; // info_bits: REC_INFO_MIN_REC_FLAG (bit 4)
+    constexpr uint16_t REC_STATUS_INFIMUM = 0x02;
+    page_data[54] = REC_STATUS_INFIMUM; // info_bits: REC_INFO_MIN_REC_FLAG (bit 4)
     write_le<uint16_t>(page_data.data(), 55, 70);   // next_record_offset
     
     // 用户记录
@@ -76,7 +86,8 @@ TEST(BPlusTreeParser, ParseValidLeafPageFull) {
     write_le<uint16_t>(page_data.data(), 71, 86);   // next_record_offset
     
     // SUPREMUM 记录 at offset 86
-    page_data[86] = 0x03; // REC_STATUS_SUPREMUM
+    constexpr uint16_t REC_STATUS_SUPREMUM = 0x03;
+    page_data[86] = REC_STATUS_SUPREMUM; // REC_STATUS_SUPREMUM
     write_le<uint16_t>(page_data.data(), 87, 0xFFFF); // end of chain
     
     // 设置目录槽 (在页尾部)

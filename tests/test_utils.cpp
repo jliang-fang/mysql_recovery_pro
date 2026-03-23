@@ -23,8 +23,8 @@ TEST(UtilsTest, FactorialConsistency) {
     EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
 
-// ✅ 新增：测试 std::factorial (C++20)
-TEST(UtilsTest, FactorialWithStd) {
+// ✅ 新增：测试预计算表 factorial (C++17/20 兼容)
+TEST(UtilsTest, FactorialWithPrecomputedTable) {
     // 验证与预计算表结果一致
     EXPECT_EQ(dbrecovery::utils::factorial(0), 1);
     EXPECT_EQ(dbrecovery::utils::factorial(5), 120);
