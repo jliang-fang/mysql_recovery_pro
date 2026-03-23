@@ -276,6 +276,22 @@ TEST(BPlusTreeParser, UseConstantsInsteadOfHardcodedOffsets) {
     EXPECT_EQ(offsets[1], supremum_offset);
 }
 
+// ✅ P0 新增：测试校验和不匹配时解析应失败
+TEST(BPlusTreeParser, ParseFailsOnChecksumMismatch) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置一个错误的校验和（假设原本是 CRC32C）
+    for (int i = 0; i < 4; ++i) {
+        page_data[24 + i] = 0xFF; // 故意设置为全1，与计算出的值不符
+    }
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_FALSE(parser.parse());
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 

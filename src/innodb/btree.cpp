@@ -27,6 +27,13 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
 }
 
 bool BPlusTreeParser::parse() noexcept(false) {
+    // ✅ P0 修复：添加页校验和验证（防止解析损坏页）
+    // 在解析任何结构之前，必须先验证页的完整性
+    if (!dbrecovery::innodb::PageReader::validate_checksum(page_data_)) {
+        std::cerr << "[ERROR] BPlusTreeParser: Page checksum validation failed. Aborting parse." << std::endl;
+        return false;
+    }
+    
     // ✅ 修复：使用 page_defs.hpp 中定义的常量进行边界检查
     constexpr size_t min_page_size = dbrecovery::innodb::FIL_HEADER_SIZE + 16; // FIL header (38) + minimal page header space
     if (page_data_.size() < min_page_size) {
