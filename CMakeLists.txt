@@ -36,6 +36,7 @@ set(SOURCES
     src/innodb/v2/record_parser.cpp
     src/innodb/btree.cpp
     src/recovery/blob_reconstructor.cpp
+    src/recovery/engine.cpp
     src/utils/cli_parser.cpp
     src/utils/file_mapper.cpp
 )
@@ -64,9 +65,16 @@ enable_testing()
 find_package(GTest QUIET)
 if(GTEST_FOUND)
     add_subdirectory(tests)
-    
+
     # 添加测试数据生成脚本作为全局测试
-    add_test(NAME generate_test_data COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/ibd_generator.py test_table)
+    add_test(NAME generate_test_data COMMAND python3
+${CMAKE_SOURCE_DIR}/tools/ibd_generator.py test_table)
+
+    # 添加恢复引擎测试
+    add_executable(test_recovery_engine tests/test_recovery_engine.cpp)
+    target_link_libraries(test_recovery_engine dbrecovery_innodb GTest::GTest
+GTest::Main)
+    add_test(NAME test_recovery_engine COMMAND test_recovery_engine)
 else()
     message(WARNING "GoogleTest not found — C++ tests disabled")
 endif()
