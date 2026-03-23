@@ -207,7 +207,7 @@ def generate_ibd(table_name="users", include_blob=False):
     
     # SUPREMUM 记录
     supremum = bytearray(5)
-    supremum[0] = 0x01  # info_bits: REC_INFO_STATUS_MASK for supremum
+    supremum[0] = 0x03  # info_bits: REC_STATUS_SUPREMUM (0x03) - matches C++ parser expectation
     write_le_uint16(supremum, 1, 0xFFFF)  # next_record_offset = 0xFFFF marks end
     
     record_data.extend(supremum)
