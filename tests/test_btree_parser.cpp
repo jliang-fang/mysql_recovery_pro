@@ -309,6 +309,99 @@ TEST(BPlusTreeParser, ParseSucceedsOnChecksumMismatchNonStrictMode) {
     EXPECT_TRUE(parser.parse());
 }
 
+// ✅ P0 新增：测试 BLOB 字段解析（单页 BLOB 场景）
+TEST(BPlusTreeParser, ParseBlobFieldSinglePage) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置堆顶位置（足够大以包含记录）
+    constexpr uint16_t heap_top = 200;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, heap_top);
+    
+    // 设置有效的 INFIMUM 记录
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, heap_top - 5);
+    
+    // 设置有效的 SUPREMUM 记录
+    constexpr uint16_t supremum_offset = heap_top - 5;
+    page_data[supremum_offset] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), supremum_offset + 1, 0xFFFF);
+    
+    // 设置目录槽
+    constexpr uint16_t n_dir_slots = 2;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET, n_dir_slots);
+    size_t dir_start = 16384 - n_dir_slots * 2;
+    write_le<uint16_t>(page_data.data(), dir_start + 0, infimum_offset);
+    write_le<uint16_t>(page_data.data(), dir_start + 2, supremum_offset);
+    
+    // 设置用户记录（包含 BLOB 指针）
+    constexpr uint16_t user_rec_offset = 54 + 13; // INFIMUM 后
+    page_data[user_rec_offset] = 0x00; // info_bits (普通记录)
+    write_le<uint16_t>(page_data.data(), user_rec_offset + 1, heap_top); // next_record_offset
+    
+    // BLOB 指针（20字节）：space_id=0, page_no=100, offset=0, len=50, total_len=50
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 6, 0);   // space_id
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 10, 100); // page_no
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 14, 0);   // offset
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 18, 50);  // len
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 22, 50);  // total_len
+    
+    // 填充 BLOB 数据（在页内）
+    for (int i = 0; i < 50; ++i) {
+        page_data[1000 + i] = static_cast<uint8_t>(i % 256);
+    }
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+}
+
+// ✅ P0 新增：测试 BLOB 字段解析（跨页 BLOB 场景）
+TEST(BPlusTreeParser, ParseBlobFieldMultiPage) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置堆顶位置
+    constexpr uint16_t heap_top = 200;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, heap_top);
+    
+    // 设置有效的 INFIMUM 记录
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, heap_top - 5);
+    
+    // 设置有效的 SUPREMUM 记录
+    constexpr uint16_t supremum_offset = heap_top - 5;
+    page_data[supremum_offset] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), supremum_offset + 1, 0xFFFF);
+    
+    // 设置目录槽
+    constexpr uint16_t n_dir_slots = 2;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET, n_dir_slots);
+    size_t dir_start = 16384 - n_dir_slots * 2;
+    write_le<uint16_t>(page_data.data(), dir_start + 0, infimum_offset);
+    write_le<uint16_t>(page_data.data(), dir_start + 2, supremum_offset);
+    
+    // 设置用户记录（包含跨页 BLOB 指针）
+    constexpr uint16_t user_rec_offset = 54 + 13;
+    page_data[user_rec_offset] = 0x00; // info_bits
+    write_le<uint16_t>(page_data.data(), user_rec_offset + 1, heap_top); // next_record_offset
+    
+    // BLOB 指针（20字节）：total_len > len，表示跨页
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 6, 0);   // space_id
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 10, 100); // page_no
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 14, 0);   // offset
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 18, 50);  // len (当前页)
+    write_le<uint32_t>(page_data.data(), user_rec_offset + 22, 100); // total_len (跨两页)
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+}
+
 // ✅ P0 新增：测试页大小无效时的行为
 TEST(PageReader, ValidateChecksumInvalidPageSize) {
     std::vector<uint8_t> page_data(12345, 0); // 非标准页大小

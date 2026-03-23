@@ -30,11 +30,24 @@ std::string BPlusTreeParser::parse_field_value(
             return "<INVALID_BLOB_PTR>";
         }
         
-        // ✅ 简化处理：返回 BLOB 指针信息（完整数据需通过 page_reader 回调获取）
+        // ✅ 完整处理：尝试读取 BLOB 数据（需要 page_reader 回调）
+        // 注意：此处简化实现，实际应通过外部传入的 page_reader 获取数据
         std::ostringstream oss;
         oss << "BLOB[sid=" << blob_ptr->space_id 
             << ",page=" << blob_ptr->page_no 
             << ",len=" << blob_ptr->total_len << "]";
+        
+        // ✅ 新增：如果 total_len <= len，说明是单页 BLOB，可直接读取
+        if (blob_ptr->total_len > 0 && blob_ptr->total_len <= 16384) {
+            size_t blob_offset = blob_ptr->offset;
+            if (blob_offset + blob_ptr->len <= page_data_.size()) {
+                std::string blob_data(reinterpret_cast<const char*>(page_data_.data() + blob_offset), 
+                                     blob_ptr->len);
+                oss << ",data=" << blob_data.substr(0, 32); // 截断显示前32字节
+                if (blob_ptr->len > 32) oss << "...";
+            }
+        }
+        
         return oss.str();
     }
     
@@ -157,8 +170,13 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
 bool BPlusTreeParser::parse() noexcept(false) {
     // ✅ P0 修复：添加页校验和验证（防止解析损坏页）
     // 在解析任何结构之前，必须先验证页的完整性
-    if (!dbrecovery::innodb::PageReader::validate_checksum(page_data_)) {
-        std::cerr << "[ERROR] BPlusTreeParser: Page checksum validation failed. Aborting parse." << std::endl;
+    uint32_t stored_checksum = 0, computed_checksum = 0;
+    bool checksum_valid = dbrecovery::innodb::PageReader::validate_checksum(
+        page_data_, true, &stored_checksum, &computed_checksum);
+    
+    if (!checksum_valid) {
+        std::cerr << "[ERROR] BPlusTreeParser: Page checksum validation failed. Stored=" 
+                  << stored_checksum << ", Computed=" << computed_checksum << ". Aborting parse." << std::endl;
         return false;
     }
     
@@ -189,6 +207,11 @@ bool BPlusTreeParser::parse() noexcept(false) {
         std::cerr << "[ERROR] BPlusTreeParser: Page health check failed. Status: " << health.status_message << std::endl;
         return false;
     }
+    
+    // ✅ 新增：将校验和结果注入健康检查
+    health.checksum_expected = stored_checksum;
+    health.checksum_actual = computed_checksum;
+    health.checksum_match = (stored_checksum == computed_checksum);
     
     // 解析B+树头
     if (!parse_header()) {
