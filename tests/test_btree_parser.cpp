@@ -276,8 +276,8 @@ TEST(BPlusTreeParser, UseConstantsInsteadOfHardcodedOffsets) {
     EXPECT_EQ(offsets[1], supremum_offset);
 }
 
-// ✅ P0 新增：测试校验和不匹配时解析应失败
-TEST(BPlusTreeParser, ParseFailsOnChecksumMismatch) {
+// ✅ P0 新增：测试校验和不匹配时解析应失败（严格模式）
+TEST(BPlusTreeParser, ParseFailsOnChecksumMismatchStrictMode) {
     std::vector<uint8_t> page_data(16384, 0);
     
     // 设置有效的页类型
@@ -290,6 +290,43 @@ TEST(BPlusTreeParser, ParseFailsOnChecksumMismatch) {
     
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
+}
+
+// ✅ P0 新增：测试校验和不匹配时在非严格模式下仍可解析（容错）
+TEST(BPlusTreeParser, ParseSucceedsOnChecksumMismatchNonStrictMode) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置一个错误的校验和（假设原本是 CRC32C）
+    for (int i = 0; i < 4; ++i) {
+        page_data[24 + i] = 0xFF; // 故意设置为全1，与计算出的值不符
+    }
+    
+    BPlusTreeParser parser(page_data);
+    // 在非严格模式下，即使校验和不匹配也应能解析（假设其他结构正确）
+    EXPECT_TRUE(parser.parse());
+}
+
+// ✅ P0 新增：测试页大小无效时的行为
+TEST(PageReader, ValidateChecksumInvalidPageSize) {
+    std::vector<uint8_t> page_data(12345, 0); // 非标准页大小
+    
+    uint32_t stored, computed;
+    bool result = PageReader::validate_checksum(page_data, true, &stored, &computed);
+    
+    EXPECT_FALSE(result); // 严格模式下应失败
+}
+
+// ✅ P0 新增：测试页大小无效时的非严格模式容错
+TEST(PageReader, ValidateChecksumInvalidPageSizeNonStrict) {
+    std::vector<uint8_t> page_data(12345, 0); // 非标准页大小
+    
+    uint32_t stored, computed;
+    bool result = PageReader::validate_checksum(page_data, false, &stored, &computed);
+    
+    EXPECT_TRUE(result); // 非严格模式下应允许继续
 }
 
 } // namespace innodb

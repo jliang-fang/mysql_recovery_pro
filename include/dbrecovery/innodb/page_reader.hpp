@@ -33,9 +33,15 @@ public:
      * @brief 校验页校验和（支持 CRC32C / INNODB / NONE）
      *
      * @param page_data 页数据（包含 FIL_HEADER）
-     * @return true 校验通过
+     * @param strict_mode 是否启用严格模式（true=失败即返回false, false=记录警告但继续）
+     * @param out_stored 可选：输出存储的校验和值
+     * @param out_computed 可选：输出计算出的校验和值
+     * @return true 校验通过或非严格模式下允许继续
      */
-    static bool validate_checksum(const std::vector<uint8_t>& page_data);
+    static bool validate_checksum(const std::vector<uint8_t>& page_data, 
+                                  bool strict_mode = true,
+                                  uint32_t* out_stored = nullptr,
+                                  uint32_t* out_computed = nullptr);
 
     /**
      * @brief 计算页的 INNODB 校验和（MySQL 5.6/5.7 兼容）

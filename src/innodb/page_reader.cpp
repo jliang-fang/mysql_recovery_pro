@@ -77,9 +77,13 @@ static uint32_t compute_old_checksum_internal(const std::vector<uint8_t>& page_d
 
 // ==================== PageReader 静态工具类实现 ====================
 
-bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32_t* out_stored, uint32_t* out_computed) {
+bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, 
+                                   bool strict_mode,
+                                   uint32_t* out_stored, 
+                                   uint32_t* out_computed) {
     // ✅ 增强：严格边界检查
     if (page_data.size() < 38 + 16) { // FIL header (38) + minimal record space
+        std::cerr << "[ERROR] Page size too small for checksum validation" << std::endl;
         return false;
     }
     
@@ -93,8 +97,8 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32
         }
     }
     if (!is_valid_size) {
-        std::cerr << "[WARN] Invalid page size: " << page_data.size() << std::endl;
-        return false;
+        std::cerr << "[WARN] Invalid page size: " << page_data.size() << ", expected one of {4096, 8192, 16384, 32768, 65536}" << std::endl;
+        if (strict_mode) return false;
     }
     
     // 读取页类型（偏移 38+12=50）
@@ -111,13 +115,23 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32
             }
             uint32_t computed_crc32c = compute_crc32c(page_copy);
             if (computed_crc32c == stored_checksum) {
+                if (out_stored) *out_stored = stored_checksum;
                 if (out_computed) *out_computed = computed_crc32c;
                 return true;
             }
+            
             std::cerr << "[WARN] SDI page checksum mismatch. Stored=" << stored_checksum 
                       << ", CRC32C=" << computed_crc32c << std::endl;
-            return false;
+            
+            if (strict_mode) {
+                if (out_computed) *out_computed = computed_crc32c;
+                return false;
+            }
+            
+            // 非严格模式下记录警告但继续
+            std::cerr << "[INFO] Continuing in non-strict mode despite SDI checksum mismatch" << std::endl;
         }
+        if (out_stored) *out_stored = 0; // NONE 模式
         return true; // NONE 模式或未初始化
     }
     
@@ -170,8 +184,16 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data, uint32
               << ", INNODB=" << computed_innodb
               << ", NEW_CRC32C=" << computed_new_crc32c
               << ", INNODB_80=" << computed_innodb_80 << std::endl;
+    
     if (out_computed) *out_computed = computed_crc32c; // 默认返回 CRC32C
-    return false;
+    
+    if (strict_mode) {
+        return false; // 严格模式下失败
+    }
+    
+    // 非严格模式下记录警告但继续
+    std::cerr << "[WARN] Checksum validation failed, but continuing in non-strict mode" << std::endl;
+    return true;
 }
 
 uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
