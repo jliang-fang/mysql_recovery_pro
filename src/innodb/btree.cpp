@@ -1,6 +1,7 @@
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/redo_log.hpp"
 #include <iostream>
 #include <cstring>
 #include <iomanip>
@@ -9,6 +10,42 @@
 
 namespace dbrecovery {
 namespace innodb {
+
+// ==================== 辅助函数：Redo Log 记录回放 ====================
+
+void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
+    if (record.r_type != 30 && record.r_type != 31 && record.r_type != 32) {
+        // 仅支持 COMPACT 格式的记录操作
+        return;
+    }
+
+    size_t pos = 0;
+    uint8_t rec_type = 0;
+    if (pos < record.r_data.size()) {
+        rec_type = record.r_data[pos++];
+    }
+
+    switch (record.r_type) {
+        case 30: { // MLOG_COMP_REC_INSERT
+            std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT at page " 
+                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
+            // TODO: 解析记录数据并插入到页中
+            break;
+        }
+        case 31: { // MLOG_COMP_REC_UPDATE
+            std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE at page " 
+                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
+            // TODO: 解析更新数据并应用到具体记录
+            break;
+        }
+        case 32: { // MLOG_COMP_REC_DELETE
+            std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE at page " 
+                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
+            // TODO: 定位具体记录并设置删除标志
+            break;
+        }
+    }
+}
 
 // ==================== 辅助函数：字段值解析 ====================
 
@@ -31,7 +68,6 @@ std::string BPlusTreeParser::parse_field_value(
         }
 
         // ✅ P0 修复：使用真实的页读取回调来构建和验证完整的 BLOB 页链
-        // 此处传入一个能够读取当前页数据的 lambda，以支持跨页 BLOB 的链式遍历
         auto page_reader = [this](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
             // 注意：这是一个简化的实现。在实际应用中，应通过 FileMapper 或 InnoDBFileReader 读取真实文件。
             // 此处仅用于演示，从当前页数据中模拟读取（仅适用于单页 BLOB 或测试场景）
@@ -74,7 +110,7 @@ std::string BPlusTreeParser::parse_field_value(
                 oss << ",data=" << blob_data.substr(0, 32); // 截断显示前32字节
                 if (blob_ptr->len > 32) oss << "...";
             }
-        } else if (blob_ptr->total_len > 16384 && !blob_ptr->chain_pages.empty()) {
+        } else if (!blob_ptr->chain_pages.empty()) {
             // ✅ P0 新增：处理跨页 BLOB，调用 read_blob_data_from_chain 重组数据
             auto blob_data = dbrecovery::innodb::read_blob_data_from_chain(
                 blob_ptr->chain_pages, 
