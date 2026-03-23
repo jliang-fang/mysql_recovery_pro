@@ -179,7 +179,8 @@ struct BlobPointer {
 };
 
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
-std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20) {
+std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20,
+                                              const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) {
     if (!data || data_size < 16) return std::nullopt;
         
     // BLOB 指针格式（20字节）：
@@ -238,12 +239,6 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
     
     // 如果 total_len > len，说明是多页 BLOB，需要构建完整的页链
     if (ptr.total_len > ptr.len) {
-        auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
-            // 注意：这是一个简化的模拟实现。在实际应用中，应传入真实的页读取回调。
-            // 此处仅用于演示，返回空表示无法读取真实数据
-            return std::nullopt;
-        };
-        
         auto chain_opt = build_blob_page_chain(ptr.space_id, ptr.page_no, page_reader);
         if (chain_opt.has_value()) {
             ptr.chain_pages = std::move(chain_opt.value()).pages;

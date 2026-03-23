@@ -481,6 +481,42 @@ TEST(PageReader, ValidateChecksumInvalidPageSizeNonStrict) {
     EXPECT_TRUE(result); // 非严格模式下应允许继续
 }
 
+// ✅ P1 新增：测试 parse_blob_pointer 在多页 BLOB 场景下的行为（需要 page_reader 回调）
+TEST(BlobPointerTest, ParseBlobPointerMultiPageWithReader) {
+    std::vector<uint8_t> data(20, 0);
+    write_le<uint32_t>(data.data(), 0, 0);   // space_id
+    write_le<uint32_t>(data.data(), 4, 100); // page_no (first BLOB 页)
+    write_le<uint32_t>(data.data(), 8, 0);   // offset
+    write_le<uint32_t>(data.data(), 12, 50); // len (current page)
+    write_le<uint32_t>(data.data(), 16, 150); // total_len (multi-page)
+
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        if (space_id == 0 && page_no == 100) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 设置下一个 BLOB 页号（偏移 38+0=38）
+            write_le<uint32_t>(page_data.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_NEXT, 200); // next_bpage = 200
+            return page_data;
+        }
+        if (space_id == 0 && page_no == 200) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 设置下一个 BLOB 页号为 0xFFFFFFFF，表示链表结束
+            write_le<uint32_t>(page_data.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_NEXT, 0xFFFFFFFF);
+            return page_data;
+        }
+        return std::nullopt;
+    };
+
+    auto ptr = parse_blob_pointer(data.data(), data.size(), page_reader);
+    EXPECT_TRUE(ptr.has_value());
+    
+    // ✅ 验证：chain_pages 应包含两个页（100 和 200）
+    EXPECT_EQ(ptr->chain_pages.size(), 2);
+    EXPECT_EQ(ptr->chain_pages[0].first, 0);
+    EXPECT_EQ(ptr->chain_pages[0].second, 100);
+    EXPECT_EQ(ptr->chain_pages[1].first, 0);
+    EXPECT_EQ(ptr->chain_pages[1].second, 200);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
