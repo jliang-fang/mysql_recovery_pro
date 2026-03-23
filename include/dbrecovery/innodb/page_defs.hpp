@@ -136,9 +136,6 @@ constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_
 // REC_INFO_STATUS_MASK 是最低3位（0x07），用于区分 INFIMUM/SUPREMUM/ORDINARY/Node Pointer
 constexpr uint8_t REC_INFO_STATUS_MASK  = 0x07;
 
-// ✅ 新增：BLOB 指针标志位常量
-constexpr uint8_t REC_INFO_EXTERN_FLAG  = 0x20;   // external pointer flag (bit 5 of info_bits)
-
 // ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
 // These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).
 // They match the InnoDB source code definitions in include/page0page.h

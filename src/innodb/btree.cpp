@@ -55,6 +55,13 @@ bool BPlusTreeParser::parse() noexcept(false) {
         return false;
     }
     
+    // ✅ 新增：页健康检查（目录槽、记录链完整性）
+    PageHealth health = check_health();
+    if (!health.is_valid) {
+        std::cerr << "[ERROR] BPlusTreeParser: Page health check failed. Status: " << health.status_message << std::endl;
+        return false;
+    }
+    
     // 解析B+树头
     if (!parse_header()) {
         std::cerr << "[ERROR] BPlusTreeParser: Failed to parse B+ tree header" << std::endl;
