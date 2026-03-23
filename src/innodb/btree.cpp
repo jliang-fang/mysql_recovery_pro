@@ -29,7 +29,18 @@ std::string BPlusTreeParser::parse_field_value(
         if (!blob_ptr.has_value()) {
             return "<INVALID_BLOB_PTR>";
         }
-        
+
+        // ✅ 新增：使用 is_valid() 进行深度校验
+        auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+            // 注意：这是一个简化的模拟实现。在实际应用中，应传入真实的页读取回调。
+            // 此处仅用于演示，返回空表示无法读取真实数据
+            return std::nullopt;
+        };
+
+        if (!blob_ptr->is_valid(page_reader, true)) {
+            return "<INVALID_BLOB_PTR>";
+        }
+
         // ✅ 完整处理：尝试读取 BLOB 数据（需要 page_reader 回调）
         // 注意：此处简化实现，实际应通过外部传入的 page_reader 获取数据
         std::ostringstream oss;

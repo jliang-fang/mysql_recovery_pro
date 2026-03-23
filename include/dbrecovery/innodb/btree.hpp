@@ -526,6 +526,69 @@ TEST(BPlusTreeParserTest, ParseUndoLogPage) {
     EXPECT_TRUE(parser.parse());
 }
 
+// ==================== BlobPointer 单元测试 ====================
+TEST(BlobPointerTest, ParseValidSinglePageBlob) {
+    std::vector<uint8_t> data(20, 0);
+    write_le<uint32_t>(data.data(), 0, 0);   // space_id
+    write_le<uint32_t>(data.data(), 4, 100); // page_no
+    write_le<uint32_t>(data.data(), 8, 0);   // offset
+    write_le<uint32_t>(data.data(), 12, 50); // len
+    write_le<uint32_t>(data.data(), 16, 50); // total_len
+
+    auto ptr = parse_blob_pointer(data);
+    EXPECT_TRUE(ptr.has_value());
+    EXPECT_EQ(ptr->space_id, 0);
+    EXPECT_EQ(ptr->page_no, 100);
+    EXPECT_EQ(ptr->len, 50);
+    EXPECT_EQ(ptr->total_len, 50);
+    EXPECT_EQ(ptr->chain_pages.size(), 1);
+}
+
+TEST(BlobPointerTest, ParseValidMultiPageBlob) {
+    std::vector<uint8_t> data(20, 0);
+    write_le<uint32_t>(data.data(), 0, 0);   // space_id
+    write_le<uint32_t>(data.data(), 4, 100); // page_no (first page)
+    write_le<uint32_t>(data.data(), 8, 0);   // offset
+    write_le<uint32_t>(data.data(), 12, 50); // len (current page)
+    write_le<uint32_t>(data.data(), 16, 150); // total_len (multi-page)
+
+    auto ptr = parse_blob_pointer(data);
+    EXPECT_TRUE(ptr.has_value());
+    EXPECT_EQ(ptr->total_len, 150);
+    EXPECT_EQ(ptr->len, 50);
+}
+
+TEST(BlobPointerTest, ParseInvalidZeroTotalLenAndZeroLen) {
+    std::vector<uint8_t> data(20, 0);
+    write_le<uint32_t>(data.data(), 0, 0);   // space_id
+    write_le<uint32_t>(data.data(), 4, 100); // page_no
+    write_le<uint32_t>(data.data(), 8, 0);   // offset
+    write_le<uint32_t>(data.data(), 12, 0);  // len = 0
+    write_le<uint32_t>(data.data(), 16, 0);  // total_len = 0
+
+    auto ptr = parse_blob_pointer(data);
+    EXPECT_FALSE(ptr.has_value()); // 单页 BLOB 长度为 0 是无效的
+}
+
+TEST(BlobPageChainTest, DetectCircularReference) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 200);
+    chain.add_page(0, 300);
+    chain.add_page(0, 100); // 循环引用
+
+    EXPECT_TRUE(chain.has_circular_reference());
+}
+
+TEST(BlobPageChainTest, NoCircularReference) {
+    BlobPageChain chain;
+    chain.add_page(0, 100);
+    chain.add_page(0, 200);
+    chain.add_page(0, 300);
+
+    EXPECT_FALSE(chain.has_circular_reference());
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
