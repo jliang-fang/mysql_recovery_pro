@@ -69,14 +69,60 @@ std::string BPlusTreeParser::parse_field_value(
             return "<TRUNCATED>";
         }
         
-        uint8_t prefix_len = page_data_[data_pos];
-        data_pos++;
+        // ✅ 修复：处理 VARCHAR 长度前缀（>255 字节时使用 2 字节前缀）
+        uint16_t prefix_len = 0;
+        if (page_data_[data_pos] < 255) {
+            prefix_len = page_data_[data_pos];
+            data_pos++;
+        } else {
+            // 2 字节前缀
+            data_pos++;
+            prefix_len = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos);
+            data_pos += 2;
+        }
         
         std::string value;
-        for (uint8_t i = 0; i < prefix_len && data_pos < page_data_.size(); ++i) {
+        for (uint16_t i = 0; i < prefix_len && data_pos < page_data_.size(); ++i) {
             value += static_cast<char>(page_data_[data_pos++]);
         }
         return value;
+    }
+    
+    // ✅ 新增：处理 DATETIME2/TIMESTAMP2 类型（MySQL 5.6+）
+    if (col.mysql_type_id == dbrecovery::innodb::mysql_types::DATETIME2 ||
+        col.mysql_type_id == dbrecovery::innodb::mysql_types::TIMESTAMP2) {
+        int precision = col.datetime_precision >= 0 ? col.datetime_precision : 0;
+        return parse_datetime2_value(static_cast<uint8_t>(precision), data_pos);
+    }
+    
+    // ✅ 新增：处理 JSON 类型（存储为 BLOB）
+    if (col.mysql_type_id == dbrecovery::innodb::mysql_types::JSON) {
+        if (data_pos + 20 > page_data_.size()) {
+            return "<JSON_BLOB_POINTER_TRUNCATED>";
+        }
+        
+        auto blob_ptr = dbrecovery::innodb::parse_blob_pointer(page_data_.data() + data_pos, 20);
+        if (!blob_ptr.has_value()) {
+            return "<INVALID_JSON_BLOB_PTR>";
+        }
+        
+        std::ostringstream oss;
+        oss << "JSON[sid=" << blob_ptr->space_id 
+            << ",page=" << blob_ptr->page_no 
+            << ",len=" << blob_ptr->total_len << "]";
+        
+        // ✅ 新增：如果 total_len <= len，说明是单页 BLOB，可直接读取
+        if (blob_ptr->total_len > 0 && blob_ptr->total_len <= 16384) {
+            size_t blob_offset = blob_ptr->offset;
+            if (blob_offset + blob_ptr->len <= page_data_.size()) {
+                std::string json_str(reinterpret_cast<const char*>(page_data_.data() + blob_offset), 
+                                     blob_ptr->len);
+                oss << ",data=" << json_str.substr(0, 64); // 截断显示前64字节
+                if (blob_ptr->len > 64) oss << "...";
+            }
+        }
+        
+        return oss.str();
     }
     
     // ✅ 新增：处理固定长度类型
