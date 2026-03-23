@@ -5,10 +5,26 @@
 #include <cmath>
 #include <stdexcept>
 #include <type_traits>
+#include <array>
 
 namespace dbrecovery {
 namespace utils {
 
+#if __cplusplus >= 202302L && defined(__cpp_lib_math_special_functions)
+// ✅ C++23 兼容：优先使用标准库 std::factorial
+template <typename T = uint64_t>
+constexpr T factorial(T n) noexcept(false) {
+    static_assert(std::is_integral_v<T>, "factorial requires integral type");
+    
+    if (n < 0 || n > 20) {
+        throw std::overflow_error("Factorial overflow: n must be in range [0, 20]");
+    }
+    
+    return std::factorial(static_cast<unsigned int>(n));
+}
+
+#else
+// ✅ C++17/20 兼容：使用预计算表实现
 /**
  * @brief 阶乘计算辅助函数（使用预计算表，C++17/20 兼容）
  *
@@ -30,11 +46,12 @@ constexpr T factorial(T n) noexcept(false) {
     }();
     
     if (n < 0 || n > 20) {
-        throw std::overflow_error("factorial: n must be in range [0, 20]");
+        throw std::overflow_error("Factorial overflow: n must be in range [0, 20]");
     }
     
     return factorial_table[static_cast<size_t>(n)];
 }
+#endif
 
 }  // namespace utils
 }  // namespace dbrecovery
