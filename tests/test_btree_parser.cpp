@@ -593,6 +593,49 @@ TEST(BPlusTreeParser, ParseRecordWithMultiPageBlob) {
     EXPECT_NE(it->second.find("data_size=150"), std::string::npos); // 应显示重组后的总长度
 }
 
+// ✅ P0 新增：测试循环引用的 BLOB 页链被正确拒绝
+TEST(BlobPointerTest, RejectCircularBLOBChain) {
+    std::vector<uint8_t> data(20, 0);
+    write_le<uint32_t>(data.data(), 0, 0);   // space_id
+    write_le<uint32_t>(data.data(), 4, 100); // page_no (first BLOB 页)
+    write_le<uint32_t>(data.data(), 8, 0);   // offset
+    write_le<uint32_t>(data.data(), 12, 50); // len (current page)
+    write_le<uint32_t>(data.data(), 16, 150); // total_len (multi-page)
+
+    auto page_reader = [](uint32_t space_id, uint32_t page_no) -> std::optional<std::vector<uint8_t>> {
+        if (space_id == 0 && page_no == 100) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 设置下一个 BLOB 页号为 200
+            write_le<uint32_t>(page_data.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_NEXT, 200);
+            return page_data;
+        }
+        if (space_id == 0 && page_no == 200) {
+            std::vector<uint8_t> page_data(16384, 0);
+            // 设置下一个 BLOB 页号为 100，形成循环
+            write_le<uint32_t>(page_data.data(), dbrecovery::innodb::BlobPageChain::BTR_BPAGE_NEXT, 100);
+            return page_data;
+        }
+        return std::nullopt;
+    };
+
+    auto ptr = dbrecovery::innodb::parse_blob_pointer(data.data(), data.size(), page_reader);
+    EXPECT_TRUE(ptr.has_value());
+
+    // ✅ 验证：chain_pages 应包含两个页（100 和 200）
+    EXPECT_EQ(ptr->chain_pages.size(), 2);
+
+    // ✅ P0 新增：验证 is_valid 在严格模式下会因循环引用而失败
+    EXPECT_FALSE(ptr->is_valid(page_reader, true));
+
+    // ✅ P0 新增：验证 read_blob_data_from_chain 会拒绝处理循环链
+    auto result = dbrecovery::innodb::read_blob_data_from_chain(
+        ptr->chain_pages,
+        ptr->total_len,
+        page_reader
+    );
+    EXPECT_TRUE(result.empty()); // 应返回空，而不是陷入无限循环
+}
+
 // ✅ P1 新增：测试完整的多页 BLOB 链恢复流程（集成测试）
 TEST(BPlusTreeParser, FullMultiPageBlobRecoveryIntegration) {
     // 1. 创建一个包含跨页 BLOB 的主索引页

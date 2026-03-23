@@ -92,7 +92,16 @@ std::string BPlusTreeParser::parse_field_value(
 
         // ✅ P0 修复：使用 is_valid() 进行深度校验（包括循环引用和页链连续性检查）
         if (!blob_ptr->is_valid(page_reader, true)) {
+            std::cerr << "[ERROR] BLOB pointer validation failed for space_id=" 
+                      << blob_ptr->space_id << ", page_no=" << blob_ptr->page_no << std::endl;
             return "<INVALID_BLOB_PTR>";
+        }
+
+        // ✅ P0 新增：在读取前再次检查页链完整性，双重保险
+        if (blob_ptr->chain_pages.empty()) {
+            std::cerr << "[ERROR] BLOB chain is empty after validation for space_id=" 
+                      << blob_ptr->space_id << ", page_no=" << blob_ptr->page_no << std::endl;
+            return "<EMPTY_BLOB_CHAIN>";
         }
 
         // ✅ 完整处理：尝试读取 BLOB 数据
@@ -109,6 +118,8 @@ std::string BPlusTreeParser::parse_field_value(
                                      blob_ptr->len);
                 oss << ",data=" << blob_data.substr(0, 32); // 截断显示前32字节
                 if (blob_ptr->len > 32) oss << "...";
+            } else {
+                std::cerr << "[WARN] BLOB data offset/length exceeds page boundary" << std::endl;
             }
         } else if (!blob_ptr->chain_pages.empty()) {
             // ✅ P0 新增：处理跨页 BLOB，调用 read_blob_data_from_chain 重组数据
@@ -132,6 +143,8 @@ std::string BPlusTreeParser::parse_field_value(
                     oss << ",preview=<truncated>";
                 }
             } else {
+                std::cerr << "[ERROR] Failed to reconstruct multi-page BLOB data for space_id=" 
+                          << blob_ptr->space_id << ", page_no=" << blob_ptr->page_no << std::endl;
                 oss << ",data=<failed_to_reconstruct>";
             }
         }
