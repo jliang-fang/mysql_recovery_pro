@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <vector>
+#include <map>
 #include <memory>
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
@@ -19,10 +20,6 @@ enum class BTreeNodeType : uint8_t {
     LEAF = 2,
     INVALID = 255
 };
-
-// ✅ 记录头标志位常量（用于 COMPACT 格式，参考 MySQL 8.0 源码 sql/dd/impl/table.h 和 page/page0page.h）
-// 注意：REC_INFO_STATUS_MASK 是最低3位（0x07），REC_INFO_DELETED_FLAG 是 bit 3 (0x08)
-// 这些常量已在 page_defs.hpp 中定义，此处仅作引用以保持向后兼容性
 
 /**
  * @brief B+Tree 索引页结构解析器
@@ -91,120 +88,10 @@ public:
      * @return std::vector<std::map<std::string, std::string>> 解析后的记录
      */
     std::vector<std::map<std::string, std::string>> parse_records(
-        const catalog::TableSchema& schema) const {
-        std::vector<std::map<std::string, std::string>> records;
-        
-        if (!is_compact_format()) {
-            // 仅支持 COMPACT 格式
-            return records;
-        }
-        
-        // 解析每个用户记录
-        for (size_t i = 0; i < record_offsets_.size(); ++i) {
-            uint16_t offset = record_offsets_[i];
-            
-            // 跳过 INFIMUM 和 SUPREMUM 系统记录
-            if (offset == 0 || offset >= page_data_.size() - 5) {
-                continue;
-            }
-            
-            // 解析记录头（COMPACT格式）
-            if (offset + 6 > page_data_.size()) {
-                continue;
-            }
-            
-            uint8_t info_bits = page_data_[offset];
-            uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data() + offset + 1, 0) & 0x3FFF;
-            
-            // 跳过已删除的记录
-            if (info_bits & dbrecovery::innodb::REC_INFO_DELETED_FLAG) {
-                continue;
-            }
-            
-            // ✅ 统一：解析 n_fields 字段数量（位于记录头第5字节）
-            uint16_t n_fields = page_data_[offset + 5];
-            if (n_fields == 0 || n_fields > schema.columns.size()) {
-                // 兼容性处理：如果无法确定字段数，使用schema中的字段数
-                n_fields = static_cast<uint16_t>(schema.columns.size());
-            }
-            
-            // 解析 NULL 位图（COMPACT格式：NULL位图在记录头后）
-            size_t data_pos = offset + 5; // 记录头从 offset 开始，第5字节是 info_bits
-            uint32_t nullable_count = 0;
-            for (const auto& pair : schema.columns) {
-                if (pair.second.is_nullable) {
-                    nullable_count++;
-                }
-            }
-            size_t null_bitmap_size = (nullable_count + 7) / 8;
-            
-            // ✅ 修复：跳过 info_bits 后，data_pos 应该指向 NULL 位图的开头
-            data_pos += 1; // info_bits
-            
-            if (data_pos + null_bitmap_size > page_data_.size()) {
-                break;
-            }
-            
-            // ✅ 新增：确保 NULL 位图解析正确处理非空列跳过逻辑
-            // COMPACT 格式中，NULL 位图只包含可空列，顺序与 schema.columns 中的定义顺序一致
-            
-            // 解析字段数据
-            std::map<std::string, std::string> record;
-            
-            // ✅ 统一：根据实际解析的字段数进行循环
-            uint16_t parsed_fields = 0;
-            size_t nullable_idx = 0; // NULL 位图中的索引
-            
-            for (const auto& pair : schema.columns) {
-                const auto& col = pair.second;
-                
-                if (data_pos >= page_data_.size() || parsed_fields >= n_fields) {
-                    break;
-                }
-                
-                // ✅ 新增：对于非空列，跳过 NULL 位图中的对应位
-                bool is_nullable_col = col.is_nullable;
-                
-                // 检查当前列是否在 NULL 位图中（仅当它是可空列时）
-                if (is_nullable_col) {
-                    // ✅ 修复：data_pos 现在指向 NULL 位图的开头，直接使用
-                    size_t byte_idx = nullable_idx / 8;
-                    size_t bit_idx = nullable_idx % 8;
-                    
-                    if (data_pos + byte_idx < page_data_.size()) {
-                        uint8_t bitmap_byte = page_data_[data_pos + byte_idx];
-                        bool is_null = (bitmap_byte & (1 << bit_idx)) != 0;
-                        
-                        if (is_null) {
-                            record[col.name] = "NULL";
-                            nullable_idx++;
-                            parsed_fields++;
-                            continue; // 跳过字段值解析
-                        }
-                    }
-                    nullable_idx++;
-                }
-                
-                // ✅ 修复：移动 data_pos 到字段数据的起始位置（跳过 NULL 位图）
-                if (is_nullable_col && nullable_idx == 0) {
-                    data_pos += null_bitmap_size;
-                }
-                
-                std::string value = parse_field_value(col, data_pos, false);
-                record[col.name] = value;
-                parsed_fields++;
-            }
-            
-            records.push_back(record);
-        }
-        
-        return records;
-    }
-    
+        const catalog::TableSchema& schema) const;
+
     // ✅ 统一：格式校验方法
-    bool is_compact_format() const {
-        return (btr_format_ & 0x80) == 0; // COMPACT 格式标志位为 0
-    }
+    bool is_compact_format() const;
     
     // ✅ 新增：SDI 页解析支持
     [[nodiscard]] uint64_t get_sdi_table_id() const;
