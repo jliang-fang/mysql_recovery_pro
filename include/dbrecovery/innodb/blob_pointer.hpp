@@ -30,9 +30,61 @@ struct BlobPageChain {
         pages.emplace_back(space_id, page_no);
     }
 
-    // ✅ 新增：声明 is_valid 方法，实现保留在头文件中（内联函数）
+    // ✅ 新增：实现 is_valid 方法，验证页链完整性
     bool is_valid(const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }, 
-                  bool strict_mode = true) const;
+                  bool strict_mode = true) const {
+        if (pages.empty()) {
+            if (strict_mode) {
+                std::cerr << "[ERROR] BlobPageChain is empty" << std::endl;
+            }
+            return false;
+        }
+        
+        // ✅ 新增：检测循环引用
+        if (has_circular_reference()) {
+            if (strict_mode) {
+                std::cerr << "[ERROR] BlobPageChain contains circular reference" << std::endl;
+            }
+            return false;
+        }
+        
+        // 如果没有 page_reader，仅做基础校验（已通过 has_circular_reference）
+        if (!page_reader) {
+            return true;
+        }
+        
+        // ✅ 新增：验证页链连续性
+        for (size_t i = 0; i < pages.size(); ++i) {
+            auto [space_id, page_no] = pages[i];
+            auto page_data_opt = page_reader(space_id, page_no);
+            
+            if (!page_data_opt || page_data_opt->size() < BlobPageChain::BTR_BPAGE_LEN + 4) {
+                if (strict_mode) {
+                    std::cerr << "[ERROR] Failed to read BLOB page (" << space_id << ", " << page_no << ")" << std::endl;
+                }
+                return false;
+            }
+            
+            // ✅ 新增：验证下一个页号（除最后一页外）
+            if (i < pages.size() - 1) {
+                uint32_t next_expected = pages[i + 1].second;
+                uint32_t actual_next = dbrecovery::innodb::read_le<uint32_t>(
+                    page_data_opt->data(), BlobPageChain::BTR_BPAGE_NEXT
+                );
+                
+                if (actual_next != next_expected) {
+                    if (strict_mode) {
+                        std::cerr << "[ERROR] BLOB chain broken at page (" << space_id 
+                                  << ", " << page_no << "). Expected next=" << next_expected 
+                                  << ", actual=" << actual_next << std::endl;
+                    }
+                    return false;
+                }
+            }
+        }
+        
+        return true;
+    }
 
     // ✅ 新增：检测循环引用（增强版）
     bool has_circular_reference() const {

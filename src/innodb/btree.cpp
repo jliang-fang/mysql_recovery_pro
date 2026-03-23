@@ -12,6 +12,134 @@ namespace innodb {
 
 // ==================== 辅助函数：字段值解析 ====================
 
+std::string BPlusTreeParser::parse_field_value(
+    const catalog::ColumnInfo& col, size_t& data_pos, bool is_extern) const {
+    
+    // ✅ 新增：处理外部存储（BLOB）指针
+    if (is_extern || col.mysql_type_id == dbrecovery::innodb::mysql_types::TINY_BLOB ||
+                   col.mysql_type_id == dbrecovery::innodb::mysql_types::MEDIUM_BLOB ||
+                   col.mysql_type_id == dbrecovery::innodb::mysql_types::LONG_BLOB ||
+                   col.mysql_type_id == dbrecovery::innodb::mysql_types::BLOB) {
+        // BLOB 字段存储的是 20 字节指针（或更短的前缀）
+        if (data_pos + 20 > page_data_.size()) {
+            return "<BLOB_POINTER_TRUNCATED>";
+        }
+        
+        auto blob_ptr = dbrecovery::innodb::parse_blob_pointer(page_data_.data() + data_pos, 20);
+        if (!blob_ptr.has_value()) {
+            return "<INVALID_BLOB_PTR>";
+        }
+        
+        // ✅ 简化处理：返回 BLOB 指针信息（完整数据需通过 page_reader 回调获取）
+        std::ostringstream oss;
+        oss << "BLOB[sid=" << blob_ptr->space_id 
+            << ",page=" << blob_ptr->page_no 
+            << ",len=" << blob_ptr->total_len << "]";
+        return oss.str();
+    }
+    
+    // ✅ 新增：处理 VARCHAR 类型（前缀长度字节 + 数据）
+    if (col.mysql_type_id == dbrecovery::innodb::mysql_types::VARCHAR ||
+        col.mysql_type_id == dbrecovery::innodb::mysql_types::VAR_STRING) {
+        if (data_pos >= page_data_.size()) {
+            return "<TRUNCATED>";
+        }
+        
+        uint8_t prefix_len = page_data_[data_pos];
+        data_pos++;
+        
+        std::string value;
+        for (uint8_t i = 0; i < prefix_len && data_pos < page_data_.size(); ++i) {
+            value += static_cast<char>(page_data_[data_pos++]);
+        }
+        return value;
+    }
+    
+    // ✅ 新增：处理固定长度类型
+    switch (col.mysql_type_id) {
+        case dbrecovery::innodb::mysql_types::TINY:
+            if (data_pos + 1 > page_data_.size()) return "<TRUNCATED>";
+            return std::to_string(static_cast<int>(page_data_[data_pos++]));
+            
+        case dbrecovery::innodb::mysql_types::SHORT:
+            if (data_pos + 2 > page_data_.size()) return "<TRUNCATED>";
+            return std::to_string(dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), data_pos));
+            
+        case dbrecovery::innodb::mysql_types::LONG:
+            if (data_pos + 4 > page_data_.size()) return "<TRUNCATED>";
+            return std::to_string(dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos));
+            
+        case dbrecovery::innodb::mysql_types::LONGLONG:
+            if (data_pos + 8 > page_data_.size()) return "<TRUNCATED>";
+            return std::to_string(dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos));
+            
+        case dbrecovery::innodb::mysql_types::DATE:
+            if (data_pos + 3 > page_data_.size()) return "<TRUNCATED>";
+            // MySQL DATE 格式：[year_high(7bit), year_low(8bit), month(4bit), day(5bit)]
+            uint32_t packed = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos) & 0xFFFFFF;
+            int year = ((packed >> 17) & 0x7F) * 256 + ((packed >> 9) & 0xFF);
+            int month = (packed >> 5) & 0xF;
+            int day = packed & 0x1F;
+            return std::to_string(year) + "-" + std::to_string(month) + "-" + std::to_string(day);
+            
+        case dbrecovery::innodb::mysql_types::DATETIME:
+            if (data_pos + 8 > page_data_.size()) return "<TRUNCATED>";
+            // MySQL DATETIME 格式（8字节）：[year(2B), month(1B), day(1B), hour(1B), minute(1B), second(1B), frac(3B)]
+            uint64_t packed = dbrecovery::innodb::read_le<uint64_t>(page_data_.data(), data_pos);
+            int year = static_cast<int>(packed >> 48);
+            int month = (packed >> 40) & 0xFF;
+            int day = (packed >> 32) & 0xFF;
+            int hour = (packed >> 24) & 0xFF;
+            int minute = (packed >> 16) & 0xFF;
+            int second = (packed >> 8) & 0xFF;
+            return std::to_string(year) + "-" + 
+                   std::to_string(month) + "-" + 
+                   std::to_string(day) + " " +
+                   std::to_string(hour) + ":" + 
+                   std::to_string(minute) + ":" + 
+                   std::to_string(second);
+                   
+        default:
+            return "<UNSUPPORTED_TYPE>";
+    }
+}
+
+std::string BPlusTreeParser::parse_datetime2_value(uint8_t precision, size_t& data_pos) const {
+    // ✅ 新增：DATETIME2 解析（参考 MySQL 8.0 field.cc）
+    if (data_pos + 5 > page_data_.size()) return "<TRUNCATED>";
+    
+    // 前5字节 packed format
+    uint32_t packed = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos);
+    int year_low = packed & 0xFF;
+    int year_high = (packed >> 8) & 0xFF;
+    int month = (packed >> 16) & 0xF;
+    int day = (packed >> 20) & 0x1F;
+    int hour = (packed >> 25) & 0x1F;
+    int minute = (packed >> 30) & 0x3F;
+    
+    // 后3字节小数部分（precision=6）
+    if (data_pos + 8 > page_data_.size()) return "<TRUNCATED>";
+    uint32_t frac = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), data_pos + 5) & 0xFFFFFF;
+    
+    std::ostringstream oss;
+    oss << (year_high * 256 + year_low) << "-" 
+        << month << "-" << day << " "
+        << hour << ":" << minute << ":";
+    
+    if (precision > 0) {
+        // 格式化小数部分
+        int frac_digits = precision;
+        std::string frac_str = std::to_string(frac);
+        while (frac_str.length() < 6) frac_str = "0" + frac_str;
+        oss << frac_str.substr(0, frac_digits);
+    } else {
+        oss << "00";
+    }
+    
+    data_pos += 8; // DATETIME2(6) 总共 8 字节
+    return oss.str();
+}
+
 // ==================== BPlusTreeParser 实现 ====================
 
 BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
