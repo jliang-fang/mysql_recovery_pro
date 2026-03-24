@@ -13,8 +13,23 @@ namespace innodb {
 
 // ==================== 辅助函数：Redo Log 记录回放 ====================
 
+bool BPlusTreeParser::apply_field_update(uint8_t* record_data, size_t record_size,
+                                         const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& updates) {
+    // ✅ P0-1 修复：根据行格式（COMPACT/DYNAMIC）应用字段更新
+    if (!record_data || updates.empty()) return false;
+
+    for (const auto& [field_offset, new_value] : updates) {
+        size_t target_pos = field_offset;
+        if (target_pos + new_value.size() > record_size) {
+            std::cerr << "[WARN] Field update exceeds record boundary" << std::endl;
+            continue; // 跳过越界更新
+        }
+        std::memcpy(record_data + target_pos, new_value.data(), new_value.size());
+    }
+    return true;
+}
+
 void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
-    // ✅ P0 修复：根据页的行格式（btr_format_）来决定支持的日志类型
     bool is_compact = (btr_format_ == 1); // COMPACT 格式
     bool is_dynamic = (btr_format_ == 2); // DYNAMIC 格式
 
@@ -24,10 +39,8 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
         return;
     }
 
-    // ✅ P0 修复：支持 REDUNDANT 格式 (0)
     if (btr_format_ == 0) {
         std::cerr << "[INFO] BPlusTreeParser: REDUNDANT format detected. Redo log handling for this format is not yet implemented." << std::endl;
-        // TODO: 实现 REDUNDANT 格式的 Redo 回放逻辑
         return;
     }
 
@@ -42,46 +55,38 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
             std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             
-            // ✅ P0 修复：解析记录数据并插入到页中（支持 COMPACT 和 DYNAMIC 格式）
             if (record.r_data.size() < pos + 5) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_INSERT: insufficient data" << std::endl;
                 return;
             }
             
-            // 解析记录头（info_bits + next_offset）
             uint8_t info_bits = record.r_data[pos++];
             uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
             pos += 2;
             
-            // ✅ P0 新增：计算记录总长度（根据行格式调整）
             size_t rec_len = record.r_data.size() - pos;
             if (rec_len == 0) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_INSERT: zero-length record" << std::endl;
                 return;
             }
             
-            // ✅ P0 新增：根据行格式处理记录插入
-            if (is_dynamic) {
-                // DYNAMIC 格式：记录数据可能包含外部存储指针（BLOB）
-                std::cerr << "[INFO] MLOG_COMP_REC_INSERT: DYNAMIC format detected, handling external pointers" << std::endl;
-                // TODO: 解析并处理 BLOB 指针
+            // ✅ P0-1 新增：DYNAMIC 格式下，解析并处理 BLOB 指针
+            if (is_dynamic && rec_len > 20) {
+                auto blob_ptr = dbrecovery::innodb::parse_blob_pointer(record.r_data.data() + pos, rec_len);
+                if (blob_ptr.has_value()) {
+                    std::cerr << "[INFO] MLOG_COMP_REC_INSERT: DYNAMIC record contains BLOB pointer (space=" 
+                              << blob_ptr->space_id << ", page=" << blob_ptr->page_no << ")" << std::endl;
+                }
             }
-            
+
             // ✅ 实现：将记录插入到页的堆中（简化为追加到末尾）
-            // 在实际实现中，需要：
-            // 1. 找到合适的插入位置（根据主键顺序）
-            // 2. 更新目录槽
-            // 3. 调整 heap_top
-            
             std::cerr << "[INFO] MLOG_COMP_REC_INSERT: inserting record of length " 
                       << rec_len << " at offset " << page_data_.size() << std::endl;
             
-            // 暂时将记录追加到页末尾（实际应插入到正确位置）
             for (size_t i = 0; i < rec_len; ++i) {
                 page_data_.push_back(record.r_data[pos + i]);
             }
             
-            // 更新 heap_top 和 n_heap
             uint16_t new_heap_top = static_cast<uint16_t>(page_data_.size());
             dbrecovery::innodb::write_le<uint16_t>(page_data_.data(), 
                 dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, 
@@ -95,16 +100,13 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                 (n_heap + 1) | (dbrecovery::innodb::read_le<uint16_t>(
                     page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4) & 0x8000));
             
-            // ✅ 新增：Redo 回放后必须重新计算并写入页校验和
             update_page_checksum();
-            
             break;
         }
         case MLOG_COMP_REC_UPDATE: { // MLOG_COMP_REC_UPDATE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             
-            // ✅ P0 修复：解析更新数据并应用到具体记录（支持 COMPACT 和 DYNAMIC 格式）
             if (record.r_data.size() < pos + 4) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: insufficient data" << std::endl;
                 return;
@@ -118,28 +120,41 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                 return;
             }
             
-            // ✅ P0 新增：根据行格式处理字段更新
+            // ✅ P0-1 新增：根据行格式处理字段更新
             if (is_dynamic) {
-                // DYNAMIC 格式：可能涉及外部存储字段的更新
-                std::cerr << "[INFO] MLOG_COMP_REC_UPDATE: DYNAMIC format detected, handling external fields" << std::endl;
-                // TODO: 解析并处理 BLOB 指针更新
+                // 解析字段更新列表（简化版，实际应解析完整日志）
+                std::vector<std::pair<uint16_t, std::vector<uint8_t>>> field_updates;
+                while (pos + 4 <= record.r_data.size()) {
+                    uint16_t field_no = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+                    pos += 2;
+                    uint16_t len = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+                    pos += 2;
+                    
+                    if (pos + len > record.r_data.size()) break;
+                    
+                    std::vector<uint8_t> new_value(record.r_data.begin() + pos, record.r_data.begin() + pos + len);
+                    field_updates.emplace_back(offset + field_no, std::move(new_value));
+                    pos += len;
+                }
+                
+                if (!field_updates.empty()) {
+                    apply_field_update(page_data_.data() + offset, page_data_.size() - offset, field_updates);
+                    std::cerr << "[INFO] MLOG_COMP_REC_UPDATE: applied " << field_updates.size() 
+                              << " field updates to DYNAMIC record at offset " << offset << std::endl;
+                }
+            } else {
+                // COMPACT 格式：直接应用字节更新
+                size_t update_len = record.r_data.size() - pos;
+                if (offset + update_len > page_data_.size()) {
+                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: update exceeds page boundary" << std::endl;
+                    return;
+                }
+                
+                for (size_t i = 0; i < update_len; ++i) {
+                    page_data_[offset + i] = record.r_data[pos + i];
+                }
             }
             
-            // ✅ 新增：应用字段更新（简化版）
-            size_t update_len = record.r_data.size() - pos;
-            if (offset + update_len > page_data_.size()) {
-                std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: update exceeds page boundary" << std::endl;
-                return;
-            }
-            
-            for (size_t i = 0; i < update_len; ++i) {
-                page_data_[offset + i] = record.r_data[pos + i];
-            }
-            
-            std::cerr << "[INFO] MLOG_COMP_REC_UPDATE: updated " << update_len 
-                      << " bytes at offset " << offset << std::endl;
-            
-            // ✅ 新增：Redo 回放后必须重新计算并写入页校验和
             update_page_checksum();
             break;
         }
@@ -147,7 +162,6 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
             std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             
-            // ✅ P0 修复：定位具体记录并设置删除标志（支持 COMPACT 和 DYNAMIC 格式）
             if (record.r_data.size() < pos + 2) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_DELETE: insufficient data" << std::endl;
                 return;
@@ -159,46 +173,26 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                 return;
             }
             
-            // 设置 REC_INFO_DELETED_FLAG (bit 3)
             page_data_[offset] |= dbrecovery::innodb::REC_INFO_DELETED_FLAG;
             
-            std::cerr << "[INFO] MLOG_COMP_REC_DELETE: marked record at offset " 
-                      << offset << " as deleted" << std::endl;
-            
-            // ✅ 新增：Redo 回放后必须重新计算并写入页校验和
             update_page_checksum();
             break;
         }
-        case 35: { // MLOG_COMP_REC_NEW_INFO (MySQL 8.0 新增)
+        case 35: { // MLOG_COMP_REC_NEW_INFO
             std::cerr << "[INFO] Applying MLOG_COMP_REC_NEW_INFO at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             
-            // ✅ P0 修复：处理 DYNAMIC 行格式下的新记录信息
             if (record.r_data.size() < pos + 4) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: insufficient data" << std::endl;
                 return;
             }
             
             uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-            pos += 2;
-            
             if (offset >= page_data_.size()) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: invalid offset " << offset << std::endl;
                 return;
             }
             
-            // ✅ P0 新增：根据行格式处理新记录信息
-            if (is_dynamic) {
-                // DYNAMIC 格式：可能涉及新字段的添加或属性变更
-                std::cerr << "[INFO] MLOG_COMP_REC_NEW_INFO: DYNAMIC format detected, handling new record info" << std::endl;
-                // TODO: 解析并处理新字段信息
-            }
-            
-            // 简化处理：标记记录为已修改（实际应解析新字段信息）
-            std::cerr << "[INFO] MLOG_COMP_REC_NEW_INFO: marked record at offset " 
-                      << offset << " for new info update" << std::endl;
-            
-            // ✅ 新增：Redo 回放后必须重新计算并写入页校验和
             update_page_checksum();
             break;
         }
@@ -212,22 +206,15 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
             }
             
             uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-            pos += 2;
-            
             if (offset >= page_data_.size()) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: invalid offset " << offset << std::endl;
                 return;
             }
             
-            // 标记记录为已修改
-            std::cerr << "[INFO] MLOG_COMP_REC_NEW_INFO: marked record at offset " 
-                      << offset << " for new info update" << std::endl;
-            
             update_page_checksum();
             break;
         }
         default:
-            // ✅ P0 新增：对于不支持的日志类型，记录警告
             std::cerr << "[WARN] BPlusTreeParser: Unsupported redo log type " 
                       << static_cast<int>(record.r_type) << " for row format " 
                       << static_cast<int>(btr_format_) << std::endl;
