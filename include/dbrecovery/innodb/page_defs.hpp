@@ -175,13 +175,19 @@ constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION     = 12;
 constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
 
 // ==================== Record Offset Constants (absolute offsets from page start) ====================
-/// @brief Absolute offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
+/// @brief Absolute offset of INFIMUM record within Page Data
 /// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
 constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
 /// @brief Absolute offset of SUPREMUM record within Page Data (typically at heap_top - 5)
 /// This is dynamic and should be read from page header, but for reference:
 /// Note: In practice, this is calculated as `heap_top - 5` where heap_top is read from the page header.
 constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder (dynamic)
+
+// ✅ 新增：B+Tree 记录偏移常量（用于解析用户记录）
+/// @brief Offset of first user record after INFIMUM/SUPREMUM
+constexpr uint16_t PAGE_USER_RECORDS_START = 54 + 13; // INFIMUM header size (13 bytes)
+/// @brief Offset of next record field within record header
+constexpr uint16_t REC_NEXT_OFFSET_POS = 1;
 
 // ==================== Page Header Offsets (relative to page start, absolute offsets) ====================
 // These are the offsets from the beginning of the page (FIL_HEADER_SIZE=38 is added).

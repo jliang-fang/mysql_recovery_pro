@@ -14,7 +14,9 @@ namespace innodb {
 // ==================== 辅助函数：Redo Log 记录回放 ====================
 
 void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
-    if (record.r_type != 30 && record.r_type != 31 && record.r_type != 32) {
+    if (record.r_type != MLOG_COMP_REC_INSERT && 
+        record.r_type != MLOG_COMP_REC_UPDATE && 
+        record.r_type != MLOG_COMP_REC_DELETE) {
         // 仅支持 COMPACT 格式的记录操作
         return;
     }
@@ -78,7 +80,7 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
             
             break;
         }
-        case 31: { // MLOG_COMP_REC_UPDATE
+        case MLOG_COMP_REC_UPDATE: { // MLOG_COMP_REC_UPDATE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             
@@ -111,7 +113,7 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                       << " bytes at offset " << offset << std::endl;
             break;
         }
-        case 32: { // MLOG_COMP_REC_DELETE
+        case MLOG_COMP_REC_DELETE: { // MLOG_COMP_REC_DELETE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             

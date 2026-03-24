@@ -8,6 +8,27 @@
 namespace dbrecovery {
 namespace innodb {
 
+// ✅ Redo Log 类型常量（参考 MySQL 8.0 mlog_id_t 枚举）
+constexpr uint8_t MLOG_1BYTE = 1;
+constexpr uint8_t MLOG_2BYTES = 2;
+constexpr uint8_t MLOG_4BYTES = 3;
+constexpr uint8_t MLOG_8BYTES = 4;
+constexpr uint8_t MLOG_REC_INSERT = 10;
+constexpr uint8_t MLOG_REC_UPDATE = 11;
+constexpr uint8_t MLOG_REC_DELETE = 12;
+constexpr uint8_t MLOG_PAGE_CREATE = 15;
+constexpr uint8_t MLOG_PAGE_REINIT = 16;
+constexpr uint8_t MLOG_INDEX_ALLOC = 17;
+constexpr uint8_t MLOG_COMP_REC_INSERT = 30;
+constexpr uint8_t MLOG_COMP_REC_UPDATE = 31;
+constexpr uint8_t MLOG_COMP_REC_DELETE = 32;
+constexpr uint8_t MLOG_COMP_PAGE_CREATE = 33;
+constexpr uint8_t MLOG_COMP_PAGE_REINIT = 34;
+constexpr uint8_t MLOG_BLOB_WRITE = 40;
+constexpr uint8_t MLOG_MULTI_REC_END = 50;
+constexpr uint8_t MLOG_CHECKPOINT = 51;
+constexpr uint8_t MLOG_INDEX_LOAD = 52;
+
 // ✅ Redo Log 记录结构（参考 MySQL 8.0 mtr0mtr.h）
 struct RedoLogRecord {
     uint16_t r_type;          // 日志类型 (MLOG_*)
