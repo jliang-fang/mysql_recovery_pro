@@ -70,19 +70,6 @@ inline std::string page_type_to_string(uint16_t type) {
     }
 }
 
-// ✅ 新增：页类型字符串化辅助函数（用于调试输出）
-inline std::string page_type_to_string(uint16_t type) {
-    switch (type) {
-        case FIL_PAGE_INDEX:       return "FIL_PAGE_INDEX";
-        case FIL_PAGE_UNDO_LOG:    return "FIL_PAGE_UNDO_LOG";
-        case FIL_PAGE_TYPE_ALLOCATED: return "FIL_PAGE_TYPE_ALLOCATED";
-        case FIL_PAGE_SDI:         return "FIL_PAGE_SDI";
-        case FIL_PAGE_TYPE_BLOB:   return "FIL_PAGE_TYPE_BLOB";
-        case FIL_PAGE_COMPRESSED:  return "FIL_PAGE_COMPRESSED";
-        default:                   return "UNKNOWN";
-    }
-}
-
 // InnoDB 常量
 constexpr size_t UNIV_PAGE_SIZE         = 16384; // 默认页大小 16KB
 constexpr size_t UNIV_PAGE_SIZE_MIN     = 4096;  // 最小页大小 (4KB)
