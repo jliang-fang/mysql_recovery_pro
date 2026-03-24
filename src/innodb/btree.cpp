@@ -28,7 +28,7 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
     }
 
     switch (record.r_type) {
-        case 30: { // MLOG_COMP_REC_INSERT
+        case MLOG_COMP_REC_INSERT: { // MLOG_COMP_REC_INSERT
             std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
             

@@ -174,7 +174,12 @@ struct BlobPointer {
             chain.add_page(p.first, p.second);
         }
 
-        return chain.is_valid(page_reader, strict_mode);
+        bool valid = chain.is_valid(page_reader, strict_mode);
+        if (!valid && strict_mode) {
+            std::cerr << "[ERROR] BLOB pointer validation failed: " 
+                      << (chain.has_circular_reference() ? "circular reference" : "broken chain") << std::endl;
+        }
+        return valid;
     }
 };
 
