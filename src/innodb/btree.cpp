@@ -14,10 +14,20 @@ namespace innodb {
 // ==================== 辅助函数：Redo Log 记录回放 ====================
 
 void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
-    if (record.r_type != MLOG_COMP_REC_INSERT && 
-        record.r_type != MLOG_COMP_REC_UPDATE && 
-        record.r_type != MLOG_COMP_REC_DELETE) {
-        // 仅支持 COMPACT 格式的记录操作
+    // ✅ P0-1 修复：根据页的行格式（btr_format_）来决定支持的日志类型
+    bool is_compact = (btr_format_ == 1); // COMPACT 格式
+    bool is_dynamic = (btr_format_ == 2); // DYNAMIC 格式
+
+    if (!is_compact && !is_dynamic) {
+        std::cerr << "[WARN] BPlusTreeParser: Unsupported row format " 
+                  << static_cast<int>(btr_format_) << ". Only COMPACT(1) and DYNAMIC(2) are supported." << std::endl;
+        return;
+    }
+
+    // ✅ P0-1 修复：支持 REDUNDANT 格式 (0)
+    if (btr_format_ == 0) {
+        std::cerr << "[INFO] BPlusTreeParser: REDUNDANT format detected. Redo log handling for this format is not yet implemented." << std::endl;
+        // TODO: 实现 REDUNDANT 格式的 Redo 回放逻辑
         return;
     }
 
@@ -136,6 +146,12 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                       << offset << " as deleted" << std::endl;
             break;
         }
+        default:
+            // ✅ P0-1 新增：对于不支持的日志类型，记录警告
+            std::cerr << "[WARN] BPlusTreeParser: Unsupported redo log type " 
+                      << static_cast<int>(record.r_type) << " for row format " 
+                      << static_cast<int>(btr_format_) << std::endl;
+            break;
     }
 }
 
@@ -495,6 +511,9 @@ bool BPlusTreeParser::parse_header() noexcept {
     const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_HEAP_TOP; // 修复：使用常量定义的偏移
     flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), flags_offset);
     
+    // ✅ P0-1 新增：从 flags 中解析行格式 (BTR_FORMAT_MASK = 0x07)
+    btr_format_ = static_cast<uint8_t>(flags_ & 0x07);
+
     // ✅ 新增：验证页级别合理性（MySQL 8.0 B+树最大高度通常不超过5）
     if (page_level_ > 5) {
         std::cerr << "[WARN] BPlusTreeParser: Unreasonably high page level: " << page_level_ << std::endl;
