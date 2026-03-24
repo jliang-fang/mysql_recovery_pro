@@ -99,6 +99,9 @@ public:
     // ✅ 新增：SDI 页解析支持
     [[nodiscard]] uint64_t get_sdi_table_id() const;
 
+    // ✅ P0 新增：Redo 回放后更新页校验和
+    void update_page_checksum();
+
 private:
     /**
      * @brief 解析单个字段的值（根据列类型）

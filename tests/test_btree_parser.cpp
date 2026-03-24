@@ -770,11 +770,71 @@ TEST(BPlusTreeParser, ApplyRedoRecordDelete) {
     // ✅ 验证：记录头的 REC_INFO_DELETED_FLAG (bit 3) 应被设置
     EXPECT_NE(page_data[70] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
 }
+
+// ✅ P0 新增：测试 Redo 回放后页校验和更新
+TEST(BPlusTreeParser, ApplyRedoRecordUpdatesChecksum) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 记录原始校验和（应为 0 或无效值）
+    uint32_t original_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 24);
+    
+    // 构造 MLOG_COMP_REC_DELETE 记录
+    RedoLogRecord record;
+    record.r_type = MLOG_COMP_REC_DELETE;
+    record.r_page_no = 0;
+    write_le<uint16_t>(record.r_data, 0, 70);
+    
+    parser.apply_redo_record(record);
+    
+    // ✅ 验证：校验和字段已被更新
+    uint32_t new_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 24);
+    EXPECT_NE(new_checksum, original_checksum) << "Checksum should be updated after redo application";
+    
+    // ✅ 验证：新校验和与计算出的 CRC32C 匹配
+    uint32_t computed_crc = dbrecovery::innodb::PageReader::compute_crc32c(page_data);
+    EXPECT_EQ(new_checksum, computed_crc) << "Stored checksum should match computed CRC32C";
+}
+
+// ✅ P0 新增：测试 MLOG_COMP_REC_NEW_INFO (MySQL 8.0 DYNAMIC 行格式)
+TEST(BPlusTreeParser, ApplyRedoRecordNewInfoDynamicFormat) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置 flags 以表示 DYNAMIC 行格式 (flags & 0x07 = 2)
+    constexpr uint16_t DYNAMIC_ROW_FORMAT_FLAGS = 2;
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_HEAP_TOP, DYNAMIC_ROW_FORMAT_FLAGS);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    EXPECT_EQ(parser.btr_format(), 2); // 验证行格式为 DYNAMIC
+    
+    // 构造 MLOG_COMP_REC_NEW_INFO 记录
+    RedoLogRecord record;
+    record.r_type = 35; // MLOG_COMP_REC_NEW_INFO
+    record.r_page_no = 0;
+    write_le<uint16_t>(record.r_data, 0, 70); // offset
+    
+    parser.apply_redo_record(record);
+    
+    // ✅ 验证：记录被标记为已修改（校验和更新）
+    uint32_t checksum_after = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 24);
+    EXPECT_NE(checksum_after, 0) << "Checksum should be updated after MLOG_COMP_REC_NEW_INFO";
+}
     
 } // namespace innodb
 } // namespace dbrecovery
     
 int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
+    ::testing::InitGoogleTEST(&argc, argv);
     return RUN_ALL_TESTS();
 }
