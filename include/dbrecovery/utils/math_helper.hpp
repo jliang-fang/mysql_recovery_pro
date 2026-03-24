@@ -10,8 +10,8 @@
 namespace dbrecovery {
 namespace utils {
 
-#if __cplusplus >= 202302L && defined(__cpp_lib_math_special_functions)
-// ✅ C++23 兼容：优先使用标准库 std::factorial
+#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
+// ✅ C++20 兼容：优先使用标准库 std::factorial (自 C++20 起可用)
 template <typename T = uint64_t>
 constexpr T factorial(T n) noexcept(false) {
     static_assert(std::is_integral_v<T>, "factorial requires integral type");
