@@ -143,69 +143,6 @@ private:
 
 public:
     /**
-     * @brief 解析记录数据（仅支持 COMPACT 格式）
-     * 
-     * @param schema 表结构定义
-     * @return std::vector<std::map<std::string, std::string>> 解析后的记录
-     */
-    std::vector<std::map<std::string, std::string>> parse_records(
-        const catalog::TableSchema& schema) const;
-
-    // ✅ 统一：格式校验方法
-    bool is_compact_format() const;
-    
-    // ✅ 新增：SDI 页解析支持
-    [[nodiscard]] uint64_t get_sdi_table_id() const;
-
-private:
-    /**
-     * @brief 解析单个字段的值（根据列类型）
-     * 
-     * @param col 列定义
-     * @param data_pos 数据位置指针（会更新）
-     * @param is_extern 是否为外部存储（如 BLOB 指针）
-     * @return std::string 解析后的字符串值
-     */
-    std::string parse_field_value(
-        const catalog::ColumnInfo& col, size_t& data_pos, bool is_extern) const;
-
-    // ✅ 新增：DATETIME2 字段解析辅助函数
-    std::string parse_datetime2_value(uint8_t precision, size_t& data_pos) const;
-
-    /**
-     * @brief 解析页的目录槽（record directory）
-     * 
-     * @return true 目录解析成功
-     * @return false 目录解析失败
-     */
-    bool parse_directory();
-    
-    // ✅ 新增：解析页头信息
-    bool parse_header();
-    
-    // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
-    bool parse_infimum_supremum();
-    
-    // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
-    bool parse_user_records();
-
-private:
-    std::vector<uint8_t> page_data_;
-    BTreeNodeType node_type_ = BTreeNodeType::INVALID;
-    uint32_t page_level_ = 0;
-    uint32_t next_page_ = 0xFFFFFFFF;
-    uint32_t prev_page_ = 0xFFFFFFFF;
-    uint16_t n_records_ = 0;
-    std::vector<uint16_t> record_offsets_;
-    uint8_t btr_format_ = 0;  // B+树记录格式标志位 (BTR_FORMAT_MASK)
-    uint16_t flags_ = 0;      // B+树标志位（用于存储行格式等信息）
-    
-    // INFIMUM/SUPREMUM 记录偏移
-    uint16_t infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
-    uint16_t supremum_offset_ = 0; // 实际值在 parse_infimum_supremum() 中计算
-
-public:
-    /**
      * @brief 解析页数据
      *
      * 这是 B+ 树解析的核心入口点。它会按顺序执行以下步骤：
