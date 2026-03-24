@@ -593,7 +593,65 @@ TEST(BPlusTreeParser, ParseRecordWithMultiPageBlob) {
     EXPECT_NE(it->second.find("data_size=150"), std::string::npos); // 应显示重组后的总长度
 }
 
-// ✅ P0 新增：测试循环引用的 BLOB 页链被正确拒绝
+// ✅ 新增：测试所有校验和算法（MySQL 5.6/5.7/8.0 兼容）
+TEST(PageReader, ValidateChecksumAllAlgorithms) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 测试 CRC32C 校验和
+    uint32_t crc = PageReader::compute_crc32c(page_data);
+    for (int i = 0; i < 4; ++i) {
+        page_data[24 + i] = (crc >> (i * 8)) & 0xFF;
+    }
+    
+    uint32_t stored, computed;
+    EXPECT_TRUE(PageReader::validate_checksum(page_data, true, &stored, &computed));
+    EXPECT_EQ(stored, computed);
+    
+    // 测试 INNODB 校验和
+    for (int i = 0; i < 4; ++i) page_data[24 + i] = 0;
+    uint32_t innodb_crc = PageReader::compute_innodb_checksum(page_data);
+    for (int i = 0; i < 4; ++i) {
+        page_data[24 + i] = (innodb_crc >> (i * 8)) & 0xFF;
+    }
+    
+    EXPECT_TRUE(PageReader::validate_checksum(page_data, true, &stored, &computed));
+    EXPECT_EQ(stored, computed);
+}
+
+// ✅ 新增：测试 Redo Log 回放（MLOG_COMP_REC_INSERT）
+TEST(BPlusTreeParser, RedoInsertRecord) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 构造 MLOG_COMP_REC_INSERT 记录
+    RedoLogRecord record;
+    record.r_type = 30; // MLOG_COMP_REC_INSERT
+    record.r_page_no = 0;
+    
+    // 添加记录数据：info_bits(1) + next_offset(2) + data
+    record.r_data.push_back(0x00); // info_bits
+    write_le<uint16_t>(record.r_data, record.r_data.size(), 54);
+    record.r_data.push_back('t'); // test data
+    record.r_data.push_back('e');
+    record.r_data.push_back('s');
+    record.r_data.push_back('t');
+    
+    parser.apply_redo_record(record);
+    
+    // 验证页大小增加（记录被追加）
+    EXPECT_GT(parser.page_data_.size(), 16384);
+}
+
+// ✅ 新增：测试循环引用的 BLOB 页链被正确拒绝
 TEST(BlobPointerTest, RejectCircularBLOBChain) {
     std::vector<uint8_t> data(20, 0);
     write_le<uint32_t>(data.data(), 0, 0);   // space_id

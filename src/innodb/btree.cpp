@@ -29,19 +29,109 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
         case 30: { // MLOG_COMP_REC_INSERT
             std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-            // TODO: 解析记录数据并插入到页中
+            
+            // ✅ 实现：解析记录数据并插入到页中
+            if (record.r_data.size() < pos + 5) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_INSERT: insufficient data" << std::endl;
+                return;
+            }
+            
+            // 解析记录头（info_bits + next_offset）
+            uint8_t info_bits = record.r_data[pos++];
+            uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+            pos += 2;
+            
+            // ✅ 新增：计算记录总长度（简化版，实际应根据表结构解析）
+            size_t rec_len = record.r_data.size() - pos;
+            if (rec_len == 0) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_INSERT: zero-length record" << std::endl;
+                return;
+            }
+            
+            // ✅ 实现：将记录插入到页的堆中（简化为追加到末尾）
+            // 在实际实现中，需要：
+            // 1. 找到合适的插入位置（根据主键顺序）
+            // 2. 更新目录槽
+            // 3. 调整 heap_top
+            
+            std::cerr << "[INFO] MLOG_COMP_REC_INSERT: inserting record of length " 
+                      << rec_len << " at offset " << page_data_.size() << std::endl;
+            
+            // 暂时将记录追加到页末尾（实际应插入到正确位置）
+            for (size_t i = 0; i < rec_len; ++i) {
+                page_data_.push_back(record.r_data[pos + i]);
+            }
+            
+            // 更新 heap_top 和 n_heap
+            uint16_t new_heap_top = static_cast<uint16_t>(page_data_.size());
+            dbrecovery::innodb::write_le<uint16_t>(page_data_.data(), 
+                dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, 
+                new_heap_top);
+            
+            uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(
+                page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4
+            ) & 0x7FFF;
+            dbrecovery::innodb::write_le<uint16_t>(page_data_.data(),
+                dbrecovery::innodb::FIL_HEADER_SIZE + 4,
+                (n_heap + 1) | (dbrecovery::innodb::read_le<uint16_t>(
+                    page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4) & 0x8000));
+            
             break;
         }
         case 31: { // MLOG_COMP_REC_UPDATE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-            // TODO: 解析更新数据并应用到具体记录
+            
+            // ✅ 实现：解析更新数据并应用到具体记录
+            if (record.r_data.size() < pos + 4) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: insufficient data" << std::endl;
+                return;
+            }
+            
+            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+            pos += 2;
+            
+            if (offset >= page_data_.size()) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: invalid offset " << offset << std::endl;
+                return;
+            }
+            
+            // ✅ 新增：应用字段更新（简化版）
+            size_t update_len = record.r_data.size() - pos;
+            if (offset + update_len > page_data_.size()) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: update exceeds page boundary" << std::endl;
+                return;
+            }
+            
+            for (size_t i = 0; i < update_len; ++i) {
+                page_data_[offset + i] = record.r_data[pos + i];
+            }
+            
+            std::cerr << "[INFO] MLOG_COMP_REC_UPDATE: updated " << update_len 
+                      << " bytes at offset " << offset << std::endl;
             break;
         }
         case 32: { // MLOG_COMP_REC_DELETE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE at page " 
                       << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-            // TODO: 定位具体记录并设置删除标志
+            
+            // ✅ 实现：定位具体记录并设置删除标志
+            if (record.r_data.size() < pos + 2) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_DELETE: insufficient data" << std::endl;
+                return;
+            }
+            
+            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+            if (offset >= page_data_.size()) {
+                std::cerr << "[ERROR] MLOG_COMP_REC_DELETE: invalid offset " << offset << std::endl;
+                return;
+            }
+            
+            // 设置 REC_INFO_DELETED_FLAG (bit 3)
+            page_data_[offset] |= dbrecovery::innodb::REC_INFO_DELETED_FLAG;
+            
+            std::cerr << "[INFO] MLOG_COMP_REC_DELETE: marked record at offset " 
+                      << offset << " as deleted" << std::endl;
             break;
         }
     }
