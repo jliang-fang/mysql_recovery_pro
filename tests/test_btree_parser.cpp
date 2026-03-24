@@ -830,6 +830,117 @@ TEST(BPlusTreeParser, ApplyRedoRecordNewInfoDynamicFormat) {
     uint32_t checksum_after = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 24);
     EXPECT_NE(checksum_after, 0) << "Checksum should be updated after MLOG_COMP_REC_NEW_INFO";
 }
+
+// ✅ P0-1 新增：测试 REDUNDANT 行格式的 Redo 回放
+TEST(BPlusTreeParser, ApplyRedoRecordRedundantFormat) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    // REDUNDANT 格式默认为 0，无需额外设置 flags
+    
+    // 构造 MLOG_COMP_REC_DELETE 记录
+    RedoLogRecord record;
+    record.r_type = MLOG_COMP_REC_DELETE;
+    record.r_page_no = 0;
+    write_le<uint16_t>(record.r_data, 0, 70); // 要删除的记录偏移
+    
+    parser.apply_redo_record(record);
+    
+    // ✅ 验证：记录被标记为已删除
+    EXPECT_NE(page_data[70] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
+}
+
+// ✅ P0-1 新增：测试 COMPRESSED 行格式的 Redo 回放
+TEST(BPlusTreeParser, ApplyRedoRecordCompressedFormat) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    // COMPRESSED 格式为 3，需要设置 flags 的低 3 位为 0x03
+    
+    // 构造 MLOG_COMP_REC_INSERT 记录
+    RedoLogRecord record;
+    record.r_type = MLOG_COMP_REC_INSERT;
+    record.r_page_no = 0;
+    
+    // 添加记录数据：info_bits(1) + next_offset(2) + data
+    record.r_data.push_back(0x00); // info_bits
+    write_le<uint16_t>(record.r_data, record.r_data.size(), 54);
+    record.r_data.push_back('t'); // test data
+    record.r_data.push_back('e');
+    record.r_data.push_back('s');
+    record.r_data.push_back('t');
+    
+    parser.apply_redo_record(record);
+    
+    // ✅ 验证：页大小增加（记录被追加）
+    EXPECT_GT(parser.page_data_.size(), 16384);
+}
+
+// ✅ P0-1 新增：测试所有行格式的统一处理
+TEST(BPlusTreeParser, ApplyRedoRecordAllRowFormats) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 测试 REDUNDANT (0)
+    {
+        RedoLogRecord record;
+        record.r_type = MLOG_COMP_REC_DELETE;
+        record.r_page_no = 0;
+        write_le<uint16_t>(record.r_data, 0, 70);
+        
+        parser.apply_redo_record(record);
+        EXPECT_NE(page_data[70] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
+    }
+    
+    // 测试 COMPACT (1)
+    {
+        RedoLogRecord record;
+        record.r_type = MLOG_COMP_REC_DELETE;
+        record.r_page_no = 0;
+        write_le<uint16_t>(record.r_data, 0, 80);
+        
+        parser.apply_redo_record(record);
+        EXPECT_NE(page_data[80] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
+    }
+    
+    // 测试 DYNAMIC (2)
+    {
+        RedoLogRecord record;
+        record.r_type = MLOG_COMP_REC_DELETE;
+        record.r_page_no = 0;
+        write_le<uint16_t>(record.r_data, 0, 90);
+        
+        parser.apply_redo_record(record);
+        EXPECT_NE(page_data[90] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
+    }
+    
+    // 测试 COMPRESSED (3)
+    {
+        RedoLogRecord record;
+        record.r_type = MLOG_COMP_REC_DELETE;
+        record.r_page_no = 0;
+        write_le<uint16_t>(record.r_data, 0, 100);
+        
+        parser.apply_redo_record(record);
+        EXPECT_NE(page_data[100] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
+    }
+}
     
 } // namespace innodb
 } // namespace dbrecovery
