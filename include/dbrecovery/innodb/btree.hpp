@@ -99,6 +99,10 @@ public:
     // ✅ 新增：SDI 页解析支持
     [[nodiscard]] uint64_t get_sdi_table_id() const;
 
+    // ✅ P0-1 修复：新增字段级 Redo 应用辅助函数（支持 COMPACT/DYNAMIC）
+    bool apply_field_update(uint8_t* record_data, size_t record_size,
+                            const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& updates);
+
     // ✅ P0 新增：Redo 回放后更新页校验和
     void update_page_checksum();
 
