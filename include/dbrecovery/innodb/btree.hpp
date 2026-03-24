@@ -231,10 +231,13 @@ public:
                         }
                     }
                     nullable_idx++;
+                } else {
+                    // 非空列不占用 NULL 位图空间，但需要增加已解析字段计数
+                    parsed_fields++;
                 }
                 
                 // ✅ 修复：移动 data_pos 到字段数据的起始位置（跳过 NULL 位图）
-                if (is_nullable_col && nullable_idx == 0) {
+                if (is_nullable_col && nullable_idx == 1) {
                     data_pos += null_bitmap_size;
                 }
                 
