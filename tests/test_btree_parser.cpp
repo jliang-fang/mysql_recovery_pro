@@ -745,6 +745,31 @@ TEST(BPlusTreeParser, ApplyRedoRecordDynamicFormat) {
     // 验证页大小增加（记录被追加）
     EXPECT_GT(parser.page_data_.size(), 16384);
 }
+
+// ✅ P0 新增：测试 MLOG_COMP_REC_DELETE 的 Redo 回放
+TEST(BPlusTreeParser, ApplyRedoRecordDelete) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 构造 MLOG_COMP_REC_DELETE 记录，指定要删除的记录偏移为 70
+    RedoLogRecord record;
+    record.r_type = MLOG_COMP_REC_DELETE;
+    record.r_page_no = 0;
+    
+    // 添加记录数据：offset(2)
+    write_le<uint16_t>(record.r_data, 0, 70); // 要删除的记录偏移
+    
+    parser.apply_redo_record(record);
+    
+    // ✅ 验证：记录头的 REC_INFO_DELETED_FLAG (bit 3) 应被设置
+    EXPECT_NE(page_data[70] & dbrecovery::innodb::REC_INFO_DELETED_FLAG, 0);
+}
     
 } // namespace innodb
 } // namespace dbrecovery
