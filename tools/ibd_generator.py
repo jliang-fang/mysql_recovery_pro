@@ -259,16 +259,55 @@ def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False):
 # ==================== 主程序入口 ====================
 if __name__ == "__main__":
     import sys
+    import argparse
     
-    if len(sys.argv) > 1:
-        table_name = sys.argv[1]
-    else:
-        table_name = "users"
-        
-    ibd_data = generate_ibd(table_name)
+    parser = argparse.ArgumentParser(description="Generate InnoDB test data for recovery testing")
+    parser.add_argument("table_name", nargs="?", default="users", help="Table name")
+    parser.add_argument("--scenario", choices=["default", "rm_rf", "header_corrupt", "truncate_partial"], 
+                       default="default", help="Scenario type")
+    parser.add_argument("--output", "-o", default=None, help="Output file path (default: <table_name>.ibd)")
+    parser.add_argument("--rows_kept", type=int, default=0, help="For truncate_partial: number of rows to keep")
     
-    output_file = f"{table_name}.ibd"
-    with open(output_file, 'wb') as f:
-        f.write(ibd_data)
+    args = parser.parse_args()
+    
+    if args.scenario == "rm_rf":
+        # 模拟 rm -rf 场景：生成一个空文件或损坏的文件
+        output_file = args.output or f"{args.table_name}_rm_rf.ibd"
+        with open(output_file, 'wb') as f:
+            # 写入一个损坏的页头（FIL_PAGE_TYPE 错误）
+            page = bytearray(16384)
+            page[0] = 0xFF  # 故意设置错误的页类型
+            f.write(page)
+        print(f"Generated {output_file} (simulated rm -rf scenario)")
+    elif args.scenario == "header_corrupt":
+        # 模拟文件头损坏场景
+        output_file = args.output or f"{args.table_name}_header_corrupt.ibd"
+        ibd_data = generate_ibd(args.table_name)
+        if len(ibd_data) >= 512:
+            # 破坏页头的最后 256 字节（包含关键元数据）
+            for i in range(256):
+                ibd_data[256 + i] = 0xFF
+        with open(output_file, 'wb') as f:
+            f.write(ibd_data)
+        print(f"Generated {output_file} (header corrupted scenario)")
+    elif args.scenario == "truncate_partial":
+        # 模拟部分 Truncate 场景：只保留前 N 行数据
+        output_file = args.output or f"{args.table_name}_truncated.ibd"
+        ibd_data = generate_ibd(args.table_name, include_blob=True)
         
-    print(f"Generated {output_file} ({len(ibd_data)} bytes)")
+        # 简单模拟：截断文件到一半大小（实际应更精细地处理页结构）
+        if len(ibd_data) > 16384:
+            truncated_size = len(ibd_data) // 2
+            ibd_data = ibd_data[:truncated_size]
+        
+        with open(output_file, 'wb') as f:
+            f.write(ibd_data)
+        print(f"Generated {output_file} (partial truncate scenario)")
+    else:  # default
+        output_file = args.output or f"{args.table_name}.ibd"
+        ibd_data = generate_ibd(args.table_name)
+        
+        with open(output_file, 'wb') as f:
+            f.write(ibd_data)
+            
+        print(f"Generated {output_file} ({len(ibd_data)} bytes)")
