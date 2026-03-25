@@ -103,6 +103,13 @@ public:
     bool apply_field_update(uint8_t* record_data, size_t record_size,
                             const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& updates);
 
+    // ✅ P0-1 新增：DYNAMIC 行格式字段偏移计算辅助函数
+    static std::optional<uint16_t> calculate_dynamic_field_offset(
+        const uint8_t* record_data,
+        size_t record_size,
+        uint16_t field_no,
+        bool is_compact_format);
+
     // ✅ P0 新增：Redo 回放后更新页校验和
     void update_page_checksum();
 

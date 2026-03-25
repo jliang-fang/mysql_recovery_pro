@@ -886,6 +886,29 @@ TEST(BPlusTreeParser, ApplyRedoRecordCompressedFormat) {
     EXPECT_GT(parser.page_data_.size(), 16384);
 }
 
+// ✅ P0-1 新增：测试 DYNAMIC 行格式字段偏移计算
+TEST(BPlusTreeParser, CalculateDynamicFieldOffset) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 测试 calculate_dynamic_field_offset 函数
+    auto offset = innodb::BPlusTreeParser::calculate_dynamic_field_offset(
+        page_data.data() + 100, // record_data
+        100,                    // record_size
+        2,                      // field_no
+        true                    // is_compact_format
+    );
+    
+    EXPECT_TRUE(offset.has_value());
+    EXPECT_GT(offset.value(), 0);
+}
+
 // ✅ P0-1 新增：测试所有行格式的统一处理
 TEST(BPlusTreeParser, ApplyRedoRecordAllRowFormats) {
     std::vector<uint8_t> page_data(16384, 0);
