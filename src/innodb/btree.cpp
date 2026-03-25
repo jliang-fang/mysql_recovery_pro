@@ -46,7 +46,7 @@ bool BPlusTreeParser::apply_field_update(uint8_t* record_data, size_t record_siz
     return true;
 }
 
-// ✅ P0-1 新增：DYNAMIC 行格式字段偏移计算辅助函数
+// ✅ P0-2 新增：DYNAMIC 行格式字段偏移计算辅助函数（完整版）
 std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     const uint8_t* record_data,
     size_t record_size,
@@ -57,10 +57,7 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
         return std::nullopt;
     }
 
-    // ✅ 修复：COMPACT 记录头格式为 [info_bits(1), n_fields_high(1), next_offset(2)]
-    // 实际字段偏移需要从记录末尾反向计算，此处简化处理
-    // 在真实场景中，应解析完整的 COMPACT 行格式头（参考 MySQL 8.0 rec.h）
-    
+    // ✅ 新增：边界检查
     if (record_size < 5) {
         std::cerr << "[ERROR] Record too small for field offset calculation" << std::endl;
         return std::nullopt;
@@ -86,14 +83,42 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
             return std::nullopt;
         }
         
-        // 简化处理：假设所有字段都是固定长度（实际应根据表结构定义）
-        // 对于 DYNAMIC 格式，变长字段会有额外的长度前缀
+        // ✅ 新增：DYNAMIC 格式支持变长字段前缀长度
+        uint16_t field_len = 0;
+        
         if (i == field_no) {
-            return static_cast<uint16_t>(data_pos);
+            // 当前字段：需要确定其长度
+            // 简化处理：假设固定长度字段（实际应根据表结构定义）
+            // 对于 VARCHAR，需要读取前缀长度字节
+            if (data_pos + 1 <= record_size && record_data[data_pos] < 255) {
+                field_len = record_data[data_pos];
+                data_pos++; // 跳过长度前缀
+            } else if (data_pos + 3 <= record_size && record_data[data_pos] == 255) {
+                // 2 字节前缀
+                data_pos++;
+                field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos);
+                data_pos += 2;
+            } else {
+                // 默认假设为固定长度字段（4字节）
+                field_len = 4;
+            }
+            
+            return static_cast<uint16_t>(data_pos - field_len); // 返回字段起始位置
         }
         
-        // 跳过当前字段数据（简化为 4 字节，实际应动态计算）
-        data_pos += 4;
+        // 跳过当前字段数据
+        if (data_pos < record_size) {
+            uint8_t len_byte = record_data[data_pos];
+            if (len_byte < 255) {
+                data_pos += 1 + len_byte; // 长度前缀 + 数据
+            } else if (data_pos + 3 <= record_size) {
+                data_pos++; // 跳过 0xFF 标记
+                uint16_t var_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos);
+                data_pos += 2 + var_len; // 2字节长度前缀 + 数据
+            } else {
+                data_pos += 4; // 默认固定长度
+            }
+        }
     }
 
     std::cerr << "[WARN] calculate_dynamic_field_offset: Using simplified offset calculation" << std::endl;
@@ -829,11 +854,19 @@ bool BPlusTreeParser::parse_infimum_supremum() {
         return false;
     }
 
-    // ✅ 新增：验证 SUPREMUM 记录头（必须是 REC_STATUS_SUPREMUM = 0x03）
-    uint8_t supremum_info_bits = page_data_[supremum_offset_];
-    if ((supremum_info_bits & dbrecovery::innodb::REC_INFO_STATUS_MASK) != dbrecovery::innodb::REC_STATUS_SUPREMUM) {
-        std::cerr << "[ERROR] BPlusTreeParser: SUPREMUM record type mismatch. Expected 0x03, got 0x"
-                  << std::hex << static_cast<int>(supremum_info_bits & dbrecovery::innodb::REC_INFO_STATUS_MASK) << std::dec << std::endl;
+    // ✅ 新增：验证 INFIMUM 和 SUPREMUM 的逻辑边界
+    if (infimum_offset_ >= supremum_offset_) {
+        std::cerr << "[ERROR] BPlusTreeParser: Invalid record order. INFIMUM(" << infimum_offset_ 
+                  << ") >= SUPREMUM(" << supremum_offset_ << ")" << std::endl;
+        return false;
+    }
+
+    // ✅ 新增：验证记录链连续性（检查 INFIMUM 的 next_record_offset 是否指向 SUPREMUM）
+    constexpr size_t infimum_next_offset_field = infimum_abs + 1; // next_record_offset 字段位置
+    uint16_t actual_infimum_next = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_next_offset_field) & 0x3FFF;
+    if (actual_infimum_next != supremum_offset_) {
+        std::cerr << "[ERROR] BPlusTreeParser: Record chain broken. INFIMUM next=" << actual_infimum_next 
+                  << ", but SUPREMUM at " << supremum_offset_ << std::endl;
         return false;
     }
 

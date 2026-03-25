@@ -125,7 +125,7 @@ def create_sdi_page(table_name):
     
     return bytes(page)
 
-def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False):
+def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False, row_format="DYNAMIC"):
     """Generate a minimal .ibd file with SDI + B+ tree with optional test data"""
     pages = []
     
@@ -135,6 +135,11 @@ def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False):
     # Page 1: Root page of clustered index (with test records)
     root_page = create_page_header(FIL_PAGE_INDEX)
     write_le_uint32(root_page, 38, 0)   # PAGE_LEVEL = 0 (leaf)
+    
+    # ✅ 新增：根据行格式设置 flags（BTR 标志位）
+    row_format_flags = {"REDUNDANT": 0, "COMPACT": 1, "DYNAMIC": 2, "COMPRESSED": 3}
+    flags = row_format_flags.get(row_format.upper(), 2)  # 默认 DYNAMIC
+    write_le_uint16(root_page, 40, flags << 8 | 0x07)   # 设置行格式标志
     
     # 构建测试记录
     record_data = bytearray()
