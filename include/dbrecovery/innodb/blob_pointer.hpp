@@ -86,24 +86,31 @@ struct BlobPageChain {
         return true;
     }
 
-    // ✅ 新增：检测循环引用（增强版）
+    // ✅ 新增：检测循环引用（Floyd 判圈算法实现）
     bool has_circular_reference() const {
-        // ✅ 修复：显式处理空链和单页情况
-        if (pages.empty()) {
-            return false; // 空链无循环
+        if (pages.size() <= 1) {
+            return false; // 空链或单页无法形成循环
         }
-        
-        if (pages.size() == 1) {
-            return false; // 单页无法形成循环
-        }
-        
-        std::set<std::pair<uint32_t, uint32_t>> seen;
-        for (const auto& p : pages) {
-            if (seen.count(p)) {
-                return true; // 检测到重复页，即存在循环
+
+        // 使用 Floyd 判圈算法（龟兔赛跑）
+        size_t slow = 0;
+        size_t fast = 0;
+
+        while (true) {
+            // 龟走一步
+            slow++;
+            if (slow >= pages.size()) break;
+
+            // 兔走两步
+            fast += 2;
+            if (fast >= pages.size()) break;
+
+            // 检查是否相遇（注意：比较的是 pair<space_id, page_no>）
+            if (pages[slow] == pages[fast]) {
+                return true; // 检测到循环
             }
-            seen.insert(p);
         }
+
         return false;
     }
 
