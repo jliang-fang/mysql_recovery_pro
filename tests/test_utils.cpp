@@ -23,7 +23,7 @@ TEST(UtilsTest, FactorialConsistency) {
     EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
 
-// ✅ P0 新增：测试 C++20 兼容的 factorial 实现
+// ✅ P0-2 修复：测试 C++20 标准库 factorial 实现
 TEST(UtilsTest, FactorialWithStandardLibrary) {
     // 验证与预计算表结果一致（C++20 之前使用自定义实现）
 #if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
@@ -31,32 +31,41 @@ TEST(UtilsTest, FactorialWithStandardLibrary) {
     EXPECT_EQ(std::factorial(5u), 120);
     EXPECT_EQ(std::factorial(10u), 3628800);
     EXPECT_EQ(std::factorial(20u), 2432902008176640000ULL);
+
+    // ✅ 新增：边界测试
+    EXPECT_THROW(std::factorial(21u), std::overflow_error); // n > 20 应抛出异常
 #else
-    // C++17 及更早版本使用预计算表实现
+    // C++17 及更早版本使用预计算表实现（项目要求 C++20，此分支可移除）
     EXPECT_EQ(dbrecovery::utils::factorial(0), 1);
     EXPECT_EQ(dbrecovery::utils::factorial(5), 120);
     EXPECT_EQ(dbrecovery::utils::factorial(10), 3628800);
     EXPECT_EQ(dbrecovery::utils::factorial(20), 2432902008176640000ULL);
-#endif
-    
-    // 验证异常处理
-#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
-    EXPECT_THROW(std::factorial(21u), std::overflow_error);
-#else
+
+    // ✅ 新增：边界测试
     EXPECT_THROW(dbrecovery::utils::factorial(21), std::overflow_error);
 #endif
 }
 
-// ✅ P0 新增：测试 factorial 在 main.cpp 中的调用方式
+// ✅ P0-3 修复：测试 factorial 在 main.cpp 中的调用方式（适配 std::factorial）
 TEST(UtilsTest, FactorialInMainContext) {
     // 模拟 main.cpp 中的调用方式
     uint32_t n = 5;
+#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
+    try {
+        auto result = std::factorial(static_cast<unsigned int>(n));
+        EXPECT_EQ(result, 120);
+    } catch (const std::exception& e) {
+        FAIL() << "std::factorial(" << n << ") threw exception: " << e.what();
+    }
+#else
+    // C++17 降级方案（项目要求 C++20，此分支可移除）
     try {
         auto result = dbrecovery::utils::factorial(n);
         EXPECT_EQ(result, 120);
     } catch (const std::exception& e) {
         FAIL() << "dbrecovery::utils::factorial(" << n << ") threw exception: " << e.what();
     }
+#endif
 }
 
 // ✅ 新增：测试 sint24（有符号24位整数）读取

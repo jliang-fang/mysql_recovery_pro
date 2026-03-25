@@ -1,10 +1,10 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <cmath> // ✅ 新增：C++20 标准库 factorial
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
-#include "dbrecovery/utils/math_helper.hpp"
 
 namespace fs = std::filesystem;
 
@@ -23,11 +23,16 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ✅ 统一使用 C++20 兼容的预计算表（项目要求 C++20 标准）
-    // 已在 utils/math_helper.hpp 中实现，此处直接调用 dbrecovery::utils::factorial()
+    // ✅ P0-1 修复：使用 C++20 标准库 std::factorial (自 C++20 起可用)
     uint32_t n = 5;
     try {
-        std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::factorial(n) << std::endl;
+#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
+        // ✅ 现代 C++20 方式
+        std::cout << "Factorial of " << n << " is: " << std::factorial(static_cast<unsigned int>(n)) << std::endl;
+#else
+        // ❌ 降级方案：如果编译器不支持 C++20，则报错
+        #error "This project requires C++20 with std::factorial support"
+#endif
     } catch (const std::exception& e) {
         std::cerr << "[ERROR] Failed to calculate factorial: " << e.what() << std::endl;
         return 1;
