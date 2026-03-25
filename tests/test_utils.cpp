@@ -23,16 +23,40 @@ TEST(UtilsTest, FactorialConsistency) {
     EXPECT_EQ(factorial_table[20], 2432902008176640000ULL);
 }
 
-// ✅ 新增：测试预计算表 factorial (C++17/20 兼容)
-TEST(UtilsTest, FactorialWithPrecomputedTable) {
-    // 验证与预计算表结果一致
+// ✅ P0 新增：测试 C++20 兼容的 factorial 实现
+TEST(UtilsTest, FactorialWithStandardLibrary) {
+    // 验证与预计算表结果一致（C++20 之前使用自定义实现）
+#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
+    EXPECT_EQ(std::factorial(0u), 1);
+    EXPECT_EQ(std::factorial(5u), 120);
+    EXPECT_EQ(std::factorial(10u), 3628800);
+    EXPECT_EQ(std::factorial(20u), 2432902008176640000ULL);
+#else
+    // C++17 及更早版本使用预计算表实现
     EXPECT_EQ(dbrecovery::utils::factorial(0), 1);
     EXPECT_EQ(dbrecovery::utils::factorial(5), 120);
     EXPECT_EQ(dbrecovery::utils::factorial(10), 3628800);
     EXPECT_EQ(dbrecovery::utils::factorial(20), 2432902008176640000ULL);
+#endif
     
     // 验证异常处理
+#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
+    EXPECT_THROW(std::factorial(21u), std::overflow_error);
+#else
     EXPECT_THROW(dbrecovery::utils::factorial(21), std::overflow_error);
+#endif
+}
+
+// ✅ P0 新增：测试 factorial 在 main.cpp 中的调用方式
+TEST(UtilsTest, FactorialInMainContext) {
+    // 模拟 main.cpp 中的调用方式
+    uint32_t n = 5;
+    try {
+        auto result = dbrecovery::utils::factorial(n);
+        EXPECT_EQ(result, 120);
+    } catch (const std::exception& e) {
+        FAIL() << "dbrecovery::utils::factorial(" << n << ") threw exception: " << e.what();
+    }
 }
 
 // ✅ 新增：测试 sint24（有符号24位整数）读取

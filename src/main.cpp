@@ -26,7 +26,12 @@ int main(int argc, char** argv) {
     // ✅ 统一使用 C++20 兼容的预计算表（项目要求 C++20 标准）
     // 已在 utils/math_helper.hpp 中实现，此处直接调用 dbrecovery::utils::factorial()
     uint32_t n = 5;
-    std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::factorial(n) << std::endl;
+    try {
+        std::cout << "Factorial of " << n << " is: " << dbrecovery::utils::factorial(n) << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to calculate factorial: " << e.what() << std::endl;
+        return 1;
+    }
 
     // 检查文件是否存在
     std::ifstream f(ibd_path);
