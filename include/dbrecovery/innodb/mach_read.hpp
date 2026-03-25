@@ -7,7 +7,9 @@ namespace dbrecovery {
 namespace innodb {
 
 /**
- * @brief 安全读取 little-endian 整数（支持 uint24 和 sint24）
+ * @brief 安全读取 little-endian 整数（支持 sint24 和 uint24）
+ *
+ * ✅ P0-1 修复：增强对有符号整数的支持，确保所有整数类型（包括负值）都能正确解析
  */
 template<typename T>
 inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
@@ -20,22 +22,26 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
     const uint8_t* p = ptr + offset;
 
     if constexpr (sizeof(T) == 1) {
+        // ✅ P0-1 修复：直接转换，有符号/无符号由编译器处理
         return static_cast<T>(p[0]);
     } else if constexpr (sizeof(T) == 2) {
         uint16_t val = static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8);
-        return static_cast<T>(val);
-    } else if constexpr (sizeof(T) == 3) { // ✅ 新增：支持 sint24 和 uint24
+        // ✅ P0-1 修复：对于有符号类型，编译器会自动进行符号扩展
+        return static_cast<T>(static_cast<int16_t>(val));
+    } else if constexpr (sizeof(T) == 3) {
         uint32_t val = static_cast<uint32_t>(p[0]) | 
                       (static_cast<uint32_t>(p[1]) << 8) | 
                       (static_cast<uint32_t>(p[2]) << 16);
         
+        // ✅ P0-1 修复：统一处理 sint24 和 uint24
         if constexpr (std::is_signed_v<T>) {
-            // ✅ 符号扩展：如果最高位为1，则扩展符号位
+            // 符号扩展：如果最高位为1（0x800000），则扩展符号位到32位
             if (val & 0x800000) {
                 val |= 0xFF000000;
             }
             return static_cast<T>(static_cast<int32_t>(val));
         } else {
+            // 无符号：仅保留低24位
             return static_cast<T>(val & 0xFFFFFF);
         }
     } else if constexpr (sizeof(T) == 4) {
@@ -43,7 +49,8 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
                       (static_cast<uint32_t>(p[1]) << 8) |
                       (static_cast<uint32_t>(p[2]) << 16) | 
                       (static_cast<uint32_t>(p[3]) << 24);
-        return static_cast<T>(val);
+        // ✅ P0-1 修复：对于有符号类型，编译器会自动进行符号扩展
+        return static_cast<T>(static_cast<int32_t>(val));
     } else if constexpr (sizeof(T) == 8) {
         uint64_t val = static_cast<uint64_t>(p[0]) | 
                       (static_cast<uint64_t>(p[1]) << 8) |
@@ -53,7 +60,8 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
                       (static_cast<uint64_t>(p[5]) << 40) |
                       (static_cast<uint64_t>(p[6]) << 48) | 
                       (static_cast<uint64_t>(p[7]) << 56);
-        return static_cast<T>(val);
+        // ✅ P0-1 修复：对于有符号类型，编译器会自动进行符号扩展
+        return static_cast<T>(static_cast<int64_t>(val));
     } else {
         static_assert(sizeof(T) <= 8, "Unsupported integer size for read_le");
     }
