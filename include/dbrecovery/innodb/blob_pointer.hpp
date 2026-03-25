@@ -88,7 +88,14 @@ struct BlobPageChain {
 
     // ✅ 新增：检测循环引用（增强版）
     bool has_circular_reference() const {
-        if (pages.size() <= 1) return false;
+        // ✅ 修复：显式处理空链和单页情况
+        if (pages.empty()) {
+            return false; // 空链无循环
+        }
+        
+        if (pages.size() == 1) {
+            return false; // 单页无法形成循环
+        }
         
         std::set<std::pair<uint32_t, uint32_t>> seen;
         for (const auto& p : pages) {
