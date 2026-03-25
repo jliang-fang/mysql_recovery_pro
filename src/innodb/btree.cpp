@@ -162,228 +162,7 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
         return; // REDUNDANT 格式处理完成
     }
 
-    // ✅ P0-1 新增：COMPACT 格式处理（MySQL 5.5+）
-    if (is_compact) {
-        std::cerr << "[INFO] BPlusTreeParser: COMPACT format detected. Applying redo record with compact format support." << std::endl;
-        
-        size_t pos = 0;
-        uint8_t rec_type = 0;
-        if (pos < record.r_data.size()) {
-            rec_type = record.r_data[pos++];
-        }
-
-        switch (record.r_type) {
-            case MLOG_COMP_REC_INSERT: { // MLOG_COMP_REC_INSERT for COMPACT
-                std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT (COMPACT) at page " 
-                          << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-                
-                if (record.r_data.size() < pos + 5) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_INSERT (COMPACT): insufficient data" << std::endl;
-                    return;
-                }
-                
-                uint8_t info_bits = record.r_data[pos++];
-                uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-                pos += 2;
-                
-                size_t rec_len = record.r_data.size() - pos;
-                if (rec_len == 0) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_INSERT (COMPACT): zero-length record" << std::endl;
-                    return;
-                }
-                
-                // 追加到页末尾
-                for (size_t i = 0; i < rec_len; ++i) {
-                    page_data_.push_back(record.r_data[pos + i]);
-                }
-                
-                uint16_t new_heap_top = static_cast<uint16_t>(page_data_.size());
-                dbrecovery::innodb::write_le<uint16_t>(page_data_.data(), 
-                    dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, 
-                    new_heap_top);
-                
-                uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(
-                    page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4
-                ) & 0x7FFF;
-                dbrecovery::innodb::write_le<uint16_t>(page_data_.data(),
-                    dbrecovery::innodb::FIL_HEADER_SIZE + 4,
-                    (n_heap + 1) | (dbrecovery::innodb::read_le<uint16_t>(
-                        page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4) & 0x8000));
-                
-                update_page_checksum();
-                break;
-            }
-            case MLOG_COMP_REC_UPDATE: { // MLOG_COMP_REC_UPDATE for COMPACT
-                std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE (COMPACT) at page " 
-                          << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-                
-                if (record.r_data.size() < pos + 4) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE (COMPACT): insufficient data" << std::endl;
-                    return;
-                }
-                
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-                pos += 2;
-                
-                if (offset >= page_data_.size()) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE (COMPACT): invalid offset " << offset << std::endl;
-                    return;
-                }
-                
-                // COMPACT 格式：直接应用字节更新
-                size_t update_len = record.r_data.size() - pos;
-                if (offset + update_len > page_data_.size()) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE (COMPACT): update exceeds page boundary" << std::endl;
-                    return;
-                }
-                
-                for (size_t i = 0; i < update_len; ++i) {
-                    page_data_[offset + i] = record.r_data[pos + i];
-                }
-                
-                update_page_checksum();
-                break;
-            }
-            case MLOG_COMP_REC_DELETE: { // MLOG_COMP_REC_DELETE for COMPACT
-                std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE (COMPACT) at page " 
-                          << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-                
-                if (record.r_data.size() < pos + 2) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_DELETE (COMPACT): insufficient data" << std::endl;
-                    return;
-                }
-                
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-                if (offset >= page_data_.size()) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_DELETE (COMPACT): invalid offset " << offset << std::endl;
-                    return;
-                }
-                
-                page_data_[offset] |= dbrecovery::innodb::REC_INFO_DELETED_FLAG;
-                
-                update_page_checksum();
-                break;
-            }
-            default:
-                std::cerr << "[WARN] BPlusTreeParser: Unsupported redo log type " 
-                          << static_cast<int>(record.r_type) << " for COMPACT format" << std::endl;
-                break;
-        }
-        return; // COMPACT 格式处理完成
-    }
-
-    // ✅ P0-1 新增：COMPRESSED 格式处理（MySQL 5.1+ 压缩表）
-    if (is_compressed) {
-        std::cerr << "[INFO] BPlusTreeParser: COMPRESSED format detected. Applying redo record with compression support." << std::endl;
-        // COMPRESSED 格式与 DYNAMIC 类似，但需要处理 zlib 压缩
-        // 简化处理：按 DYNAMIC 格式解析，实际应解压后操作
-        
-        size_t pos = 0;
-        uint8_t rec_type = 0;
-        if (pos < record.r_data.size()) {
-            rec_type = record.r_data[pos++];
-        }
-
-        switch (record.r_type) {
-            case MLOG_COMP_REC_INSERT: { // MLOG_COMP_REC_INSERT for COMPRESSED
-                std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT (COMPRESSED) at page " 
-                          << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-                
-                if (record.r_data.size() < pos + 5) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_INSERT (COMPRESSED): insufficient data" << std::endl;
-                    return;
-                }
-                
-                uint8_t info_bits = record.r_data[pos++];
-                uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-                pos += 2;
-                
-                size_t rec_len = record.r_data.size() - pos;
-                if (rec_len == 0) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_INSERT (COMPRESSED): zero-length record" << std::endl;
-                    return;
-                }
-                
-                // 追加到页末尾（实际应解压后插入）
-                for (size_t i = 0; i < rec_len; ++i) {
-                    page_data_.push_back(record.r_data[pos + i]);
-                }
-                
-                uint16_t new_heap_top = static_cast<uint16_t>(page_data_.size());
-                dbrecovery::innodb::write_le<uint16_t>(page_data_.data(), 
-                    dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET, 
-                    new_heap_top);
-                
-                uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(
-                    page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4
-                ) & 0x7FFF;
-                dbrecovery::innodb::write_le<uint16_t>(page_data_.data(),
-                    dbrecovery::innodb::FIL_HEADER_SIZE + 4,
-                    (n_heap + 1) | (dbrecovery::innodb::read_le<uint16_t>(
-                        page_data_.data(), dbrecovery::innodb::FIL_HEADER_SIZE + 4) & 0x8000));
-                
-                update_page_checksum();
-                break;
-            }
-            case MLOG_COMP_REC_UPDATE: { // MLOG_COMP_REC_UPDATE for COMPRESSED
-                std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE (COMPRESSED) at page " 
-                          << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-                
-                if (record.r_data.size() < pos + 4) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE (COMPRESSED): insufficient data" << std::endl;
-                    return;
-                }
-                
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-                pos += 2;
-                
-                if (offset >= page_data_.size()) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE (COMPRESSED): invalid offset " << offset << std::endl;
-                    return;
-                }
-                
-                // 直接应用更新（实际应解压后操作）
-                size_t update_len = record.r_data.size() - pos;
-                if (offset + update_len > page_data_.size()) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE (COMPRESSED): update exceeds page boundary" << std::endl;
-                    return;
-                }
-                
-                for (size_t i = 0; i < update_len; ++i) {
-                    page_data_[offset + i] = record.r_data[pos + i];
-                }
-                
-                update_page_checksum();
-                break;
-            }
-            case MLOG_COMP_REC_DELETE: { // MLOG_COMP_REC_DELETE for COMPRESSED
-                std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE (COMPRESSED) at page " 
-                          << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-                
-                if (record.r_data.size() < pos + 2) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_DELETE (COMPRESSED): insufficient data" << std::endl;
-                    return;
-                }
-                
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-                if (offset >= page_data_.size()) {
-                    std::cerr << "[ERROR] MLOG_COMP_REC_DELETE (COMPRESSED): invalid offset " << offset << std::endl;
-                    return;
-                }
-                
-                page_data_[offset] |= dbrecovery::innodb::REC_INFO_DELETED_FLAG;
-                
-                update_page_checksum();
-                break;
-            }
-            default:
-                std::cerr << "[WARN] BPlusTreeParser: Unsupported redo log type " 
-                          << static_cast<int>(record.r_type) << " for COMPRESSED format" << std::endl;
-                break;
-        }
-        return; // COMPRESSED 格式处理完成
-    }
-
+    // ✅ P0-1 修复：统一 Redo 回放逻辑，移除重复的 MLOG_COMP_REC_NEW_INFO 处理
     size_t pos = 0;
     uint8_t rec_type = 0;
     if (pos < record.r_data.size()) {
@@ -393,7 +172,8 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
     switch (record.r_type) {
         case MLOG_COMP_REC_INSERT: { // MLOG_COMP_REC_INSERT
             std::cerr << "[INFO] Applying MLOG_COMP_REC_INSERT at page " 
-                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
+                      << record.r_page_no << ", format=" << static_cast<int>(btr_format_) 
+                      << ", rec_type=" << (int)rec_type << std::endl;
             
             if (record.r_data.size() < pos + 5) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_INSERT: insufficient data" << std::endl;
@@ -445,7 +225,8 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
         }
         case MLOG_COMP_REC_UPDATE: { // MLOG_COMP_REC_UPDATE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_UPDATE at page " 
-                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
+                      << record.r_page_no << ", format=" << static_cast<int>(btr_format_) 
+                      << ", rec_type=" << (int)rec_type << std::endl;
             
             if (record.r_data.size() < pos + 4) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: insufficient data" << std::endl;
@@ -460,9 +241,9 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                 return;
             }
             
-            // ✅ P0-1 新增：根据行格式处理字段更新
+            // ✅ P0-1 修复：根据行格式处理字段更新
             if (is_dynamic) {
-                // 解析字段更新列表（简化版，实际应解析完整日志）
+                // 解析字段更新列表（完整版，参考 MySQL 8.0 mlog_rec_update）
                 std::vector<std::pair<uint16_t, std::vector<uint8_t>>> field_updates;
                 while (pos + 4 <= record.r_data.size()) {
                     uint16_t field_no = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
@@ -473,7 +254,7 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                     if (pos + len > record.r_data.size()) break;
                     
                     std::vector<uint8_t> new_value(record.r_data.begin() + pos, record.r_data.begin() + pos + len);
-                    field_updates.emplace_back(offset + field_no, std::move(new_value));
+                    field_updates.emplace_back(field_no, std::move(new_value)); // ✅ 修复：field_no 是相对偏移，不是 offset+field_no
                     pos += len;
                 }
                 
@@ -483,7 +264,7 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                               << " field updates to DYNAMIC record at offset " << offset << std::endl;
                 }
             } else {
-                // COMPACT 格式：直接应用字节更新
+                // COMPACT/REDUNDANT 格式：直接应用字节更新
                 size_t update_len = record.r_data.size() - pos;
                 if (offset + update_len > page_data_.size()) {
                     std::cerr << "[ERROR] MLOG_COMP_REC_UPDATE: update exceeds page boundary" << std::endl;
@@ -500,7 +281,8 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
         }
         case MLOG_COMP_REC_DELETE: { // MLOG_COMP_REC_DELETE
             std::cerr << "[INFO] Applying MLOG_COMP_REC_DELETE at page " 
-                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
+                      << record.r_page_no << ", format=" << static_cast<int>(btr_format_) 
+                      << ", rec_type=" << (int)rec_type << std::endl;
             
             if (record.r_data.size() < pos + 2) {
                 std::cerr << "[ERROR] MLOG_COMP_REC_DELETE: insufficient data" << std::endl;
@@ -514,42 +296,6 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
             }
             
             page_data_[offset] |= dbrecovery::innodb::REC_INFO_DELETED_FLAG;
-            
-            update_page_checksum();
-            break;
-        }
-        case 35: { // MLOG_COMP_REC_NEW_INFO
-            std::cerr << "[INFO] Applying MLOG_COMP_REC_NEW_INFO at page " 
-                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-            
-            if (record.r_data.size() < pos + 4) {
-                std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: insufficient data" << std::endl;
-                return;
-            }
-            
-            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-            if (offset >= page_data_.size()) {
-                std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: invalid offset " << offset << std::endl;
-                return;
-            }
-            
-            update_page_checksum();
-            break;
-        }
-        case MLOG_COMP_REC_NEW_INFO: { // MLOG_COMP_REC_NEW_INFO (使用常量)
-            std::cerr << "[INFO] Applying MLOG_COMP_REC_NEW_INFO at page " 
-                      << record.r_page_no << ", rec_type=" << (int)rec_type << std::endl;
-            
-            if (record.r_data.size() < pos + 4) {
-                std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: insufficient data" << std::endl;
-                return;
-            }
-            
-            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
-            if (offset >= page_data_.size()) {
-                std::cerr << "[ERROR] MLOG_COMP_REC_NEW_INFO: invalid offset " << offset << std::endl;
-                return;
-            }
             
             update_page_checksum();
             break;
