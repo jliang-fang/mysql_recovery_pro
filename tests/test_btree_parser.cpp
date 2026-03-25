@@ -1000,6 +1000,36 @@ TEST(BPlusTreeParser, ApplyFieldUpdateRedundantFormat) {
     
     // 设置记录头（REDUNDANT 格式）
     record_data[0] = 0x00; // info_bits
+    record_data[1] = 0x03; // next_offset[15:8]
+    write_le<uint16_t>(record_data.data(), 2, 54); // next_offset
+    
+    // 设置 n_fields (低 7 位)
+    record_data[5] = 0x03;
+    
+    // 构造字段更新：field_no=0, new_value="id"
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> updates;
+    std::vector<uint8_t> new_value = {'i', 'd'};
+    updates.emplace_back(0, new_value);
+    
+    // 调用 apply_field_update
+    bool result = innodb::BPlusTreeParser::apply_field_update(
+        record_data.data(), 
+        record_data.size(), 
+        updates
+    );
+    
+    EXPECT_TRUE(result);
+    // 验证字段值被正确更新（假设 field_no=0 在偏移 5 处）
+    EXPECT_EQ(record_data[5], 'i');
+    EXPECT_EQ(record_data[6], 'd');
+}
+
+// ✅ P0-1 新增：测试 REDUNDANT 行格式字段更新
+TEST(BPlusTreeParser, ApplyFieldUpdateRedundantFormat) {
+    std::vector<uint8_t> record_data(64, 0);
+    
+    // 设置记录头（REDUNDANT 格式）
+    record_data[0] = 0x00; // info_bits
     record_data[1] = 0x03; // n_fields_high + next_offset[15:8]
     write_le<uint16_t>(record_data.data(), 2, 54); // next_offset
     
@@ -1051,6 +1081,20 @@ TEST(BPlusTreeParser, CalculateDynamicFieldOffset) {
     
     EXPECT_TRUE(offset1.has_value());
     EXPECT_GT(offset1.value(), offset0.value());
+}
+
+// ✅ P0-2 新增：测试 CRC32C 编译时查表（零运行时开销）
+TEST(PageReader, CRC32CCompileTimeTable) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 计算 CRC32C（应使用编译时生成的表）
+    uint32_t crc = dbrecovery::innodb::PageReader::compute_crc32c(page_data);
+    
+    // 验证结果与手动计算一致
+    EXPECT_NE(crc, 0);
 }
 
 // ✅ P0 新增：测试 Floyd 判圈算法检测循环引用

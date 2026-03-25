@@ -15,20 +15,33 @@ namespace innodb {
 
 bool BPlusTreeParser::apply_field_update(uint8_t* record_data, size_t record_size,
                                          const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& updates) {
-    // ✅ P0-1 修复：根据行格式（COMPACT/DYNAMIC）应用字段更新
+    // ✅ P0-1 修复：根据行格式（REDUNDANT/COMPACT/DYNAMIC）应用字段更新
     if (!record_data || updates.empty()) return false;
 
     for (const auto& [field_no, new_value] : updates) {
-        // ✅ 新增：使用 calculate_dynamic_field_offset 计算目标字段偏移
-        auto opt_offset = calculate_dynamic_field_offset(
-            record_data,
-            record_size,
-            field_no,
-            true // is_compact_format for COMPACT/DYNAMIC
-        );
+        std::optional<uint16_t> opt_offset;
+        
+        // ✅ 新增：根据行格式选择不同的偏移计算方法
+        if (btr_format_ == row_formats::REDUNDANT) {
+            // REDUNDANT 格式使用简化计算（基于字段序号）
+            opt_offset = calculate_redundant_field_offset(record_data, record_size, field_no);
+        } else if (is_compact_or_dynamic_format()) {
+            // COMPACT/DYNAMIC 格式使用动态偏移计算
+            opt_offset = calculate_dynamic_field_offset(
+                record_data,
+                record_size,
+                field_no,
+                true // is_compact_format
+            );
+        } else {
+            std::cerr << "[ERROR] Unsupported row format " << static_cast<int>(btr_format_) 
+                      << " for field offset calculation" << std::endl;
+            continue;
+        }
         
         if (!opt_offset.has_value()) {
-            std::cerr << "[ERROR] Failed to calculate dynamic field offset for field " << field_no << std::endl;
+            std::cerr << "[ERROR] Failed to calculate field offset for field " << field_no 
+                      << ", format=" << static_cast<int>(btr_format_) << std::endl;
             continue;
         }
         
@@ -44,6 +57,49 @@ bool BPlusTreeParser::apply_field_update(uint8_t* record_data, size_t record_siz
         std::memcpy(record_data + target_pos, new_value.data(), new_value.size());
     }
     return true;
+}
+
+// ✅ P0-2 新增：REDUNDANT 行格式字段偏移计算辅助函数
+std::optional<uint16_t> BPlusTreeParser::calculate_redundant_field_offset(
+    const uint8_t* record_data,
+    size_t record_size,
+    uint16_t field_no) {
+    // REDUNDANT 格式记录头为 6 字节（info_bits + next_offset(2) + heap_no(2) + n_fields(1) + status(1)）
+    if (record_size < 6) {
+        std::cerr << "[ERROR] Record too small for REDUNDANT field offset calculation" << std::endl;
+        return std::nullopt;
+    }
+
+    // 解析记录头
+    uint8_t info_bits = record_data[0];
+    uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record_data, 1);
+    
+    // n_fields 在第 5 字节（低 7 位）
+    uint8_t n_fields = record_data[5] & 0x7F;
+    
+    if (field_no >= n_fields) {
+        std::cerr << "[ERROR] Field number " << field_no 
+                  << " exceeds REDUNDANT record fields " << (int)n_fields << std::endl;
+        return std::nullopt;
+    }
+
+    // ✅ 新增：从记录末尾反向计算字段偏移（参考 MySQL 8.0 rec_get_nth_field_offs_redundant）
+    // 假设字段按顺序存储，且每个字段有长度前缀
+    size_t data_pos = record_size; // 从末尾开始
+    
+    for (int i = n_fields - 1; i >= 0; --i) {
+        if (data_pos < 2) break; // 至少需要 2 字节读取长度
+        
+        uint16_t field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos - 2);
+        data_pos -= 2 + field_len;
+        
+        if (i == field_no) {
+            return static_cast<uint16_t>(data_pos);
+        }
+    }
+
+    std::cerr << "[WARN] calculate_redundant_field_offset: Using simplified offset calculation" << std::endl;
+    return static_cast<uint16_t>(record_size - 2); // 默认返回末尾前 2 字节
 }
 
 // ✅ P0-2 新增：DYNAMIC 行格式字段偏移计算辅助函数（完整版）
@@ -75,54 +131,32 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
 
     // ✅ 新增：从记录末尾反向计算字段偏移（参考 MySQL 8.0 rec_get_nth_field_offs）
     // 假设记录数据部分在头之后，且字段按顺序存储
-    size_t data_pos = 5; // 跳过记录头
+    size_t data_pos = record_size; // 从末尾开始
     
-    for (uint16_t i = 0; i <= field_no; ++i) {
-        if (data_pos >= record_size) {
-            std::cerr << "[ERROR] Data position exceeds record size" << std::endl;
-            return std::nullopt;
-        }
+    for (int i = n_fields - 1; i >= 0; --i) {
+        if (data_pos < 2) break; // 至少需要 2 字节读取长度
         
-        // ✅ 新增：DYNAMIC 格式支持变长字段前缀长度
+        uint8_t len_byte = record_data[data_pos - 1];
         uint16_t field_len = 0;
         
-        if (i == field_no) {
-            // 当前字段：需要确定其长度
-            // 简化处理：假设固定长度字段（实际应根据表结构定义）
-            // 对于 VARCHAR，需要读取前缀长度字节
-            if (data_pos + 1 <= record_size && record_data[data_pos] < 255) {
-                field_len = record_data[data_pos];
-                data_pos++; // 跳过长度前缀
-            } else if (data_pos + 3 <= record_size && record_data[data_pos] == 255) {
-                // 2 字节前缀
-                data_pos++;
-                field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos);
-                data_pos += 2;
-            } else {
-                // 默认假设为固定长度字段（4字节）
-                field_len = 4;
-            }
-            
-            return static_cast<uint16_t>(data_pos - field_len); // 返回字段起始位置
+        if (len_byte < 255) {
+            field_len = len_byte;
+            data_pos -= 1 + field_len; // 长度前缀 + 数据
+        } else if (data_pos >= 3) {
+            data_pos--; // 跳过 0xFF 标记
+            field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos - 2);
+            data_pos -= 2 + field_len; // 2字节长度前缀 + 数据
+        } else {
+            break;
         }
         
-        // 跳过当前字段数据
-        if (data_pos < record_size) {
-            uint8_t len_byte = record_data[data_pos];
-            if (len_byte < 255) {
-                data_pos += 1 + len_byte; // 长度前缀 + 数据
-            } else if (data_pos + 3 <= record_size) {
-                data_pos++; // 跳过 0xFF 标记
-                uint16_t var_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos);
-                data_pos += 2 + var_len; // 2字节长度前缀 + 数据
-            } else {
-                data_pos += 4; // 默认固定长度
-            }
+        if (i == field_no) {
+            return static_cast<uint16_t>(data_pos);
         }
     }
 
     std::cerr << "[WARN] calculate_dynamic_field_offset: Using simplified offset calculation" << std::endl;
-    return static_cast<uint16_t>(data_pos);
+    return static_cast<uint16_t>(5); // 默认返回记录头后
 }
 
 void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {

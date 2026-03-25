@@ -12,6 +12,16 @@ namespace dbrecovery {
 namespace innodb {
 
 /**
+ * @brief InnoDB 行格式常量（参考 MySQL 8.0 dict0dict.h）
+ */
+namespace row_formats {
+    constexpr uint8_t REDUNDANT = 0;   // MySQL 4.0/5.0 兼容
+    constexpr uint8_t COMPACT = 1;     // MySQL 4.1+ 默认
+    constexpr uint8_t DYNAMIC = 2;     // MySQL 5.7+ 默认（支持页压缩）
+    constexpr uint8_t COMPRESSED = 3;  // MySQL 5.1+ 支持（需要页压缩）
+}
+
+/**
  * @brief B+Tree 节点类型
  */
 enum class BTreeNodeType : uint8_t {
@@ -38,7 +48,23 @@ public:
     [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
 
     // ✅ P0-1 修复：新增获取行格式的方法
-    [[nodiscard]] uint8_t btr_format() const { return btr_format_; }
+    [[nodiscard]] uint8_t btr_format() const { 
+        if (btr_format_ == 0xFF) {
+            std::cerr << "[WARN] B+Tree format not parsed yet" << std::endl;
+        }
+        return btr_format_; 
+    }
+
+    // ✅ 新增：判断是否为 COMPACT 格式（兼容 REDUNDANT 和 COMPACT）
+    [[nodiscard]] bool is_compact_or_dynamic_format() const {
+        return btr_format_ == row_formats::COMPACT || 
+               btr_format_ == row_formats::DYNAMIC;
+    }
+
+    // ✅ 新增：判断是否为 REDUNDANT 格式
+    [[nodiscard]] bool is_redundant_format() const {
+        return btr_format_ == row_formats::REDUNDANT;
+    }
     
 private:
     bool valid_page_type_ = false;
@@ -76,8 +102,8 @@ private:
     uint32_t prev_page_ = 0xFFFFFFFF;
     uint16_t n_records_ = 0;
     std::vector<uint16_t> record_offsets_;
-    uint8_t btr_format_ = 0;  // B+树记录格式标志位 (BTR_FORMAT_MASK)
-    uint16_t flags_ = 0;      // B+树标志位（用于存储行格式等信息）
+    uint8_t btr_format_ = 0xFF;  // ✅ 修复：初始化为 0xFF 表示未解析
+    uint16_t flags_ = 0xFFFF;     // ✅ 修复：初始化为 0xFFFF 表示未解析
     
     // INFIMUM/SUPREMUM 记录偏移
     uint16_t infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;

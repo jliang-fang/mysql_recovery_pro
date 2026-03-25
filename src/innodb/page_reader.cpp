@@ -8,25 +8,27 @@ namespace dbrecovery {
 namespace innodb {
 
 // ==================== 辅助函数：校验和计算 ====================
-static uint32_t compute_crc32c_internal(const std::vector<uint8_t>& page_data) {
-    // ✅ P0-3 修复：使用更高效的运行时查表法
-    static std::array<uint32_t, 256> crc_table;
-    static std::once_flag init_flag;
-    
-    std::call_once(init_flag, []() {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t crc = i;
-            for (int j = 0; j < 8; ++j) {
-                if (crc & 1) {
-                    crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
-                } else {
-                    crc >>= 1;
-                }
+// ✅ P0-2 修复：使用 constexpr 预计算 CRC32C 表（编译时初始化，零运行时开销）
+constexpr std::array<uint32_t, 256> generate_crc32c_table() {
+    std::array<uint32_t, 256> table{};
+    for (uint32_t i = 0; i < 256; ++i) {
+        uint32_t crc = i;
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ 0x82F63B78; // CRC32C 多项式（Castagnoli）
+            } else {
+                crc >>= 1;
             }
-            crc_table[i] = crc;
         }
-    });
+        table[i] = crc;
+    }
+    return table;
+}
 
+// ✅ 编译时生成 CRC32C 表
+static constexpr auto crc32c_table = generate_crc32c_table();
+
+static uint32_t compute_crc32c_internal(const std::vector<uint8_t>& page_data) {
     uint32_t crc = ~0U;
 
     const size_t checksum_start = 24;
@@ -36,7 +38,7 @@ static uint32_t compute_crc32c_internal(const std::vector<uint8_t>& page_data) {
         if (i >= checksum_start && i < checksum_end) continue;
 
         uint8_t byte = page_data[i];
-        crc = crc_table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
+        crc = crc32c_table[(crc ^ byte) & 0xFF] ^ (crc >> 8);
     }
 
     return ~crc;
