@@ -49,7 +49,7 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
                       (static_cast<uint32_t>(p[1]) << 8) |
                       (static_cast<uint32_t>(p[2]) << 16) | 
                       (static_cast<uint32_t>(p[3]) << 24);
-        // ✅ P0-1 修复：对于有符号类型，编译器会自动进行符号扩展
+        // ✅ P0-1 修复：对于有符号类型，显式转换为 int32_t 确保符号扩展
         return static_cast<T>(static_cast<int32_t>(val));
     } else if constexpr (sizeof(T) == 8) {
         uint64_t val = static_cast<uint64_t>(p[0]) | 
@@ -60,7 +60,7 @@ inline T read_le(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
                       (static_cast<uint64_t>(p[5]) << 40) |
                       (static_cast<uint64_t>(p[6]) << 48) | 
                       (static_cast<uint64_t>(p[7]) << 56);
-        // ✅ P0-1 修复：对于有符号类型，编译器会自动进行符号扩展
+        // ✅ P0-1 修复：对于有符号类型，显式转换为 int64_t 确保符号扩展
         return static_cast<T>(static_cast<int64_t>(val));
     } else {
         static_assert(sizeof(T) <= 8, "Unsupported integer size for read_le");

@@ -1135,6 +1135,30 @@ TEST(PageReader, CRC32CCompileTimeTable) {
     EXPECT_NE(crc, 0);
 }
 
+// ✅ P0-1 新增：测试 mach_read 的 sint24 负值解析
+TEST(MachReadTest, ReadSint24NegativeValue) {
+    std::vector<uint8_t> data(3, 0);
+    // 设置为 -1 (0xFFFFFF in 24-bit two's complement)
+    data[0] = 0xFF;
+    data[1] = 0xFF;
+    data[2] = 0xFF;
+
+    int32_t val = dbrecovery::innodb::read_le<int32_t>(data.data());
+    EXPECT_EQ(val, -1);
+}
+
+// ✅ P0-1 新增：测试 mach_read 的 sint24 正值解析
+TEST(MachReadTest, ReadSint24PositiveValue) {
+    std::vector<uint8_t> data(3, 0);
+    // 设置为 123456 (0x01E240 in 24-bit)
+    data[0] = 0x40;
+    data[1] = 0xE2;
+    data[2] = 0x01;
+
+    int32_t val = dbrecovery::innodb::read_le<int32_t>(data.data());
+    EXPECT_EQ(val, 123456);
+}
+
 // ✅ P0 新增：测试 Floyd 判圈算法检测循环引用
 TEST(BlobPageChainTest, DetectCircularReferenceWithFloyd) {
     std::vector<uint8_t> data(20, 0);
