@@ -1051,6 +1051,44 @@ TEST(BPlusTreeParser, ApplyFieldUpdateRedundantFormat) {
     EXPECT_EQ(record_data[6], 'd');
 }
 
+// ✅ P0-1 新增：测试 DYNAMIC 行格式字段更新（包含 BLOB 指针场景）
+TEST(BPlusTreeParser, ApplyFieldUpdateDynamicFormatWithBlob) {
+    std::vector<uint8_t> record_data(128, 0);
+    
+    // 设置记录头（COMPACT/DYNAMIC 格式）
+    record_data[0] = 0x00; // info_bits
+    record_data[1] = 0x05; // n_fields (5 fields)
+    write_le<uint16_t>(record_data.data(), 2, 110); // next_record_offset
+    
+    // 模拟字段偏移（简化：假设每个字段固定长度）
+    // field_no=3 是 BLOB 字段，位于偏移 80
+    size_t blob_ptr_pos = 80;
+    
+    // 构造 BLOB 指针更新（20字节）
+    std::vector<uint8_t> new_blob_ptr(20, 0);
+    write_le<uint32_t>(new_blob_ptr.data(), 0, 0);   // space_id
+    write_le<uint32_t>(new_blob_ptr.data(), 4, 150); // page_no
+    write_le<uint32_t>(new_blob_ptr.data(), 8, 0);   // offset
+    write_le<uint32_t>(new_blob_ptr.data(), 12, 100); // len
+    write_le<uint32_t>(new_blob_ptr.data(), 16, 100); // total_len
+    
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> updates;
+    updates.emplace_back(3, new_blob_ptr);
+    
+    // 调用 apply_field_update
+    bool result = innodb::BPlusTreeParser::apply_field_update(
+        record_data.data(), 
+        record_data.size(), 
+        updates
+    );
+    
+    EXPECT_TRUE(result);
+    // 验证 BLOB 指针被正确写入
+    for (int i = 0; i < 20; ++i) {
+        EXPECT_EQ(record_data[blob_ptr_pos + i], new_blob_ptr[i]) << "Byte mismatch at offset " << i;
+    }
+}
+
 // ✅ P0-1 新增：测试字段偏移计算函数
 TEST(BPlusTreeParser, CalculateDynamicFieldOffset) {
     std::vector<uint8_t> record_data(64, 0);
