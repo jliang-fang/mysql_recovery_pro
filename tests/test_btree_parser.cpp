@@ -965,6 +965,94 @@ TEST(BPlusTreeParser, ApplyRedoRecordAllRowFormats) {
     }
 }
 
+// ✅ P0-1 新增：测试 DYNAMIC 行格式字段更新
+TEST(BPlusTreeParser, ApplyFieldUpdateDynamicFormat) {
+    std::vector<uint8_t> record_data(64, 0);
+    
+    // 设置记录头：info_bits=0x00, n_fields=3
+    record_data[0] = 0x00; // info_bits
+    record_data[1] = 0x03; // n_fields (3 fields)
+    write_le<uint16_t>(record_data.data(), 2, 54); // next_offset
+    
+    // 构造字段更新：field_no=1, new_value="test"
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> updates;
+    std::vector<uint8_t> new_value = {'t', 'e', 's', 't'};
+    updates.emplace_back(1, new_value);
+    
+    // 调用 apply_field_update
+    bool result = innodb::BPlusTreeParser::apply_field_update(
+        record_data.data(), 
+        record_data.size(), 
+        updates
+    );
+    
+    EXPECT_TRUE(result);
+    // 验证字段值被正确更新（假设 field_no=1 在偏移 5+4=9 处）
+    EXPECT_EQ(record_data[9], 't');
+    EXPECT_EQ(record_data[10], 'e');
+    EXPECT_EQ(record_data[11], 's');
+    EXPECT_EQ(record_data[12], 't');
+}
+
+// ✅ P0-1 新增：测试 REDUNDANT 行格式字段更新
+TEST(BPlusTreeParser, ApplyFieldUpdateRedundantFormat) {
+    std::vector<uint8_t> record_data(64, 0);
+    
+    // 设置记录头（REDUNDANT 格式）
+    record_data[0] = 0x00; // info_bits
+    record_data[1] = 0x03; // n_fields_high + next_offset[15:8]
+    write_le<uint16_t>(record_data.data(), 2, 54); // next_offset
+    
+    // 构造字段更新：field_no=0, new_value="id"
+    std::vector<std::pair<uint16_t, std::vector<uint8_t>>> updates;
+    std::vector<uint8_t> new_value = {'i', 'd'};
+    updates.emplace_back(0, new_value);
+    
+    // 调用 apply_field_update
+    bool result = innodb::BPlusTreeParser::apply_field_update(
+        record_data.data(), 
+        record_data.size(), 
+        updates
+    );
+    
+    EXPECT_TRUE(result);
+    // 验证字段值被正确更新（假设 field_no=0 在偏移 5 处）
+    EXPECT_EQ(record_data[5], 'i');
+    EXPECT_EQ(record_data[6], 'd');
+}
+
+// ✅ P0-1 新增：测试字段偏移计算函数
+TEST(BPlusTreeParser, CalculateDynamicFieldOffset) {
+    std::vector<uint8_t> record_data(64, 0);
+    
+    // 设置记录头
+    record_data[0] = 0x00; // info_bits
+    record_data[1] = 0x03; // n_fields (3 fields)
+    write_le<uint16_t>(record_data.data(), 2, 54); // next_offset
+    
+    // 测试 field_no=0
+    auto offset0 = innodb::BPlusTreeParser::calculate_dynamic_field_offset(
+        record_data.data(), 
+        record_data.size(),
+        0,
+        true // is_compact_format
+    );
+    
+    EXPECT_TRUE(offset0.has_value());
+    EXPECT_GT(offset0.value(), 0);
+    
+    // 测试 field_no=1
+    auto offset1 = innodb::BPlusTreeParser::calculate_dynamic_field_offset(
+        record_data.data(), 
+        record_data.size(),
+        1,
+        true
+    );
+    
+    EXPECT_TRUE(offset1.has_value());
+    EXPECT_GT(offset1.value(), offset0.value());
+}
+
 // ✅ P0 新增：测试 Floyd 判圈算法检测循环引用
 TEST(BlobPageChainTest, DetectCircularReferenceWithFloyd) {
     std::vector<uint8_t> data(20, 0);
