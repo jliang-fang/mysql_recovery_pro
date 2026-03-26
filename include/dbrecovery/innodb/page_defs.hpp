@@ -26,11 +26,6 @@ constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET
 /// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
 constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
-/// @brief Absolute offset of page type within a page (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 50)
-constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET; // 38 + 12 = 50
-/// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
-constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
-
 /// @brief Absolute offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
 /// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
 constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
