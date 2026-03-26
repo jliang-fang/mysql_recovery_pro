@@ -1,11 +1,87 @@
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/redo_log.hpp"
 #include <iostream>
 #include <array>
 #include <cstring> // for std::memcpy
+#include <fstream>
 
 namespace dbrecovery {
 namespace innodb {
+
+// ==================== RedoLogParser 实现 ====================
+RedoLogParser::RedoLogParser() : is_valid_(true) {}
+RedoLogParser::~RedoLogParser() = default;
+
+std::optional<RedoLogRecord> RedoLogParser::parse_record(const uint8_t* data, size_t len) {
+    if (!data || len < 5) {
+        return std::nullopt;
+    }
+
+    RedoLogRecord record;
+    size_t pos = 0;
+
+    // ✅ P0-1: 解析日志类型 (1 byte)
+    record.r_type = dbrecovery::innodb::read_le<uint8_t>(data, pos);
+    pos += sizeof(uint8_t);
+
+    // ✅ P0-1: 解析空间ID和页号 (各4 bytes)
+    if (pos + 8 <= len) {
+        record.r_space_id = dbrecovery::innodb::read_le<uint32_t>(data, pos);
+        pos += sizeof(uint32_t);
+        record.r_page_no = dbrecovery::innodb::read_le<uint32_t>(data, pos);
+        pos += sizeof(uint32_t);
+    }
+
+    // ✅ P0-1: 解析剩余数据作为日志内容
+    if (pos < len) {
+        record.r_data.assign(data + pos, data + len);
+    }
+
+    return record;
+}
+
+std::vector<RedoLogRecord> RedoLogParser::parse_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Failed to open redo log file: " << path << std::endl;
+        return {};
+    }
+
+    // 读取文件大小
+    file.seekg(0, std::ios::end);
+    size_t file_size = static_cast<size_t>(file.tellg());
+    file.seekg(0, std::ios::beg);
+
+    if (file_size == 0) {
+        std::cerr << "[WARN] Redo log file is empty: " << path << std::endl;
+        return {};
+    }
+
+    // 读取整个文件
+    std::vector<uint8_t> buffer(file_size);
+    file.read(reinterpret_cast<char*>(buffer.data()), file_size);
+    file.close();
+
+    // 解析所有记录（简化版：假设每个记录至少5字节）
+    std::vector<RedoLogRecord> records;
+    size_t pos = 0;
+
+    while (pos + 5 <= buffer.size()) {
+        auto record_opt = parse_record(buffer.data() + pos, buffer.size() - pos);
+        if (!record_opt.has_value()) {
+            break; // 解析失败，停止
+        }
+
+        const auto& record = record_opt.value();
+        records.push_back(record);
+
+        // 移动到下一个记录（简化：假设每个记录长度为 data_size + 5）
+        pos += 5 + record.r_data.size();
+    }
+
+    return records;
+}
 
 // ==================== 辅助函数：校验和计算 ====================
 // ✅ P0-2 修复：使用 constexpr 预计算 CRC32C 表（编译时初始化，零运行时开销）
