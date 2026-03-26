@@ -330,7 +330,7 @@ std::optional<BlobPageChain> build_blob_page_chain(
                       << current_space << ", " << next_bpage << ")" << std::endl;
             break;
         }
-        
+
         // 添加下一个页到链中
         chain.add_page(current_space, next_bpage);
         
