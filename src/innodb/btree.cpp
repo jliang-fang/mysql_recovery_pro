@@ -785,8 +785,8 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
     infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
 }
 
-bool BPlusTreeParser::parse() noexcept(false) {
-    // ✅ P0 修复：添加页校验和验证（防止解析损坏页）
+utils::Result<bool> BPlusTreeParser::parse() {
+    // ✅ P0-1 修复：添加页校验和验证（防止解析损坏页）
     // 在解析任何结构之前，必须先验证页的完整性
     uint32_t stored_checksum = 0, computed_checksum = 0;
     bool checksum_valid = dbrecovery::innodb::PageReader::validate_checksum(
@@ -795,7 +795,10 @@ bool BPlusTreeParser::parse() noexcept(false) {
     if (!checksum_valid) {
         std::cerr << "[ERROR] BPlusTreeParser: Page checksum validation failed. Stored=" 
                   << stored_checksum << ", Computed=" << computed_checksum << ". Aborting parse." << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::CHECKSUM_MISMATCH,
+            "Page checksum validation failed"
+        ));
     }
     
     // ✅ 修复：使用 page_defs.hpp 中定义的常量进行边界检查
@@ -803,7 +806,10 @@ bool BPlusTreeParser::parse() noexcept(false) {
     if (page_data_.size() < min_page_size) {
         std::cerr << "[ERROR] BPlusTreeParser: Page too small. Required: " << min_page_size 
                   << ", Actual: " << page_data_.size() << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::INVALID_ARGUMENT,
+            "Page size too small"
+        ));
     }
     
     // ✅ 修复：使用正确的偏移计算页类型，引用 page_defs.hpp 中的常量
@@ -816,14 +822,20 @@ bool BPlusTreeParser::parse() noexcept(false) {
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
         std::cerr << "[ERROR] BPlusTreeParser: Invalid page type " << page_type 
                   << " (" << dbrecovery::innodb::page_type_to_string(page_type) << ")" << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::PARSE_ERROR,
+            "Invalid page type"
+        ));
     }
     
     // ✅ 新增：页健康检查（目录槽、记录链完整性）
     PageHealth health = check_health();
     if (!health.is_valid) {
         std::cerr << "[ERROR] BPlusTreeParser: Page health check failed. Status: " << health.status_message << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::PARSE_ERROR,
+            "Page health check failed: " + health.status_message
+        ));
     }
     
     // ✅ 新增：将校验和结果注入健康检查
@@ -834,28 +846,40 @@ bool BPlusTreeParser::parse() noexcept(false) {
     // 解析B+树头
     if (!parse_header()) {
         std::cerr << "[ERROR] BPlusTreeParser: Failed to parse B+ tree header" << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::PARSE_ERROR,
+            "Failed to parse B+ tree header"
+        ));
     }
     
     // ✅ 修复：使用常量定义的偏移解析 INFIMUM/SUPREMUM
     if (!parse_infimum_supremum()) {
         std::cerr << "[ERROR] BPlusTreeParser: Failed to parse infimum/supremum records" << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::PARSE_ERROR,
+            "Failed to parse infimum/supremum records"
+        ));
     }
     
     // ✅ 修复：核心逻辑，使用页目录解析用户记录，移除废弃的 fallback
     if (!parse_directory()) {
         std::cerr << "[ERROR] BPlusTreeParser: Failed to parse directory, cannot recover records reliably" << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::PARSE_ERROR,
+            "Failed to parse directory"
+        ));
     }
     
     // ✅ 新增：解析用户记录（从目录槽中获取偏移后）
     if (!parse_user_records()) {
         std::cerr << "[ERROR] BPlusTreeParser: Failed to parse user records" << std::endl;
-        return false;
+        return utils::Result<bool>::Err(utils::Error(
+            utils::Error::Code::PARSE_ERROR,
+            "Failed to parse user records"
+        ));
     }
     
-    return true;
+    return utils::Result<bool>::Ok(true);
 }
 
 bool BPlusTreeParser::parse_header() noexcept {

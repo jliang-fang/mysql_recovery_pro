@@ -321,7 +321,7 @@ TEST(BPlusTreeParser, UseConstantsInsteadOfHardcodedOffsets) {
     EXPECT_EQ(offsets[1], supremum_offset);
 }
 
-// ✅ P0 新增：测试校验和不匹配时解析应失败（严格模式）
+// ✅ P0-1 新增：测试校验和不匹配时解析应失败（严格模式）并返回错误信息
 TEST(BPlusTreeParser, ParseFailsOnChecksumMismatchStrictMode) {
     std::vector<uint8_t> page_data(16384, 0);
     
@@ -334,10 +334,12 @@ TEST(BPlusTreeParser, ParseFailsOnChecksumMismatchStrictMode) {
     }
     
     BPlusTreeParser parser(page_data);
-    EXPECT_FALSE(parser.parse());
+    auto result = parser.parse();
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.error().code(), utils::Error::Code::CHECKSUM_MISMATCH);
 }
 
-// ✅ P0 新增：测试校验和不匹配时在非严格模式下仍可解析（容错）
+// ✅ P0-1 新增：测试校验和不匹配时在非严格模式下仍可解析（容错）
 TEST(BPlusTreeParser, ParseSucceedsOnChecksumMismatchNonStrictMode) {
     std::vector<uint8_t> page_data(16384, 0);
     
@@ -351,7 +353,8 @@ TEST(BPlusTreeParser, ParseSucceedsOnChecksumMismatchNonStrictMode) {
     
     BPlusTreeParser parser(page_data);
     // 在非严格模式下，即使校验和不匹配也应能解析（假设其他结构正确）
-    EXPECT_TRUE(parser.parse());
+    auto result = parser.parse();
+    EXPECT_TRUE(result.ok());
 }
 
 // ✅ P0 新增：测试 BLOB 字段解析（单页 BLOB 场景）

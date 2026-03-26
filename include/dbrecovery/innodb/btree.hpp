@@ -38,8 +38,8 @@ class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
     
-    // ✅ 统一异常规范：所有解析方法均不标记 noexcept，确保异常可传播
-    bool parse();
+    // ✅ P0-1 修复：统一异常规范，返回 Result 类型以提供更好的错误信息
+    utils::Result<bool> parse();
     
     [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
@@ -185,10 +185,9 @@ public:
      * 4. 解析 INFIMUM/SUPREMUM 系统记录
      * 5. 解析用户记录（通过目录槽）
      *
-     * @return true 页解析成功
-     * @return false 页解析失败（校验和不匹配、格式错误等）
+     * @return utils::Result<bool> 包含成功/失败状态和详细错误信息
      */
-    bool parse() noexcept(false);
+    utils::Result<bool> parse();
 
 private:
     // ✅ 新增：页健康检查辅助函数
