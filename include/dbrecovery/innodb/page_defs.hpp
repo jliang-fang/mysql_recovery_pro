@@ -93,6 +93,11 @@ constexpr uint16_t BTR_MAX_SIZE         = 50;       // maximum size of a record
 constexpr uint16_t BTR_N_LEVELS_ABS     = FIL_HEADER_SIZE + 4;   // absolute offset for page_level (38+4=42)
 constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = FIL_HEADER_SIZE + 6; // absolute offset for index id (38+6=44)
 
+// ✅ 新增：BTR Header 相对偏移（用于解析 B+Tree 头部）
+constexpr uint16_t BTR_PAGE_OFFSET_HEAP_TOP = 2;   // relative to BTR header
+constexpr uint16_t BTR_PAGE_OFFSET_FREE     = 6;   // relative to BTR header
+constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION = 12; // relative to BTR header
+
 // ==================== Page Header Constants (relative to FIL_HEADER_SIZE) ====================
 // From MySQL 8.0.36: include/page0page.h
 // PAGE_N_DIR_SLOTS, PAGE_HEAP_TOP, etc., are relative to the start of page data (after FIL header)

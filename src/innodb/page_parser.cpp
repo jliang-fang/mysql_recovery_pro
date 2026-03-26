@@ -65,17 +65,22 @@ bool PageParser::parse_header() {
         }
     }
 
-    // ✅ Step 2: 校验页类型（支持索引页、SDI页和Undo日志页）
-    constexpr uint16_t FIL_PAGE_INDEX = 9969;  // B+Tree index page
-    constexpr uint16_t FIL_PAGE_UNDO_LOG = 9970;  // Undo log page
-    constexpr uint16_t FIL_PAGE_SDI = 9971;  // SDI metadata page
-    constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
+    // ✅ Step 2: 校验页类型（支持所有 InnoDB 页类型）
+    constexpr uint16_t FIL_PAGE_INDEX       = dbrecovery::innodb::FIL_PAGE_INDEX;      // B+Tree index page
+    constexpr uint16_t FIL_PAGE_UNDO_LOG    = dbrecovery::innodb::FIL_PAGE_UNDO_LOG;   // Undo log page
+    constexpr uint16_t FIL_PAGE_SDI         = dbrecovery::innodb::FIL_PAGE_SDI;        // SDI metadata page
+    constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED; // Freshly allocated page
+    constexpr uint16_t FIL_PAGE_TYPE_BLOB   = dbrecovery::innodb::FIL_PAGE_TYPE_BLOB;  // BLOB data page
+    constexpr uint16_t FIL_PAGE_COMPRESSED  = dbrecovery::innodb::FIL_PAGE_COMPRESSED; // Compressed page
     
     if (page_type_ != FIL_PAGE_INDEX && 
         page_type_ != FIL_PAGE_UNDO_LOG && 
         page_type_ != FIL_PAGE_SDI &&
-        page_type_ != FIL_PAGE_TYPE_ALLOCATED) {
-        std::cerr << "[WARN] Unsupported page type: 0x" << std::hex << page_type_ << std::dec << "\n";
+        page_type_ != FIL_PAGE_TYPE_ALLOCATED &&
+        page_type_ != FIL_PAGE_TYPE_BLOB &&
+        page_type_ != FIL_PAGE_COMPRESSED) {
+        std::cerr << "[WARN] Unsupported page type: 0x" << std::hex << page_type_ << " (" 
+                  << dbrecovery::innodb::page_type_to_string(page_type_) << ")" << std::dec << "\n";
         return false; // 非有效页类型，跳过
     }
 
