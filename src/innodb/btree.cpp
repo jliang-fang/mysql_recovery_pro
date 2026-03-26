@@ -74,18 +74,25 @@ std::optional<uint16_t> BPlusTreeParser::calculate_redundant_field_offset(
     const uint8_t* record_data,
     size_t record_size,
     uint16_t field_no) {
-    // REDUNDANT 格式记录头为 6 字节（info_bits + next_offset(2) + heap_no(2) + n_fields(1) + status(1)）
-    if (record_size < 6) {
+    // ✅ P0-3 修复：使用常量定义记录头大小
+    constexpr size_t REDUNDANT_HEADER_SIZE = 6; // info_bits(1) + next_offset(2) + heap_no(2) + n_fields(1)
+    
+    if (record_size < REDUNDANT_HEADER_SIZE) {
         std::cerr << "[ERROR] Record too small for REDUNDANT field offset calculation" << std::endl;
         return std::nullopt;
     }
 
+    // ✅ P0-3 新增：使用常量定义字段偏移
+    constexpr size_t INFO_BITS_POS = 0;
+    constexpr size_t NEXT_OFFSET_POS = 1;
+    constexpr size_t N_FIELDS_POS = 5; // n_fields 在第 5 字节（低 7 位）
+
     // 解析记录头
-    uint8_t info_bits = record_data[0];
-    uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record_data, 1);
+    uint8_t info_bits = record_data[INFO_BITS_POS];
+    uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record_data, NEXT_OFFSET_POS);
     
     // n_fields 在第 5 字节（低 7 位）
-    uint8_t n_fields = record_data[5] & 0x7F;
+    uint8_t n_fields = record_data[N_FIELDS_POS] & 0x7F;
     
     if (field_no >= n_fields) {
         std::cerr << "[ERROR] Field number " << field_no 
@@ -132,20 +139,27 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     size_t record_size,
     uint16_t field_no,
     bool is_compact_format) {
+    // ✅ P0-4 修复：使用常量定义记录头大小
+    constexpr size_t COMPACT_HEADER_SIZE = 5; // info_bits(1) + n_fields(1) + next_offset(2)
+
     // ✅ 修复：此函数仅用于 COMPACT/DYNAMIC 格式，REDUNDANT 格式不适用
     if (!is_compact_format) {
         return std::nullopt;
     }
 
     // ✅ 新增：边界检查
-    if (record_size < 5) {
+    if (record_size < COMPACT_HEADER_SIZE) {
         std::cerr << "[ERROR] Record too small for field offset calculation" << std::endl;
         return std::nullopt;
     }
 
+    // ✅ P0-4 新增：使用常量定义字段偏移
+    constexpr size_t INFO_BITS_POS = 0;
+    constexpr size_t N_FIELDS_POS = 1;
+
     // 解析记录头：info_bits(1) + n_fields(1) + next_offset(2)
-    uint8_t info_bits = record_data[0];
-    uint8_t n_fields = record_data[1]; // 实际字段数（COMPACT 格式）
+    uint8_t info_bits = record_data[INFO_BITS_POS];
+    uint8_t n_fields = record_data[N_FIELDS_POS]; // 实际字段数（COMPACT 格式）
     
     if (field_no >= n_fields) {
         std::cerr << "[ERROR] Field number " << field_no 
@@ -184,7 +198,7 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     
     // COMPACT 格式字段偏移计算公式：
     // field_offset = 5 + (field_no * 2)  // 简化假设每个字段有 2 字节长度前缀
-    uint16_t fallback_offset = static_cast<uint16_t>(5 + (field_no * 2));
+    uint16_t fallback_offset = static_cast<uint16_t>(COMPACT_HEADER_SIZE + (field_no * 2));
     
     if (fallback_offset >= record_size) {
         std::cerr << "[ERROR] Fallback offset calculation failed" << std::endl;

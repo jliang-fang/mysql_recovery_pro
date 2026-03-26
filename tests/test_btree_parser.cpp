@@ -18,12 +18,11 @@ TEST(BPlusTreeParser, ParseValidLeafPage) {
     // 设置页级别为 0（叶子节点）
     write_le<uint16_t>(page_data.data(), dbrecovery::innodb::BTR_N_LEVELS_ABS, 0);
     
-    // 设置目录槽数量
-    constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = 0;
+    // ✅ P0-1 新增：使用常量定义偏移
+    constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET;
     write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + PAGE_N_DIR_SLOTS_OFFSET, 5);  // n_dir_slots
     
-    // 设置堆顶位置
-    constexpr uint16_t PAGE_HEAP_TOP_OFFSET = 2;
+    constexpr uint16_t PAGE_HEAP_TOP_OFFSET = dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET;
     write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_HEADER_SIZE + PAGE_HEAP_TOP_OFFSET, 100);  // heap_top
     
     BPlusTreeParser parser(page_data);
@@ -34,8 +33,8 @@ TEST(BPlusTreeParser, ParseInvalidPageType) {
     // 创建一个无效页类型的数据
     std::vector<uint8_t> page_data(16384, 0);
     
-    // 设置页类型为 FIL_PAGE_TYPE_ALLOCATED (0)
-    write_le<uint16_t>(page_data.data(), 50, FIL_PAGE_TYPE_ALLOCATED);
+    // ✅ P0-1 新增：使用常量定义偏移
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED);
     
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
@@ -45,6 +44,41 @@ TEST(BPlusTreeParser, ParseEmptyData) {
     std::vector<uint8_t> page_data;
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
+}
+
+// ✅ P0 新增：测试使用常量而非硬编码偏移
+TEST(BPlusTreeParser, UseConstantsInsteadOfHardcodedOffsets) {
+    // 创建一个 16KB 的页数据
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // ✅ 使用常量设置页头信息
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::BTR_N_LEVELS_ABS, 0);     // PAGE_LEVEL = 0 (leaf)
+    
+    constexpr uint16_t FIL_HEADER_SIZE = dbrecovery::innodb::FIL_HEADER_SIZE;
+    constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET;
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + PAGE_N_DIR_SLOTS_OFFSET, 5);     // PAGE_N_DIR_SLOTS
+    
+    constexpr uint16_t PAGE_HEAP_TOP_OFFSET = dbrecovery::innodb::PAGE_HEAP_TOP_OFFSET;
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + PAGE_HEAP_TOP_OFFSET, 100);   // PAGE_HEAP_TOP
+    
+    // ✅ 使用常量设置 INFIMUM 记录
+    constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
+    page_data[infimum_offset] = dbrecovery::innodb::REC_STATUS_INFIMUM; // info_bits: REC_INFO_MIN_REC_FLAG (bit 4)
+    write_le<uint16_t>(page_data.data(), infimum_offset + 1, 70);   // next_record_offset
+    
+    // ✅ 使用常量设置用户记录
+    page_data[70] = 0x00; // info_bits
+    write_le<uint16_t>(page_data.data(), 71, 86);   // next_record_offset
+    
+    // ✅ 使用常量设置 SUPREMUM 记录
+    constexpr uint16_t supremum_offset = 100 - 5; // heap_top - 5
+    page_data[supremum_offset] = dbrecovery::innodb::REC_STATUS_SUPREMUM; // REC_STATUS_SUPREMUM
+    write_le<uint16_t>(page_data.data(), supremum_offset + 1, 0xFFFF); // end of chain
+    
+    BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    EXPECT_EQ(parser.node_type(), dbrecovery::innodb::BTreeNodeType::LEAF);
 }
 
 // ✅ 新增：测试一个完整的、有效的叶子页解析
