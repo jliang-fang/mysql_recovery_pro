@@ -250,6 +250,9 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data,
         {compute_old_checksum(page_copy), "OLD"}
     };
 
+    uint32_t computed_new_crc32c = compute_crc32c(page_copy);
+    uint32_t computed_innodb_80 = compute_innodb_checksum(page_copy);
+
     for (const auto& [computed, algo_name] : computed_checksums) {
         if (computed == stored_checksum) {
             if (out_computed) *out_computed = computed;
@@ -259,12 +262,10 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data,
 
     // 所有校验均失败，输出详细错误信息
     std::cerr << "[ERROR] Page checksum mismatch. Stored=" << stored_checksum 
-              << ", CRC32C=" << computed_crc32c 
-              << ", INNODB=" << computed_innodb
-              << ", NEW_CRC32C=" << computed_new_crc32c
-              << ", INNODB_80=" << computed_innodb_80 << std::endl;
+              << ", CRC32C=" << computed_new_crc32c 
+              << ", INNODB=" << computed_innodb_80 << std::endl;
     
-    if (out_computed) *out_computed = computed_crc32c; // 默认返回 CRC32C
+    if (out_computed) *out_computed = computed_new_crc32c; // 默认返回 CRC32C
     
     if (strict_mode) {
         return false; // 严格模式下失败

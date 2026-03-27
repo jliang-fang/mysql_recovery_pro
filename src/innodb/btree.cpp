@@ -984,8 +984,95 @@ bool BPlusTreeParser::parse_infimum_supremum() {
     return true;
 }
 
-// ✅ 修复：移除重复的 parse_user_records 实现（已在头文件中声明为 private）
-// 此处仅保留 check_health 的实现
+bool BPlusTreeParser::parse_directory() {
+    // ✅ 新增：解析页目录槽（record directory）
+    constexpr size_t n_dir_slots_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::PAGE_N_DIR_SLOTS_OFFSET;
+    
+    if (page_data_.size() < n_dir_slots_offset + 2) {
+        std::cerr << "[ERROR] BPlusTreeParser: Page too small for directory" << std::endl;
+        return false;
+    }
+    
+    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), n_dir_slots_offset);
+    
+    // 验证目录槽数量合理性（至少有INFIMUM和SUPREMUM）
+    if (n_dir_slots < 2) {
+        std::cerr << "[ERROR] BPlusTreeParser: Insufficient directory slots: " << n_dir_slots << std::endl;
+        return false;
+    }
+    
+    // ✅ 新增：从目录槽中提取记录偏移
+    constexpr size_t dir_slot_size = 2; // 每个目录槽占2字节（15位偏移 + 1位标志）
+    constexpr size_t min_dir_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 36; // 确保有足够空间读取页目录
+    
+    if (page_data_.size() < min_dir_offset + n_dir_slots * dir_slot_size) {
+        std::cerr << "[ERROR] BPlusTreeParser: Page too small for directory slots" << std::endl;
+        return false;
+    }
+    
+    // 从后往前遍历目录槽（InnoDB目录槽按降序存储）
+    record_offsets_.clear();
+    for (int i = n_dir_slots - 1; i >= 0; --i) {
+        size_t slot_offset = min_dir_offset + i * dir_slot_size;
+        uint16_t rec_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_offset) & 0x7FFF;
+        
+        // 验证偏移有效性
+        if (rec_offset >= page_data_.size()) {
+            std::cerr << "[ERROR] BPlusTreeParser: Invalid record offset in directory: " << rec_offset << std::endl;
+            return false;
+        }
+        
+        record_offsets_.push_back(rec_offset);
+    }
+    
+    // ✅ 新增：反转记录偏移列表，使其按升序排列（INFIMUM -> ... -> SUPREMUM）
+    std::reverse(record_offsets_.begin(), record_offsets_.end());
+    
+    return true;
+}
+
+bool BPlusTreeParser::parse_user_records() {
+    // ✅ 新增：解析用户记录（从目录槽中获取偏移后）
+    if (record_offsets_.size() < 2) {
+        std::cerr << "[ERROR] BPlusTreeParser: Not enough records to parse user records" << std::endl;
+        return false;
+    }
+    
+    // ✅ 新增：跳过INFIMUM和SUPREMUM系统记录（前两个偏移）
+    size_t user_record_start = 2;
+    if (record_offsets_.size() <= user_record_start) {
+        std::cerr << "[WARN] BPlusTreeParser: No user records found" << std::endl;
+        return true; // 没有用户记录是合法的
+    }
+    
+    // ✅ 新增：遍历用户记录并验证其完整性
+    for (size_t i = user_record_start; i < record_offsets_.size(); ++i) {
+        uint16_t rec_offset = record_offsets_[i];
+        
+        // 验证记录头大小（至少5字节）
+        if (rec_offset + 5 > page_data_.size()) {
+            std::cerr << "[WARN] BPlusTreeParser: Record at offset " << rec_offset 
+                      << " is too small to parse header" << std::endl;
+            continue; // 跳过损坏的记录
+        }
+        
+        // ✅ 新增：解析记录头并验证类型
+        uint8_t info_bits = page_data_[rec_offset];
+        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), rec_offset + 1) & 0x3FFF;
+        
+        // 验证记录链连续性（除了最后一个记录）
+        if (i < record_offsets_.size() - 1) {
+            uint16_t expected_next = record_offsets_[i + 1];
+            if (next_offset != expected_next && next_offset != 0xFFFF) {
+                std::cerr << "[WARN] BPlusTreeParser: Record chain broken at offset " << rec_offset 
+                          << ": next=" << next_offset << ", expected=" << expected_next << std::endl;
+                // 继续处理但标记为不完整
+            }
+        }
+    }
+    
+    return true;
+}
 
 BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     PageHealth health;

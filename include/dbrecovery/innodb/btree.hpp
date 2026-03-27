@@ -68,11 +68,6 @@ public:
     
 private:
     bool valid_page_type_ = false;
-    uint32_t page_level_ = 0xFFFFFFFF;
-    uint32_t next_page_ = 0xFFFFFFFF;
-    uint32_t prev_page_ = 0xFFFFFFFF;
-    uint16_t n_records_ = 0;
-    std::vector<uint16_t> record_offsets_;
     
     // ✅ 统一：页健康状态检查（消除重复定义）
     struct PageHealth {
