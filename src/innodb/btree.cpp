@@ -196,9 +196,20 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     // ✅ P0-4 新增：备用方案，使用记录头中的信息
     std::cerr << "[WARN] calculate_dynamic_field_offset: Using fallback offset calculation" << std::endl;
     
-    // COMPACT 格式字段偏移计算公式：
-    // field_offset = 5 + (field_no * 2)  // 简化假设每个字段有 2 字节长度前缀
-    uint16_t fallback_offset = static_cast<uint16_t>(COMPACT_HEADER_SIZE + (field_no * 2));
+    // COMPACT 格式字段偏移计算公式（更精确的估算）：
+    // field_offset = 5 (header) + null_bitmap_size + (field_no * avg_field_overhead)
+    // 其中 avg_field_overhead 是一个平均值，对于变长字段通常为 1-3 字节
+    uint16_t null_bitmap_size = 0;
+    if (record_data[INFO_BITS_POS] & 0x80) { // 假设第7位是 NULL 位图标志（实际需根据表结构）
+        // 简化：假设最多 8 个可空列，需要 1 字节
+        null_bitmap_size = 1;
+    }
+    
+    uint16_t fallback_offset = static_cast<uint16_t>(COMPACT_HEADER_SIZE + null_bitmap_size);
+    for (uint16_t i = 0; i < field_no; ++i) {
+        // 简化：假设每个字段平均占用 4 字节（包括长度前缀和数据）
+        fallback_offset += 4;
+    }
     
     if (fallback_offset >= record_size) {
         std::cerr << "[ERROR] Fallback offset calculation failed" << std::endl;

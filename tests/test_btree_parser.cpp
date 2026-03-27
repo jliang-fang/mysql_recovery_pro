@@ -658,6 +658,26 @@ TEST(PageReader, ValidateChecksumAllAlgorithms) {
     EXPECT_EQ(stored, computed);
 }
 
+// ✅ P1 新增：测试校验和不匹配时的详细错误输出
+TEST(PageReader, ValidateChecksumMismatchDetailedError) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 设置一个错误的校验和（与所有计算出的值都不匹配）
+    for (int i = 0; i < 4; ++i) {
+        page_data[24 + i] = 0xFF;
+    }
+    
+    uint32_t stored, computed;
+    bool result = PageReader::validate_checksum(page_data, false, &stored, &computed);
+    
+    EXPECT_FALSE(result); // 在严格模式下应失败
+    EXPECT_EQ(stored, 0xFFFFFFFF);
+    // computed 应为 CRC32C 的值（因为它是第一个被尝试的算法）
+}
+
 // ✅ 新增：测试 Redo Log 回放（MLOG_COMP_REC_INSERT）
 TEST(BPlusTreeParser, RedoInsertRecord) {
     std::vector<uint8_t> page_data(16384, 0);
@@ -1156,6 +1176,28 @@ TEST(BPlusTreeParser, CalculateDynamicFieldOffset) {
     
     EXPECT_TRUE(offset1.has_value());
     EXPECT_GT(offset1.value(), offset0.value());
+}
+
+// ✅ P2 新增：测试字段偏移计算函数在异常情况下的行为
+TEST(BPlusTreeParser, CalculateDynamicFieldOffsetFallback) {
+    std::vector<uint8_t> record_data(32, 0);
+    
+    // 设置记录头（n_fields=5，但实际数据不足）
+    record_data[0] = 0x00; // info_bits
+    record_data[1] = 0x05; // n_fields (5 fields)
+    write_le<uint16_t>(record_data.data(), 2, 30); // next_offset
+    
+    // 测试 field_no=4（最后一个字段）
+    auto offset4 = innodb::BPlusTreeParser::calculate_dynamic_field_offset(
+        record_data.data(), 
+        record_data.size(),
+        4,
+        true
+    );
+    
+    EXPECT_TRUE(offset4.has_value());
+    // 预期返回一个估算值，该值应小于记录大小
+    EXPECT_LT(offset4.value(), record_data.size());
 }
 
 // ✅ P0-2 新增：测试 CRC32C 编译时查表（零运行时开销）

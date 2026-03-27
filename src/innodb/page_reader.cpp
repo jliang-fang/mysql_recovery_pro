@@ -243,29 +243,33 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data,
         return true;
     }
 
-    // ✅ 修复：尝试所有支持的校验和算法（MySQL 5.6/5.7/8.0 兼容）
-    std::vector<std::pair<uint32_t, std::string>> computed_checksums = {
+    // ✅ P1 新增：尝试所有支持的校验和算法（MySQL 5.6/5.7/8.0 兼容）
+    struct ChecksumResult {
+        uint32_t value;
+        std::string name;
+    };
+    
+    std::vector<ChecksumResult> computed_checksums = {
         {compute_crc32c(page_copy), "CRC32C"},
         {compute_innodb_checksum(page_copy), "INNODB"},
         {compute_old_checksum(page_copy), "OLD"}
     };
 
-    uint32_t computed_new_crc32c = compute_crc32c(page_copy);
-    uint32_t computed_innodb_80 = compute_innodb_checksum(page_copy);
-
-    for (const auto& [computed, algo_name] : computed_checksums) {
-        if (computed == stored_checksum) {
-            if (out_computed) *out_computed = computed;
+    for (const auto& result : computed_checksums) {
+        if (result.value == stored_checksum) {
+            if (out_computed) *out_computed = result.value;
             return true;
         }
     }
 
     // 所有校验均失败，输出详细错误信息
-    std::cerr << "[ERROR] Page checksum mismatch. Stored=" << stored_checksum 
-              << ", CRC32C=" << computed_new_crc32c 
-              << ", INNODB=" << computed_innodb_80 << std::endl;
+    std::cerr << "[ERROR] Page checksum mismatch. Stored=" << stored_checksum;
+    for (const auto& result : computed_checksums) {
+        std::cerr << ", " << result.name << "=" << result.value;
+    }
+    std::cerr << std::endl;
     
-    if (out_computed) *out_computed = computed_new_crc32c; // 默认返回 CRC32C
+    if (out_computed) *out_computed = computed_checksums[0].value; // 默认返回 CRC32C
     
     if (strict_mode) {
         return false; // 严格模式下失败
