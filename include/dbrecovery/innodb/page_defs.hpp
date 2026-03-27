@@ -26,10 +26,6 @@ constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET
 /// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
 constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
-/// @brief Absolute offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
-/// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
-constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
-
 /// @brief Offset of page number within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_OFFSET      = 4;
 /// @brief Absolute offset of LSN within a page (FIL_HEADER_SIZE + 8 = 46)
@@ -60,8 +56,6 @@ inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
 // ✅ 新增：静态断言验证关键常量的正确性（编译时检查）
 static_assert(FIL_HEADER_SIZE == 38, "FIL_HEADER_SIZE must be 38 bytes");
 static_assert(FIL_PAGE_TYPE_ABS == 50, "FIL_PAGE_TYPE_ABS must be 38 + 12 = 50");
-static_assert(BTR_N_LEVELS_ABS == 42, "BTR_N_LEVELS_ABS must be 38 + 4 = 42");
-static_assert(PAGE_INFIMUM_REC_OFFSET_ABS == 54, "PAGE_INFIMUM_REC_OFFSET_ABS must be 54");
 
 // ✅ 新增：页类型字符串化辅助函数（用于调试输出）
 inline std::string page_type_to_string(uint16_t type) {
@@ -112,7 +106,7 @@ constexpr uint16_t PAGE_N_HEAP_OFFSET      = 4;
 constexpr uint16_t PAGE_FREE_OFFSET        = 6;
 
 // ==================== Record Constants ====================
-/// @brief Offset of INFIMUM record within Page Data (after FIL header + BTR header + 8 bytes for system fields)
+/// @brief Offset of INFIMUM record within Page Data
 /// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
 constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
 /// @brief Offset of SUPREMUM record within Page Data (typically at heap_top - 5)
