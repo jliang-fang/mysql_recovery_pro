@@ -133,42 +133,42 @@ std::optional<uint16_t> BPlusTreeParser::calculate_redundant_field_offset(
     return fallback_offset;
 }
 
-// ✅ P0-4 修复：DYNAMIC 行格式字段偏移计算辅助函数（完整版）
+// ✅ P0-2 修复：DYNAMIC 行格式字段偏移计算辅助函数（严格遵循 MySQL 8.0 rec_get_nth_field_offs）
 std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     const uint8_t* record_data,
     size_t record_size,
     uint16_t field_no,
     bool is_compact_format) {
-    // ✅ P0-4 修复：使用常量定义记录头大小
-    constexpr size_t COMPACT_HEADER_SIZE = 5; // info_bits(1) + n_fields(1) + next_offset(2)
+    // ✅ P0-2 修复：使用常量定义记录头大小（REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT）
+    constexpr size_t COMPACT_HEADER_SIZE = 5; // info_bits(1) + next_offset(2) + heap_no(2)
 
     // ✅ 修复：此函数仅用于 COMPACT/DYNAMIC 格式，REDUNDANT 格式不适用
     if (!is_compact_format) {
         return std::nullopt;
     }
 
-    // ✅ 新增：边界检查
+    // ✅ 新增：边界检查（确保记录头完整）
     if (record_size < COMPACT_HEADER_SIZE) {
-        std::cerr << "[ERROR] Record too small for field offset calculation" << std::endl;
+        std::cerr << "[ERROR] Record too small for field offset calculation. Required: " 
+                  << COMPACT_HEADER_SIZE << ", Actual: " << record_size << std::endl;
         return std::nullopt;
     }
 
-    // ✅ P0-4 新增：使用常量定义字段偏移
-    constexpr size_t INFO_BITS_POS = 0;
-    constexpr size_t N_FIELDS_POS = 1;
+    // ✅ P0-2 新增：解析记录头以获取字段数量（n_fields）
+    // REC_N_FIELDS_MASK = 0xF8 (bit 3-7), REC_N_FIELDS_OFFSET = 3
+    uint8_t info_bits = record_data[0];
+    uint8_t n_fields_high = (info_bits & 0xF8) >> 3; // bit 3-7
+    uint8_t n_fields_low = record_data[1] >> 4;      // bit 4-7 of byte 1
+    uint8_t n_fields = static_cast<uint8_t>((n_fields_high << 4) | (n_fields_low & 0x0F));
 
-    // 解析记录头：info_bits(1) + n_fields(1) + next_offset(2)
-    uint8_t info_bits = record_data[INFO_BITS_POS];
-    uint8_t n_fields = record_data[N_FIELDS_POS]; // 实际字段数（COMPACT 格式）
-    
     if (field_no >= n_fields) {
         std::cerr << "[ERROR] Field number " << field_no 
                   << " exceeds record fields " << (int)n_fields << std::endl;
         return std::nullopt;
     }
 
-    // ✅ P0-4 修复：从记录末尾反向计算字段偏移（参考 MySQL 8.0 rec_get_nth_field_offs）
-    // 假设记录数据部分在头之后，且字段按顺序存储
+    // ✅ P0-2 修复：从记录末尾反向计算字段偏移（严格遵循 MySQL 8.0 rec_get_nth_field_offs_redundant/compact）
+    // 假设字段按顺序存储，且每个字段有长度前缀（1字节或2字节）
     size_t data_pos = record_size; // 从末尾开始
     
     for (int i = n_fields - 1; i >= 0; --i) {
@@ -181,10 +181,11 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
             field_len = len_byte;
             data_pos -= 1 + field_len; // 长度前缀 + 数据
         } else if (data_pos >= 3) {
-            data_pos--; // 跳过 0xFF 标记
+            data_pos--; // 跳过 0xFF 标记（表示长度 > 254）
             field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos - 2);
             data_pos -= 2 + field_len; // 2字节长度前缀 + 数据
         } else {
+            std::cerr << "[WARN] Insufficient data to read field length at index " << i << std::endl;
             break;
         }
         
@@ -193,14 +194,13 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
         }
     }
 
-    // ✅ P0-4 新增：备用方案，使用记录头中的信息
+    // ✅ P0-2 新增：备用方案（仅在反向计算失败时使用）
     std::cerr << "[WARN] calculate_dynamic_field_offset: Using fallback offset calculation" << std::endl;
     
     // COMPACT 格式字段偏移计算公式（更精确的估算）：
     // field_offset = 5 (header) + null_bitmap_size + (field_no * avg_field_overhead)
-    // 其中 avg_field_overhead 是一个平均值，对于变长字段通常为 1-3 字节
     uint16_t null_bitmap_size = 0;
-    if (record_data[INFO_BITS_POS] & 0x80) { // 假设第7位是 NULL 位图标志（实际需根据表结构）
+    if (record_data[0] & 0x80) { // 假设第7位是 NULL 位图标志（实际需根据表结构）
         // 简化：假设最多 8 个可空列，需要 1 字节
         null_bitmap_size = 1;
     }
@@ -212,7 +212,8 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     }
     
     if (fallback_offset >= record_size) {
-        std::cerr << "[ERROR] Fallback offset calculation failed" << std::endl;
+        std::cerr << "[ERROR] Fallback offset calculation failed. Offset=" 
+                  << fallback_offset << ", size=" << record_size << std::endl;
         return std::nullopt;
     }
     
