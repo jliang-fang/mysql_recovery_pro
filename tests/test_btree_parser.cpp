@@ -1051,6 +1051,43 @@ TEST(BPlusTreeParser, ApplyFieldUpdateDynamicFormat) {
     EXPECT_EQ(record_data[12], 't');
 }
 
+// ✅ P0 新增：测试 Redo 回放中 MLOG_COMP_REC_UPDATE 的字段更新逻辑
+TEST(BPlusTreeParser, ApplyRedoRecordUpdateDynamicFormat) {
+    std::vector<uint8_t> page_data(16384, 0);
+    
+    // 设置有效的页类型
+    write_le<uint16_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, dbrecovery::innodb::FIL_PAGE_INDEX);
+    
+    // 初始化 BPlusTreeParser
+    innodb::BPlusTreeParser parser(page_data);
+    EXPECT_TRUE(parser.parse());
+    
+    // 构造 MLOG_COMP_REC_UPDATE 记录，指定要更新的记录偏移为 70
+    RedoLogRecord record;
+    record.r_type = MLOG_COMP_REC_UPDATE;
+    record.r_page_no = 0;
+    
+    // 添加记录数据：offset(2) + field_updates
+    write_le<uint16_t>(record.r_data, 0, 70); // 要更新的记录偏移
+    
+    // 构造字段更新列表 (field_no=1, new_value="new_test")
+    std::vector<uint8_t> field_update_data;
+    write_le<uint16_t>(field_update_data, 0, 1); // field_no
+    write_le<uint16_t>(field_update_data, field_update_data.size(), 8); // len
+    field_update_data.insert(field_update_data.end(), {'n', 'e', 'w', '_', 't', 'e', 's', 't'});
+    
+    record.r_data.insert(record.r_data.end(), field_update_data.begin(), field_update_data.end());
+    
+    parser.apply_redo_record(record);
+    
+    // ✅ 验证：记录头的字段值已被更新
+    // 假设 field_no=1 在偏移 70 + 5 = 75 处（简化计算）
+    EXPECT_EQ(page_data[75], 'n');
+    EXPECT_EQ(page_data[76], 'e');
+    EXPECT_EQ(page_data[77], 'w');
+    EXPECT_EQ(page_data[78], '_');
+}
+
 // ✅ P0-1 新增：测试 REDUNDANT 行格式字段更新
 TEST(BPlusTreeParser, ApplyFieldUpdateRedundantFormat) {
     std::vector<uint8_t> record_data(64, 0);
