@@ -1275,6 +1275,30 @@ TEST(MachReadTest, ReadSint24PositiveValue) {
     EXPECT_EQ(val, 123456);
 }
 
+// ✅ P0-1 新增：测试 mach_read 的 read_be 有符号整数支持
+TEST(MachReadTest, ReadBeSignedInt) {
+    // 测试 int16_t: -1 (0xFFFF in big-endian)
+    std::vector<uint8_t> data2(2, 0xFF);
+    int16_t val16 = dbrecovery::innodb::read_be<int16_t>(data2.data());
+    EXPECT_EQ(val16, -1);
+
+    // 测试 int32_t: -1 (0xFFFFFFFF in big-endian)
+    std::vector<uint8_t> data4(4, 0xFF);
+    int32_t val32 = dbrecovery::innodb::read_be<int32_t>(data4.data());
+    EXPECT_EQ(val32, -1);
+
+    // 测试 int64_t: -1 (0xFFFFFFFFFFFFFFFF in big-endian)
+    std::vector<uint8_t> data8(8, 0xFF);
+    int64_t val64 = dbrecovery::innodb::read_be<int64_t>(data8.data());
+    EXPECT_EQ(val64, -1);
+
+    // 测试正数: 32768 (0x00008000 in big-endian)
+    std::vector<uint8_t> data_pos(4, 0);
+    data_pos[2] = 0x80;
+    int32_t val_pos = dbrecovery::innodb::read_be<int32_t>(data_pos.data());
+    EXPECT_EQ(val_pos, 32768);
+}
+
 // ✅ P0 新增：测试 Floyd 判圈算法检测循环引用
 TEST(BlobPageChainTest, DetectCircularReferenceWithFloyd) {
     std::vector<uint8_t> data(20, 0);
