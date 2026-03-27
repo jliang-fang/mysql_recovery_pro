@@ -507,8 +507,13 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
 
 // ✅ 新增：Redo 回放后更新页校验和
 void BPlusTreeParser::update_page_checksum() {
-    // 计算 CRC32C 校验和
-    uint32_t computed_crc = dbrecovery::innodb::PageReader::compute_crc32c(page_data_);
+    // 计算 CRC32C 校验和（排除校验和字段）
+    std::vector<uint8_t> page_copy = page_data_;
+    for (int i = 0; i < 4; ++i) {
+        page_copy[24 + i] = 0;
+    }
+    
+    uint32_t computed_crc = dbrecovery::innodb::PageReader::compute_crc32c(page_copy);
     
     // 写入校验和字段（偏移 24-27）
     for (int i = 0; i < 4; ++i) {

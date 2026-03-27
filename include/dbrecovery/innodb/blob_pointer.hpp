@@ -265,6 +265,9 @@ std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_s
             // 如果无法构建完整链，至少保留当前页
             std::cerr << "[WARN] Failed to build full BLOB page chain, using single page only" << std::endl;
         }
+    } else if (ptr.total_len == 0 && ptr.len > 0) {
+        // ✅ 新增：单页 BLOB 场景，确保 chain_pages 至少包含当前页
+        // 此处已通过上面的 `ptr.chain_pages.emplace_back` 实现
     }
         
     return ptr;
