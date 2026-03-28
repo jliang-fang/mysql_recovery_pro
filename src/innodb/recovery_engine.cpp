@@ -50,9 +50,10 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             std::cerr << "[WARN] Failed to read page " << page_no << "\n";
             continue;
         }
-        
-        // 解析页类型
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 12);
+
+        // ✅ P0-1 修复：解析页类型 - 使用正确的偏移量（相对于页起始位置）
+        // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 16);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
     
@@ -64,84 +65,97 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
         // 解析 SDI 元数据（使用 nlohmann/json 库）
         for (const auto& [page_no, page_data] : pages_by_type[9971]) {
             std::cout << "[INFO] SDI Page " << page_no << ": size=" << page_data.size() << "\n";
-            
+
             // 从 SDI 页中提取 JSON 负载
             const uint8_t* sdi_payload = page_data.data() + 38; // 跳过 FIL_HEADER
             if (page_data.size() > 58) {
-                std::string json_str(reinterpret_cast<const char*>(sdi_payload), 
-                                    page_data.size() - 38);
-                
-                try {
-                    // 使用 nlohmann/json 解析 SDI JSON
-                    auto sdi_json = nlohmann::json::parse(json_str);
+                // ✅ P0-1 修复：SDI payload 包含 20 字节头部，需要先解压
+                // SDI Header: type(4) + id(8) + uncompressed_len(4) + compressed_len(4) = 20 bytes
+                if (page_data.size() >= 38 + 20) {
+                    uint32_t uncompressed_len = dbrecovery::innodb::read_le<uint32_t>(sdi_payload + 12);
+                    uint32_t compressed_len = dbrecovery::innodb::read_le<uint32_t>(sdi_payload + 16);
                     
-                    // 提取表名
-                    if (sdi_json.contains("name")) {
-                        std::string table_name = sdi_json["name"].get<std::string>();
-                        std::cout << "[INFO] SDI Table Name: " << table_name << "\n";
-                    }
+                    std::cout << "[INFO] SDI: uncompressed_len=" << uncompressed_len 
+                              << ", compressed_len=" << compressed_len << "\n";
                     
-                    // ✅ 新增：从SDI中解析表结构
-                    if (sdi_json.contains("columns") && sdi_json["columns"].is_array()) {
-                        uint32_t ordinal = 1;
-                        for (const auto& col_json : sdi_json["columns"]) {
-                            catalog::ColumnInfo col;
-                            if (col_json.contains("name")) {
-                                col.name = col_json["name"].get<std::string>();
-                            }
-                            if (col_json.contains("type")) {
-                                col.mysql_type_id = col_json["type"].get<uint32_t>();
-                            }
-                            if (col_json.contains("is_nullable")) {
-                                col.is_nullable = col_json["is_nullable"].get<bool>();
-                            }
-                            table_schema.columns[ordinal++] = col;
-                        }
-                    }
+                    // 使用 SDIManager 解压
+                    auto sdi_json_str = dbrecovery::innodb::SDIManager::extract_sdi_json(
+                        sdi_payload, page_data.size() - 38);
                     
-                    // ✅ 新增：从SDI中解析索引信息
-                    if (sdi_json.contains("indexes") && sdi_json["indexes"].is_array()) {
-                        for (const auto& idx_json : sdi_json["indexes"]) {
-                            catalog::IndexInfo index;
-                            if (idx_json.contains("name")) {
-                                index.name = idx_json["name"].get<std::string>();
+                    if (sdi_json_str.has_value()) {
+                        try {
+                            auto sdi_json = nlohmann::json::parse(sdi_json_str.value());
+
+                            // 提取表名
+                            if (sdi_json.contains("name")) {
+                                std::string table_name = sdi_json["name"].get<std::string>();
+                                std::cout << "[INFO] SDI Table Name: " << table_name << "\n";
                             }
-                            if (idx_json.contains("columns") && idx_json["columns"].is_array()) {
-                                for (const auto& col : idx_json["columns"]) {
-                                    index.columns.push_back(col.get<std::string>());
+
+                            // ✅ 新增：从SDI中解析表结构
+                            if (sdi_json.contains("columns") && sdi_json["columns"].is_array()) {
+                                uint32_t ordinal = 1;
+                                for (const auto& col_json : sdi_json["columns"]) {
+                                    catalog::ColumnInfo col;
+                                    if (col_json.contains("name")) {
+                                        col.name = col_json["name"].get<std::string>();
+                                    }
+                                    if (col_json.contains("type")) {
+                                        col.mysql_type_id = col_json["type"].get<uint32_t>();
+                                    }
+                                    if (col_json.contains("is_nullable")) {
+                                        col.is_nullable = col_json["is_nullable"].get<bool>();
+                                    }
+                                    table_schema.columns[ordinal++] = col;
                                 }
                             }
-                            table_schema.indexes.push_back(index);
-                        }
-                    }
-                    
-                } catch (const nlohmann::json::parse_error& e) {
-                    std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
-                    
-                    // ✅ 修复：更健壮的降级方案
-                    if (page_data.size() > 58) {
-                        // 尝试从JSON中提取表名（不依赖固定偏移）
-                        std::string sdi_str(reinterpret_cast<const char*>(sdi_payload), 
-                                           page_data.size() - 38);
-                        
-                        size_t name_pos = sdi_str.find("\"name\"");
-                        if (name_pos != std::string::npos) {
-                            size_t colon_pos = sdi_str.find(':', name_pos);
-                            if (colon_pos != std::string::npos) {
-                                size_t start = sdi_str.find_first_not_of(" \t\n\r", colon_pos + 1);
-                                if (start != std::string::npos && sdi_str[start] == '"') {
-                                    size_t end = start + 1;
-                                    while (end < sdi_str.length() && sdi_str[end] != '"') {
-                                        if (sdi_str[end] == '\\' && end + 1 < sdi_str.length()) {
-                                            end += 2; // 跳过转义字符
-                                        } else {
-                                            end++;
+
+                            // ✅ 新增：从SDI中解析索引信息
+                            if (sdi_json.contains("indexes") && sdi_json["indexes"].is_array()) {
+                                for (const auto& idx_json : sdi_json["indexes"]) {
+                                    catalog::IndexInfo index;
+                                    if (idx_json.contains("name")) {
+                                        index.name = idx_json["name"].get<std::string>();
+                                    }
+                                    if (idx_json.contains("columns") && idx_json["columns"].is_array()) {
+                                        for (const auto& col : idx_json["columns"]) {
+                                            if (col.is_string()) {
+                                                index.columns.push_back(col.get<std::string>());
+                                            }
                                         }
                                     }
-                                    
-                                    if (end < sdi_str.length()) {
-                                        std::string table_name = sdi_str.substr(start + 1, end - start - 1);
-                                        std::cout << "[INFO] SDI Table Name (fallback): " << table_name << "\n";
+                                    table_schema.indexes.push_back(index);
+                                }
+                            }
+                        } catch (const nlohmann::json::parse_error& e) {
+                            std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
+
+                            // ✅ 修复：更健壮的降级方案
+                            if (page_data.size() > 58) {
+                                // 尝试从JSON中提取表名（不依赖固定偏移）
+                                std::string sdi_str(reinterpret_cast<const char*>(sdi_payload),
+                                                   page_data.size() - 38);
+
+                                size_t name_pos = sdi_str.find("\"name\"");
+                                if (name_pos != std::string::npos) {
+                                    size_t colon_pos = sdi_str.find(':', name_pos);
+                                    if (colon_pos != std::string::npos) {
+                                        size_t start = sdi_str.find_first_not_of(" \t\n\r", colon_pos + 1);
+                                        if (start != std::string::npos && sdi_str[start] == '"') {
+                                            size_t end = start + 1;
+                                            while (end < sdi_str.length() && sdi_str[end] != '"') {
+                                                if (sdi_str[end] == '\\' && end + 1 < sdi_str.length()) {
+                                                    end += 2; // 跳过转义字符
+                                                } else {
+                                                    end++;
+                                                }
+                                            }
+
+                                            if (end < sdi_str.length()) {
+                                                std::string table_name = sdi_str.substr(start + 1, end - start - 1);
+                                                std::cout << "[INFO] SDI Table Name (fallback): " << table_name << "\n";
+                                            }
+                                        }
                                     }
                                 }
                             }

@@ -7,6 +7,7 @@
 // Include schema_defs.hpp first to avoid namespace pollution
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/recovery/blob_reconstructor.hpp"
+#include "dbrecovery/innodb/sdi_manager.hpp"
 
 // schema_defs.hpp 和 blob_reconstructor.hpp 已经正确关闭了 dbrecovery 命名空间
 // 此处重新打开 dbrecovery 和 innodb 命名空间

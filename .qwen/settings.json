@@ -51,7 +51,9 @@
       "Bash(strings *)",
       "Bash(clang-tidy *)",
       "Bash(git add *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(python3 *)",
+      "Bash(./build/mysql8_recover *)"
     ]
   },
   "$version": 3

@@ -5,7 +5,7 @@ import json
 import zlib
 
 # ==================== 常量定义 ====================
-PAGE_SIZE = 16384  # 默认 InnoDB 页大小（16KB）
+PAGE_SIZE = 4096  # ✅ 修复：使用 4KB 页大小（与 C++ 代码兼容）
 
 # MySQL 类型常量（参考 MySQL 8.0 源码 include/mysql_com.h）
 MYSQL_TYPE_DECIMAL     = 0
@@ -71,28 +71,44 @@ def write_le_uint16(data, offset, value):
 def create_page_header(page_type):
     """Create a minimal InnoDB page header"""
     page = bytearray(PAGE_SIZE)
-    
-    # FIL Header (38 bytes)
-    write_le_uint32(page, 0x00, page_type)      # Page type
-    write_le_uint32(page, 0x04, 0)              # Checksum1
-    write_le_uint32(page, 0x08, 0)              # LSN (64-bit low)
-    write_le_uint32(page, 0x0C, 0)              # LSN high
-    write_le_uint16(page, 0x10, 0)              # Page offset
-    write_le_uint16(page, 0x12, 0xFFFF)         # Previous page (none)
-    write_le_uint16(page, 0x14, 0xFFFF)         # Next page (none)
-    write_le_uint32(page, 0x18, 0)              # B-tree index (0 = leaf)
-    
+
+    # ✅ 修复：FIL Header (38 bytes) - 使用正确的偏移量（相对于页起始位置）
+    # 参考 MySQL 8.0 源码 include/fil0fil.h
+    # 所有偏移都是相对于页起始位置的相对偏移（0-based）
+    # offset 0:   space_id (4 bytes)
+    # offset 4:   checksum1 (4 bytes)
+    # offset 8:   LSN low (4 bytes)
+    # offset 12:  LSN high (4 bytes)
+    # offset 16:  page_type (2 bytes) - ✅ 修复：正确偏移是 16，不是 12！
+    # offset 18:  page_no (2 bytes)
+    # offset 20:  prev_page (2 bytes)
+    # offset 22:  next_page (2 bytes)
+    # offset 24:  btree_index (4 bytes)
+    # offset 26:  reserved/unused (12 bytes)
+    # offset 38:  page data starts here
+
+    # ✅ 修复：写入正确的 FIL Header 偏移（相对于页起始位置）
+    write_le_uint32(page, 0x00, 0)              # space_id (offset 0)
+    write_le_uint32(page, 0x04, 0)              # checksum1 (offset 4)
+    write_le_uint32(page, 0x08, 0)              # LSN low (offset 8)
+    write_le_uint32(page, 0x0C, 0)              # LSN high (offset 12)
+    write_le_uint16(page, 0x10, page_type)      # page_type at offset 16 (relative to page start)
+    write_le_uint16(page, 0x12, 0)              # page_no at offset 18
+    write_le_uint16(page, 0x14, 0xFFFF)         # prev_page at offset 20
+    write_le_uint16(page, 0x16, 0xFFFF)         # next_page at offset 22
+    write_le_uint32(page, 0x18, 0)              # btree_index at offset 24
+
     return page
 
 def create_sdi_page(table_name):
-    """Create a SDI page with compressed JSON"""
+    """Create a SDI page with compressed JSON (raw deflate, no zlib header)"""
     schema = {
         "schema": {"name": "test_recovery"},
         "table": {
             "name": table_name,
             "columns": [
                 {"name": "id", "type": MYSQL_TYPE_LONGLONG, "is_nullable": False},
-                {"name": "name", "type": MYSQL_TYPE_VARCHAR, "is_nullable": False, 
+                {"name": "name", "type": MYSQL_TYPE_VARCHAR, "is_nullable": False,
                  "length": 128, "charset_id": 255, "collation_id": 255,
                  "default_value": "unknown"},
                 {"name": "email", "type": MYSQL_TYPE_VARCHAR, "is_nullable": True,
@@ -107,22 +123,27 @@ def create_sdi_page(table_name):
             ]
         }
     }
-    
+
     json_str = json.dumps(schema, separators=(',', ':'))
-    compressed = zlib.compress(json_str.encode(), 1)[2:]  # Skip zlib header
-    
+    # ✅ 修复：使用 raw deflate（无 zlib 头），与 MySQL SDI 格式一致
+    # zlib.compress() 返回带 zlib header 的数据，需要手动压缩为 raw deflate
+    import zlib
+    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -zlib.MAX_WBITS)
+    compressed = compressor.compress(json_str.encode())
+    compressed += compressor.flush()
+
     sdi_header = bytearray(20)
     write_le_uint32(sdi_header, 0, 1)           # type
     write_le_uint64(sdi_header, 4, 1)           # id
     write_le_uint32(sdi_header, 12, len(json_str))  # uncompressed_len
     write_le_uint32(sdi_header, 16, len(compressed)) # compressed_len
-    
+
     payload = sdi_header + compressed
     page = create_page_header(FIL_PAGE_SDI)
-    
+
     # Write SDI payload at offset 38 (after FIL header)
     page[38:38+len(payload)] = payload
-    
+
     return bytes(page)
 
 def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False, row_format="DYNAMIC"):
@@ -188,13 +209,19 @@ def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False, 
         user_rec = bytearray()
         user_rec.append(0x00)  # info_bits (普通记录)
         user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
+        # ✅ 修复：确保 user_rec 有足够的空间（预留 2 字节用于 next_record_offset）
+        while len(user_rec) < 3:
+            user_rec.append(0)
         write_le_uint16(user_rec, 1, 56 + len(record_data) + 2)  # next_record_offset
-        
+
         # NULL 位图（假设所有列都非空）
         user_rec.extend(b'\x00')  # 1 byte null bitmap
-        
+
         # id 字段 (LONGLONG, 8 bytes)
-        write_le_uint64(user_rec, len(user_rec), 1)
+        # ✅ 修复：确保有足够空间
+        while len(user_rec) < 12:
+            user_rec.append(0)
+        write_le_uint64(user_rec, len(user_rec) - 8, 1)
         
         # name 字段 (VARCHAR, 前缀长度 1 字节)
         name_str = "test"

@@ -180,9 +180,11 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data,
         std::cerr << "[WARN] Invalid page size: " << page_data.size() << ", expected one of {4096, 8192, 16384, 32768, 65536}" << std::endl;
         if (strict_mode) return false;
     }
-    
-    // 读取页类型（偏移 38+12=50）
-    uint16_t page_type = read_le<uint16_t>(page_data.data(), 38 + 12);
+
+    // ✅ P0-1 修复：读取页类型 - 使用正确的偏移量（相对于页起始位置）
+    // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
+    // NOT 12 (which is LSN high) or 38+12=50 (absolute offset)
+    uint16_t page_type = read_le<uint16_t>(page_data.data(), 16);
     
     // ✅ 新增：SDI 页通常不启用校验和，但需检查是否为加密表空间
     if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
@@ -383,9 +385,11 @@ std::vector<uint8_t> InnoDBFileReader::read_page(uint32_t page_no) {
     std::vector<uint8_t> page_data(page_size_);
     const uint8_t* data = mapper_->data() + offset;
     std::memcpy(page_data.data(), data, page_size_);
-    
-    // ✅ 新增：页类型校验
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 38 + 12);
+
+    // ✅ P0-1 修复：页类型校验 - 使用正确的偏移量（相对于页起始位置）
+    // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
+    // NOT 12 (which is LSN high) or 38+12=50 (absolute offset)
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 16);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
         page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
