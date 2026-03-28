@@ -1,4 +1,13 @@
+#include "dbrecovery/innodb/undo_log.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
+#include <fstream>
+#include <iostream>
+#include <vector>
+
 // ✅ 删除：这些函数已在 mach_read.hpp 中实现，此处无需重复定义
+
+namespace dbrecovery {
+namespace innodb {
 
 UndoLogParser::UndoLogParser() {}
 
@@ -13,11 +22,14 @@ std::optional<UndoLogRecord> UndoLogParser::parse_record(const uint8_t* data, si
     size_t pos = 0;
 
     // 解析事务ID和回滚指针
-    record.u_trx_id = read_uint64_le(data, pos);
-    record.u_roll_ptr = read_uint64_le(data, pos);
+    record.u_trx_id = dbrecovery::innodb::read_le<uint64_t>(data, pos);
+    pos += 8;
+    record.u_roll_ptr = dbrecovery::innodb::read_le<uint64_t>(data, pos);
+    pos += 8;
 
     // 解析类型
-    record.u_type = read_uint16_le(data, pos);
+    record.u_type = dbrecovery::innodb::read_le<uint16_t>(data, pos);
+    pos += 2;
 
     // 剩余数据作为记录数据
     if (pos < len) {
@@ -49,6 +61,7 @@ std::vector<UndoLogRecord> UndoLogParser::parse_file(const std::string& path) {
     // 读取整个文件
     std::vector<uint8_t> buffer(file_size);
     file.read(reinterpret_cast<char*>(buffer.data()), file_size);
+    file.close();
 
     // 解析所有记录
     size_t pos = 0;

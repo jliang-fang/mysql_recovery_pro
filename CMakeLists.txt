@@ -17,6 +17,10 @@ else()
     message(WARNING "MySQL headers not found, some features may be disabled")
 endif()
 
+# 查找 zlib（用于 SDI 解压缩）
+find_package(ZLIB REQUIRED)
+message(STATUS "Found zlib at: ${ZLIB_LIBRARIES}")
+
 # 添加源文件
 set(SOURCES
     # ✅ P0-1 修复：移除 schema_defs.cpp（函数已在头文件中内联实现）
@@ -28,6 +32,10 @@ set(SOURCES
     src/innodb/recovery_engine.cpp
     src/innodb/blob_parser.cpp
     src/innodb/btree.cpp
+    src/innodb/sdi_manager.cpp
+    src/innodb/sdi_cache.cpp
+    src/innodb/redo_log.cpp
+    src/innodb/undo_log.cpp
     src/recovery/blob_reconstructor.cpp
     src/recovery/engine.cpp
     src/utils/cli_parser.cpp
@@ -50,6 +58,9 @@ target_include_directories(dbrecovery_innodb PUBLIC
 # 链接系统 nlohmann_json 库
 target_link_libraries(dbrecovery_innodb PUBLIC nlohmann_json::nlohmann_json)
 
+# 链接 zlib（用于 SDI 解压缩）
+target_link_libraries(dbrecovery_innodb PUBLIC ZLIB::ZLIB)
+
 add_executable(mysql8_recover src/main.cpp)
 target_link_libraries(mysql8_recover dbrecovery_innodb)
 
@@ -59,18 +70,28 @@ enable_testing()
 find_package(GTest QUIET)
 if(GTEST_FOUND)
     add_subdirectory(tests)
+else()
+    # 如果系统没有GTest，尝试使用本地版本或创建别名
+    # 这里创建一个简单的GTest::GTest别名
+    add_library(GTest::GTest INTERFACE)
+    add_library(GTest::Main INTERFACE)
+
+    # 如果有gtest库文件，链接它
+    if(EXISTS "/usr/lib64/libgtest.so" OR EXISTS "/usr/lib/libgtest.so")
+        target_link_libraries(GTest::GTest INTERFACE gtest)
+        target_link_libraries(GTest::Main INTERFACE gtest_main)
+    endif()
 
     # 添加测试数据生成脚本作为全局测试
-    add_test(NAME generate_test_data COMMAND python3
-${CMAKE_SOURCE_DIR}/tools/ibd_generator.py test_table)
+    add_test(NAME generate_test_data COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/ibd_generator.py test_table)
 
     # 添加恢复引擎测试
     add_executable(test_recovery_engine tests/test_recovery_engine.cpp)
-    target_link_libraries(test_recovery_engine dbrecovery_innodb GTest::GTest
-GTest::Main)
+    target_link_libraries(test_recovery_engine dbrecovery_innodb GTest::GTest GTest::Main)
     add_test(NAME test_recovery_engine COMMAND test_recovery_engine)
-else()
-    message(WARNING "GoogleTest not found — C++ tests disabled")
+
+    # 启用tests子目录（即使GTest未找到）
+    add_subdirectory(tests)
 endif()
 
 # Python tests

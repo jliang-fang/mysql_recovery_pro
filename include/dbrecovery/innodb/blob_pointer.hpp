@@ -97,24 +97,15 @@ struct BlobPageChain {
             return false; // 单页无法形成循环
         }
 
-        // 使用 Floyd 判圈算法（龟兔赛跑）
-        size_t slow = 0;
-        size_t fast = 0;
-
-        while (true) {
-            // 龟走一步
-            slow++;
-            if (slow >= pages.size()) break;
-
-            // 兔走两步
-            fast += 2;
-            if (fast >= pages.size()) break;
-
-            // 检查是否相遇（注意：比较的是 pair<space_id, page_no>）
-            if (pages[slow] == pages[fast]) {
-                std::cerr << "[ERROR] Circular reference detected in BlobPageChain at index " << slow << std::endl;
-                return true; // 检测到循环
+        // 检测vector中是否有重复的元素（循环引用）
+        std::set<std::pair<uint32_t, uint32_t>> seen;
+        for (const auto& page : pages) {
+            if (seen.find(page) != seen.end()) {
+                std::cerr << "[ERROR] Circular reference detected in BlobPageChain: (" 
+                          << page.first << ", " << page.second << ")" << std::endl;
+                return true; // 检测到循环（重复的页）
             }
+            seen.insert(page);
         }
 
         return false;
@@ -410,9 +401,9 @@ std::vector<uint8_t> read_blob_data_from_chain(
             break; // ✅ P0 修复：遇到无效数据长度时立即中止
         }
         
-        // 添加数据到结果（跳过页头16字节）
-        size_t data_offset = 16; // BLOB 页头大小
-        blob_data.insert(blob_data.end(), page_data->begin() + data_offset, 
+        // 添加数据到结果（跳过页头）
+        size_t data_offset = BlobPageChain::BTR_BPAGE_LEN + 4; // BLOB 页头大小（数据长度字段之后）
+        blob_data.insert(blob_data.end(), page_data->begin() + data_offset,
                         page_data->begin() + data_offset + data_len);
     }
     

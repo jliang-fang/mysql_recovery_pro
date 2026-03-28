@@ -162,35 +162,33 @@ FileMapper& FileMapper::operator=(FileMapper&& other) noexcept {
             munmap(data_, size_);
             data_ = nullptr;
         }
-        
+
         if (fd_ >= 0) {
             close(fd_);
             fd_ = -1;
         }
 #endif
-        
+
         // 移动资源（直接赋值，不关闭源对象）
         fd_ = other.fd_;
         data_ = other.data_;
         size_ = other.size_;
         is_valid_ = other.is_valid_;
-        
+
 #ifdef _WIN32
         handle_ = other.handle_;
 #endif
-        
-        // 清空源对象（仅重置为初始状态，不关闭资源）
+
+        // 清空源对象（重置为初始状态）
         other.fd_ = -1;
         other.data_ = nullptr;
         other.size_ = 0;
         other.is_valid_ = false;
 #ifdef _WIN32
         other.handle_ = INVALID_HANDLE_VALUE;
-#else
-        other.data_ = nullptr;
 #endif
     }
-    
+
     return *this;
 }
 

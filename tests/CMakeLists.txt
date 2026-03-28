@@ -1,36 +1,29 @@
 # Unit test configuration for dbrecovery
 
-# ✅ P0-3 修复：注释掉 test_utils.cpp，待后续补充
-# add_library(dbrecovery_test_utils STATIC
-#     test_utils.cpp
-# )
-# target_include_directories(dbrecovery_test_utils PUBLIC ${CMAKE_SOURCE_DIR}/include)
-# target_link_libraries(dbrecovery_test_utils PUBLIC dbrecovery_innodb)
-
 # Page header tests
 add_executable(test_page_header test_page_header.cpp)
 target_link_libraries(test_page_header PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_page_header)
 
-# ✅ P0-3 修复：注释掉 test_btree_parser.cpp，待后续补充
-# add_executable(test_btree_parser test_btree_parser.cpp)
-# target_link_libraries(test_btree_parser PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
-# gtest_discover_tests(test_btree_parser)
+# BLOB recovery tests
+add_executable(test_blob_recovery innodb/blob_recovery_test.cpp)
+target_link_libraries(test_blob_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_blob_recovery)
 
-# ✅ P0-3 修复：注释掉缺失的测试文件，待后续补充
-# Undo log parser tests
-# add_executable(test_undo_log test_undo_log.cpp)
-# target_link_libraries(test_undo_log PRIVATE dbrecovery_innodb dbrecovery_test_utils GTest::GTest GTest::Main)
-# gtest_discover_tests(test_undo_log)
+# Redo log tests
+add_executable(test_redo_log innodb/redo_log_test.cpp)
+target_link_libraries(test_redo_log PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_redo_log)
 
-# Blob pointer tests
-# add_executable(test_blob_pointer test_blob_pointer.cpp tests/innodb/blob_pointer_test.cpp)
-# target_link_libraries(test_blob_pointer PRIVATE dbrecovery_innodb dbrecovery_test_utils GTest::GTest GTest::Main)
-# gtest_discover_tests(test_blob_pointer)
+# SDI manager tests
+add_executable(test_sdi_manager innodb/sdi_manager_test.cpp)
+target_link_libraries(test_sdi_manager PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_sdi_manager)
 
-# ✅ P0-2 修复：注释掉缺失的集成测试，待后续补充
 # Integration tests (requires generated .ibd files)
-# add_executable(test_integration test_integration.cpp)
-# target_link_libraries(test_integration PRIVATE dbrecovery_innodb dbrecovery_test_utils GTest::GTest GTest::Main)
-# set_property(TEST test_integration APPEND PROPERTY ENVIRONMENT "TEST_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/data")
-# gtest_discover_tests(test_integration)
+add_executable(test_integration test_integration.cpp)
+target_link_libraries(test_integration PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+if(TARGET test_integration)
+    add_test(NAME test_integration COMMAND test_integration)
+    set_property(TEST test_integration APPEND PROPERTY ENVIRONMENT "TEST_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/data")
+endif()

@@ -250,10 +250,17 @@ struct TableSchema {
     
     // ✅ 新增：从 nlohmann/json 对象加载
     bool from_json(const nlohmann::json& j) {
-        if (j.contains("name")) {
+        // 支持 "name" 和 "table_name" 两种字段名
+        if (j.contains("table_name")) {
+            table_name = j["table_name"].get<std::string>();
+        } else if (j.contains("name")) {
             table_name = j["name"].get<std::string>();
         }
-        
+
+        if (j.contains("table_id")) {
+            table_id = j["table_id"].get<uint64_t>();
+        }
+
         if (j.contains("columns") && j["columns"].is_array()) {
             uint32_t ordinal = 1;
             for (const auto& col_json : j["columns"]) {
@@ -270,7 +277,7 @@ struct TableSchema {
                 columns[ordinal++] = col;
             }
         }
-        
+
         return validate();
     }
     

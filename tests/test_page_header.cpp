@@ -67,14 +67,14 @@ TEST(Record, ToStringFormatting) {
 // ==================== RecordHeader 解析测试（新增）====================
 TEST(RecordHeader, ParseCompactFormat) {
     std::vector<uint8_t> data(5, 0);
-    data[0] = 0x12; // info_bits
+    data[0] = 0x00; // info_bits (no flags set)
     write_le<uint16_t>(data.data(), 1, 70); // next_record_offset (bits 0-14)
     data[3] = 0x01; // heap_no low byte
     data[4] = 0x00; // heap_no high byte
 
     auto header = RecordHeader::parse(data.data(), data.size());
     EXPECT_TRUE(header.has_value());
-    
+
     EXPECT_EQ(header->get_next_record_offset(), 70);
     EXPECT_FALSE(header->is_deleted());
     EXPECT_FALSE(header->is_min_rec());

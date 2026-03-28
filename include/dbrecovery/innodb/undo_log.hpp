@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <vector>
 #include <optional>
+#include <string>
 
 namespace dbrecovery {
 namespace innodb {
@@ -11,7 +12,7 @@ struct UndoLogRecord {
     uint64_t u_roll_ptr;      // 回滚指针
     uint16_t u_type;          // 类型
     std::vector<uint8_t> u_data; // 记录数据
-    
+
     std::string to_string() const {
         return "UndoLogRecord{trx_id=" + std::to_string(u_trx_id) +
                ", roll_ptr=" + std::to_string(u_roll_ptr) +
@@ -24,7 +25,7 @@ class UndoLogParser {
 public:
     UndoLogParser();
     ~UndoLogParser();
-    
+
     std::optional<UndoLogRecord> parse_record(const uint8_t* data, size_t len);
     std::vector<UndoLogRecord> parse_file(const std::string& path);
 
