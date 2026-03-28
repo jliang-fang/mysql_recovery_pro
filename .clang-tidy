@@ -1,25 +1,12 @@
-echo "##active_line7##"
 ---
-echo "##active_line8##"
 Checks: >
-echo "##active_line9##"
     -*
-echo "##active_line10##"
     ,modernize-*
-echo "##active_line11##"
     ,performance-*
-echo "##active_line12##"
     ,readability-*
-echo "##active_line13##"
     ,bugprone-*
-echo "##active_line14##"
     ,cert-*
-echo "##active_line15##"
     ,misc-*
-echo "##active_line16##"
 CheckOptions:
-echo "##active_line17##"
     bugprone-easily-swappable-parameters:
-echo "##active_line18##"
         ParameterNames: "buffer,size"
-echo "##active_line19##"
