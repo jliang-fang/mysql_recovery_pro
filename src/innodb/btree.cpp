@@ -1264,15 +1264,108 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
 
 // ==================== BPlusTreeParser 实现 ====================
 
-// ✅ 新增：parse_records 方法实现（根据表结构解析记录）
+// ✅ P1-1 实现：parse_records 方法（根据表结构解析记录）
 std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_records(
     const catalog::TableSchema& schema) const {
     std::vector<std::map<std::string, std::string>> records;
 
-    // TODO: 实现完整的记录解析逻辑
-    // 这里需要根据行格式（REDUNDANT/COMPACT/DYNAMIC）和表结构解析记录
-    // 暂时返回空记录列表
-    (void)schema; // 避免未使用警告
+    // ✅ 验证页已解析
+    if (record_offsets_.empty()) {
+        std::cerr << "[ERROR] BPlusTreeParser::parse_records: Page not parsed yet" << std::endl;
+        return records;
+    }
+
+    // ✅ 跳过INFIMUM和SUPREMUM系统记录（前两个偏移）
+    size_t user_record_start = 2;
+    if (record_offsets_.size() <= user_record_start) {
+        std::cerr << "[WARN] BPlusTreeParser::parse_records: No user records found" << std::endl;
+        return records;
+    }
+
+    // ✅ 遍历用户记录
+    for (size_t i = user_record_start; i < record_offsets_.size(); ++i) {
+        uint16_t rec_offset = record_offsets_[i];
+
+        // 验证记录头大小（至少5字节）
+        if (rec_offset + 5 > page_data_.size()) {
+            std::cerr << "[WARN] BPlusTreeParser::parse_records: Record at offset " << rec_offset
+                      << " is too small to parse header" << std::endl;
+            continue;
+        }
+
+        // 解析记录头
+        uint8_t info_bits = page_data_[rec_offset];
+        bool is_deleted = (info_bits & dbrecovery::innodb::REC_INFO_DELETED_FLAG) != 0;
+
+        // 跳过已删除的记录
+        if (is_deleted) {
+            continue;
+        }
+
+        // 解析字段数量
+        uint8_t n_fields = 0;
+        if (btr_format_ == dbrecovery::innodb::row_formats::REDUNDANT) {
+            // REDUNDANT 格式：n_fields 在第 5 字节（低 7 位）
+            if (rec_offset + 5 < page_data_.size()) {
+                n_fields = page_data_[rec_offset + 5] & 0x7F;
+            }
+        } else {
+            // COMPACT/DYNAMIC 格式：n_fields 在 info_bits 和下一个字节中
+            if (rec_offset + 2 < page_data_.size()) {
+                uint8_t n_fields_high = (info_bits & 0xF8) >> 3;
+                uint8_t n_fields_low = page_data_[rec_offset + 1] >> 4;
+                n_fields = static_cast<uint8_t>((n_fields_high << 4) | (n_fields_low & 0x0F));
+            }
+        }
+
+        // ✅ 验证字段数量与表结构匹配
+        if (n_fields != schema.columns.size()) {
+            std::cerr << "[WARN] BPlusTreeParser::parse_records: Field count mismatch. "
+                      << "Expected: " << schema.columns.size() << ", Got: " << n_fields << std::endl;
+            // 继续处理但使用表结构中的字段数
+        }
+
+        // 解析记录数据
+        size_t data_pos = rec_offset;
+        if (btr_format_ == dbrecovery::innodb::row_formats::REDUNDANT) {
+            // REDUNDANT 格式：记录头 6 字节
+            data_pos += 6;
+        } else {
+            // COMPACT/DYNAMIC 格式：记录头 5 字节 + NULL 位图
+            data_pos += 5;
+
+            // 解析 NULL 位图
+            uint32_t nullable_count = schema.get_nullable_column_count();
+            if (nullable_count > 0) {
+                size_t null_bitmap_size = (nullable_count + 7) / 8;
+                if (data_pos + null_bitmap_size > page_data_.size()) {
+                    std::cerr << "[WARN] BPlusTreeParser::parse_records: NULL bitmap exceeds page" << std::endl;
+                    break;
+                }
+                data_pos += null_bitmap_size;
+            }
+        }
+
+        // ✅ 解析每个字段
+        std::map<std::string, std::string> record;
+        uint32_t field_no = 1;
+
+        for (const auto& pair : schema.columns) {
+            const auto& col = pair.second;
+
+            if (data_pos >= page_data_.size()) {
+                record[col.name] = "<TRUNCATED>";
+                break;
+            }
+
+            // 解析字段值
+            std::string value = parse_field_value(col, data_pos, false);
+            record[col.name] = value;
+            field_no++;
+        }
+
+        records.push_back(record);
+    }
 
     return records;
 }
