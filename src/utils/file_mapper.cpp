@@ -3,6 +3,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <cstring>
+#include <iostream>
 
 #ifdef _WIN32
 #  include <windows.h>

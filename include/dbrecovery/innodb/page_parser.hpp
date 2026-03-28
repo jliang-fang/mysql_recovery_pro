@@ -1,71 +1,20 @@
 #ifndef DBRECOVERY_INNODB_PAGE_PARSER_HPP
 #define DBRECOVERY_INNODB_PAGE_PARSER_HPP
+
 #include <vector>
 #include <cstdint>
 #include <cstddef>
 
+// ✅ 修复：移除重复的常量定义，统一使用 page_defs.hpp
+// page_defs.hpp 已包含所有必要的 InnoDB 常量定义
+
+#include "dbrecovery/innodb/page_defs.hpp"
+
 namespace dbrecovery {
 namespace innodb {
 
-// ✅ MySQL 8.0 记录头信息常量定义
-constexpr uint8_t REC_INFO_BITS_MASK = 0x07;      // 记录头最低3位是info bits
-constexpr uint8_t REC_INFO_DELETED_FLAG = 0x01;   // 已删除标记
-constexpr uint8_t REC_INFO_MIN_REC_FLAG = 0x02;   // 最小记录标记（infimum）
-constexpr uint8_t REC_INFO_NEW_CHUNK_FLAG = 0x40; // 新数据块标志
-
-// ✅ COMPACT 记录头格式标志位
-constexpr uint8_t REC_STATUS_ORDINARY = 0;
-constexpr uint8_t REC_STATUS_NODE_PTR = 1;
-constexpr uint8_t REC_INFO_STATUS_MASK = 0x03;
-
-// ✅ 行格式标志位（从 FSP_HEADER.flags 中提取）
-constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS = (1 << 0);  // 原子BLOB
-constexpr uint32_t FSP_FLAGS_COMPACT      = (0 << 1);  // COMPACT行格式
-constexpr uint32_t FSP_FLAGS_DYNAMIC      = (1 << 1);  // DYNAMIC行格式
-constexpr uint32_t FSP_FLAGS_COMPRESSED   = (2 << 1);  // COMPRESSED行格式
-constexpr uint32_t FSP_FLAGS_MASK         = 0x3F;      // 标志位掩码
-
-// ✅ InnoDB 页大小常量（参考 UNIV_PAGE_SIZE）
-constexpr size_t UNIV_PAGE_SIZE          = 16384;   // 默认 16KB
-constexpr size_t UNIV_PAGE_SIZE_MIN      = 4096;    // 最小 4KB
-constexpr size_t UNIV_PAGE_SIZE_MAX      = 65536;   // 最大 64KB
-
-// ✅ B+树页类型常量
-constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;
-constexpr uint16_t FIL_PAGE_INDEX        = 9969;  // B+Tree索引页
-constexpr uint16_t FIL_PAGE_UNDO_LOG     = 9970;  // Undo日志页
-constexpr uint16_t FIL_PAGE_SDI          = 9971;  // SDI元数据页
-constexpr uint16_t FIL_PAGE_TYPE_BLOB    = 9972;  // BLOB页
-
-// ✅ FIL Header 常量
-constexpr size_t FIL_PAGE_OFFSET         = 4;     // 页偏移（4字节）
-constexpr size_t FIL_PAGE_LSN            = 8;     // LSN（8字节）
-constexpr size_t FIL_PAGE_TYPE           = 12;    // 页类型（2字节）
-constexpr size_t FIL_PAGE_FILE_FLUSH_LSN = 16;    // 文件刷新LSN（8字节）
-constexpr size_t FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID = 24; // 空间ID（4字节）
-
-// ✅ 记录结构定义（包含完整信息）
-struct Record {
-    uint16_t offset;           // 记录在页中的偏移
-    uint8_t info_bits;         // 记录头信息位
-    bool is_deleted;           // 是否已删除
-    uint16_t next_offset;      // 下一条记录的偏移（链表结构）
-    uint16_t n_fields;         // 字段数量
-    std::vector<uint8_t> null_bits;  // NULL位图
-    
-    Record() : offset(0), info_bits(0), is_deleted(false), 
-               next_offset(0xFFFF), n_fields(0) {}
-};
-
-// ✅ 页头信息结构
-struct PageHeader {
-    uint16_t n_dir_slots;      // 目录槽数量
-    uint16_t heap_top;         // 堆顶偏移
-    uint16_t n_heap;           // 堆中记录数（低15位）
-    uint16_t free_offset;      // 空闲空间起始偏移
-    
-    PageHeader() : n_dir_slots(0), heap_top(0), n_heap(0), free_offset(0) {}
-};
+// ✅ 修复：移除重复的 Record 和 PageHeader 结构体定义
+// 这些结构体已在 page_defs.hpp 中定义
 
 class PageParser {
 public:

@@ -2,8 +2,14 @@
 
 #include <string>
 #include <vector>
+#include <map>
+
+// Include schema_defs.hpp first to avoid namespace pollution
+#include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/recovery/blob_reconstructor.hpp"
 
+// schema_defs.hpp 和 blob_reconstructor.hpp 已经正确关闭了 dbrecovery 命名空间
+// 此处重新打开 dbrecovery 和 innodb 命名空间
 namespace dbrecovery {
 namespace innodb {
 
@@ -52,16 +58,24 @@ public:
      */
     // const std::vector<RedoRecord>& get_redo_records() const;
 
+    /**
+     * @brief 获取文件有效性状态
+     *
+     * @return true 文件有效且已成功初始化
+     * @return false 文件无效或未打开
+     */
+    [[nodiscard]] bool is_valid() const { return is_initialized_; }
+
 private:
     // ✅ 新增：关键成员变量
-    std::unique_ptr<BlobReconstructor> blob_reconstructor_;
-    
+    std::unique_ptr<recovery::BlobReconstructor> blob_reconstructor_;
+
     // 页缓存，用于存储已读取的页数据
     std::map<uint32_t, std::vector<uint8_t>> page_cache_;
-    
+
     // 表结构缓存，用于存储从 SDI 解析的元数据
     catalog::TableSchema table_schema_;
-    
+
     // 恢复状态标志
     bool is_initialized_ = false;
 };

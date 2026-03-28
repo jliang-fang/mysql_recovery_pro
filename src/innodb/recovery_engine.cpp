@@ -1,17 +1,23 @@
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/page_parser.hpp"
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/blob_pointer.hpp"
+#include "dbrecovery/recovery/blob_reconstructor.hpp"
+
 #include "dbrecovery/catalog/schema_defs.hpp"
+
 #include <iostream>
 #include <fstream>
 #include <filesystem>
-#include <string>  // ✅ 新增：std::string 需要
+#include <string>
+#include <memory>
+#include <nlohmann/json.hpp>
 
 namespace dbrecovery {
 namespace innodb {
 
-RecoveryEngine::RecoveryEngine() : blob_reconstructor_(std::make_unique<BlobReconstructor>()) {
+RecoveryEngine::RecoveryEngine() : blob_reconstructor_(std::make_unique<recovery::BlobReconstructor>(0)) {
     std::cout << "[INFO] RecoveryEngine initialized\n";
 }
 
@@ -24,20 +30,20 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
 
 bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_id) {
     std::cout << "[INFO] recover_table called: " << ibd_path << ", table_id=" << table_id << "\n";
-    
-    // Use PageReader to scan pages
-    dbrecovery::innodb::PageReader reader(ibd_path);
+
+    // Use InnoDBFileReader to scan pages
+    dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
     if (!reader.is_valid()) {
         std::cerr << "[ERROR] Failed to open .ibd file: " << ibd_path << "\n";
         return false;
     }
-    
+
     uint32_t total_pages = reader.get_total_pages();
     std::cout << "[INFO] Total pages: " << total_pages << "\n";
-    
+
     // ✅ Step 1: 解析所有页并分类
     std::map<uint16_t, std::vector<std::pair<uint32_t, std::vector<uint8_t>>>> pages_by_type;
-    
+
     for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
         auto page_data = reader.read_page(page_no);
         if (page_data.empty()) {
@@ -145,18 +151,18 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             }
         }
     }
-    
+
     // ✅ Step 3: 处理索引页（FIL_PAGE_INDEX = 9969）
     if (pages_by_type.count(9969)) {
         std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
-        
+
         // TODO: 实现 B+树重建逻辑
         for (const auto& [page_no, page_data] : pages_by_type[9969]) {
             dbrecovery::innodb::PageParser parser(page_data.data(), page_data.size());
             if (parser.parse_header()) {
-                std::cout << "[INFO] Page " << page_no << ": type=" << parser.page_type() 
-                          << ", level=" << parser.page_level() << "\n";
-                
+                std::cout << "[INFO] Page " << page_no << ": type=" << parser.type()
+                          << ", level=" << parser.level() << "\n";
+
                 // 解析记录
                 auto records = parser.parse_records();
                 std::cout << "[INFO] Page " << page_no << ": found " << records.size() << " records\n";
@@ -166,7 +172,7 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
         std::cerr << "[WARN] No index pages found in file\n";
         return false;
     }
-    
+
     // ✅ Step 4: 处理 BLOB 数据（如果存在）
     if (table_schema.columns.empty()) {
         std::cout << "[INFO] No table schema available, skipping BLOB reconstruction\n";
@@ -175,8 +181,8 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
         bool has_blob = false;
         for (const auto& pair : table_schema.columns) {
             const auto& col = pair.second;
-            if (col.mysql_type_id >= catalog::mysql_types::TINY_BLOB && 
-                col.mysql_type_id <= catalog::mysql_types::BLOB) {
+            if (col.mysql_type_id >= dbrecovery::innodb::mysql_types::TINY_BLOB &&
+                col.mysql_type_id <= dbrecovery::innodb::mysql_types::BLOB) {
                 has_blob = true;
                 break;
             }

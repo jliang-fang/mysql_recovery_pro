@@ -349,7 +349,7 @@ constexpr uint8_t TIME        = 11;
 constexpr uint8_t DATETIME    = 12;
 constexpr uint8_t YEAR        = 13;
 constexpr uint8_t VARCHAR     = 15;
-constexpr uint8_t VAR_STRING  = 15; // ✅ 添加：VAR_STRING 是 VARCHAR 的别名
+constexpr uint8_t VAR_STRING  = 253; // ✅ 修复：VAR_STRING 是独立类型 (253)，不是 VARCHAR 的别名
 constexpr uint8_t BIT         = 16;
 constexpr uint8_t TIMESTAMP2  = 17;
 constexpr uint8_t DATETIME2   = 18;
@@ -357,12 +357,20 @@ constexpr uint8_t TIME2       = 19;
 constexpr uint8_t JSON        = 245;
 
 // BLOB 类型
-constexpr uint8_t TINY_BLOB   = 250;
-constexpr uint8_t MEDIUM_BLOB = 251;
-constexpr uint8_t LONG_BLOB   = 252;
-constexpr uint8_t BLOB        = 253;
+constexpr uint8_t TINY_BLOB   = 249;
+constexpr uint8_t MEDIUM_BLOB = 250;
+constexpr uint8_t LONG_BLOB   = 251;
+constexpr uint8_t BLOB        = 252;
 
 } // namespace mysql_types
+
+// 行格式常量（在 dbrecovery::innodb 命名空间中定义）
+namespace row_formats {
+    constexpr uint32_t REDUNDANT = 0;
+    constexpr uint32_t COMPACT   = 1;
+    constexpr uint32_t DYNAMIC   = 2;
+    constexpr uint32_t COMPRESSED = 3;
+} // namespace row_formats
 
 } // namespace innodb
 } // namespace dbrecovery

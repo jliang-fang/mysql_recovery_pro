@@ -5,7 +5,7 @@
 #include <array>
 
 namespace dbrecovery {
-namespac e innodb {
+namespace innodb {
 
 // InnoDB page header structure (fixed part, 38 bytes for FIL header + 10 bytes for page type-specific header)
 // Total page size is typically 16KB (16384 bytes), but header is only the first ~50 bytes.

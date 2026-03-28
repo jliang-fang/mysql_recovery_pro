@@ -1,4 +1,5 @@
 #include "dbrecovery/recovery/engine.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -59,8 +60,7 @@ RecoveryEngine::recover_truncate(
         }
 
         // 检查页类型是否为 B+Tree 索引页
-        uint16_t page_type = innodb::read_le<uint16_t>(page_data.data(), 50); //
-FIL_PAGE_TYPE_ABS
+        uint16_t page_type = innodb::read_le<uint16_t>(page_data.data(), innodb::FIL_PAGE_TYPE_ABS);
         if (page_type != innodb::FIL_PAGE_INDEX) {
             continue;
         }
@@ -78,8 +78,7 @@ FIL_PAGE_TYPE_ABS
 records.end());
     }
 
-    std::cout << "[INFO] Recovered " << recovered_records.size() << " records
-from "
+    std::cout << "[INFO] Recovered " << recovered_records.size() << " records from "
               << total_pages << " pages" << std::endl;
 
     return recovered_records;
@@ -94,18 +93,15 @@ bool RecoveryEngine::repair_header(const std::string& output_path) {
     // 读取第一页（系统页）
     auto page_data = file_reader_->read_page_raw(0);
     if (page_data.empty() || page_data.size() < 16384) {
-        std::cerr << "[ERROR] Failed to read first page for header repair" <<
-std::endl;
+        std::cerr << "[ERROR] Failed to read first page for header repair" << std::endl;
         return false;
     }
 
     // 检查并修复 FIL_PAGE_TYPE
-    uint16_t* page_type_ptr = reinterpret_cast<uint16_t*>(page_data.data() +
-50);
+    uint16_t* page_type_ptr = reinterpret_cast<uint16_t*>(page_data.data() + innodb::FIL_PAGE_TYPE_ABS);
     if (*page_type_ptr != innodb::FIL_PAGE_INDEX &&
         *page_type_ptr != innodb::FIL_PAGE_SDI) {
-        std::cerr << "[WARN] Invalid page type in header, attempting repair" <<
-std::endl;
+        std::cerr << "[WARN] Invalid page type in header, attempting repair" << std::endl;
 
         // 尝试设置为默认的 B+Tree 索引页类型
         *page_type_ptr = innodb::FIL_PAGE_INDEX;
@@ -114,13 +110,11 @@ std::endl;
     // 写入修复后的文件
     std::ofstream out(output_path, std::ios::binary);
     if (!out) {
-        std::cerr << "[ERROR] Failed to open output file: " << output_path <<
-std::endl;
+        std::cerr << "[ERROR] Failed to open output file: " << output_path << std::endl;
         return false;
     }
 
-    out.write(reinterpret_cast<const char*>(page_data.data()),
-page_data.size());
+    out.write(reinterpret_cast<const char*>(page_data.data()), page_data.size());
 
     // 补全剩余页（如果文件不完整）
     uint64_t file_size = file_reader_->get_file_size();
@@ -130,20 +124,17 @@ page_data.size());
     if (expected_size > file_size) {
         std::vector<uint8_t> padding(page_size, 0);
         for (uint64_t i = file_size; i < expected_size; i += page_size) {
-            out.write(reinterpret_cast<const char*>(padding.data()),
-padding.size());
+            out.write(reinterpret_cast<const char*>(padding.data()), padding.size());
         }
     }
 
     out.close();
-    std::cout << "[INFO] Header repaired and saved to: " << output_path <<
-std::endl;
+    std::cout << "[INFO] Header repaired and saved to: " << output_path << std::endl;
 
     return true;
 }
 
-bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string,
-std::string>>& records,
+bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
                                    const std::string& csv_path) {
     if (records.empty()) {
         std::cerr << "[WARN] No records to export" << std::endl;
@@ -152,8 +143,7 @@ std::string>>& records,
 
     std::ofstream out(csv_path);
     if (!out) {
-        std::cerr << "[ERROR] Failed to open CSV file: " << csv_path <<
-std::endl;
+        std::cerr << "[ERROR] Failed to open CSV file: " << csv_path << std::endl;
         return false;
     }
 
@@ -178,14 +168,12 @@ std::endl;
     }
 
     out.close();
-    std::cout << "[INFO] Exported " << records.size() << " records to CSV: " <<
-csv_path << std::endl;
+    std::cout << "[INFO] Exported " << records.size() << " records to CSV: " << csv_path << std::endl;
 
     return true;
 }
 
-bool RecoveryEngine::export_to_sql(const std::vector<std::map<std::string,
-std::string>>& records,
+bool RecoveryEngine::export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
                                    const std::string& table_name,
                                    const std::string& sql_path) {
     if (records.empty()) {
@@ -195,8 +183,7 @@ std::string>>& records,
 
     std::ofstream out(sql_path);
     if (!out) {
-        std::cerr << "[ERROR] Failed to open SQL file: " << sql_path <<
-std::endl;
+        std::cerr << "[ERROR] Failed to open SQL file: " << sql_path << std::endl;
         return false;
     }
 
@@ -241,8 +228,7 @@ std::endl;
     }
 
     out.close();
-    std::cout << "[INFO] Exported " << records.size() << " records to SQL: " <<
-sql_path << std::endl;
+    std::cout << "[INFO] Exported " << records.size() << " records to SQL: " << sql_path << std::endl;
 
     return true;
 }

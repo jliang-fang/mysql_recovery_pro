@@ -6,7 +6,14 @@
       "Bash(mkdir *)",
       "Bash(which *)",
       "Bash(yum *)",
-      "Bash(grep *)"
+      "Bash(grep *)",
+      "Bash(ls *)",
+      "Bash(find *)",
+      "Bash(g++ *)",
+      "Bash(do *)",
+      "Bash(done)",
+      "Bash(then *)",
+      "Bash(fi)"
     ]
   },
   "$version": 3

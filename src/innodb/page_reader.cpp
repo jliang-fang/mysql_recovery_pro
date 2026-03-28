@@ -5,6 +5,7 @@
 #include <array>
 #include <cstring> // for std::memcpy
 #include <fstream>
+#include <vector>
 
 namespace dbrecovery {
 namespace innodb {
@@ -142,7 +143,7 @@ static uint32_t compute_old_checksum_internal(const std::vector<uint8_t>& page_d
     const uint16_t* data = reinterpret_cast<const uint16_t*>(page_data.data());
     size_t len = page_data.size() / 2;
 
-    uint32_t checksum = 0;
+    uint64_t checksum = 0;  // ✅ 修复：使用 uint64_t 避免移位警告
     for (size_t i = 0; i < len; ++i) {
         // 跳过校验和字段 (offset 24-27, which is 12th and 13th uint16_t)
         if (i == 12 || i == 13) continue;
@@ -151,7 +152,7 @@ static uint32_t compute_old_checksum_internal(const std::vector<uint8_t>& page_d
         checksum = (checksum & 0xFFFFFFFF) + (checksum >> 32);
     }
 
-    return (checksum & 0xFFFFFFFF) + (checksum >> 32);
+    return static_cast<uint32_t>((checksum & 0xFFFFFFFF) + (checksum >> 32));
 }
 
 // ==================== PageReader 静态工具类实现 ====================
@@ -284,6 +285,10 @@ uint32_t PageReader::compute_crc32c(const std::vector<uint8_t>& page_data) {
     return compute_crc32c_internal(page_data);
 }
 
+uint32_t PageReader::compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
+    return compute_innodb_checksum_internal(page_data);
+}
+
 uint32_t PageReader::compute_crc32(const std::vector<uint8_t>& page_data) {
     // ✅ 新增：标准 CRC32 (ISO/Hermann) 算法实现
     static const uint32_t crc32_table[256] = {
@@ -307,8 +312,8 @@ uint32_t PageReader::compute_old_checksum(const std::vector<uint8_t>& page_data)
 
 InnoDBFileReader::InnoDBFileReader(const std::string& file_path)
     : page_size_(16384), total_pages_(0), is_valid_(false) {
-    
-    mapper_ = std::make_unique<FileMapper>(file_path);
+
+    mapper_ = std::make_unique<utils::FileMapper>(file_path);
     if (!mapper_->is_valid()) {
         return;
     }

@@ -203,6 +203,13 @@ struct BlobPointer {
     }
 };
 
+// ✅ 新增：前置声明 build_blob_page_chain（供 parse_blob_pointer 使用）
+std::optional<BlobPageChain> build_blob_page_chain(
+    uint32_t first_space_id,
+    uint32_t first_page_no,
+    const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader
+);
+
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
 std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20,
                                               const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) {
@@ -285,11 +292,11 @@ inline std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>&
     return parse_blob_pointer(data.data(), data.size());
 }
 
-// ✅ 新增：从 BLOB 页数据中解析完整页链
+// ✅ 新增：从 BLOB 页数据中解析完整页链（实现）
 std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_space_id,
     uint32_t first_page_no,
-    const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }
+    const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader
 ) {
     BlobPageChain chain;
     
@@ -417,13 +424,15 @@ std::vector<uint8_t> read_blob_data_from_chain(
     return blob_data;
 }
 
+} // namespace innodb
+} // namespace dbrecovery
+
 // ==================== 单元测试入口（供 GTest 调用）====================
+// 注意：测试代码在头文件末尾的 #ifdef DBRECOVERY_ENABLE_TESTS 块中
+// 以避免头文件被多次包含时的命名空间闭合问题
+
 #ifdef DBRECOVERY_ENABLE_TESTS
 #include <gtest/gtest.h>
-#include "dbrecovery/innodb/blob_pointer.hpp"
-
-namespace dbrecovery {
-namespace innodb {
 
 // 测试读取 BLOB 页数据长度（正常情况）
 TEST(BlobParserTest, ReadBlobPageDataLengthValid) {
@@ -528,8 +537,4 @@ TEST(BlobPageChainTest, NoCircularReference) {
 
     EXPECT_FALSE(chain.has_circular_reference());
 }
-
-} // namespace innodb
-} // namespace dbrecovery
-
 #endif // DBRECOVERY_ENABLE_TESTS

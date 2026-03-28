@@ -4,7 +4,7 @@
 #include <cstdint>
 
 namespace dbrecovery {
-namespac e innodb {
+namespace innodb {
 
 // InnoDB page types
 constexpr uint16_t FSP_PAGE_TYPE_ALLOCATED = 0;

@@ -5,7 +5,10 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <optional>
+#include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/redo_log.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -13,12 +16,11 @@ namespace innodb {
 
 /**
  * @brief InnoDB 行格式常量（参考 MySQL 8.0 dict0dict.h）
+ * 注意：这些常量已在 page_defs.hpp 中定义，此处仅作引用
  */
 namespace row_formats {
-    constexpr uint8_t REDUNDANT = 0;   // MySQL 4.0/5.0 兼容
-    constexpr uint8_t COMPACT = 1;     // MySQL 4.1+ 默认
-    constexpr uint8_t DYNAMIC = 2;     // MySQL 5.7+ 默认（支持页压缩）
-    constexpr uint8_t COMPRESSED = 3;  // MySQL 5.1+ 支持（需要页压缩）
+    // ✅ 修复：使用 page_defs.hpp 中定义的常量（uint32_t）
+    using namespace dbrecovery::innodb::row_formats;
 }
 
 /**
@@ -37,27 +39,27 @@ enum class BTreeNodeType : uint8_t {
 class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
-    
-    // ✅ P0-1 修复：统一异常规范，返回 Result 类型以提供更好的错误信息
-    utils::Result<bool> parse();
-    
+
+    // ✅ P0-1 修复：返回 bool 类型（简化接口）
+    bool parse() noexcept;
+
     [[nodiscard]] bool is_valid_page_type() const { return valid_page_type_; }
     [[nodiscard]] BTreeNodeType node_type() const { return node_type_; }
-    
+
     // ✅ 新增：提供 record_offsets 的公共访问器（供测试使用）
     [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
 
     // ✅ P0-1 修复：新增获取行格式的方法
-    [[nodiscard]] uint8_t btr_format() const { 
+    [[nodiscard]] uint8_t btr_format() const {
         if (btr_format_ == 0xFF) {
             std::cerr << "[WARN] B+Tree format not parsed yet" << std::endl;
         }
-        return btr_format_; 
+        return btr_format_;
     }
 
     // ✅ 新增：判断是否为 COMPACT 格式（兼容 REDUNDANT 和 COMPACT）
     [[nodiscard]] bool is_compact_or_dynamic_format() const {
-        return btr_format_ == row_formats::COMPACT || 
+        return btr_format_ == row_formats::COMPACT ||
                btr_format_ == row_formats::DYNAMIC;
     }
 
@@ -65,10 +67,13 @@ public:
     [[nodiscard]] bool is_redundant_format() const {
         return btr_format_ == row_formats::REDUNDANT;
     }
-    
+
+    // ✅ 新增：获取页类型
+    [[nodiscard]] uint16_t page_type() const { return page_type_; }
+
 private:
     bool valid_page_type_ = false;
-    
+
     // ✅ 统一：页健康状态检查（消除重复定义）
     struct PageHealth {
         bool is_valid = true;
@@ -76,7 +81,7 @@ private:
         uint32_t checksum_expected = 0;
         uint32_t checksum_actual = 0;
         bool checksum_match = false;
-        
+
         // B+Tree specific
         bool has_infimum = false;
         bool has_supremum = false;
@@ -85,8 +90,9 @@ private:
         uint16_t page_level = 0;
         uint32_t next_page = 0;
         uint32_t prev_page = 0;
+        uint16_t free_space = 0;  // ✅ 新增：空闲空间大小
     };
-    
+
     [[nodiscard]] PageHealth check_health() const;
 
 private:
@@ -99,7 +105,8 @@ private:
     std::vector<uint16_t> record_offsets_;
     uint8_t btr_format_ = 0xFF;  // ✅ 修复：初始化为 0xFF 表示未解析
     uint16_t flags_ = 0xFFFF;     // ✅ 修复：初始化为 0xFFFF 表示未解析
-    
+    uint16_t page_type_ = 0;      // ✅ 新增：存储页类型
+
     // INFIMUM/SUPREMUM 记录偏移
     uint16_t infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
     uint16_t supremum_offset_ = 0; // 实际值在 parse_infimum_supremum() 中计算
@@ -107,7 +114,7 @@ private:
 public:
     /**
      * @brief 解析记录数据（仅支持 COMPACT 格式）
-     * 
+     *
      * @param schema 表结构定义
      * @return std::vector<std::map<std::string, std::string>> 解析后的记录
      */
@@ -116,7 +123,7 @@ public:
 
     // ✅ 统一：格式校验方法
     bool is_compact_format() const;
-    
+
     // ✅ 新增：SDI 页解析支持
     [[nodiscard]] uint64_t get_sdi_table_id() const;
 
@@ -134,10 +141,13 @@ public:
     // ✅ P0 新增：Redo 回放后更新页校验和
     void update_page_checksum();
 
+    // ✅ P0 新增：Redo 记录回放（支持所有行格式）
+    void apply_redo_record(const RedoLogRecord& record);
+
 private:
     /**
      * @brief 解析单个字段的值（根据列类型）
-     * 
+     *
      * @param col 列定义
      * @param data_pos 数据位置指针（会更新）
      * @param is_extern 是否为外部存储（如 BLOB 指针）
@@ -151,42 +161,26 @@ private:
 
     /**
      * @brief 解析页的目录槽（record directory）
-     * 
+     *
      * @return true 目录解析成功
      * @return false 目录解析失败
      */
     bool parse_directory();
-    
+
     // ✅ 新增：解析页头信息
-    bool parse_header();
-    
+    bool parse_header() noexcept;
+
     // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
-    bool parse_infimum_supremum();
-    
+    bool parse_infimum_supremum() noexcept;
+
     // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
-    bool parse_user_records();
+    bool parse_user_records() noexcept;
 
-private:
-    uint16_t page_type_ = 0; // ✅ 新增：存储页类型，供 SDI 页判断使用
-
-public:
-    /**
-     * @brief 解析页数据
-     *
-     * 这是 B+ 树解析的核心入口点。它会按顺序执行以下步骤：
-     * 1. 验证页校验和（确保页完整性）
-     * 2. 检查页大小和类型
-     * 3. 解析页头信息（BTR Header）
-     * 4. 解析 INFIMUM/SUPREMUM 系统记录
-     * 5. 解析用户记录（通过目录槽）
-     *
-     * @return utils::Result<bool> 包含成功/失败状态和详细错误信息
-     */
-    utils::Result<bool> parse();
-
-private:
-    // ✅ 新增：页健康检查辅助函数
-    PageHealth check_health() const;
+    // ✅ P0-3 修复：REDUNDANT 行格式字段偏移计算辅助函数（完整版）
+    std::optional<uint16_t> calculate_redundant_field_offset(
+        const uint8_t* record_data,
+        size_t record_size,
+        uint16_t field_no);
 };
 
 // ==================== 单元测试入口（供 GTest 调用）====================
@@ -200,7 +194,7 @@ namespace innodb {
 // 测试 BPlusTreeParser 在页太小时返回 false
 TEST(BPlusTreeParserTest, ParseTooSmallPage) {
     std::vector<uint8_t> page_data(50, 0); // 小于最小大小 (38 + 16 = 54)
-    
+
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
 }
@@ -208,10 +202,10 @@ TEST(BPlusTreeParserTest, ParseTooSmallPage) {
 // 测试 BPlusTreeParser 在页头信息无效时返回 false
 TEST(BPlusTreeParserTest, ParseInvalidPageHeader) {
     std::vector<uint8_t> page_data(1024, 0);
-    
+
     // 设置一个无效的页类型（非 FIL_PAGE_INDEX/SDI/UNDO_LOG）
     write_le<uint16_t>(page_data.data(), 38 + 12, 0xFFFF);
-    
+
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
 }
@@ -219,13 +213,13 @@ TEST(BPlusTreeParserTest, ParseInvalidPageHeader) {
 // 测试 BPlusTreeParser 在 INFIMUM/SUPREMUM 记录无效时返回 false
 TEST(BPlusTreeParserTest, ParseInvalidInfimumSupremum) {
     std::vector<uint8_t> page_data(1024, 0);
-    
+
     // 设置有效的页类型
     write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_INDEX);
-    
+
     // 设置堆顶位置（使 INFIMUM/SUPREMUM 解析失败）
     write_le<uint16_t>(page_data.data(), 38 + 4, 50); // heap_top = 50
-    
+
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
 }
@@ -233,20 +227,20 @@ TEST(BPlusTreeParserTest, ParseInvalidInfimumSupremum) {
 // 测试 BPlusTreeParser 在正常情况下返回 true
 TEST(BPlusTreeParserTest, ParseValidPage) {
     std::vector<uint8_t> page_data(16384, 0);
-    
+
     // 设置有效的页类型
     write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_INDEX);
-    
+
     // 设置堆顶位置（足够大以包含 INFIMUM 和 SUPREMUM）
     write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
-    
+
     // 设置有效的 INFIMUM 记录（偏移 54）
     page_data[54] = REC_INFO_MIN_REC_FLAG;
     write_le<uint16_t>(page_data.data(), 55, 100); // next_record_offset
-    
+
     // 设置有效的 SUPREMUM 记录
     page_data[99] = REC_STATUS_SUPREMUM;
-    
+
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
 }
@@ -254,20 +248,20 @@ TEST(BPlusTreeParserTest, ParseValidPage) {
 // 测试 BPlusTreeParser 在解析 SDI 页时返回 true
 TEST(BPlusTreeParserTest, ParseSDIPage) {
     std::vector<uint8_t> page_data(16384, 0);
-    
+
     // 设置有效的 SDI 页类型
     write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_SDI);
-    
+
     // 设置堆顶位置
     write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
-    
+
     // 设置有效的 INFIMUM 记录（偏移 54）
     page_data[54] = REC_INFO_MIN_REC_FLAG;
     write_le<uint16_t>(page_data.data(), 55, 100);
-    
+
     // 设置有效的 SUPREMUM 记录
     page_data[99] = REC_STATUS_SUPREMUM;
-    
+
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
 }
@@ -275,20 +269,20 @@ TEST(BPlusTreeParserTest, ParseSDIPage) {
 // 测试 BPlusTreeParser 在解析 Undo Log 页时返回 true
 TEST(BPlusTreeParserTest, ParseUndoLogPage) {
     std::vector<uint8_t> page_data(16384, 0);
-    
+
     // 设置有效的 Undo Log 页类型
     write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_UNDO_LOG);
-    
+
     // 设置堆顶位置
     write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
-    
+
     // 设置有效的 INFIMUM 记录（偏移 54）
     page_data[54] = REC_INFO_MIN_REC_FLAG;
     write_le<uint16_t>(page_data.data(), 55, 100);
-    
+
     // 设置有效的 SUPREMUM 记录
     page_data[99] = REC_STATUS_SUPREMUM;
-    
+
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
 }
@@ -367,17 +361,17 @@ TEST(BlobPageChainTest, NoCircularReference) {
 class BPlusTreeReconstructor {
 public:
     explicit BPlusTreeReconstructor(uint32_t root_page_no);
-    
+
     /**
      * @brief 添加索引页数据
      */
     void add_page(uint32_t page_no, std::vector<uint8_t> page_data);
-    
+
     /**
      * @brief 重建索引结构
      */
     bool reconstruct() noexcept;
-    
+
     /**
      * @brief 获取所有记录
      */
@@ -389,7 +383,7 @@ private:
     uint32_t root_page_no_;
     std::map<uint32_t, std::vector<uint8_t>> pages_;
     std::vector<std::map<std::string, std::string>> records_;
-    
+
     bool traverse_tree(uint32_t page_no, const catalog::TableSchema& schema) noexcept;
 };
 

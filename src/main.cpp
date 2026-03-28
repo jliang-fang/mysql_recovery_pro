@@ -23,20 +23,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // ✅ P0-1 修复：使用 C++20 标准库 std::factorial (自 C++20 起可用)
+    // ✅ P0-1 修复：使用简单的循环计算阶乘（兼容 C++20 之前的标准）
     uint32_t n = 5;
-    try {
-#if __cplusplus >= 202002L && defined(__cpp_lib_math_special_functions)
-        // ✅ 现代 C++20 方式
-        std::cout << "Factorial of " << n << " is: " << std::factorial(static_cast<unsigned int>(n)) << std::endl;
-#else
-        // ❌ 降级方案：如果编译器不支持 C++20，则报错
-        #error "This project requires C++20 with std::factorial support"
-#endif
-    } catch (const std::exception& e) {
-        std::cerr << "[ERROR] Failed to calculate factorial: " << e.what() << std::endl;
-        return 1;
+    uint64_t factorial = 1;
+    for (uint32_t i = 1; i <= n; ++i) {
+        factorial *= i;
     }
+    std::cout << "Factorial of " << n << " is: " << factorial << std::endl;
 
     // 检查文件是否存在
     std::ifstream f(ibd_path);

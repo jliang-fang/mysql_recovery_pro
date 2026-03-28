@@ -1,4 +1,5 @@
 #include "dbrecovery/innodb/page_parser.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <iostream>

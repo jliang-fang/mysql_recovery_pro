@@ -1,14 +1,17 @@
 #include "dbrecovery/recovery/blob_reconstructor.hpp"
 #include <algorithm>
 #include <iostream>
+#include <cstring>
+#include <cstdint>
 
 namespace dbrecovery {
 namespace recovery {
 
+// ✅ P0-1 修复：使用类内定义的类型别名（BlobReconstructor::Offset 等）
 struct ChunkInfo {
-    Offset offset;
-    Length length;
-    DataChunk data;
+    BlobReconstructor::Offset offset;
+    BlobReconstructor::Length length;
+    BlobReconstructor::DataChunk data;
 };
 
 BlobReconstructor::BlobReconstructor(BlobId blob_id)
@@ -55,8 +58,8 @@ bool BlobReconstructor::AddChunk(Offset offset, const DataChunk& data) {
         }
     }
     
-    chunks_.push_back({offset, static_cast<Length>(data.size()), data});
-    current_size_ = std::max(current_size_, offset + static_cast<Offset>(data.size()));
+    chunks_.push_back({offset, static_cast<BlobReconstructor::Length>(data.size()), data});
+    current_size_ = std::max<BlobReconstructor::Offset>(current_size_, offset + static_cast<BlobReconstructor::Offset>(data.size()));
     std::sort(chunks_.begin(), chunks_.end(),
               [](const auto& a, const auto& b) { return a.offset < b.offset; });
     return true;

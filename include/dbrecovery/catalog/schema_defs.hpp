@@ -296,15 +296,6 @@ struct TableSchema {
     }
 };
 
-// ✅ P0-1 修复：删除重复的 mysql_types 命名空间定义（已在 page_defs.hpp 中定义）
-// 行格式常量
-namespace row_formats {
-    constexpr uint32_t REDUNDANT = 0;
-    constexpr uint32_t COMPACT   = 1;
-    constexpr uint32_t DYNAMIC   = 2;
-    constexpr uint32_t COMPRESSED = 3;
-}
-
 } // namespace catalog
 } // namespace dbrecovery
 

@@ -27,8 +27,6 @@ set(SOURCES
     src/innodb/page_reader.cpp
     src/innodb/recovery_engine.cpp
     src/innodb/blob_parser.cpp
-    src/innodb/v2/page_parser.cpp
-    src/innodb/v2/record_parser.cpp
     src/innodb/btree.cpp
     src/recovery/blob_reconstructor.cpp
     src/recovery/engine.cpp

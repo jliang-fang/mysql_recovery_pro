@@ -5,8 +5,10 @@
 #include <vector>
 #include <span>
 #include <memory>
+#include <map>
 
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/utils/file_mapper.hpp"
 
 namespace dbrecovery {
@@ -156,11 +158,10 @@ private:
     uint64_t file_size_;
     uint32_t page_size_;
     uint32_t total_pages_;
-    std::unique_ptr<FileMapper> mapper_;
+    std::unique_ptr<utils::FileMapper> mapper_;
     bool is_valid_;
 };
 
 } // namespace innodb
 } // namespace dbrecovery
 
-#endif // DBRECOVERY_INNODB_PAGE_READER_HPP
