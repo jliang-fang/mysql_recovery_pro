@@ -65,3 +65,4 @@ std::string SQLOutputter::get_result() const {
 
 } // namespace export
 } // namespace dbrecovery
+
