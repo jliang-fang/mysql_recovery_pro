@@ -4,18 +4,22 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include <cstring>
 #include <stdexcept>
+#include <cmath>  // ✅ 新增：std::pow 需要
+
+// ✅ 新增：引入 mysql_types 命名空间
+using namespace dbrecovery::innodb::mysql_types;
 
 namespace dbrecovery {
 namespace engine {
 
 std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::TableSchema& schema) const {
     std::vector<FieldValue> fields;
-    
+
     // 基础校验：至少包含记录头（5 字节）+ 1 字节数据
     if (!page_base_ || size_ == 0) {
         return fields;
     }
-    
+
     constexpr size_t MAX_PAGE_SIZE = 65536; // InnoDB 最大页大小 (64KB)
     if (origin + 6 > size_ || origin + 6 > MAX_PAGE_SIZE) {
         return fields;
@@ -27,24 +31,24 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
     if (origin + 5 > size_ || origin + 5 > MAX_PAGE_SIZE) {
         return fields;
     }
-    
+
     // ✅ 修复：检查记录删除标志（REC_INFO_DELETED_FLAG = bit 3, mask = 0x08）
     uint8_t info_bits = record_ptr[0];
     bool is_deleted = (info_bits & 0x08) != 0;
-    
+
     if (is_deleted) {
         return fields; // 跳过已删除记录
     }
 
     // Step 2: 解析 NULL 位图（从记录头后开始）
     const uint8_t* null_ptr = record_ptr + 5; // 跳过 5-byte record header (COMPACT)
-    
-    // ✅ 修复：正确计算可空列数量
+
+    // ✅ 修复：正确计算可空列数量（使用 const_cast 以允许在构造函数外设置）
     uint32_t nullable_count = schema.get_nullable_column_count();
     if (nullable_count == 0) {
-        null_bytes_ = 0;
+        const_cast<uint32_t&>(null_bytes_) = 0;
     } else {
-        null_bytes_ = (nullable_count + 7) / 8;
+        const_cast<uint32_t&>(null_bytes_) = (nullable_count + 7) / 8;
     }
     
     // 按列顺序解析字段值
@@ -102,8 +106,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             const auto& prev_col = prev_pair.second;
             
             // ✅ 修复：正确跳过每个字段的数据
-            if (prev_col.mysql_type_id == mysql_types::VARCHAR || 
-                prev_col.mysql_type_id == mysql_types::VAR_STRING) { // VARCHAR/VAR_STRING
+            if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::VARCHAR || 
+                prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::VAR_STRING) { // VARCHAR/VAR_STRING
                 bool use_two_byte_prefix = (prev_col.column_length > 255);
                 
                 if (data_ptr + (use_two_byte_prefix ? 2 : 1) > page_base_ + size_) {
@@ -112,7 +116,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 
                 uint32_t len = 0;
                 if (use_two_byte_prefix) {
-                    len = MachRead::read_le<uint16_t>(data_ptr, 0);
+                    len = dbrecovery::innodb::read_le<uint16_t>(data_ptr, 0);
                     data_ptr += 2;
                 } else {
                     len = *data_ptr;
@@ -122,62 +126,62 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 if (len > 0 && data_ptr + len <= page_base_ + size_) {
                     data_ptr += len;
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::JSON) { // JSON
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::JSON) { // JSON
                 if (data_ptr + 2 > page_base_ + size_) {
                     break; // 数据不足，停止解析
                 }
                 
-                uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
+                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(data_ptr, 0);
                 data_ptr += 2;
                 
                 if (len > 0 && data_ptr + len <= page_base_ + size_) {
                     data_ptr += len;
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::LONGLONG) { // LONGLONG
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::LONGLONG) { // LONGLONG
                 if (data_ptr + 8 <= page_base_ + size_) {
                     data_ptr += 8;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::LONG) { // LONG
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::LONG) { // LONG
                 if (data_ptr + 4 <= page_base_ + size_) {
                     data_ptr += 4;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::INT24) { // INT24
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::INT24) { // INT24
                 if (data_ptr + 3 <= page_base_ + size_) {
                     data_ptr += 3;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::SHORT) { // SHORT
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::SHORT) { // SHORT
                 if (data_ptr + 2 <= page_base_ + size_) {
                     data_ptr += 2;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::TINY) { // TINY
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::TINY) { // TINY
                 if (data_ptr + 1 <= page_base_ + size_) {
                     data_ptr += 1;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::DATE) { // DATE
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::DATE) { // DATE
                 if (data_ptr + 3 <= page_base_ + size_) {
                     data_ptr += 3;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::DATETIME || 
-                       prev_col.mysql_type_id == mysql_types::TIMESTAMP) { // DATETIME/TIMESTAMP
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::DATETIME || 
+                       prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::TIMESTAMP2) { // DATETIME/TIMESTAMP
                 if (data_ptr + 5 <= page_base_ + size_) {
                     data_ptr += 5;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::DATETIME2 || 
-                       prev_col.mysql_type_id == mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::DATETIME2 || 
+                       prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
                 // ✅ 修复：根据精度计算大小（参考 MySQL 8.0 源码 sql/field.cc）
                 int precision = prev_col.datetime_precision;
                 if (precision < 0) precision = 6; // 默认精度
@@ -196,20 +200,20 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::TIME || 
-                       prev_col.mysql_type_id == mysql_types::TIME2) { // TIME/TIME2
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::TIME || 
+                       prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::TIME2) { // TIME/TIME2
                 if (data_ptr + 3 <= page_base_ + size_) {
                     data_ptr += 3;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::YEAR) { // YEAR
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::YEAR) { // YEAR
                 if (data_ptr + 1 <= page_base_ + size_) {
                     data_ptr += 1;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::BIT) { // BIT
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::BIT) { // BIT
                 uint32_t bit_count = prev_col.column_length;
                 uint32_t byte_size = (bit_count + 7) / 8;
                 if (data_ptr + byte_size <= page_base_ + size_) {
@@ -217,20 +221,20 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::FLOAT) { // FLOAT
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::FLOAT) { // FLOAT
                 if (data_ptr + 4 <= page_base_ + size_) {
                     data_ptr += 4;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id == mysql_types::DOUBLE) { // DOUBLE
+            } else if (prev_col.mysql_type_id == dbrecovery::innodb::mysql_types::DOUBLE) { // DOUBLE
                 if (data_ptr + 8 <= page_base_ + size_) {
                     data_ptr += 8;
                 } else {
                     break; // 数据不足
                 }
-            } else if (prev_col.mysql_type_id >= mysql_types::TINY_BLOB && 
-                       prev_col.mysql_type_id <= mysql_types::BLOB) { // BLOB类型
+            } else if (prev_col.mysql_type_id >= dbrecovery::innodb::mysql_types::TINY_BLOB && 
+                       prev_col.mysql_type_id <= dbrecovery::innodb::mysql_types::BLOB) { // BLOB类型
                 // ✅ 新增：BLOB指针长度为20字节（不是4字节）
                 if (data_ptr + 20 <= page_base_ + size_) {
                     data_ptr += 20;
@@ -248,8 +252,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
         }
         
         // ✅ 修复：解析当前字段（添加边界检查）
-        if (col.mysql_type_id == mysql_types::VARCHAR || 
-            col.mysql_type_id == mysql_types::VAR_STRING) { // VARCHAR/VAR_STRING
+        if (col.mysql_type_id == dbrecovery::innodb::mysql_types::VARCHAR || 
+            col.mysql_type_id == dbrecovery::innodb::mysql_types::VAR_STRING) { // VARCHAR/VAR_STRING
             bool use_two_byte_prefix = (col.column_length > 255);
             
             if (data_ptr + (use_two_byte_prefix ? 2 : 1) > page_base_ + size_) {
@@ -257,7 +261,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             } else {
                 uint32_t len = 0;
                 if (use_two_byte_prefix) {
-                    len = MachRead::read_le<uint16_t>(data_ptr, 0);
+                    len = dbrecovery::innodb::read_le<uint16_t>(data_ptr, 0);
                     data_ptr += 2;
                 } else {
                     len = *data_ptr;
@@ -270,11 +274,11 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                     fv.value = "[TRUNCATED]";
                 }
             }
-        } else if (col.mysql_type_id == mysql_types::JSON) { // JSON
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::JSON) { // JSON
             if (data_ptr + 2 > page_base_ + size_) {
                 fv.value = "[TRUNCATED_JSON]";
             } else {
-                uint16_t len = MachRead::read_le<uint16_t>(data_ptr, 0);
+                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(data_ptr, 0);
                 data_ptr += 2;
                 
                 if (len > 0 && data_ptr + len <= page_base_ + size_) {
@@ -283,23 +287,23 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                     fv.value = "[TRUNCATED_JSON]";
                 }
             }
-        } else if (col.mysql_type_id == mysql_types::LONGLONG) { // LONGLONG
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::LONGLONG) { // LONGLONG
             if (data_ptr + 8 <= page_base_ + size_) {
-                uint64_t val = MachRead::read_le<uint64_t>(data_ptr, 0);
+                uint64_t val = dbrecovery::innodb::read_le<uint64_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::LONG) { // LONG
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::LONG) { // LONG
             if (data_ptr + 4 <= page_base_ + size_) {
-                uint32_t val = MachRead::read_le<uint32_t>(data_ptr, 0);
+                uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::INT24) { // INT24
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::INT24) { // INT24
             if (data_ptr + 3 <= page_base_ + size_) {
-                uint32_t val = MachRead::read_le<uint32_t>(data_ptr, 0);
+                uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data_ptr, 0);
                 // 处理符号扩展
                 if (val & 0x800000) {
                     val |= 0xFF000000;
@@ -308,21 +312,21 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::SHORT) { // SHORT
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::SHORT) { // SHORT
             if (data_ptr + 2 <= page_base_ + size_) {
-                uint16_t val = MachRead::read_le<uint16_t>(data_ptr, 0);
+                uint16_t val = dbrecovery::innodb::read_le<uint16_t>(data_ptr, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::TINY) { // TINY
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::TINY) { // TINY
             if (data_ptr + 1 <= page_base_ + size_) {
                 uint8_t val = *data_ptr;
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::DATE) { // DATE
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::DATE) { // DATE
             if (data_ptr + 3 <= page_base_ + size_) {
                 uint8_t day = data_ptr[0];
                 uint8_t month = data_ptr[1];
@@ -339,8 +343,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::DATETIME || 
-                   col.mysql_type_id == mysql_types::TIMESTAMP) { // DATETIME/TIMESTAMP
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::DATETIME || 
+                   col.mysql_type_id == dbrecovery::innodb::mysql_types::TIMESTAMP2) { // DATETIME/TIMESTAMP
             if (data_ptr + 5 <= page_base_ + size_) {
                 uint8_t byte0 = data_ptr[0];
                 uint8_t byte1 = data_ptr[1];
@@ -366,8 +370,8 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::DATETIME2 || 
-                   col.mysql_type_id == mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
+        } else if (col.mysql_type_id == dbrecovery::innodb::mysql_types::DATETIME2 || 
+                   col.mysql_type_id == dbrecovery::innodb::mysql_types::TIMESTAMP2) { // DATETIME2/TIMESTAMP2
             // ✅ 新增：DATETIME2 解析逻辑（参考 MySQL 8.0 源码 sql/field.cc）
             int precision = col.datetime_precision;
             if (precision < 0) precision = 6; // 默认精度
@@ -418,7 +422,17 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
                 
                 fv.value = oss.str();
             }
-        } else if (col.mysql_type_id == mysql_types::FLOAT) { // FLOAT
+        } else if (col.mysql_type_id == TINY_BLOB ||
+                   col.mysql_type_id == MEDIUM_BLOB ||
+                   col.mysql_type_id == LONG_BLOB ||
+                   col.mysql_type_id == BLOB) { // BLOB
+            // BLOB 字段存储的是 20 字节指针
+            if (data_ptr + 20 <= page_base_ + size_) {
+                fv.value = "[BLOB_POINTER]";
+            } else {
+                fv.value = "[TRUNCATED]";
+            }
+        } else if (col.mysql_type_id == FLOAT) { // FLOAT
             if (data_ptr + 4 <= page_base_ + size_) {
                 float val;
                 std::memcpy(&val, data_ptr, sizeof(float));
@@ -426,7 +440,7 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
             } else {
                 fv.value = "[TRUNCATED]";
             }
-        } else if (col.mysql_type_id == mysql_types::DOUBLE) { // DOUBLE
+        } else if (col.mysql_type_id == DOUBLE) { // DOUBLE
             if (data_ptr + 8 <= page_base_ + size_) {
                 double val;
                 std::memcpy(&val, data_ptr, sizeof(double));
@@ -447,27 +461,27 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
 // 辅助方法：解码单个字段
 FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_nullable, size_t length) const {
     FieldValue fv;
-    
+
     switch (type) {
-        case mysql_types::LONG: { // 3
+        case LONG: { // 3
             if (length >= 4) {
-                uint32_t val = MachRead::read_le<uint32_t>(data, 0);
+                uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[INVALID_LENGTH]";
             }
             break;
         }
-        case mysql_types::LONGLONG: { // 8
+        case LONGLONG: { // 8
             if (length >= 8) {
-                uint64_t val = MachRead::read_le<uint64_t>(data, 0);
+                uint64_t val = dbrecovery::innodb::read_le<uint64_t>(data, 0);
                 fv.value = std::to_string(val);
             } else {
                 fv.value = "[INVALID_LENGTH]";
             }
             break;
         }
-        case mysql_types::VARCHAR: { // 15
+        case VARCHAR: { // 15
             if (length > 0) {
                 uint8_t len = *data;
                 if (len > 0 && length >= len + 1) {
@@ -480,9 +494,9 @@ FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_
             }
             break;
         }
-        case mysql_types::JSON: { // 245
+        case JSON: { // 245
             if (length >= 2) {
-                uint16_t len = MachRead::read_le<uint16_t>(data, 0);
+                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(data, 0);
                 if (len > 0 && length >= len + 2) {
                     fv.value = "[JSON_DATA]";
                 } else {
@@ -497,7 +511,7 @@ FieldValue RowDecoder::decode_field(const uint8_t* data, uint32_t type, bool is_
             fv.value = "[UNIMPLEMENTED_TYPE_" + std::to_string(type) + "]";
             break;
     }
-    
+
     return fv;
 }
 

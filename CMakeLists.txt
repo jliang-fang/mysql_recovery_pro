@@ -6,13 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 
 # 集成 nlohmann/json 库
-include(FetchContent)
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.11.3 # 稳定版本，支持 C++17
-)
-FetchContent_MakeAvailable(nlohmann_json)
+# ✅ P0-1 修复：使用系统安装的 nlohmann-json 库
+find_package(nlohmann_json REQUIRED)
 
 # 查找 MySQL 头文件
 find_path(MYSQL_INCLUDE_DIR mysql_version.h PATHS /usr/include/mysql /usr/local/include/mysql NO_DEFAULT_PATH)
@@ -24,7 +19,7 @@ endif()
 
 # 添加源文件
 set(SOURCES
-    src/catalog/schema_defs.cpp
+    # ✅ P0-1 修复：移除 schema_defs.cpp（函数已在头文件中内联实现）
     src/engine/row_decoder.cpp
     src/engine/field_decoder.cpp
     src/innodb/binary_reader.cpp
@@ -53,7 +48,8 @@ target_include_directories(dbrecovery_innodb PUBLIC
     $<$<BOOL:${MYSQL_INCLUDE_DIR}>:${MYSQL_INCLUDE_DIR}>
 )
 
-# 链接必要的库
+# ✅ P0-1 修复：使用本地 nlohmann/json（已通过 include_directories 添加）
+# 链接系统 nlohmann_json 库
 target_link_libraries(dbrecovery_innodb PUBLIC nlohmann_json::nlohmann_json)
 
 add_executable(mysql8_recover src/main.cpp)

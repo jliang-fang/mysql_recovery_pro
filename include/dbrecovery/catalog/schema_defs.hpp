@@ -7,16 +7,11 @@
 #include <optional>
 #include <iostream>
 
-// ✅ 新增：nlohmann/json 依赖声明
-#ifdef JSON_HPP_INCLUDED
-// 使用 nlohmann/json 库
-#else
-// 如果未定义 JSON_HPP_INCLUDED，需要包含 json 头文件或确保已定义相关类型
-// 这里使用前向声明避免编译错误
-namespace nlohmann {
-    class json;
-}
-#endif
+// ✅ P0-1 修复：使用系统 nlohmann/json 库
+#include <nlohmann/json.hpp>
+
+// ✅ 新增：包含 page_defs.hpp 以获取 mysql_types 常量定义
+#include "dbrecovery/innodb/page_defs.hpp"
 
 namespace dbrecovery {
 namespace catalog {
@@ -170,52 +165,45 @@ struct TableSchema {
     // ✅ 新增：计算列大小（用于行格式适配）
     uint32_t get_column_size(const ColumnInfo& col) const {
         switch (col.mysql_type_id) {
-            case mysql_types::TINY:
+            case dbrecovery::innodb::mysql_types::TINY:
                 return 1;
-            case mysql_types::SHORT:
+            case dbrecovery::innodb::mysql_types::SHORT:
                 return 2;
-            case mysql_types::LONG:
+            case dbrecovery::innodb::mysql_types::LONG:
                 return 4;
-            case mysql_types::LONGLONG:
+            case dbrecovery::innodb::mysql_types::LONGLONG:
                 return 8;
-            case mysql_types::INT24:
+            case dbrecovery::innodb::mysql_types::INT24:
                 return 3;
-            case mysql_types::FLOAT:
+            case dbrecovery::innodb::mysql_types::FLOAT:
                 return 4;
-            case mysql_types::DOUBLE:
+            case dbrecovery::innodb::mysql_types::DOUBLE:
                 return 8;
-            case mysql_types::VARCHAR:
-            case mysql_types::VAR_STRING:
+            case dbrecovery::innodb::mysql_types::VARCHAR:
                 // 考虑字符集编码（utf8mb4 最多4字节/字符）
                 return col.column_length * 4 + 2; // 长度前缀
-            case mysql_types::CHAR:
-                return col.column_length * 4;
-            case mysql_types::DATE:
+            case dbrecovery::innodb::mysql_types::DATE:
                 return 3;
-            case mysql_types::DATETIME:
-            case mysql_types::TIMESTAMP:
+            case dbrecovery::innodb::mysql_types::DATETIME:
                 return 5;
-            case mysql_types::DATETIME2:
-            case mysql_types::TIMESTAMP2:
+            case dbrecovery::innodb::mysql_types::DATETIME2:
                 // 精度决定大小
                 if (col.datetime_precision <= 2) return 3;
                 if (col.datetime_precision <= 4) return 4;
                 return 5;
-            case mysql_types::TIME:
+            case dbrecovery::innodb::mysql_types::TIME2:
                 return 3;
-            case mysql_types::TIME2:
-                return 3;
-            case mysql_types::YEAR:
+            case dbrecovery::innodb::mysql_types::YEAR:
                 return 1;
-            case mysql_types::BIT:
+            case dbrecovery::innodb::mysql_types::BIT:
                 return (col.column_length + 7) / 8;
-            case mysql_types::JSON:
+            case dbrecovery::innodb::mysql_types::JSON:
                 // JSON 存储为 BLOB
                 return col.column_length;
             default:
                 // BLOB/TEXT 类型
-                if (col.mysql_type_id >= mysql_types::TINY_BLOB && 
-                    col.mysql_type_id <= mysql_types::BLOB) {
+                if (col.mysql_type_id >= dbrecovery::innodb::mysql_types::TINY_BLOB &&
+                    col.mysql_type_id <= dbrecovery::innodb::mysql_types::BLOB) {
                     return 4; // 指针大小
                 }
                 return col.column_length;
@@ -261,7 +249,7 @@ struct TableSchema {
     }
     
     // ✅ 新增：从 nlohmann/json 对象加载
-    bool from_json(const class json& j) {
+    bool from_json(const nlohmann::json& j) {
         if (j.contains("name")) {
             table_name = j["name"].get<std::string>();
         }
@@ -287,15 +275,15 @@ struct TableSchema {
     }
     
     // ✅ 新增：转换为 nlohmann/json 对象
-    json to_json() const {
-        json j;
+    nlohmann::json to_json() const {
+        nlohmann::json j;
         j["name"] = table_name;
         j["engine"] = engine;
         j["row_format"] = row_format;
         
-        json columns_array = json::array();
+        nlohmann::json columns_array = nlohmann::json::array();
         for (const auto& pair : columns) {
-            json col_json;
+            nlohmann::json col_json;
             col_json["ordinal"] = pair.first;
             col_json["name"] = pair.second.name;
             col_json["type_id"] = pair.second.mysql_type_id;
@@ -308,65 +296,7 @@ struct TableSchema {
     }
 };
 
-// MySQL 8.0 类型常量（参考 include/mysql/mysql_type.h）
-namespace mysql_types {
-    // 数值类型
-    constexpr uint8_t DECIMAL     = 0;
-    constexpr uint8_t TINY        = 1;
-    constexpr uint8_t SHORT       = 2;
-    constexpr uint8_t LONG        = 3;
-    constexpr uint8_t FLOAT       = 4;
-    constexpr uint8_t DOUBLE      = 5;
-    constexpr uint8_t NULL_TYPE   = 6;
-    constexpr uint8_t TIMESTAMP   = 7;
-    constexpr uint8_t LONGLONG    = 8;
-    constexpr uint8_t INT24       = 9;
-    
-    // 日期时间类型
-    constexpr uint8_t DATE        = 10;
-    constexpr uint8_t TIME        = 11;
-    constexpr uint8_t DATETIME    = 12;
-    constexpr uint8_t YEAR        = 13;
-    constexpr uint8_t NEWDATE     = 14;
-    
-    // 字符串类型
-    constexpr uint8_t VARCHAR     = 15;
-    constexpr uint8_t BIT         = 16;
-    constexpr uint8_t TIMESTAMP2  = 17;
-    constexpr uint8_t DATETIME2   = 18;
-    constexpr uint8_t TIME2       = 19;
-    
-    // JSON 和新类型
-    constexpr uint8_t JSON        = 245;
-    constexpr uint8_t NEWDECIMAL  = 246;
-    constexpr uint8_t ENUM        = 247;
-    constexpr uint8_t SET         = 248;
-    constexpr uint8_t TINY_BLOB   = 249;
-    constexpr uint8_t MEDIUM_BLOB = 250;
-    constexpr uint8_t LONG_BLOB   = 251;
-    constexpr uint8_t BLOB        = 252;
-    constexpr uint8_t VAR_STRING  = 253;
-    constexpr uint8_t STRING      = 254;
-    constexpr uint8_t GEOMETRY    = 255;
-
-    // 辅助函数：判断是否为 BLOB 类型
-    inline bool is_blob_type(uint8_t type_id) {
-        return (type_id >= TINY_BLOB && type_id <= GEOMETRY);
-    }
-
-    // 辅助函数：判断是否为日期时间类型
-    inline bool is_datetime_type(uint8_t type_id) {
-        return (type_id == DATE || type_id == DATETIME || type_id == TIMESTAMP ||
-                type_id == TIME || type_id == YEAR ||
-                type_id == NEWDATE || type_id == DATETIME2 || type_id == TIMESTAMP2 || type_id == TIME2);
-    }
-
-    // 辅助函数：判断是否为数值类型
-    inline bool is_numeric_type(uint8_t type_id) {
-        return (type_id <= DOUBLE || type_id == NEWDECIMAL);
-    }
-}
-
+// ✅ P0-1 修复：删除重复的 mysql_types 命名空间定义（已在 page_defs.hpp 中定义）
 // 行格式常量
 namespace row_formats {
     constexpr uint32_t REDUNDANT = 0;

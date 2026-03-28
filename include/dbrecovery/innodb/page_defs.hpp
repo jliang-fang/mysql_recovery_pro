@@ -156,23 +156,15 @@ constexpr uint16_t FIL_PAGE_OFFSET_N_DIRECT_PAGES= 38 + 14; // PAGE_N_DIRECT_PAG
 // ==================== Page Header Offsets (relative to B+Tree header, for compatibility with InnoDB source) ====================
 // These are the offsets from the start of the B+Tree header (which is at FIL_HEADER_SIZE=38).
 // They match the InnoDB source code definitions in include/page0page.h (e.g., BTR_N_LEVELS = 4)
-constexpr uint16_t BTR_PAGE_OFFSET_N_DIR_SLOTS   = 0;
-constexpr uint16_t BTR_PAGE_OFFSET_HEAP_TOP      = 2;
-constexpr uint16_t BTR_PAGE_OFFSET_N_HEAP        = 4;
-constexpr uint16_t BTR_PAGE_OFFSET_FREE          = 6;
-constexpr uint16_t BTR_PAGE_OFFSET_GARBAGE_END   = 8;
-constexpr uint16_t BTR_PAGE_OFFSET_LAST_INSERT   = 10;
-constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION     = 12;
-constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
-
-// ==================== Record Offset Constants (absolute offsets from page start) ====================
-/// @brief Absolute offset of INFIMUM record within Page Data
-/// In practice, it's at absolute offset 54, which is FIL_HEADER_SIZE(38) + PAGE_N_DIR_SLOTS(2) + PAGE_HEAP_TOP(2) + ... = 54
-constexpr uint16_t PAGE_INFIMUM_REC_OFFSET_ABS = 54;
-/// @brief Absolute offset of SUPREMUM record within Page Data (typically at heap_top - 5)
-/// This is dynamic and should be read from page header, but for reference:
-/// Note: In practice, this is calculated as `heap_top - 5` where heap_top is read from the page header.
-constexpr uint16_t PAGE_SUPREMUM_REC_OFFSET_ABS = 0xFFFF; // Placeholder (dynamic)
+// ✅ P0-1 修复：移除重复定义（已在第91-93行定义）
+// constexpr uint16_t BTR_PAGE_OFFSET_N_DIR_SLOTS   = 0;
+// constexpr uint16_t BTR_PAGE_OFFSET_HEAP_TOP      = 2;
+// constexpr uint16_t BTR_PAGE_OFFSET_N_HEAP        = 4;
+// constexpr uint16_t BTR_PAGE_OFFSET_FREE          = 6;
+// constexpr uint16_t BTR_PAGE_OFFSET_GARBAGE_END   = 8;
+// constexpr uint16_t BTR_PAGE_OFFSET_LAST_INSERT   = 10;
+// constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION     = 12;
+// constexpr uint16_t BTR_PAGE_OFFSET_N_DIRECT_PAGES= 14;
 
 // ✅ 新增：B+Tree 记录偏移常量（用于解析用户记录）
 /// @brief Offset of first user record after INFIMUM/SUPREMUM

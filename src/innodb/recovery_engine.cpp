@@ -6,6 +6,7 @@
 #include <iostream>
 #include <fstream>
 #include <filesystem>
+#include <string>  // ✅ 新增：std::string 需要
 
 namespace dbrecovery {
 namespace innodb {

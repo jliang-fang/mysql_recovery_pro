@@ -44,7 +44,7 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                     std::cerr << "[ERROR] VARCHAR length prefix out of bounds" << std::endl;
                     return nullptr;
                 }
-                uint16_t len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
+                uint16_t len = dbrecovery::innodb::read_le<uint16_t>(rec_ptr, 0);
                 
                 // ✅ 新增：验证长度前缀的有效性
                 if (len > col_info.column_length) {
@@ -88,7 +88,7 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             if (rec_ptr + 2 > page_base_ + size_) {
                 return nullptr;
             }
-            uint16_t json_len = dbrecovery::innodb::MachRead::read_le<uint16_t>(rec_ptr, 0);
+            uint16_t json_len = dbrecovery::innodb::read_le<uint16_t>(rec_ptr, 0);
             field_len = 2 + json_len;
             
             // ✅ 新增：边界检查
@@ -172,7 +172,7 @@ uint32_t FieldDecoder::DecodeMicrosecond(const uint8_t* data) {
     if (!data) return 0;
     
     // 简化：读取前 3 字节作为微秒值（实际应使用专用解码函数）
-    uint32_t val = dbrecovery::innodb::MachRead::read_le<uint32_t>(data, 0);
+    uint32_t val = dbrecovery::innodb::read_le<uint32_t>(data, 0);
     return val & 0xFFFFFF; // 只取低 24 位
 }
 

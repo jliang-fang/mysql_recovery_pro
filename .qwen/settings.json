@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmake *)",
+      "Bash(rm *)",
+      "Bash(mkdir *)",
+      "Bash(which *)",
+      "Bash(yum *)",
+      "Bash(grep *)"
+    ]
+  },
+  "$version": 3
+}

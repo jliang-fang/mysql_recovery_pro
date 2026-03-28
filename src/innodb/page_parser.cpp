@@ -2,6 +2,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
+#include <set>  // ✅ 新增：std::set 需要
+#include "dbrecovery/innodb/mach_read.hpp"  // ✅ 新增：read_le 函数定义
 
 namespace dbrecovery {
 namespace innodb {
@@ -161,8 +163,8 @@ std::vector<Record> PageParser::parse_records() const {
     }
 
     // ✅ 增强：添加更严格的边界检查
-    size_t max_record_area = std::min(buffer_ + size_ - (buffer_ + 38 + 16), 
-                                      static_cast<size_t>(header_.heap_top - (38 + 16)));
+    size_t max_record_area = std::min<size_t>(buffer_ + size_ - (buffer_ + 38 + 16),
+                                              static_cast<size_t>(header_.heap_top - (38 + 16)));
     
     if (max_record_area < 5) { // 最小记录头大小
         return records;
