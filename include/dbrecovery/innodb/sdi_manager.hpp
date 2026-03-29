@@ -42,9 +42,14 @@ public:
 
         if (payload_len < 20 + data_len) return std::nullopt;
 
+        // ✅ 防御性：防止空数据导致的崩溃
+        if (data_len == 0 || raw_data == nullptr) {
+            return std::nullopt;
+        }
+
         // ✅ 正确处理 raw deflate（MySQL SDI 使用 -15 window bits）
         std::vector<uint8_t> decompressed(hdr.uncompressed_len);
-        
+
         z_stream strm = {};
         strm.next_in = const_cast<Bytef*>(raw_data);
         strm.avail_in = static_cast<uInt>(data_len);

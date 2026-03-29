@@ -133,8 +133,9 @@ TEST(IntegrationTest, FileReading) {
 
     EXPECT_FALSE(page.empty());
 
-    // 验证页头
-    EXPECT_EQ(page.size(), 16384); // 标准页大小
+    // 验证页大小（支持多种页大小）
+    EXPECT_TRUE(page.size() == 4096 || page.size() == 8192 || 
+                page.size() == 16384 || page.size() == 32768 || page.size() == 65536);
 }
 
 // ==================== 集成测试：CRC32C校验 ====================

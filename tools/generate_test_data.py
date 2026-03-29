@@ -62,8 +62,16 @@ def compute_crc32c(data):
     """计算 CRC32C 校验和（Castagnoli 多项式）"""
     import binascii
     # CRC32C 使用 Castagnoli 多项式 0x82F63B78
-    crc = binascii.crc32(data) & 0xFFFFFFFF
-    # 反转以匹配 CRC32C
+    # Python 的 binascii.crc32 使用 CRC32 (ISO/Hermann) 多项式
+    # 需要手动实现 CRC32C
+    crc = 0xFFFFFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0x82F63B78  # CRC32C 多项式
+            else:
+                crc >>= 1
     return crc ^ 0xFFFFFFFF
 
 def create_page_header(page_type, page_no=0, prev_page=0xFFFFFFFF, next_page=0xFFFFFFFF):
@@ -83,9 +91,12 @@ def create_page_header(page_type, page_no=0, prev_page=0xFFFFFFFF, next_page=0xF
     write_le_uint16(page, 0x1A, (next_page >> 16) & 0xFFFF)  # next_page high
     write_le_uint32(page, 0x1C, 0)              # btree_index
 
-    # 计算并写入校验和
+    # 计算并写入校验和（清零校验和字段后计算）
+    for i in range(4):
+        page[24 + i] = 0
     crc = compute_crc32c(bytes(page[:24]) + bytes(page[28:]))
-    write_le_uint32(page, 0x18, crc)  # 简化：写入到 reserved 字段
+    for i in range(4):
+        page[24 + i] = (crc >> (i * 8)) & 0xFF
 
     return page
 

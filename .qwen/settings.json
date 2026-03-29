@@ -81,7 +81,12 @@
       "Bash(./test_undo_log_rollback)",
       "Bash(./test_fuzz_sdi)",
       "Bash(./test_integration)",
-      "Bash(chmod *)"
+      "Bash(chmod *)",
+      "Bash(./tests/test_page_header)",
+      "Bash(./tests/test_sdi_manager)",
+      "Bash(./tests/test_fuzz_sdi)",
+      "Bash(gdb *)",
+      "Bash(valgrind *)"
     ]
   },
   "$version": 3

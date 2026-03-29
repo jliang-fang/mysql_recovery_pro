@@ -1,8 +1,42 @@
-# MySQL 8.0 Recovery Engine - User Guide
+# MySQL 8.x Data Recovery Engine - User Guide (English)
 
-## 1. Quick Start
+**Version**: v1.0.0  
+**Author**: jliang.fang  
+**Date**: 2026-03-29
 
-### 1.1 Build
+---
+
+## 1. Overview
+
+MySQL 8.x Data Recovery Engine is a high-performance offline MySQL data recovery tool supporting deep data recovery for MySQL 5.6/5.7/8.0/8.1/8.2/8.3/8.4/9.0.
+
+### 1.1 Core Features
+
+- **InnoDB Page Parsing**: Full support for COMPACT/REDUNDANT/DYNAMIC/COMPRESSED row formats
+- **B+Tree Traversal**: Recursive index traversal with page chain validation
+- **BLOB Recovery**: Multi-page BLOB reconstruction with checksum validation
+- **Redo Log Replay**: Redo log parsing and replay for all InnoDB row formats
+- **Undo Log Parsing**: Transaction rollback support
+- **SDI Metadata Parsing**: Space Descriptor Index parsing and table structure reconstruction
+- **Cross-platform**: Linux/Windows unified API
+- **CLI/GUI**: Command-line tool and graphical interface
+
+### 1.2 Supported Disaster Scenarios
+
+| Scenario | Recovery Capability | Notes |
+|----------|---------------------|-------|
+| Truncate | ✅ Full Recovery | Based on page chain and Redo Log |
+| rm -rf | ✅ Partial Recovery | Requires non-overwritten data pages |
+| File Header Corruption | ✅ Repair | Rebuild file header |
+| Tablespace Corruption | ✅ Partial Recovery | Based on available pages |
+| Redo Log Application | ✅ Full Recovery | Forward recovery |
+| BLOB Corruption | ✅ Partial Recovery | Based on page chain |
+
+---
+
+## 2. Quick Start
+
+### 2.1 Build
 
 ```bash
 # Clone project
@@ -21,20 +55,26 @@ make -j$(nproc)
 ctest --verbose
 ```
 
-### 1.2 CLI Tool
+### 2.2 Command Line Tool
 
 ```bash
-# Basic usage
+# Recover table data
 ./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered
 
 # Specify table ID
 ./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
+# Truncate recovery
+./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --truncate-recovery
+
+# rm -rf recovery
+./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --rmrf-recovery
+
 # Show help
 ./mysql8_recover --help
 ```
 
-### 1.3 GUI Tool
+### 2.3 GUI Tool
 
 ```bash
 # Launch GUI
@@ -42,221 +82,353 @@ cd build/gui
 ./mysql8_recovery_gui
 ```
 
-## 2. Features
+---
 
-### 2.1 Page Health Check
+## 3. Command Line Arguments
+
+### 3.1 Required Arguments
+
+| Argument | Description | Example |
+|----------|-------------|---------|
+| `--ibd=<path>` | Path to .ibd file | `--ibd=/var/lib/mysql/test/table.ibd` |
+
+### 3.2 Optional Arguments
+
+| Argument | Description | Default | Example |
+|----------|-------------|---------|---------|
+| `--output=<dir>` | Output directory | `/tmp/recovered` | `--output=/data/recovered` |
+| `--table-id=<id>` | Table ID for SDI lookup | 0 | `--table-id=12345` |
+| `--page-size=<size>` | Page size: 4096/8192/16384/32768/65536 | 16384 | `--page-size=8192` |
+| `--check-headers` | Check page headers only | false | `--check-headers` |
+| `--truncate-recovery` | Truncate recovery mode | false | `--truncate-recovery` |
+| `--rmrf-recovery` | rm -rf recovery mode | false | `--rmrf-recovery` |
+| `--blob-recovery` | Enable BLOB recovery | false | `--blob-recovery` |
+| `--format=<csv\|sql\|ibd>` | Output format | csv | `--format=sql` |
+
+### 3.3 Examples
 
 ```bash
-# Check page checksums
-./mysql8_recover --ibd=/path/to/table.ibd --check-headers
+# Basic recovery
+./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd --output=/tmp/users_recovered
+
+# Truncate recovery
+./mysql8_recover --ibd=/var/lib/mysql/test/orders.ibd --output=/tmp/orders_recovered --truncate-recovery --format=sql
+
+# rm -rf recovery
+./mysql8_recover --ibd=/var/lib/mysql/test/products.ibd --output=/tmp/products_recovered --rmrf-recovery --format=csv
+
+# Specify page size (for non-standard page sizes)
+./mysql8_recover --ibd=/var/lib/mysql/test/large.ibd --output=/tmp/large_recovered --page-size=32768
+
+# Check headers only
+./mysql8_recover --ibd=/var/lib/mysql/test/check.ibd --check-headers
 ```
 
-### 2.2 Truncate Recovery
+---
 
-```bash
-# Recover from truncated table
-./mysql8_recover --ibd=/path/to/truncated.ibd --output=/tmp/recovered --truncate-recovery
+## 4. Graphical Interface
+
+### 4.1 Interface Layout
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  MySQL 8.x Recovery Engine v1.0.0                          │
+├─────────────────────────────────────────────────────────────┤
+│  [File] [Recovery] [Export] [View] [Help]                  │
+├─────────────────────────────────────────────────────────────┤
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Recovery Options                                     │  │
+│  │  ┌─────────────────────────────────────────────────┐  │  │
+│  │  │ Row Format: [Auto Detect ▼]                    │  │  │
+│  │  │ Page Size: [16384]                              │  │  │
+│  │  │ [✓] Validate Checksums                          │  │  │
+│  │  │ [✓] Enable BLOB Recovery                        │  │  │
+│  │  │ Output Path: [/tmp/recovered] [Browse]         │  │  │
+│  │  └─────────────────────────────────────────────────┘  │  │
+│  │  [Start Recovery]                                     │  │
+│  └───────────────────────────────────────────────────────┘  │
+│  ┌───────────────────────────────────────────────────────┐  │
+│  │  Pages | Records | Log                                │  │
+│  └───────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 2.3 BLOB Recovery
+### 4.2 Features
+
+#### 4.2.1 Recovery Tab
+
+- **Row Format**: Select row format (Auto Detect auto-detects)
+- **Page Size**: Set page size (default 16384)
+- **Validate Checksums**: Enable checksum validation
+- **Enable BLOB Recovery**: Enable BLOB recovery
+- **Output Path**: Set output directory
+
+#### 4.2.2 Pages Tab
+
+- Display list of all pages
+- Show page type, record count, status
+- Support page-level preview
+
+#### 4.2.3 Records Tab
+
+- Display parsed records
+- Support record-level preview
+- Support export
+
+#### 4.2.4 Log Tab
+
+- Display operation logs
+- Support log search
+- Support log export
+
+---
+
+## 5. Data Export
+
+### 5.1 CSV Export
 
 ```bash
-# Recover table with BLOB fields
-./mysql8_recover --ibd=/path/to/table_with_blob.ibd --output=/tmp/recovered --blob-recovery
-```
-
-### 2.4 Redo Log Replay
-
-```bash
-# Apply Redo Log for forward recovery
-./mysql8_recover --ibd=/path/to/table.ibd --redo-log=/path/to/ib_logfile0 --output=/tmp/recovered
-```
-
-### 2.5 Export to Multiple Formats
-
-```bash
-# Export as CSV
+# Command line
 ./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --format=csv
 
-# Export as SQL
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
+```
+
+### 5.2 SQL Export
+
+```bash
+# Command line
 ./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --format=sql
 
-# Export as ibd (repaired tablespace)
-./mysql8_recover --ibd=/path/to/corrupted.ibd --output=/tmp/repaired.ibd --format=ibd
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
 ```
 
-## 3. Supported MySQL Versions
-
-| Version | Row Formats | Checksums | SDI | Status |
-|---------|-------------|-----------|-----|--------|
-| 5.6     | REDUNDANT, COMPACT | INNODB, OLD | None | ✅ Basic Support |
-| 5.7     | REDUNDANT, COMPACT | INNODB, CRC32C | None | ✅ Basic Support |
-| 8.0     | REDUNDANT, COMPACT, DYNAMIC, COMPRESSED | CRC32C | Supported | ✅ Full Support |
-| 8.1+    | All 8.0 formats | CRC32C | Supported | ✅ Full Support |
-| 9.0+    | All 8.0 formats | CRC32C | Supported | 🔄 Future Support |
-
-## 4. Supported Disaster Scenarios
-
-| Scenario | Recovery Capability | Notes |
-|----------|---------------------|-------|
-| Truncate | ✅ Full Recovery | Based on page chain and Redo Log |
-| rm -rf | ✅ Partial Recovery | Requires uncovered data pages |
-| File header corruption | ✅ Repair | Rebuild file header |
-| Tablespace corruption | ✅ Partial Recovery | Based on available pages |
-| Redo Log application | ✅ Full Recovery | Forward recovery |
-| BLOB corruption | ✅ Partial Recovery | Based on page chain |
-
-## 5. Output Formats
-
-### 5.1 CSV Format
-
-```csv
-id,name,email,created_at
-1,John Doe,john@example.com,2024-01-01 10:00:00
-2,Jane Smith,jane@example.com,2024-01-02 11:30:00
-```
-
-### 5.2 SQL Format
-
-```sql
--- Recovered from table: users
--- Engine: InnoDB
--- Row Format: DYNAMIC
-
-CREATE TABLE `users` (
-  `id` bigint unsigned NOT NULL AUTO_INCREMENT,
-  `name` varchar(255) NOT NULL,
-  `email` varchar(255) DEFAULT NULL,
-  `created_at` datetime DEFAULT NULL,
-  PRIMARY KEY (`id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-
-INSERT INTO `users` (`id`, `name`, `email`, `created_at`) VALUES
-(1, 'John Doe', 'john@example.com', '2024-01-01 10:00:00'),
-(2, 'Jane Smith', 'jane@example.com', '2024-01-02 11:30:00');
-```
-
-### 5.3 IBD Format
-
-Repaired tablespace file, can be used directly for MySQL recovery.
-
-## 6. Common Issues
-
-### 6.1 Cannot Read File
-
-**Problem**: `[ERROR] Cannot open file: /path/to/file.ibd`
-
-**Solution**:
-1. Check file permissions: `ls -l /path/to/file.ibd`
-2. Confirm file exists: `file /path/to/file.ibd`
-3. Check if file is being used by another process
-
-### 6.2 Checksum Validation Failed
-
-**Problem**: `[WARN] Page checksum validation failed`
-
-**Solution**:
-1. Use `--no-checksum` option to skip checksum validation
-2. Check if file is corrupted
-3. Try recovering from backup
-
-### 6.3 SDI Parsing Failed
-
-**Problem**: `[WARN] Failed to parse SDI JSON`
-
-**Solution**:
-1. Check if file is a valid InnoDB tablespace
-2. Try extracting SDI from ibdata file
-3. Use `--force` option for forced recovery
-
-### 6.4 BLOB Recovery Failed
-
-**Problem**: `[WARN] Failed to reconstruct BLOB data`
-
-**Solution**:
-1. Check if BLOB page chain is complete
-2. Confirm all BLOB pages are accessible
-3. Try using `--partial-blob` option for partial recovery
-
-## 7. Advanced Options
-
-### 7.1 Debug Mode
+### 5.3 IBD Export
 
 ```bash
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --debug
+# Command line
+./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/repaired --format=ibd
+
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
 ```
 
-### 7.2 Verbose Logging
+---
+
+## 6. Disaster Recovery Scenarios
+
+### 6.1 Truncate Recovery
+
+#### 6.1.1 Scenario Description
+
+When `TRUNCATE TABLE` command is executed, data pages are marked as unallocated, but actual data remains on disk.
+
+#### 6.1.2 Recovery Steps
+
+1. **Stop database writes immediately**
+2. **Backup current disk state**
+3. **Use recovery tool to scan .ibd file**
+4. **Parse page chain and extract records**
+5. **Export as CSV/SQL/IBD**
+
+#### 6.1.3 Command Line Example
 
 ```bash
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --verbose
+./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+    --output=/tmp/users_recovered \
+    --truncate-recovery \
+    --format=sql
 ```
 
-### 7.3 Custom Page Size
+### 6.2 rm -rf Recovery
+
+#### 6.2.1 Scenario Description
+
+When `rm -rf *.ibd` is executed, file system entries are deleted, but data may still exist on disk.
+
+#### 6.2.2 Recovery Steps
+
+1. **Stop disk writes immediately**
+2. **Use disk scanning tool to recover files**
+3. **Or use recovery tool to scan disk directly**
+4. **Identify InnoDB page structure**
+5. **Extract table structure and data**
+
+#### 6.2.3 Command Line Example
 
 ```bash
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --page-size=8192
+./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+    --output=/tmp/users_recovered \
+    --rmrf-recovery \
+    --format=csv
 ```
 
-Supported page sizes: 4096, 8192, 16384, 32768, 65536
+### 6.3 File Header Corruption Recovery
 
-### 7.4 Specify Row Format
+#### 6.3.1 Scenario Description
+
+File header corruption may be caused by disk bad sectors, file system errors, forced power-off, etc.
+
+#### 6.3.2 Recovery Steps
+
+1. **Read corrupted .ibd file**
+2. **Identify corrupted page headers**
+3. **Repair page type, checksum, etc.**
+4. **Rebuild file header**
+5. **Export repaired file**
+
+#### 6.3.3 Command Line Example
 
 ```bash
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --row-format=compact
+./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+    --output=/tmp/users_repaired \
+    --format=ibd
 ```
 
-Supported row formats: compact, dynamic, redundant, compressed
+---
+
+## 7. Advanced Features
+
+### 7.1 SDI Metadata Parsing
+
+SDI (Space Descriptor Index) stores table metadata including:
+
+- Table name
+- Column definitions
+- Index definitions
+- Partition information
+
+### 7.2 BLOB Recovery
+
+BLOB data is stored in independent page chains. The recovery tool supports:
+
+- Multi-page BLOB reconstruction
+- Page chain integrity validation
+- Circular reference detection
+
+### 7.3 Redo Log Replay
+
+Redo Log records all data modification operations. The recovery tool supports:
+
+- Redo Log parsing
+- Forward recovery
+- Transaction rollback
+
+---
 
 ## 8. Performance Optimization
 
-### 8.1 Multi-threading
+### 8.1 Memory Mapping
 
-```bash
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --threads=4
-```
+Use mmap for file mapping to avoid additional memory copies.
 
-### 8.2 Memory Mapping
+### 8.2 CRC32C Lookup Table
 
-Memory mapping is enabled by default for better performance.
+Use compile-time generated CRC32C table for zero runtime overhead.
 
-### 8.3 Cache Optimization
+### 8.3 Zero-Copy View
 
-Page caching is used to reduce disk I/O.
+Use `std::span` to provide zero-copy page data view.
 
-## 9. Contribution Guidelines
+---
 
-### 9.1 Code Style
+## 9. Troubleshooting
 
-- Follow Google C++ Style Guide
-- Use clang-format for formatting
-- Add unit tests
+### 9.1 Common Issues
 
-### 9.2 Commit Convention
+#### 9.1.1 Cannot Open File
 
-```
-type(scope): description
+**Error**: `Failed to open file: /path/to/file.ibd`
 
-body
+**Solution**:
+1. Check file path is correct
+2. Check file permissions
+3. Check file is not locked by another process
 
-footer
-```
+#### 9.1.2 Parse Failure
 
-Types: feat, fix, docs, style, refactor, test, chore
+**Error**: `Failed to parse page 0`
 
-### 9.3 Testing
+**Solution**:
+1. Check page size is correct
+2. Check row format is correct
+3. Check file is not corrupted
 
-```bash
-# Run all tests
-ctest --verbose
+#### 9.1.3 Low Recovery Rate
 
-# Run specific test
-./build/tests/test_page_header
+**Issue**: Recovered record count is much lower than expected
 
-# Generate test data
-python3 tools/ibd_generator.py test_table
-```
+**Solution**:
+1. Check if data has been overwritten
+2. Check if page chain is complete
+3. Try different row formats
 
-## 10. License
+### 9.2 Log Analysis
+
+Log files are located at `recovery.log` in the output directory, containing:
+
+- Operation steps
+- Error messages
+- Performance statistics
+
+---
+
+## 10. Best Practices
+
+### 10.1 Disaster Recovery
+
+1. **Stop writes immediately**: Stop database writes immediately after discovering accidental operation
+2. **Backup current state**: Backup current disk state first
+3. **Use professional tools**: Use verified recovery tools
+4. **Test recovery**: Verify recovery results in test environment
+5. **Validate data**: Verify data integrity after recovery
+
+### 10.2 Performance Optimization
+
+1. **Use SSD**: SSD provides faster I/O performance
+2. **Increase memory**: More memory reduces disk I/O
+3. **Parallel processing**: Use multi-threading to accelerate recovery
+
+---
+
+## 11. Technical Support
+
+### 11.1 Documentation
+
+- [Architecture Design](./architecture.md)
+- [Principle Documents](./principle_*.md)
+- [Test Strategy](./test_strategy.md)
+
+### 11.2 Community
+
+- GitHub Issues: https://github.com/your-org/mysql8_recovery/issues
+- Email: support@mysql8-recovery.com
+
+---
+
+## 12. License
 
 MIT License
+
+---
+
+## 13. Author
+
+**jliang.fang** - Chief Database Kernel Architect
+
+---
+
+<div align="center">
+  <p>Building the world's leading MySQL data recovery tool</p>
+</div>

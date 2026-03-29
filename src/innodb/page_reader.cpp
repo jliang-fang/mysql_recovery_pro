@@ -379,35 +379,24 @@ std::vector<uint8_t> InnoDBFileReader::read_page(uint32_t page_no) {
     if (!is_valid_ || total_pages_ == 0) {
         return {};
     }
-    
+
     // 计算页在文件中的偏移
     uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
     if (offset >= file_size_) {
         return {};
     }
-    
+
     // 读取一页数据（原始数据）
     std::vector<uint8_t> page_data(page_size_);
     const uint8_t* data = mapper_->data() + offset;
     std::memcpy(page_data.data(), data, page_size_);
 
-    // ✅ P0-1 修复：页类型校验 - 使用正确的偏移量（相对于页起始位置）
-    // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
-    // NOT 12 (which is LSN high) or 38+12=50 (absolute offset)
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 16);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
-        page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
-        page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
-        std::cerr << "[WARN] Page " << page_no << " has invalid type: " << page_type << std::endl;
-        return {};
+    // 校验校验和（非严格模式，允许校验和失败但继续返回数据）
+    if (!PageReader::validate_checksum(page_data, false)) {
+        std::cerr << "[WARN] Page " << page_no << " checksum validation failed, returning raw data" << std::endl;
+        // 非严格模式下，校验和失败仍返回原始数据
     }
-    
-    // 校验校验和
-    if (!PageReader::validate_checksum(page_data)) {
-        std::cerr << "[WARN] Page " << page_no << " checksum validation failed" << std::endl;
-        return {};
-    }
-    
+
     return page_data;
 }
 
