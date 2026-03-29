@@ -58,3 +58,8 @@ gtest_discover_tests(test_undo_log_rollback)
 add_executable(test_mysql56_57_compatibility innodb/mysql56_57_compatibility_test.cpp)
 target_link_libraries(test_mysql56_57_compatibility PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_mysql56_57_compatibility)
+
+# Page checksum validation tests (P1-5)
+add_executable(test_page_checksum innodb/page_checksum_test.cpp)
+target_link_libraries(test_page_checksum PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_page_checksum)
