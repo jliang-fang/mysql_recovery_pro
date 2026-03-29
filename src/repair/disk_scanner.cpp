@@ -1,6 +1,7 @@
 #include "dbrecovery/disk/disk_scanner.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_reader.hpp"
 #include <algorithm>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -24,12 +25,13 @@
 #  include <sys/file.h>
 #endif
 
-namespace DBRecovery::Disk {
+namespace dbrecovery {
+namespace disk {
 
 // 辅助结构：临时文件 RAII 管理器（用于自动清理）
 struct TempFile {
     std::string path;
-    ~TempFile() { 
+    ~TempFile() {
         try {
             boost::filesystem::remove(path);
         } catch (...) {}
@@ -43,41 +45,37 @@ bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
         return false;
     }
 
-    // 检查页类型（偏移 0-3 是页类型，小端序）
-    uint32_t type = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
-        std::span<const uint8_t>(page, page_size), 
-        0
-    ) & 0xFFFF; // InnoDB 页类型是 16-bit，位于前 16 位
-    
-    // 检查页类型是否有效（高 16 位应为 0 或特定标记）
-    if (type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::INDEX) &&
-        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::SDI) &&
-        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::FSP_HDR) &&
-        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::BLOB) &&
-        type != static_cast<uint32_t>(DBRecovery::InnoDB::PageType::ALLOCATED)) {
+    // 检查页类型（使用正确的偏移量 FIL_PAGE_TYPE_ABS = 16）
+    uint16_t type = dbrecovery::innodb::read_le<uint16_t>(page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+
+    // 检查页类型是否有效
+    if (type != dbrecovery::innodb::FIL_PAGE_INDEX &&
+        type != dbrecovery::innodb::FIL_PAGE_SDI &&
+        type != dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED &&
+        type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
         return false;
     }
 
     // FIL_PAGE_TYPE_ALLOCATED 类型页未启用校验和，跳过校验
-    if (type == static_cast<uint32_t>(DBRecovery::InnoDB::PageType::ALLOCATED)) {
+    if (type == dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED) {
         return true;
     }
 
     // 校验 CRC32C
-    uint32_t stored_crc = DBRecovery::InnoDB::MachRead::read_le<uint32_t>(
-        std::span<const uint8_t>(page, page_size), 
-        24  // FIL_PAGE_CHECKSUM is at offset 24
-    );
-    
-    if (stored_crc == 0) {
+    uint32_t stored_crc = dbrecovery::innodb::read_le<uint32_t>(page, 24);
+
+    if (stored_crc == 0 || stored_crc == 0xFFFFFFFF) {
         // 允许 NONE 校验和（未启用校验）
         return true;
     }
-    
+
     // 计算 CRC32C (Castagnoli)
-    uint32_t computed_crc = DBRecovery::InnoDB::PageReader::compute_crc32c(
-        std::vector<uint8_t>(page, page + page_size)
-    );
+    std::vector<uint8_t> page_vec(page, page + page_size);
+    // 清零校验和字段
+    for (int i = 0; i < 4; ++i) {
+        page_vec[24 + i] = 0;
+    }
+    uint32_t computed_crc = dbrecovery::innodb::PageReader::compute_crc32c(page_vec);
 
     return stored_crc == computed_crc;
 }
@@ -91,77 +89,16 @@ bool DiskScanner::is_innodb_file(const std::string& file_path) {
     // 检查文件大小
     file.seekg(0, std::ios::end);
     size_t file_size = file.tellg();
-    if (file_size < DBRecovery::InnoDB::UNIV_PAGE_SIZE) {
+    if (file_size < dbrecovery::innodb::UNIV_PAGE_SIZE) {
         return false;
     }
 
     // 读取第一页
-    std::vector<uint8_t> page(DBRecovery::InnoDB::UNIV_PAGE_SIZE);
+    std::vector<uint8_t> page(dbrecovery::innodb::UNIV_PAGE_SIZE);
     file.seekg(0, std::ios::beg);
-    file.read(reinterpret_cast<char*>(page.data()), DBRecovery::InnoDB::UNIV_PAGE_SIZE);
+    file.read(reinterpret_cast<char*>(page.data()), dbrecovery::innodb::UNIV_PAGE_SIZE);
 
-    return is_innodb_page(page.data(), DBRecovery::InnoDB::UNIV_PAGE_SIZE);
-}
-
-std::string DiskScanner::get_filesystem_type(const std::string& path) {
-#ifdef _WIN32
-    // Windows平台使用GetVolumeInformation获取文件系统类型
-    wchar_t volume_path[4] = {0};
-    wchar_t fs_name[MAX_PATH] = {0};
-    
-    if (path.length() >= 2 && path[1] == ':') {
-        // 处理驱动器路径如 "C:"
-        volume_path[0] = towlower(path[0]);
-        volume_path[1] = L':';
-        volume_path[2] = L'\\';
-        
-        if (GetVolumeInformationW(volume_path, nullptr, 0, nullptr, nullptr, nullptr, fs_name, MAX_PATH)) {
-            std::wstring ws(fs_name);
-            return std::string(ws.begin(), ws.end());
-        }
-    } else {
-        // 处理文件路径，获取其所在卷
-        wchar_t volume_path_w[MAX_PATH];
-        mbstowcs(volume_path_w, path.c_str(), MAX_PATH);
-        
-        // 提取根目录
-        wchar_t drive[4] = {0};
-        if (path.length() >= 2 && path[1] == ':') {
-            drive[0] = towlower(path[0]);
-            drive[1] = L':';
-            drive[2] = L'\\';
-        } else {
-            // 对于相对路径，使用当前工作目录
-            GetCurrentDirectoryW(MAX_PATH, volume_path_w);
-            
-            // 提取驱动器号
-            if (volume_path_w[0] && volume_path_w[1] == L':') {
-                drive[0] = towlower(volume_path_w[0]);
-                drive[1] = L':';
-                drive[2] = L'\\';
-            }
-        }
-        
-        if (GetVolumeInformationW(drive, nullptr, 0, nullptr, nullptr, nullptr, fs_name, MAX_PATH)) {
-            std::wstring ws(fs_name);
-            return std::string(ws.begin(), ws.end());
-        }
-    }
-    
-    return "Unknown";
-#else
-    struct statfs stat;
-    if (statfs(path.c_str(), &stat) == 0) {
-        switch (stat.f_type) {
-            case 0xEF53:  return "ext2/ext3/ext4";
-            case 0x5346524F: return "Btrfs";
-            case 0x58465342: return "XFS";
-            case 0x28680789: return "F2FS";
-            default:        return "Unknown";
-        }
-    }
-#endif
-    return "Unknown";
+    return is_innodb_page(page.data(), dbrecovery::innodb::UNIV_PAGE_SIZE);
 }
 
 std::vector<std::pair<std::string, size_t>> DiskScanner::scan_disk(const std::string& disk_path, size_t block_size) {
@@ -296,9 +233,12 @@ std::vector<std::string> DiskScanner::recover_deleted_files(const std::string& d
         if (extract_innodb_file(disk_path, offset, size, temp_output_file)) {
             // 成功写入后重命名为最终文件
             std::string final_output = output_dir + "/recovered_" + std::to_string(file_index) + ".ibd";
-            if (boost::filesystem::rename(temp_output_file, final_output)) {
+            try {
+                boost::filesystem::rename(temp_output_file, final_output);
                 recovered_files.push_back(final_output);
                 file_index++;
+            } catch (...) {
+                // 重命名失败，继续下一个
             }
         }
     }
@@ -306,56 +246,5 @@ std::vector<std::string> DiskScanner::recover_deleted_files(const std::string& d
     return recovered_files;
 }
 
-std::vector<struct stat> DiskScanner::get_deleted_file_metadata(const std::string& disk_path, const std::string& output_dir) {
-#ifdef _WIN32
-    // Windows平台暂不支持完整inode扫描，返回空列表并提示
-    std::cerr << "Windows平台暂不支持删除文件元数据恢复功能" << std::endl;
-    return {};
-#else
-    std::vector<struct stat> metadata;
-
-    // ✅ 增加 debugfs 可用性检查
-    if (system("which debugfs > /dev/null 2>&1") != 0) {
-        std::cerr << "debugfs not found, skipping inode recovery\n";
-        return metadata;
-    }
-
-    // 尝试使用 debugfs 工具解析 ext4/ext3 文件系统的空闲 inode 列表
-    std::string cmd = "debugfs -R 'ls -d' " + disk_path + " 2>/dev/null";
-    FILE* fp = popen(cmd.c_str(), "r");
-    if (!fp) {
-        std::cerr << "无法执行 debugfs 命令: " << strerror(errno) << std::endl;
-        return metadata;
-    }
-
-    char line[1024];
-    while (fgets(line, sizeof(line), fp)) {
-        // 示例输出格式：inode 12345 mode 0100644 size 4096 atime ...
-        ino_t ino = 0;
-
-        if (sscanf(line, "inode %llu", &ino) == 1 || sscanf(line, "%*s inode %llu", &ino) == 1) {
-            struct stat s{};
-            s.st_ino = static_cast<ino_t>(ino);
-            s.st_size = 0; // debugfs ls -d 不提供大小信息，设为0占位
-            metadata.push_back(s);
-        }
-    }
-
-    pclose(fp);
-
-    // 如果 debugfs 失败或未安装，则回退到模拟数据（仅用于测试）
-    if (metadata.empty()) {
-        std::cerr << "Warning: debugfs failed, returning placeholder metadata" << std::endl;
-        for (int i = 0; i < 10; ++i) {
-            struct stat s{};
-            s.st_size = 0;
-            s.st_ino = static_cast<ino_t>(i);
-            metadata.push_back(s);
-        }
-    }
-
-    return metadata;
-#endif
-}
-
-}
+} // namespace disk
+} // namespace dbrecovery

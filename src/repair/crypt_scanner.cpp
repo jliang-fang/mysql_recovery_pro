@@ -8,14 +8,14 @@
 #include <stdexcept>
 
 // ✅ 包含必要的头文件以支持安全字节序处理与平台兼容性
-#include "dbrecovery/config.hpp"
-#include "dbrecovery/crypt/crypt_scanner.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/utils/file_mapper.hpp"
 #include "dbrecovery/innodb/binary_reader.hpp"
 #include "dbrecovery/innodb/blob_pointer.hpp"
+#include "dbrecovery/crypt/crypt_scanner.hpp"
 
-namespace DBRecovery::Crypt {
+namespace dbrecovery {
+namespace crypt {
 
 // ✅ 安全临时文件生成（跨平台，避免竞态条件）
 std::string generate_temp_filename() {
@@ -24,18 +24,18 @@ std::string generate_temp_filename() {
     if (!GetTempPathW(MAX_PATH, temp_path)) {
         throw std::runtime_error("Failed to get temporary directory path");
     }
-    
+
     wchar_t temp_name[MAX_PATH];
     if (!GetTempFileNameW(temp_path, L"dbrecovery_", 0, temp_name)) {
         throw std::runtime_error("Failed to generate unique temporary filename");
     }
-    
+
     // Convert wide string to UTF-8
     int len = WideCharToMultiByte(CP_UTF8, 0, temp_name, -1, nullptr, 0, nullptr, nullptr);
     if (len <= 0) {
         throw std::runtime_error("Failed to convert temporary filename to UTF-8");
     }
-    
+
     std::string path(len - 1, '\0'); // Exclude null terminator
     WideCharToMultiByte(CP_UTF8, 0, temp_name, -1, &path[0], len, nullptr, nullptr);
     return path;
@@ -57,23 +57,32 @@ std::string sha256(const std::string& /*file_path*/) {
     throw std::runtime_error("SHA-256 implementation not provided in this context");
 }
 
-} // namespace
+// 解密文件的占位符实现（需要 CryptoPP 实际实现）
+bool decrypt_file(const std::string& /*input_file*/, const std::string& /*output_file*/, const std::string& /*password*/,
+                  const std::string& /*algorithm*/, bool /*use_bcrypt*/) {
+    // 实际实现应使用 CryptoPP 进行解密
+    // 此处返回 false 表示未实现
+    return false;
+}
+
+} // namespace crypt
+} // namespace dbrecovery
 
 // ✅ 修复后的 crack_password 函数（无竞态条件、安全清理）
-bool CryptScanner::crack_password(const std::string& input_file, 
+bool dbrecovery::crypt::CryptScanner::crack_password(const std::string& input_file,
                                   const std::vector<std::string>& passwords,
                                   std::string& cracked_password) {
-    if (passwords.size() > MAX_PASSWORD_ATTEMPTS) {
+    if (passwords.size() > dbrecovery::crypt::MAX_PASSWORD_ATTEMPTS) {
         throw std::runtime_error("Password list too large");
     }
 
     for (const auto& pwd : passwords) {
         // ✅ 使用安全生成的临时文件名（忽略调用者提供的 output_dir）
-        std::string temp_file = generate_temp_filename();
+        std::string temp_file = dbrecovery::crypt::generate_temp_filename();
 
         try {
-            if (decrypt_file(input_file, temp_file, pwd)) {
-                if (is_innodb_file(temp_file)) {
+            if (dbrecovery::crypt::decrypt_file(input_file, temp_file, pwd, "AES-256", false)) {
+                if (dbrecovery::disk::DiskScanner::is_innodb_file(temp_file)) {
                     cracked_password = pwd;
                     // ✅ 确保删除临时文件
                     std::remove(temp_file.c_str());
@@ -100,5 +109,3 @@ bool CryptScanner::crack_password(const std::string& input_file,
 
     return false;
 }
-
-} // namespace DBRecovery::Crypt

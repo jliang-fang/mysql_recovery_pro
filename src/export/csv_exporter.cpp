@@ -4,10 +4,6 @@
 namespace dbrecovery {
 namespace exporter {
 
-DataExporter::DataExporter() {}
-
-DataExporter::~DataExporter() = default;
-
 CSVExporter::CSVExporter(const std::vector<std::string>& headers) : headers_(headers) {}
 
 CSVExporter::~CSVExporter() = default;

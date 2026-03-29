@@ -144,7 +144,7 @@ bool ParallelScanner::scan_all(uint32_t total_pages) {
 }
 
 ParallelScanner::ScanStats ParallelScanner::get_stats() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> lock(stats_mutex_);
     return stats_;
 }
 
