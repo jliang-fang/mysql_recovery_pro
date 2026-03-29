@@ -76,6 +76,30 @@ public:
         return recovered_records_;
     }
 
+    /**
+     * @brief 导出为 CSV 格式
+     *
+     * @param records 记录数据
+     * @param csv_path 输出文件路径
+     * @return true 成功导出
+     * @return false 失败
+     */
+    bool export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
+                       const std::string& csv_path);
+
+    /**
+     * @brief 导出为 SQL 格式
+     *
+     * @param records 记录数据
+     * @param table_name 目标表名
+     * @param sql_path 输出文件路径
+     * @return true 成功导出
+     * @return false 失败
+     */
+    bool export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
+                       const std::string& table_name,
+                       const std::string& sql_path);
+
 private:
     // ✅ 新增：关键成员变量
     std::unique_ptr<recovery::BlobReconstructor> blob_reconstructor_;
