@@ -47,22 +47,24 @@ bool PageParser::parse_header() {
     
     fil_prev_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 0);
     fil_next_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
-    // LSN (8 bytes)
-    uint64_t fil_lsn = dbrecovery::innodb::read_le<uint64_t>(buffer_, 8);
+    // LSN (8 bytes) - reserved for future checksum validation
+    // uint64_t fil_lsn = dbrecovery::innodb::read_le<uint64_t>(buffer_, 8);
     // ✅ P0-1 修复：使用正确的偏移量（相对于页起始位置）
     // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
     page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 16);
-    uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16 + 4);
+    // space_id (4 bytes) - reserved for future validation
+    // uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16 + 4);
     page_offset_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16 + 6);
 
     // ✅ Step 1.1: 校验页校验和（FIL_PAGE_SPACE_CHECKSUM at offset 4, 8, 24, 28）
     bool checksum_valid = true;
     if (size_ >= 52) {
-        uint32_t crc32_a = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
-        uint32_t crc32_b = dbrecovery::innodb::read_le<uint32_t>(buffer_, 8);
+        // Read checksum fields for future validation
+        // uint32_t crc32_a = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
+        // uint32_t crc32_b = dbrecovery::innodb::read_le<uint32_t>(buffer_, 8);
         uint32_t checksum_a = dbrecovery::innodb::read_le<uint32_t>(buffer_, 24);
         uint32_t checksum_b = dbrecovery::innodb::read_le<uint32_t>(buffer_, 28);
-        
+
         // 简化校验：检查 checksum 字段是否一致
         if (checksum_a != checksum_b && checksum_a != 0 && checksum_b != 0) {
             std::cerr << "[WARN] Checksum mismatch: " << checksum_a << " vs " << checksum_b << "\n";
@@ -101,9 +103,12 @@ bool PageParser::parse_header() {
     header_.free_offset = dbrecovery::innodb::read_le<uint16_t>(header, 6);
 
     // 解析 BTR_HEADER (PAGE_HEADER 后的8字节)
-    uint16_t n_owned = dbrecovery::innodb::read_le<uint16_t>(header, 8);
-    uint32_t max_insert = dbrecovery::innodb::read_le<uint16_t>(header, 10);
-    uint16_t free_space = dbrecovery::innodb::read_le<uint16_t>(header, 12);
+    // n_owned (2 bytes) - reserved for future validation
+    // uint16_t n_owned = dbrecovery::innodb::read_le<uint16_t>(header, 8);
+    // max_insert (2 bytes) - reserved for future validation
+    // uint32_t max_insert = dbrecovery::innodb::read_le<uint16_t>(header, 10);
+    // free_space (2 bytes) - reserved for future validation
+    // uint16_t free_space = dbrecovery::innodb::read_le<uint16_t>(header, 12);
 
     // ✅ Step 4: 解析 flags (offset 24 in FIL_HEADER)
     if (size_ < 26) {
