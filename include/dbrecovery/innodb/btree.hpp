@@ -144,6 +144,22 @@ public:
     // ✅ P0 新增：Redo 记录回放（支持所有行格式）
     void apply_redo_record(const RedoLogRecord& record);
 
+    // ✅ P0-3 修复：REDUNDANT 行格式字段偏移计算辅助函数（完整版）
+    // ✅ 新增：公开方法供测试使用
+    std::optional<uint16_t> calculate_redundant_field_offset(
+        const uint8_t* record_data,
+        size_t record_size,
+        uint16_t field_no);
+
+    // ✅ 新增：DYNAMIC 行格式字段偏移计算辅助函数（公开供测试使用）
+    std::optional<uint16_t> calculate_dynamic_field_offset_public(
+        const uint8_t* record_data,
+        size_t record_size,
+        uint16_t field_no,
+        bool is_compact_format) {
+        return calculate_dynamic_field_offset(record_data, record_size, field_no, is_compact_format);
+    }
+
 private:
     /**
      * @brief 解析单个字段的值（根据列类型）
@@ -175,12 +191,6 @@ private:
 
     // ✅ 修复：移除 inline 和 noexcept，与 .cpp 实现保持一致
     bool parse_user_records() noexcept;
-
-    // ✅ P0-3 修复：REDUNDANT 行格式字段偏移计算辅助函数（完整版）
-    std::optional<uint16_t> calculate_redundant_field_offset(
-        const uint8_t* record_data,
-        size_t record_size,
-        uint16_t field_no);
 };
 
 // ==================== 单元测试入口（供 GTest 调用）====================
