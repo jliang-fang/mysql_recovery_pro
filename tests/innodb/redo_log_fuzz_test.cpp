@@ -263,22 +263,28 @@ TEST(RedoLogFuzzTest, BoundaryPageNoValues) {
 TEST(RedoLogFileFuzzTest, LargeFileParsing) {
     // Create a mock redo log file with multiple records
     std::vector<uint8_t> file_data;
-    
+    file_data.reserve(10 * (1 + 4 + 4 + 10)); // Pre-allocate space for 10 records
+
     // Add multiple records
     for (int i = 0; i < 10; ++i) {
-        file_data.push_back(MLOG_REC_INSERT);  // type
-        write_le<uint32_t>(file_data.data() + file_data.size() - 9, 1, i);  // space_id
-        write_le<uint32_t>(file_data.data() + file_data.size() - 5, 5, 100 + i);  // page_no
+        // Reserve space for record header (type + space_id + page_no = 9 bytes)
+        size_t record_start = file_data.size();
+        file_data.resize(record_start + 9);
+        
+        file_data[record_start] = MLOG_REC_INSERT;  // type
+        write_le<uint32_t>(file_data.data() + record_start + 1, 1, i);  // space_id
+        write_le<uint32_t>(file_data.data() + record_start + 5, 5, 100 + i);  // page_no
+        
         // Add some data
         for (int j = 0; j < 10; ++j) {
             file_data.push_back(static_cast<uint8_t>(j));
         }
     }
-    
+
     // Parse the file
     RedoLogParser parser;
     auto records = parser.parse_file("/tmp/mock_redo_log");
-    
+
     // Note: This test uses a mock file that doesn't exist
     // The parser should handle this gracefully
     EXPECT_TRUE(true); // Placeholder - actual test would need mock file

@@ -99,7 +99,8 @@ TEST(RedoLogRecordTest, ParseMinimumValidRecord) {
 TEST(RedoLogRecordTest, ParseRecordWithTransactionInfo) {
     // 创建带事务信息的记录
     // 格式：[type(1)] [space_id(4)] [page_no(4)] [data_len(2)] [data...] [trx_id(8)] [roll_ptr(8)]
-    std::vector<uint8_t> data(30, 0);
+    // 总大小 = 1 + 4 + 4 + 2 + 10 + 8 + 8 = 37 字节
+    std::vector<uint8_t> data(37, 0);
 
     data[0] = MLOG_COMP_REC_INSERT;
     write_le<uint32_t>(data.data(), 1, 1);
@@ -296,11 +297,11 @@ TEST(RedoLogConstantsTest, AllLogTypes) {
 
 // 测试type字段为最大值
 TEST(RedoLogBoundaryTest, MaxTypeValue) {
-    std::vector<uint8_t> data(5, 0);
+    std::vector<uint8_t> data(9, 0); // 需要 1 + 4 + 4 = 9 字节
     data[0] = 52; // MLOG_INDEX_LOAD (最大值)
     write_le<uint32_t>(data.data(), 1, 1);
     write_le<uint32_t>(data.data(), 5, 100);
-    
+
     auto record = RedoLogParser().parse_record(data.data(), data.size());
     EXPECT_TRUE(record.has_value());
     EXPECT_EQ(record->r_type, 52);

@@ -282,18 +282,18 @@ TEST(RedoLogRecordTest, ToString) {
 
 // Test Case 15: Parse redo log with transaction info
 TEST(RedoLogRecordTest, ParseRecordWithTransactionInfo) {
-    std::vector<uint8_t> data(17, 0);  // 9 byte header + 8 byte transaction info
+    std::vector<uint8_t> data(25, 0);  // 9 byte header + 8 byte trx_id + 8 byte roll_ptr = 25 bytes
     data[0] = MLOG_COMP_REC_INSERT;
     write_le<uint32_t>(data.data(), 1, 1);
     write_le<uint32_t>(data.data(), 5, 100);
-    
+
     // Transaction info (trx_id + roll_ptr)
     write_le<uint64_t>(data.data(), 9, 12345);  // trx_id
-    write_le<uint64_t>(data.data(), 17, 67890); // roll_ptr (beyond our header)
-    
+    write_le<uint64_t>(data.data(), 17, 67890); // roll_ptr
+
     RedoLogParser parser;
     auto record = parser.parse_record(data.data(), data.size());
-    
+
     EXPECT_TRUE(record.has_value());
     EXPECT_EQ(record->r_type, MLOG_COMP_REC_INSERT);
 }
