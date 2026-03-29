@@ -1,10 +1,10 @@
+// src/gui/preview_controller.cpp
 #include "preview_controller.h"
-
 #include <QImage>
 #include <QPixmap>
 #include <QDebug>
 
-PreviewController::PreviewController(QObject *parent)
+PreviewController::PreviewController(QObject* parent)
     : QObject(parent)
     , m_imageProvider(nullptr)
 {
@@ -12,7 +12,7 @@ PreviewController::PreviewController(QObject *parent)
 
 PreviewController::~PreviewController() = default;
 
-void PreviewController::setImageProvider(ImageProviderBase *provider)
+void PreviewController::setImageProvider(ImageProviderBase* provider)
 {
     if (m_imageProvider == provider)
         return;
@@ -21,7 +21,7 @@ void PreviewController::setImageProvider(ImageProviderBase *provider)
     emit imageProviderChanged();
 }
 
-QImage PreviewController::generatePreview(const QString &filePath, int width, int height) const
+QImage PreviewController::generatePreview(const QString& filePath, int width, int height) const
 {
     if (!m_imageProvider || filePath.isEmpty()) {
         qWarning() << "PreviewController: No image provider or empty file path.";
@@ -43,7 +43,7 @@ QImage PreviewController::generatePreview(const QString &filePath, int width, in
     return image;
 }
 
-QPixmap PreviewController::generatePreviewPixmap(const QString &filePath, int width, int height) const
+QPixmap PreviewController::generatePreviewPixmap(const QString& filePath, int width, int height) const
 {
     QImage image = generatePreview(filePath, width, height);
     return QPixmap::fromImage(image);

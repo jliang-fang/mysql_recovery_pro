@@ -26,6 +26,15 @@
 #include <QTimer>
 #include <QDateTime>
 #include <QFileInfo>
+#include <QSplitter>
+#include <QLabel>
+#include <memory>
+
+#include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/recovery/engine.hpp"
+#include "dbrecovery/engine/parallel_scanner.hpp"
+#include "dbrecovery/export/data_exporter.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
 
 class MainWindow::MainWindowPrivate {
 public:
@@ -35,32 +44,32 @@ public:
     QStatusBar* statusBar = nullptr;
     QTextEdit* logTextEdit = nullptr;
     QProgressBar* progressBar = nullptr;
-    
+
     // File menu actions
     QAction* openAction = nullptr;
     QAction* saveAction = nullptr;
     QAction* exitAction = nullptr;
-    
+
     // Recovery menu actions
     QAction* recoverAction = nullptr;
     QAction* truncateRecoveryAction = nullptr;
     QAction* headerRepairAction = nullptr;
-    
+
     // Export menu actions
     QAction* exportCsvAction = nullptr;
     QAction* exportSqlAction = nullptr;
     QAction* exportIbdAction = nullptr;
-    
+
     // View menu actions
     QAction* showLogAction = nullptr;
     QAction* showTreeAction = nullptr;
-    
+
     // Central widget components
     QTabWidget* mainTabWidget = nullptr;
     QTreeWidget* pageTreeWidget = nullptr;
     QTextEdit* recordTextEdit = nullptr;
     QGroupBox* recoveryOptionsGroupBox = nullptr;
-    
+
     // Recovery options
     QComboBox* rowFormatComboBox = nullptr;
     QSpinBox* pageSpinBox = nullptr;
@@ -68,10 +77,16 @@ public:
     QCheckBox* blobRecoveryCheckBox = nullptr;
     QLineEdit* outputLineEdit = nullptr;
     QPushButton* recoverButton = nullptr;
-    
+
     // Status labels
     QLabel* statusLabel = nullptr;
     QLabel* fileLabel = nullptr;
+
+    // Recovery engine state
+    std::unique_ptr<dbrecovery::recovery::RecoveryEngine> recoveryEngine;
+    std::vector<std::map<std::string, std::string>> recoveredRecords;
+    dbrecovery::catalog::TableSchema currentSchema;
+    std::string currentFilePath;
 };
 
 MainWindow::MainWindow(QWidget *parent)
