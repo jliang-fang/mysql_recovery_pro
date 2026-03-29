@@ -44,7 +44,7 @@ std::vector<std::map<std::string, std::string>>
 RecoveryEngine::recover_truncate(
     const catalog::TableSchema& schema) {
 
-    if (!file_reader_ || !file_reader_->is_valid()) {
+    if (!file_reader_ || file_reader_->is_valid() == false) {
         std::cerr << "[ERROR] No file opened" << std::endl;
         return {};
     }
@@ -85,7 +85,7 @@ records.end());
 }
 
 bool RecoveryEngine::repair_header(const std::string& output_path) {
-    if (!file_reader_ || !file_reader_->is_valid()) {
+    if (!file_reader_ || file_reader_->is_valid() == false) {
         std::cerr << "[ERROR] No file opened" << std::endl;
         return false;
     }
