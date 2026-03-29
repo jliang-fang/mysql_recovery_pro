@@ -240,19 +240,15 @@ std::vector<Record> PageParser::parse_records() const {
 
         records.push_back(rec_info);
 
-        // ✅ 增强：防止无限循环
-        if (next_rec_offset == 0 || rec + next_rec_offset <= rec) {
-            std::cerr << "[WARN] Invalid record pointer at offset " << rec_offset 
+        // ✅ 增强：防止无限循环和溢出
+        // 使用无符号比较避免未定义行为（指针溢出检查）
+        size_t next_rec_pos = rec - buffer_ + next_rec_offset;
+        if (next_rec_offset == 0 || next_rec_pos <= rec - buffer_ || next_rec_pos >= size_) {
+            std::cerr << "[WARN] Invalid record pointer at offset " << rec_offset
                       << ", next=" << next_rec_offset << "\n";
             break;
         }
-        
-        // ✅ 防止偏移溢出
-        if (rec + next_rec_offset < rec || rec + next_rec_offset >= buffer_ + size_) {
-            std::cerr << "[ERROR] Record pointer overflow at offset " << rec_offset << "\n";
-            break;
-        }
-        
+
         rec = buffer_ + next_rec_offset;
     }
 

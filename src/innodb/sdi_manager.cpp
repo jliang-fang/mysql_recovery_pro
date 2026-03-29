@@ -20,9 +20,9 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
         throw std::runtime_error("SDI payload too small");
     }
 
-    // Read header
-    uint32_t type = dbrecovery::innodb::read_le<uint32_t>(payload);
-    uint64_t id   = dbrecovery::innodb::read_le<uint64_t>(payload + 4);
+    // Read header (type and id are reserved for future use)
+    // uint32_t type = dbrecovery::innodb::read_le<uint32_t>(payload);
+    // uint64_t id   = dbrecovery::innodb::read_le<uint64_t>(payload + 4);
     uint32_t uncompressed_len = dbrecovery::innodb::read_le<uint32_t>(payload + 12);
     uint32_t compressed_len   = dbrecovery::innodb::read_le<uint32_t>(payload + 16);
 
