@@ -10,6 +10,9 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+signals:
+    void progressUpdated(int progress);
+
 private:
     // UI components
     class MainWindowPrivate;
