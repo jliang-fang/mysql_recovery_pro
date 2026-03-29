@@ -1148,17 +1148,28 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
 
-    // ✅ 修复：使用正确的偏移计算页类型（参考 page_defs.hpp）
-    // FIL_PAGE_TYPE is at offset 16 (relative to page start), not FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET
+    // ✅ P0-2 修复：放宽页类型检查，允许更多页类型（包括未识别的类型）
+    // 原逻辑：只允许 FIL_PAGE_INDEX 和 FIL_PAGE_SDI
+    // 新逻辑：允许所有已知页类型，对未知类型仅警告
     constexpr size_t page_type_offset_in_header = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_in_header);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
-        health.is_valid = false;
-        health.status_message = "Invalid page type: " + std::to_string(page_type);
-        return health;
+    
+    bool valid_page_type = (page_type == dbrecovery::innodb::FIL_PAGE_INDEX ||
+                           page_type == dbrecovery::innodb::FIL_PAGE_SDI ||
+                           page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG ||
+                           page_type == dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED ||
+                           page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB ||
+                           page_type == dbrecovery::innodb::FIL_PAGE_COMPRESSED);
+    
+    if (!valid_page_type) {
+        // ✅ P0-2 修复：对未知页类型仅警告，不直接返回失败
+        // 某些损坏的页可能有错误的类型值，但仍可尝试恢复
+        health.status_message = "Unknown page type: " + std::to_string(page_type) + "; ";
     }
 
-    // 检查INFIMUM和SUPREMUM记录
+    // ✅ P0-2 修复：放宽 INFIMUM/SUPREMUM 检查，允许页太小的情况
+    // 原逻辑：页太小直接返回失败
+    // 新逻辑：页太小仅标记警告，继续检查其他部分
     constexpr size_t min_size_for_records = 100;
     if (page_data_.size() >= min_size_for_records) {
         constexpr uint16_t infimum_offset = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
@@ -1172,7 +1183,8 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
     } else {
         // 页太小，无法包含完整的记录
-        health.status_message = "Page too small for records";
+        health.status_message += "Page too small for records; ";
+        // ✅ P0-2 修复：不设置 is_valid = false，仅标记警告
     }
 
     // 解析页目录
@@ -1182,10 +1194,10 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), n_dir_slots_offset);
         health.n_dir_slots = n_dir_slots;
 
-        // 验证页目录槽数量合理性（至少有INFIMUM和SUPREMUM）
+        // ✅ P0-2 修复：放宽页目录槽检查，仅警告不设置 is_valid = false
         if (n_dir_slots < 2) {
             health.status_message += "Insufficient dir slots; ";
-            health.is_valid = false;
+            // health.is_valid = false;  // ✅ P0-2 修复：移除，仅警告
         }
 
         // ✅ 新增：计算空闲空间
@@ -1199,7 +1211,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         }
     } else {
         health.status_message += "Page header incomplete; ";
-        health.is_valid = false;
+        // health.is_valid = false;  // ✅ P0-2 修复：移除，仅警告
     }
 
     // 解析堆大小
@@ -1209,14 +1221,14 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         uint16_t n_heap = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), n_heap_offset) & 0x7FFF;
         health.n_records = n_heap - 2; // 减去INFIMUM和SUPREMUM
 
-        // 验证堆大小合理性
+        // ✅ P0-2 修复：放宽堆大小检查，仅警告不设置 is_valid = false
         if (n_heap < 2 || n_heap > 16384) {
             health.status_message += "Invalid heap size: " + std::to_string(n_heap);
-            health.is_valid = false;
+            // health.is_valid = false;  // ✅ P0-2 修复：移除，仅警告
         }
     } else {
         health.status_message += "Cannot read heap size; ";
-        health.is_valid = false;
+        // health.is_valid = false;  // ✅ P0-2 修复：移除，仅警告
     }
 
     return health;
