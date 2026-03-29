@@ -4,6 +4,7 @@
 #include <vector>
 #include <optional>
 #include <string>
+#include "dbrecovery/innodb/mach_read.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -35,11 +36,11 @@ struct RedoLogRecord {
     uint32_t r_space_id;      // 表空间ID
     uint32_t r_page_no;       // 页号
     std::vector<uint8_t> r_data; // 原始日志数据
-    
+
     // 可选事务信息（仅在记录类型支持时存在）
     uint64_t r_trx_id = 0;
     uint64_t r_roll_ptr = 0;
-    
+
     std::string to_string() const {
         return "RedoLogRecord{type=" + std::to_string(r_type) +
                ", space_id=" + std::to_string(r_space_id) +
@@ -47,6 +48,31 @@ struct RedoLogRecord {
                ", data_len=" + std::to_string(r_data.size()) + "}";
     }
 };
+
+// ✅ 新增：前置声明 parse_redo_record（供模糊测试使用）
+inline std::optional<RedoLogRecord> parse_redo_record(
+    const uint8_t* data, size_t len) {
+    if (!data || len < 9) {
+        return std::nullopt;
+    }
+
+    RedoLogRecord record;
+    size_t pos = 0;
+
+    // Redo Log 类型是 1 字节 (uint8_t)
+    record.r_type = dbrecovery::innodb::read_le<uint8_t>(data, pos);
+    pos += sizeof(uint8_t);
+
+    // 解析表空间ID和页号 (各4字节)
+    if (pos + 8 <= len) {
+        record.r_space_id = dbrecovery::innodb::read_le<uint32_t>(data, pos);
+        pos += sizeof(uint32_t);
+        record.r_page_no = dbrecovery::innodb::read_le<uint32_t>(data, pos);
+        pos += sizeof(uint32_t);
+    }
+
+    return record;
+}
 
 class RedoLogParser {
 public:

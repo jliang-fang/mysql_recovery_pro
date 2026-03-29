@@ -31,6 +31,16 @@ target_link_libraries(test_fuzz_sdi PRIVATE dbrecovery_innodb GTest::GTest GTest
 target_compile_definitions(test_fuzz_sdi PRIVATE FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION=1)
 gtest_discover_tests(test_fuzz_sdi)
 
+# Fuzz tests for BLOB pointer parsing
+add_executable(test_blob_pointer_fuzz innodb/blob_pointer_fuzz_test.cpp)
+target_link_libraries(test_blob_pointer_fuzz PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_blob_pointer_fuzz)
+
+# Fuzz tests for Redo Log parsing
+add_executable(test_redo_log_fuzz innodb/redo_log_fuzz_test.cpp)
+target_link_libraries(test_redo_log_fuzz PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_redo_log_fuzz)
+
 # Redo log replay tests
 add_executable(test_redo_log_replay innodb/redo_log_replay_test.cpp)
 target_link_libraries(test_redo_log_replay PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
