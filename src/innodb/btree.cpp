@@ -90,10 +90,10 @@ std::optional<uint16_t> BPlusTreeParser::calculate_redundant_field_offset(
     constexpr size_t NEXT_OFFSET_POS = 1;
     constexpr size_t N_FIELDS_POS = 5; // n_fields 在第 5 字节（低 7 位）
 
-    // 解析记录头
-    uint8_t info_bits = record_data[INFO_BITS_POS];
-    uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record_data, NEXT_OFFSET_POS);
-    
+    // 解析记录头 - info_bits and next_offset reserved for future validation
+    // uint8_t info_bits = record_data[INFO_BITS_POS];
+    // uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(record_data, NEXT_OFFSET_POS);
+
     // n_fields 在第 5 字节（低 7 位）
     uint8_t n_fields = record_data[N_FIELDS_POS] & 0x7F;
     
@@ -174,20 +174,21 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     // ✅ P0-2 修复：从记录末尾反向计算字段偏移（严格遵循 MySQL 8.0 rec_get_nth_field_offs_redundant/compact）
     // 假设字段按顺序存储，且每个字段有长度前缀（1字节或2字节）
     size_t data_pos = record_size; // 从末尾开始
-    
+
     for (int i = n_fields - 1; i >= 0; --i) {
         if (data_pos < 2) break; // 至少需要 2 字节读取长度
-        
+
         uint8_t len_byte = record_data[data_pos - 1];
-        uint16_t field_len = 0;
-        
+        // field_len reserved for future validation
+        // uint16_t field_len = 0;
+
         if (len_byte < 255) {
-            field_len = len_byte;
-            data_pos -= 1 + field_len; // 长度前缀 + 数据
+            // field_len = len_byte;
+            data_pos -= 1 + len_byte; // 长度前缀 + 数据
         } else if (data_pos >= 3) {
             data_pos--; // 跳过 0xFF 标记（表示长度 > 254）
-            field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos - 2);
-            data_pos -= 2 + field_len; // 2字节长度前缀 + 数据
+            // field_len = dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos - 2);
+            data_pos -= 2 + dbrecovery::innodb::read_le<uint16_t>(record_data, data_pos - 2); // 2字节长度前缀 + 数据
         } else {
             std::cerr << "[WARN] Insufficient data to read field length at index " << i << std::endl;
             break;
@@ -1117,14 +1118,16 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         }
         
         // ✅ 新增：解析记录头并验证类型
-        uint8_t info_bits = page_data_[rec_offset];
+        // info_bits reserved for future validation
+        // uint8_t info_bits = page_data_[rec_offset];
         uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), rec_offset + 1) & 0x3FFF;
-        
+
         // 验证记录链连续性（除了最后一个记录）
         if (i < record_offsets_.size() - 1) {
             uint16_t expected_next = record_offsets_[i + 1];
-            if (next_offset != expected_next && next_offset != 0xFFFF) {
-                std::cerr << "[WARN] BPlusTreeParser: Record chain broken at offset " << rec_offset 
+            // next_offset != 0xFFFF check is always true because we masked with 0x3FFF
+            if (next_offset != expected_next) {
+                std::cerr << "[WARN] BPlusTreeParser: Record chain broken at offset " << rec_offset
                           << ": next=" << next_offset << ", expected=" << expected_next << std::endl;
                 // 继续处理但标记为不完整
             }
