@@ -196,6 +196,11 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data,
         uint32_t stored_checksum = read_le<uint32_t>(page_data.data(), 24);
         // 如果存储的校验和非零且非全1，则需要验证（加密表空间场景）
         if (stored_checksum != 0 && stored_checksum != 0xFFFFFFFF) {
+            // ✅ P0-1 修复：添加边界检查，防止内存越界
+            if (page_data.size() < 28) {
+                std::cerr << "[ERROR] Page too small for SDI checksum validation" << std::endl;
+                return false;
+            }
             std::vector<uint8_t> page_copy = page_data;
             for (int i = 0; i < 4; ++i) {
                 page_copy[24 + i] = 0;
@@ -206,15 +211,15 @@ bool PageReader::validate_checksum(const std::vector<uint8_t>& page_data,
                 if (out_computed) *out_computed = computed_crc32c;
                 return true;
             }
-            
-            std::cerr << "[WARN] SDI page checksum mismatch. Stored=" << stored_checksum 
+
+            std::cerr << "[WARN] SDI page checksum mismatch. Stored=" << stored_checksum
                       << ", CRC32C=" << computed_crc32c << std::endl;
-            
+
             if (strict_mode) {
                 if (out_computed) *out_computed = computed_crc32c;
                 return false;
             }
-            
+
             // 非严格模式下记录警告但继续
             std::cerr << "[INFO] Continuing in non-strict mode despite SDI checksum mismatch" << std::endl;
         }
