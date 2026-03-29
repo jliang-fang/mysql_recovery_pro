@@ -85,7 +85,8 @@ std::vector<UndoLogRecord> UndoLogParser::parse_file(const std::string& path) {
 
     // 读取整个文件
     std::vector<uint8_t> buffer(file_size);
-    file.read(reinterpret_cast<char*>(buffer.data()), file_size);
+    file.read(reinterpret_cast<char*>(buffer.data()),
+              static_cast<std::streamsize>(file_size));
     file.close();
 
     // 解析所有记录
