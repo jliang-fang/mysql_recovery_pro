@@ -8,6 +8,7 @@
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
 #include "dbrecovery/recovery/engine.hpp"  // ✅ P0-1 修复：使用 recovery::RecoveryEngine
+#include "dbrecovery/catalog/schema_defs.hpp"  //  new: TableSchema definition
 
 namespace fs = std::filesystem;
 
