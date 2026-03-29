@@ -36,6 +36,7 @@ set(SOURCES
     src/innodb/sdi_cache.cpp
     src/innodb/redo_log.cpp
     src/innodb/redo_log_replayer.cpp
+    src/innodb/thread_pool.cpp
     src/innodb/undo_log.cpp
     src/recovery/blob_reconstructor.cpp
     src/recovery/engine.cpp
