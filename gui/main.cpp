@@ -1,12 +1,10 @@
 #include <QApplication>
-#include <QWidget>
+#include "main_window.hpp"
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
 
-    QWidget window;
-    window.setWindowTitle("Hello GUI");
-    window.resize(320, 240);
+    dbrecovery::gui::MainWindow window;
     window.show();
 
     return app.exec();

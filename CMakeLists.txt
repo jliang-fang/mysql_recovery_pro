@@ -56,7 +56,9 @@ target_include_directories(dbrecovery_innodb PUBLIC
     $<$<BOOL:${MYSQL_INCLUDE_DIR}>:${MYSQL_INCLUDE_DIR}>
 )
 
-# ✅ P0-1 修复：使用本地 nlohmann/json（已通过 include_directories 添加）
+# 包含 src/CMakeLists.txt 以添加额外的源文件
+add_subdirectory(src)
+
 # 链接系统 nlohmann_json 库
 target_link_libraries(dbrecovery_innodb PUBLIC nlohmann_json::nlohmann_json)
 

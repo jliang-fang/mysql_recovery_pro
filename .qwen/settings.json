@@ -69,7 +69,19 @@
       "Bash(./tests/test_undo_log)",
       "Bash(/tmp/test_write_le)",
       "Bash(./tests/test_undo_log_rollback *)",
-      "Bash(/tmp/test_write)"
+      "Bash(/tmp/test_write)",
+      "Bash(tree *)",
+      "Bash(cppcheck *)",
+      "Bash(git checkout *)",
+      "Bash(./test_page_header)",
+      "Bash(./test_recovery_engine)",
+      "Bash(./test_parse_records)",
+      "Bash(./test_redo_log_replay)",
+      "Bash(./test_undo_log)",
+      "Bash(./test_undo_log_rollback)",
+      "Bash(./test_fuzz_sdi)",
+      "Bash(./test_integration)",
+      "Bash(chmod *)"
     ]
   },
   "$version": 3

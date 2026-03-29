@@ -15,7 +15,7 @@ endif()
 # 收集源文件
 set(GUI_SOURCES
     main.cpp
-    MainWindow.cpp
+    main_window.cpp
 )
 
 # 创建可执行目标
@@ -29,4 +29,4 @@ else()
 endif()
 
 # 设置包含目录（如果需要）
-target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_SOURCE_DIR}/include)

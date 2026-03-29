@@ -1,6 +1,7 @@
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/btree.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
