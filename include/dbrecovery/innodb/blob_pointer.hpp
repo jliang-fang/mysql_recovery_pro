@@ -195,14 +195,14 @@ struct BlobPointer {
 };
 
 // ✅ 新增：前置声明 build_blob_page_chain（供 parse_blob_pointer 使用）
-std::optional<BlobPageChain> build_blob_page_chain(
+inline std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_space_id,
     uint32_t first_page_no,
     const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader
 );
 
 // ✅ 新增：从页数据中解析 BLOB 指针（20字节）
-std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20,
+inline std::optional<BlobPointer> parse_blob_pointer(const uint8_t* data, size_t data_size = 20,
                                               const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader = [](uint32_t, uint32_t) { return std::nullopt; }) {
     if (!data || data_size < 16) return std::nullopt;
         
@@ -284,7 +284,7 @@ inline std::optional<BlobPointer> parse_blob_pointer(const std::vector<uint8_t>&
 }
 
 // ✅ 新增：从 BLOB 页数据中解析完整页链（实现）
-std::optional<BlobPageChain> build_blob_page_chain(
+inline std::optional<BlobPageChain> build_blob_page_chain(
     uint32_t first_space_id,
     uint32_t first_page_no,
     const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader
@@ -349,7 +349,7 @@ std::optional<BlobPageChain> build_blob_page_chain(
 }
 
 // ✅ 新增：从 BLOB 页数据中读取实际数据长度
-size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
+inline size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
     if (page_data.size() < BlobPageChain::BTR_BPAGE_LEN + 4) {
         return 0;
     }
@@ -369,7 +369,7 @@ size_t read_blob_page_data_length(const std::vector<uint8_t>& page_data) {
 }
 
 // ✅ 新增：从 BLOB 页链中读取完整数据
-std::vector<uint8_t> read_blob_data_from_chain(
+inline std::vector<uint8_t> read_blob_data_from_chain(
     const BlobPageChain& chain,
     uint32_t total_len,
     const std::function<std::optional<std::vector<uint8_t>>(uint32_t, uint32_t)>& page_reader

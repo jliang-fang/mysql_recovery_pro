@@ -67,6 +67,15 @@ public:
      */
     [[nodiscard]] bool is_valid() const { return is_initialized_; }
 
+    /**
+     * @brief 获取恢复的记录列表
+     *
+     * @return const std::vector<std::map<std::string, std::string>>& 恢复的记录
+     */
+    [[nodiscard]] const std::vector<std::map<std::string, std::string>>& recovered_records() const {
+        return recovered_records_;
+    }
+
 private:
     // ✅ 新增：关键成员变量
     std::unique_ptr<recovery::BlobReconstructor> blob_reconstructor_;
@@ -79,6 +88,9 @@ private:
 
     // 恢复状态标志
     bool is_initialized_ = false;
+
+    // 恢复的记录列表
+    std::vector<std::map<std::string, std::string>> recovered_records_;
 };
 
 } // namespace innodb
