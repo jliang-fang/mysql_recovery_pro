@@ -245,7 +245,7 @@ struct alignas(1) RecordHeader {
 };
 
 // ==================== Page Header Structure (for reference) ====================
-struct alignas(1) PageHeader {
+struct PageHeader {
     uint16_t n_dir_slots;   // PAGE_N_DIR_SLOTS
     uint16_t heap_top;      // PAGE_HEAP_TOP
     uint16_t n_heap;        // PAGE_N_HEAP & 0x7FFF
@@ -291,14 +291,14 @@ struct alignas(1) PageHeader {
 };
 
 // ==================== Record Info (parsed from record header) ====================
-struct alignas(1) Record {
+struct Record {
     uint16_t offset;          // absolute offset in page
     uint16_t next_offset;     // next record's absolute offset
     bool is_deleted;          // REC_INFO_DELETED_FLAG
     uint16_t heap_no;         // heap number for ordering
     uint8_t info_bits;        // 原始 info_bits 用于进一步分析
     uint16_t n_fields;        // 字段数量（COMPACT格式）
-    
+
     static std::optional<Record> parse(const uint8_t* ptr, size_t offset, size_t max_size = 6) {
         if (!ptr || max_size < 5) {
             return std::nullopt;

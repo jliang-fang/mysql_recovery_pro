@@ -132,10 +132,11 @@ public:
                             const std::vector<std::pair<uint16_t, std::vector<uint8_t>>>& updates);
 
     // ✅ P0-1 新增：DYNAMIC 行格式字段偏移计算辅助函数
+    // ✅ 修复：参数顺序调整，避免容易混淆
     static std::optional<uint16_t> calculate_dynamic_field_offset(
         const uint8_t* record_data,
-        size_t record_size,
         uint16_t field_no,
+        size_t record_size,
         bool is_compact_format);
 
     // ✅ P0 新增：Redo 回放后更新页校验和
@@ -154,10 +155,10 @@ public:
     // ✅ 新增：DYNAMIC 行格式字段偏移计算辅助函数（公开供测试使用）
     std::optional<uint16_t> calculate_dynamic_field_offset_public(
         const uint8_t* record_data,
-        size_t record_size,
         uint16_t field_no,
+        size_t record_size,
         bool is_compact_format) {
-        return calculate_dynamic_field_offset(record_data, record_size, field_no, is_compact_format);
+        return calculate_dynamic_field_offset(record_data, field_no, record_size, is_compact_format);
     }
 
 private:

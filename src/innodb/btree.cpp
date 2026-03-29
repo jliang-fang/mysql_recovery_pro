@@ -29,20 +29,21 @@ bool BPlusTreeParser::apply_field_update(uint8_t* record_data, size_t record_siz
             opt_offset = calculate_redundant_field_offset(record_data, record_size, field_no);
         } else if (is_compact_or_dynamic_format()) {
             // COMPACT/DYNAMIC 格式使用动态偏移计算
+            // ✅ 修复：参数顺序调整
             opt_offset = calculate_dynamic_field_offset(
                 record_data,
-                record_size,
                 field_no,
+                record_size,
                 true // is_compact_format
             );
         } else {
-            std::cerr << "[ERROR] Unsupported row format " << static_cast<int>(btr_format_) 
+            std::cerr << "[ERROR] Unsupported row format " << static_cast<int>(btr_format_)
                       << " for field offset calculation" << std::endl;
             continue;
         }
-        
+
         if (!opt_offset.has_value()) {
-            std::cerr << "[ERROR] Failed to calculate field offset for field " << field_no 
+            std::cerr << "[ERROR] Failed to calculate field offset for field " << field_no
                       << ", format=" << static_cast<int>(btr_format_) << std::endl;
             continue;
         }
@@ -119,27 +120,28 @@ std::optional<uint16_t> BPlusTreeParser::calculate_redundant_field_offset(
 
     // ✅ P0-3 新增：备用方案，使用记录头中的信息
     std::cerr << "[WARN] calculate_redundant_field_offset: Using fallback offset calculation" << std::endl;
-    
+
     // REDUNDANT 格式字段偏移计算公式：
     // field_offset = record_size - (n_fields - field_no) * 2 - 1
     // 其中每个字段有 2 字节长度前缀，最后 1 字节是 status
     uint16_t fallback_offset = static_cast<uint16_t>(
-        record_size - (n_fields - field_no) * 2 - 1
+        record_size - (static_cast<size_t>(n_fields) - field_no) * 2 - 1
     );
-    
+
     if (fallback_offset >= record_size) {
         std::cerr << "[ERROR] Fallback offset calculation failed" << std::endl;
         return std::nullopt;
     }
-    
+
     return fallback_offset;
 }
 
 // ✅ P0-2 修复：DYNAMIC 行格式字段偏移计算辅助函数（严格遵循 MySQL 8.0 rec_get_nth_field_offs）
+// ✅ 修复：参数顺序调整，避免容易混淆
 std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
     const uint8_t* record_data,
-    size_t record_size,
     uint16_t field_no,
+    size_t record_size,
     bool is_compact_format) {
     // ✅ P0-2 修复：使用常量定义记录头大小（REC_N_NEW_BYTES = 5 for COMPACT/REDUNDANT）
     constexpr size_t COMPACT_HEADER_SIZE = 5; // info_bits(1) + next_offset(2) + heap_no(2)
@@ -151,7 +153,7 @@ std::optional<uint16_t> BPlusTreeParser::calculate_dynamic_field_offset(
 
     // ✅ 新增：边界检查（确保记录头完整）
     if (record_size < COMPACT_HEADER_SIZE) {
-        std::cerr << "[ERROR] Record too small for field offset calculation. Required: " 
+        std::cerr << "[ERROR] Record too small for field offset calculation. Required: "
                   << COMPACT_HEADER_SIZE << ", Actual: " << record_size << std::endl;
         return std::nullopt;
     }
@@ -462,21 +464,22 @@ void BPlusTreeParser::apply_redo_record(const RedoLogRecord& record) {
                     field_updates.emplace_back(field_no, std::move(new_value));
                     pos += len;
                 }
-                
+
                 if (!field_updates.empty()) {
                     // ✅ 修复：使用新的字段偏移计算函数
+                    // ✅ 修复：参数顺序调整
                     for (auto& [field_no, new_val] : field_updates) {
                         auto opt_offset = calculate_dynamic_field_offset(
                             page_data_.data() + offset,
-                            page_data_.size() - offset,
                             field_no,
+                            page_data_.size() - offset,
                             true // is_compact_format
                         );
                         if (opt_offset.has_value()) {
                             size_t target_pos = opt_offset.value();
                             if (target_pos + new_val.size() <= page_data_.size() - offset) {
                                 std::memcpy(page_data_.data() + offset + target_pos, new_val.data(), new_val.size());
-                                std::cerr << "[INFO] MLOG_COMP_REC_UPDATE: updated field " << field_no 
+                                std::cerr << "[INFO] MLOG_COMP_REC_UPDATE: updated field " << field_no
                                           << " at dynamic offset " << target_pos << std::endl;
                             } else {
                                 std::cerr << "[WARN] Dynamic field update exceeds record boundary" << std::endl;
