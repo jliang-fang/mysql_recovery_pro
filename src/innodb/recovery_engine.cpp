@@ -24,7 +24,17 @@ RecoveryEngine::RecoveryEngine() : blob_reconstructor_(std::make_unique<recovery
 RecoveryEngine::~RecoveryEngine() = default;
 
 bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, const std::string& output_dir) {
-    std::cout << "[WARN] recover_from_checkpoint not yet implemented\n";
+    std::cout << "[INFO] recover_from_checkpoint called: " << ibdata_path << "\n";
+    
+    // TODO: 实现完整的检查点恢复逻辑
+    // 这需要：
+    // 1. 读取 ibdata 文件
+    // 2. 解析检查点信息（LSN、事务ID等）
+    // 3. 应用 Redo Log 进行前滚恢复
+    // 4. 恢复所有表空间
+    
+    std::cout << "[WARN] recover_from_checkpoint: Full checkpoint recovery not yet implemented\n";
+    std::cout << "[INFO] Use recover_table() for individual .ibd file recovery\n";
     return false;
 }
 
