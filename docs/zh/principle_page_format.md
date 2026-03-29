@@ -1,233 +1,167 @@
-# InnoDB 页格式原理文档
+# InnoDB 页格式原理详解
 
 ## 1. 概述
 
-InnoDB 是 MySQL 的默认存储引擎，采用页（Page）作为基本存储单位。每个页的大小通常为 16KB，但也支持 4KB、8KB、32KB 和 64KB。
+InnoDB 存储引擎使用页（Page）作为数据存储的基本单位。每个页的大小通常为 16KB（可配置为 4KB、8KB、32KB 或 64KB）。理解 InnoDB 页格式是数据恢复的基础。
 
-## 2. 页结构
+## 2. 页结构总览
 
-### 2.1 页头（FIL Header）- 38 字节
+```
++----------------------------------+
+| FIL Header (38 bytes)            |
++----------------------------------+
+| Page Header (变长)               |
++----------------------------------+
+| Insert/Delete Buffer (可选)      |
++----------------------------------+
+| User Records (变长)              |
++----------------------------------+
+| Free Space (变长)                |
++----------------------------------+
+| Page Directory (变长)            |
++----------------------------------+
+| Page Trailer (8 bytes)           |
++----------------------------------+
+```
 
-| 偏移 | 大小 | 字段 | 说明 |
+## 3. FIL Header（文件页头）
+
+FIL Header 是每个 InnoDB 页的固定部分，位于页的起始位置（偏移 0）。
+
+| 字段 | 偏移 | 大小 | 描述 |
 |------|------|------|------|
-| 0-3 | 4 bytes | FIL_PAGE_PREV | 前一个页号（B+树叶子节点链表） |
-| 4-7 | 4 bytes | FIL_PAGE_NEXT | 下一个页号（B+树叶子节点链表） |
-| 8-15 | 8 bytes | FIL_PAGE_LSN | 日志序列号（LSN） |
-| 16-19 | 4 bytes | FIL_PAGE_SPACE_ID | 表空间ID |
-| 20-23 | 4 bytes | FIL_PAGE_OFFSET | 页偏移 |
-| 24-27 | 4 bytes | FIL_PAGE_SPACE_CHECKSUM | 校验和（CRC32C/INNODB/OLD） |
-| 28-31 | 4 bytes | FIL_PAGE_ARCH_LOG_NO | 归档日志号（MySQL 5.6+） |
-| 32-37 | 6 bytes | FIL_PAGE_DATA_START | 数据开始标记 |
+| FIL_PAGE_PREV | 0 | 4 bytes | 上一页页号（B+Tree 叶子页使用） |
+| FIL_PAGE_NEXT | 4 | 4 bytes | 下一页页号（B+Tree 叶子页使用） |
+| FIL_PAGE_LSN | 8 | 8 bytes | 日志序列号（LSN） |
+| FIL_PAGE_TYPE | 16 | 2 bytes | 页类型 |
+| FIL_PAGE_SPACE_ID | 20 | 4 bytes | 表空间 ID |
+| FIL_PAGE_DATA_END | 24 | 4 bytes | 数据结束标记（用于校验和） |
+| FIL_PAGE_CHECKSUM | 28 | 4 bytes | 校验和 |
 
-### 2.2 页类型（FIL_PAGE_TYPE）
+### 页类型（FIL_PAGE_TYPE）
 
-| 类型值 | 类型名称 | 说明 |
-|--------|----------|------|
+| 类型值 | 名称 | 描述 |
+|--------|------|------|
 | 0 | FIL_PAGE_TYPE_ALLOCATED | 新分配的页 |
-| 9969 (0x2041) | FIL_PAGE_INDEX | B+树索引页 |
-| 9970 (0x2042) | FIL_PAGE_UNDO_LOG | Undo日志页 |
-| 9971 (0x2043) | FIL_PAGE_SDI | SDI元数据页 |
-| 9972 (0x2044) | FIL_PAGE_TYPE_BLOB | BLOB数据页 |
-| 9973 (0x2045) | FIL_PAGE_COMPRESSED | 压缩页 |
+| 9969 (0x26F1) | FIL_PAGE_INDEX | B+Tree 索引页 |
+| 9970 (0x26F2) | FIL_PAGE_UNDO_LOG | Undo Log 页 |
+| 9971 (0x26F3) | FIL_PAGE_SDI | SDI 元数据页 |
+| 9972 (0x26F4) | FIL_PAGE_TYPE_BLOB | BLOB 页 |
+| 9973 (0x26F5) | FIL_PAGE_COMPRESSED | 压缩页 |
 
-### 2.3 页头（Page Header）- 14+ 字节
+## 4. Page Header（页头）
 
-| 偏移 | 大小 | 字段 | 说明 |
+Page Header 位于 FIL Header 之后（偏移 38），大小可变，包含页的元数据。
+
+| 字段 | 偏移 | 大小 | 描述 |
 |------|------|------|------|
-| 0-1 | 2 bytes | PAGE_N_DIR_SLOTS | 页目录槽数量 |
-| 2-3 | 2 bytes | PAGE_HEAP_TOP | 堆顶位置 |
-| 4-5 | 2 bytes | PAGE_N_HEAP | 堆中记录数（15位） |
-| 6-7 | 2 bytes | PAGE_FREE | 空闲空间起始位置 |
-| 8-9 | 2 bytes | PAGE_GARBAGE_END | 垃圾空间结束位置 |
-| 10-11 | 2 bytes | PAGE_LAST_INSERT | 最后插入位置 |
-| 12-13 | 2 bytes | PAGE_DIRECTION | 插入方向 |
-| 14-15 | 2 bytes | PAGE_N_DIRECT_PAGES | 直接页数量 |
+| PAGE_N_DIR_SLOTS | 0 | 2 bytes | 目录槽数量 |
+| PAGE_HEAP_TOP | 2 | 2 bytes | 堆顶位置 |
+| PAGE_N_HEAP | 4 | 2 bytes | 记录数量（15位） |
+| PAGE_FREE | 6 | 2 bytes | 空闲空间起始位置 |
+| PAGE_GARBAGE_END | 8 | 2 bytes | 垃圾空间结束位置 |
+| PAGE_LAST_INSERT | 10 | 2 bytes | 最后插入位置 |
+| PAGE_DIRECTION | 12 | 2 bytes | 插入方向 |
+| PAGE_N_DIRECT_PAGES | 14 | 2 bytes | 直接页数量 |
 
-### 2.4 B+树头（BTR Header）- 8 字节
+## 5. User Records（用户记录）
 
-| 偏移 | 大小 | 字段 | 说明 |
-|------|------|------|------|
-| 0-1 | 2 bytes | BTR_SEG_ID | 段ID（8字节，但只用前4字节） |
-| 4-5 | 2 bytes | BTR_LEVEL | B+树层级（0=叶子节点） |
-| 6-7 | 2 bytes | BTR_INDEX_ID | 索引ID（8字节） |
+用户记录存储实际的表数据。每条记录包含：
 
-### 2.5 记录区域
+### 记录头（Record Header）
 
-#### 2.5.1 系统记录
+| 字段 | 大小 | 描述 |
+|------|------|------|
+| info_bits | 1 byte | 信息位（删除标志、最小标志等） |
+| next_record | 2 bytes | 下一条记录的偏移 |
+| heap_no | 2 bytes | 堆号 |
 
-- **INFIMUM**：最小记录，偏移固定为 54
-- **SUPREMUM**：最大记录，偏移动态计算
+### 记录类型
 
-#### 2.5.2 记录头（Record Header）- 5 字节（COMPACT格式）
+| 类型值 | 名称 | 描述 |
+|--------|------|------|
+| 0 | REC_STATUS_ORDINARY | 普通记录 |
+| 1 | REC_STATUS_NODE_PTR | 节点指针（非叶子页） |
+| 2 | REC_STATUS_INFIMUM | 最小值系统记录 |
+| 3 | REC_STATUS_SUPREMUM | 最大值系统记录 |
 
-| 偏移 | 大小 | 字段 | 说明 |
-|------|------|------|------|
-| 0 | 1 byte | info_bits | 信息位（bit 0-2: 类型, bit 3: 删除标志, bit 4: 最小记录, bit 5: 外部存储） |
-| 1-2 | 2 bytes | next_record_offset | 下一条记录偏移（15位） |
-| 3-4 | 2 bytes | heap_no | 堆编号（15位） |
+## 6. 行格式
 
-#### 2.5.3 记录数据
+InnoDB 支持多种行格式，影响记录的存储方式：
 
-记录数据包含：
-- 列长度信息（变长字段）
-- 列数据
-- NULL位图（如果存在可空列）
+### REDUNDANT（冗余格式）
 
-## 3. 校验和算法
+- MySQL 4.1 之前默认
+- 记录头：6 字节
+- 字段长度：2 字节前缀
+- 适合小字段
 
-### 3.1 CRC32C（MySQL 8.0 默认）
+### COMPACT（紧凑格式）
 
-使用 Castagnoli 多项式 (0x82F63B78)
+- MySQL 5.0 之后默认
+- 记录头：5 字节
+- 可变长度字段：1-2 字节前缀
+- 更节省空间
 
-```cpp
-constexpr std::array<uint32_t, 256> generate_crc32c_table() {
-    std::array<uint32_t, 256> table{};
-    for (uint32_t i = 0; i < 256; ++i) {
-        uint32_t crc = i;
-        for (int j = 0; j < 8; ++j) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ 0x82F63B78;
-            } else {
-                crc >>= 1;
-            }
-        }
-        table[i] = crc;
-    }
-    return table;
-}
-```
+### DYNAMIC（动态格式）
 
-### 3.2 INNODB（MySQL 5.6/5.7）
+- MySQL 5.7 之后默认
+- BLOB 字段存储在溢出页
+- 记录中只存储指针
+- 适合大字段
 
-```cpp
-uint32_t compute_innodb_checksum(const std::vector<uint8_t>& page_data) {
-    const uint32_t* data = reinterpret_cast<const uint32_t*>(page_data.data());
-    size_t len = page_data.size() / 4;
-    
-    uint32_t checksum = 0xFFFFFFFF;
-    for (size_t i = 0; i < len; ++i) {
-        if (i == 6 || i == 7) continue; // 跳过校验和字段
-        checksum ^= read_le<uint32_t>(page_data.data(), i * 4);
-        checksum += (checksum >> 16);
-        checksum &= 0xFFFFFFFF;
-    }
-    return (checksum >> 16) ^ (checksum & 0xFFFF);
-}
-```
+### COMPRESSED（压缩格式）
 
-### 3.3 OLD（MySQL 5.5）
+- 使用 zlib 压缩
+- 页大小可配置
+- 需要额外的压缩/解压开销
 
-```cpp
-uint32_t compute_old_checksum(const std::vector<uint8_t>& page_data) {
-    const uint16_t* data = reinterpret_cast<const uint16_t*>(page_data.data());
-    size_t len = page_data.size() / 2;
-    
-    uint64_t checksum = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (i == 12 || i == 13) continue; // 跳过校验和字段
-        checksum += read_le<uint16_t>(page_data.data(), i * 2);
-        checksum = (checksum & 0xFFFFFFFF) + (checksum >> 32);
-    }
-    return static_cast<uint32_t>((checksum & 0xFFFFFFFF) + (checksum >> 32));
-}
-```
+## 7. 校验和
 
-## 4. 页类型详解
+InnoDB 使用多种校验和算法：
 
-### 4.1 B+树索引页
+| 算法 | MySQL 版本 | 描述 |
+|------|------------|------|
+| NONE | 所有版本 | 不校验 |
+| INNODB | 5.6/5.7 | 传统 InnoDB 校验和 |
+| CRC32C | 8.0+ | Castagnoli CRC32（默认） |
 
-B+树是InnoDB索引的基础数据结构，具有以下特性：
-- 所有数据存储在叶子节点
-- 内部节点只存储索引键
-- 叶子节点通过双向链表连接
+校验和存储在 FIL_PAGE_CHECKSUM 字段（偏移 28）。
 
-### 4.2 Undo Log页
+## 8. 恢复相关要点
 
-用于事务回滚，包含：
-- 事务ID
-- 回滚指针
-- 旧版本数据
+### 8.1 页健康检查
 
-### 4.3 SDI页
+恢复时需要验证：
 
-Space Descriptor Index，存储表的元数据：
-- 表名
-- 列定义
-- 索引定义
-- 分区信息
+1. **页类型**：必须是 FIL_PAGE_INDEX（9969）才能恢复数据
+2. **校验和**：验证数据完整性
+3. **INFIMUM/SUPREMUM**：系统记录必须存在
+4. **页链**：通过 FIL_PAGE_PREV/NEXT 验证连续性
 
-### 4.4 BLOB页
-
-用于存储大对象数据：
-- 链表结构（next_bpage, prev_bpage）
-- 数据长度字段
-- 实际数据
-
-## 5. 页解析流程
+### 8.2 页解析步骤
 
 ```cpp
-bool PageParser::parse_header() {
-    // 1. 解析 FIL Header (offset 0-37)
-    fil_prev_ = read_le<uint32_t>(buffer_, 0);
-    fil_next_ = read_le<uint32_t>(buffer_, 4);
-    fil_lsn_ = read_le<uint64_t>(buffer_, 8);
-    page_type_ = read_le<uint16_t>(buffer_, 12);
-    space_id_ = read_le<uint32_t>(buffer_, 16);
-    page_offset_ = read_le<uint32_t>(buffer_, 20);
-    
-    // 2. 校验页类型
-    if (page_type_ != FIL_PAGE_INDEX &&
-        page_type_ != FIL_PAGE_UNDO_LOG &&
-        page_type_ != FIL_PAGE_SDI) {
-        return false;
-    }
-    
-    // 3. 解析 Page Header (offset 38)
-    header_.n_dir_slots = read_le<uint16_t>(buffer_, 38);
-    header_.heap_top = read_le<uint16_t>(buffer_, 40);
-    header_.n_heap = read_le<uint16_t>(buffer_, 42) & 0x7FFF;
-    
-    // 4. 解析 BTR Header (offset 38+16)
-    page_level_ = read_le<uint16_t>(buffer_, 54) >> 12;
-    
-    return true;
-}
+1. 读取页数据（16KB）
+2. 验证 FIL_HEADER（38 bytes）
+3. 检查页类型是否为 FIL_PAGE_INDEX
+4. 解析 PAGE_HEADER（偏移 38）
+5. 验证 INFIMUM/SUPREMUM 记录
+6. 解析用户记录
+7. 根据行格式解析字段
 ```
 
-## 6. 实际应用
+### 8.3 常见损坏场景
 
-### 6.1 数据恢复
+| 场景 | 影响 | 恢复策略 |
+|------|------|---------|
+| 页头损坏 | 无法解析页 | 从 SDI 恢复元数据 |
+| 记录头损坏 | 无法解析记录 | 跳过损坏记录 |
+| 校验和错误 | 数据可能损坏 | 使用非严格模式 |
+| 页链断裂 | 页不连续 | 重建页链 |
 
-通过解析页结构，可以从损坏的表空间中恢复数据：
-1. 读取所有页
-2. 验证页类型和校验和
-3. 解析记录数据
-4. 重建表结构
+## 9. 参考资料
 
-### 6.2 页健康检查
-
-```cpp
-struct PageHealth {
-    bool is_valid = true;
-    std::string status_message;
-    uint32_t checksum_expected = 0;
-    uint32_t checksum_actual = 0;
-    bool checksum_match = false;
-    
-    // B+Tree specific
-    bool has_infimum = false;
-    bool has_supremum = false;
-    uint16_t n_records = 0;
-    uint16_t n_dir_slots = 0;
-    uint16_t page_level = 0;
-    uint32_t next_page = 0;
-    uint32_t prev_page = 0;
-    uint16_t free_space = 0;
-};
-```
-
-## 7. 参考资料
-
-- MySQL 8.0 源码：`include/page0page.h`, `include/fil0fil.h`
-- InnoDB 内部结构：https://dev.mysql.com/doc/refman/8.0/en/innodb-file-space.html
-- B+树算法：https://dev.mysql.com/doc/refman/8.0/en/innodb-index-types.html
+- MySQL 8.0 源码：`include/page0page.h`
+- MySQL 8.0 源码：`include/fil0fil.h`
+- InnoDB 内部结构文档
