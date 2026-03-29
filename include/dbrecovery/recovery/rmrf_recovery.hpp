@@ -11,6 +11,24 @@
 namespace dbrecovery {
 namespace recovery {
 
+// ✅ P1-3 新增：扫描的文件信息结构
+struct ScannedFile {
+    std::string file_path;
+    uint64_t file_size;
+    uint32_t total_pages;
+    uint32_t valid_index_pages;
+    std::map<uint16_t, uint32_t> page_type_count;
+};
+
+// ✅ P1-3 新增：扫描的设备信息结构
+struct ScannedDevice {
+    std::string device_path;
+    uint64_t device_size;
+    uint32_t total_pages;
+    uint32_t valid_pages;
+    std::map<uint16_t, uint32_t> page_type_count;
+};
+
 /**
  * @brief RmrfRecovery: rm -rf 灾难恢复器
  *
@@ -109,10 +127,23 @@ public:
     [[nodiscard]] const std::vector<std::pair<uint32_t, std::vector<uint8_t>>>&
     sdi_pages() const { return sdi_pages_; }
 
+    // ✅ P1-3 新增：获取总索引页数
+    [[nodiscard]] uint32_t get_total_index_pages() const;
+
+    // ✅ P1-3 新增：获取扫描的文件列表
+    [[nodiscard]] const std::vector<ScannedFile>& get_scanned_files() const;
+
+    // ✅ P1-3 新增：获取扫描的设备列表
+    [[nodiscard]] const std::vector<ScannedDevice>& get_scanned_devices() const;
+
 private:
     uint32_t page_size_;
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> scanned_pages_;
     std::vector<std::pair<uint32_t, std::vector<uint8_t>>> sdi_pages_;
+    
+    // ✅ P1-3 新增：存储扫描的文件和设备信息
+    std::vector<ScannedFile> scanned_files_;
+    std::vector<ScannedDevice> scanned_devices_;
 };
 
 } // namespace recovery
