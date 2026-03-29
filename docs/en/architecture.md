@@ -1,14 +1,14 @@
-# MySQL 8.0 Recovery Engine - Architecture Documentation
+# MySQL 8.x Recovery Engine - Architecture Design Document
 
 ## 1. Overview
 
-This project is a high-performance offline MySQL 8.0+ data recovery engine developed in C++, aiming to build a world-leading, offline-capable MySQL 8.0+ deep data recovery tool.
+This project is a high-performance offline MySQL 8.x data recovery engine developed in C++, aiming to build a world-leading, offline-capable deep data recovery tool for MySQL 5.6, 5.7, 8.0, 8.1, 8.4, and 9.0.
 
 ### 1.1 Core Capabilities
 
 - **InnoDB Page Parsing**: Full support for COMPACT/REDUNDANT/DYNAMIC/COMPRESSED row formats
 - **B+Tree Traversal**: Recursive index traversal with page chain validation
-- **BLOB Recovery**: Multi-page BLOB reconstruction with checksum verification
+- **BLOB Recovery**: Multi-page BLOB reconstruction with checksum validation
 - **Redo Log Replay**: Redo log parsing and replay for all InnoDB row formats
 - **Undo Log Parsing**: Transaction rollback support
 - **SDI Metadata Parsing**: Space Descriptor Index parsing and table structure reconstruction
@@ -26,7 +26,7 @@ This project is a high-performance offline MySQL 8.0+ data recovery engine devel
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                         MySQL 8.0 Recovery Engine                   │
+│                         MySQL 8.x Recovery Engine                   │
 ├─────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐ │
 │  │   FileMapper │  │  PageReader  │  │ BPlusTreeParser││SchemaDefs│ │
@@ -40,8 +40,8 @@ This project is a high-performance offline MySQL 8.0+ data recovery engine devel
 │         │                │                  │               │        │
 │         ▼                ▼                  ▼               ▼        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────┐ │
-│  │  RedoLog     │  │  UndoLog     │  │  Recovery      │  │Export   │ │
-│  │  Parser      │  │  Parser      │  │  Engine        │  │Module   │ │
+│  │  RedoLog     │  │  UndoLog     │  │  Recovery      │  │Exporter  │ │
+│  │  Parser      │  │  Parser      │  │  Engine        │  │Module    │ │
 │  └──────────────┘  └──────────────┘  └──────────────┘  └──────────┘ │
 │         │                │                  │               │        │
 │         ▼                ▼                  ▼               ▼        │
@@ -69,7 +69,7 @@ class FileMapper {
 public:
     explicit FileMapper(const std::string& path);
     ~FileMapper();
-    
+
     bool is_valid() const;
     const uint8_t* data() const;
     size_t size() const;
@@ -94,7 +94,7 @@ public:
                                   bool strict_mode = true,
                                   uint32_t* out_stored = nullptr,
                                   uint32_t* out_computed = nullptr);
-    
+
     static uint32_t compute_crc32c(const std::vector<uint8_t>& page_data);
     static uint32_t compute_innodb_checksum(const std::vector<uint8_t>& page_data);
     static uint32_t compute_old_checksum(const std::vector<uint8_t>& page_data);
@@ -117,22 +117,22 @@ public:
 class BPlusTreeParser {
 public:
     explicit BPlusTreeParser(const std::vector<uint8_t>& page_data);
-    
+
     bool parse() noexcept;
     bool is_valid_page_type() const;
-    
+
     std::vector<std::map<std::string, std::string>> parse_records(
         const catalog::TableSchema& schema) const;
-    
+
     // Redo replay support
     void apply_redo_record(const RedoLogRecord& record);
     void update_page_checksum();
-    
+
     // Field offset calculation
     static std::optional<uint16_t> calculate_dynamic_field_offset(
         const uint8_t* record_data,
-        size_t record_size,
         uint16_t field_no,
+        size_t record_size,
         bool is_compact_format);
 };
 ```
@@ -218,7 +218,7 @@ class SDIManager {
 public:
     static std::optional<std::string> extract_sdi_json(
         const uint8_t* payload, size_t payload_len);
-    
+
     static catalog::TableSchema parse_sdi_record(
         const uint8_t* payload, size_t payload_len);
 };
@@ -232,7 +232,7 @@ public:
 - BLOB pointer parsing (20 bytes)
 - Multi-page BLOB page chain construction
 - Circular reference detection
-- Page chain integrity verification
+- Page chain integrity validation
 
 **Key Interfaces**:
 ```cpp
@@ -243,32 +243,65 @@ struct BlobPointer {
     uint32_t len;
     uint32_t total_len;
     std::vector<std::pair<uint32_t, uint32_t>> chain_pages;
-    
+
     bool is_complete() const;
     bool is_valid(const std::function<...>& page_reader, bool strict_mode) const;
 };
 
 struct BlobPageChain {
     std::vector<std::pair<uint32_t, uint32_t>> pages;
-    
+
     void add_page(uint32_t space_id, uint32_t page_no);
     bool is_valid(const std::function<...>& page_reader, bool strict_mode) const;
     bool has_circular_reference() const;
 };
 ```
 
+### 3.9 Exporter Module
+
+**Responsibility**: Data export functionality
+
+**Features**:
+- CSV export
+- SQL export
+- IBD export (repaired tablespace)
+
+**Key Interfaces**:
+```cpp
+class CSVExporter : public DataExporter {
+public:
+    explicit CSVExporter(const std::vector<std::string>& headers);
+    bool export_record(const std::map<std::string, std::string>& record) override;
+    std::string get_result() const override;
+};
+
+class SQLOutputter : public DataExporter {
+public:
+    explicit SQLOutputter(const std::string& table_name);
+    bool export_record(const std::map<std::string, std::string>& record) override;
+    std::string get_result() const override;
+};
+
+class IBDExporter : public DataExporter {
+public:
+    explicit IBDExporter(uint32_t page_size = 16384);
+    bool export_to_ibd(const std::string& file_path,
+                      const std::map<std::string, std::string>& table_schema);
+};
+```
+
 ## 4. Data Flow
 
 ```
-.ibd file → FileMapper → PageReader → BPlusTreeParser → Records
+.ibd File → FileMapper → PageReader → BPlusTreeParser → Records
                                               ↓
                                          BlobPointer → BLOB Data
                                               ↓
                                          SchemaDefs → Table Schema
                                               ↓
-                                         RecoveryEngine → Recovery Result
+                                         RecoveryEngine → Recovered Data
                                               ↓
-                                         ExportModule → CSV/SQL/ibd
+                                         Exporter Module → CSV/SQL/IBD
 ```
 
 ## 5. Extension Points
@@ -295,15 +328,15 @@ enum class RowFormat {
 ### 5.3 Adding New Export Formats
 
 ```cpp
-class ExportModule {
+class ExporterModule {
 public:
     virtual bool export_to_format(const std::vector<...>& records,
                                   const std::string& path) = 0;
 };
 
-class CSVExporter : public ExportModule { ... };
-class SQLExporter : public ExportModule { ... };
-class IBDExporter : public ExportModule { ... };
+class CSVExporter : public ExporterModule { ... };
+class SQLOutputter : public ExporterModule { ... };
+class IBDExporter : public ExporterModule { ... };
 ```
 
 ## 6. Performance Optimization
@@ -312,14 +345,14 @@ class IBDExporter : public ExportModule { ... };
 
 ```cpp
 static constexpr auto crc32c_table = generate_crc32c_table();
-// Generated at compile time, zero runtime overhead
+// Compile-time generation, zero runtime overhead
 ```
 
 ### 6.2 Memory Mapping
 
-Use mmap to avoid additional memory copies
+Use mmap to avoid extra memory copies
 
-### 6.3 Zero-copy Views
+### 6.3 Zero-copy View
 
 ```cpp
 std::span<const uint8_t> get_page_view(uint32_t page_no);
@@ -330,18 +363,18 @@ std::span<const uint8_t> get_page_view(uint32_t page_no);
 ### 7.1 Unit Tests
 
 - Each core module has independent unit tests
-- Coverage of normal scenarios, edge cases, and exception handling
+- Coverage of normal scenarios, edge cases, and error handling
 
 ### 7.2 Integration Tests
 
-- Complete recovery process tests
-- Multi-page BLOB recovery tests
-- Redo Log replay tests
+- Complete recovery flow testing
+- Multi-page BLOB recovery testing
+- Redo log replay testing
 
 ### 7.3 Fuzz Testing
 
 - Use libFuzzer or AFL for fuzz testing
-- Test parser robustness
+- Test file parser robustness
 
 ## 8. Future Extensions
 
@@ -349,7 +382,7 @@ std::span<const uint8_t> get_page_view(uint32_t page_no);
 
 - MySQL 5.6/5.7 (REDUNDANT/COMPACT)
 - MySQL 8.0/8.1/8.2/8.3/8.4/8.5 (DYNAMIC/COMPRESSED)
-- MySQL 9.0+ (Future versions)
+- MySQL 9.0 (Future versions)
 
 ### 8.2 Supported Disaster Scenarios
 
@@ -357,7 +390,7 @@ std::span<const uint8_t> get_page_view(uint32_t page_no);
 - rm -rf recovery
 - File header corruption recovery
 - Tablespace corruption recovery
-- Redo Log application
+- Redo log application
 
 ### 8.3 GUI Features
 
@@ -365,3 +398,9 @@ std::span<const uint8_t> get_page_view(uint32_t page_no);
 - Page-level visualization
 - Record-level preview
 - Export configuration
+
+## 9. References
+
+- MySQL 8.0 Source Code: `include/page0page.h`, `include/fil0fil.h`
+- InnoDB Internal Structure: https://dev.mysql.com/doc/refman/8.0/en/innodb-file-space.html
+- B+Tree Algorithm: https://dev.mysql.com/doc/refman/8.0/en/innodb-index-types.html
