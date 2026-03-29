@@ -180,3 +180,5 @@ std::vector<struct stat> DBRecovery::Disk::DiskScanner::get_deleted_file_metadat
     throw std::runtime_error("Deleted file recovery is not supported on this platform");
 #endif
 }
+
+} // namespace DBRecovery::Disk

@@ -9,9 +9,13 @@
 
 // ✅ 包含必要的头文件以支持安全字节序处理与平台兼容性
 #include "dbrecovery/config.hpp"
-#include "innodb.h" // 包含 is_innodb_file, decrypt_file 等声明
+#include "dbrecovery/crypt/crypt_scanner.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/utils/file_mapper.hpp"
+#include "dbrecovery/innodb/binary_reader.hpp"
+#include "dbrecovery/innodb/blob_pointer.hpp"
 
-namespace {
+namespace DBRecovery::Crypt {
 
 // ✅ 安全临时文件生成（跨平台，避免竞态条件）
 std::string generate_temp_filename() {
@@ -97,4 +101,4 @@ bool CryptScanner::crack_password(const std::string& input_file,
     return false;
 }
 
-// 其他函数保持不变...
+} // namespace DBRecovery::Crypt

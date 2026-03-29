@@ -50,48 +50,7 @@ namespace DBRecovery::Crypt {
                                  const std::string& algorithm = "AES-256", bool use_bcrypt = false);
 
         // 尝试破解密码（✅ 修复：使用恒定时间比较防止时序攻击）
-        static bool crack_password(const std::string& input_file, const std::string& password_file, std::string& cracked_password) {
-            std::ifstream ifs(password_file);
-            if (!ifs.is_open()) {
-                return false;
-            }
-
-            std::vector<std::string> passwords;
-            std::string line;
-            while (std::getline(ifs, line)) {
-                // 去除行尾空白字符
-                size_t end = line.find_last_not_of(" \t\r\n");
-                if (end != std::string::npos) {
-                    line.erase(end + 1);
-                }
-                passwords.push_back(line);
-            }
-
-            // 假设已知 InnoDB 文件头魔数为 0x00000f21（4字节）
-            const uint8_t expected_header[] = {0x00, 0x00, 0x0f, 0x21};
-            constexpr size_t header_len = sizeof(expected_header);
-
-            for (const auto& pwd : passwords) {
-                std::string decrypted_file = input_file + ".tmp";
-                if (decrypt_file(input_file, decrypted_file, pwd)) {
-                    // ✅ 使用恒定时间比较验证解密结果（校验已知明文头）
-                    FileMapper mapper(decrypted_file);
-                    if (mapper.size() >= header_len) {
-                        const uint8_t* data = reinterpret_cast<const uint8_t*>(mapper.data());
-                        if (constant_time_compare(data, expected_header, header_len)) {
-                            std::remove(decrypted_file.c_str());
-                            cracked_password = pwd;
-                            return true;
-                        }
-                    }
-                    std::remove(decrypted_file.c_str());
-                } else {
-                    std::remove(decrypted_file.c_str());
-                }
-            }
-
-            return false;
-        }
+        static bool crack_password(const std::string& input_file, const std::vector<std::string>& passwords, std::string& cracked_password);
 
         // 检测是否是InnoDB文件
         static bool is_innodb_file(const std::string& file_path);
