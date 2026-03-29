@@ -53,7 +53,10 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(python3 *)",
-      "Bash(./build/mysql8_recover *)"
+      "Bash(./build/mysql8_recover *)",
+      "Bash(./tests/test_parse_records *)",
+      "Bash(./mysql8_recover *)",
+      "Bash(./mysql8_recover)"
     ]
   },
   "$version": 3

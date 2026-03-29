@@ -859,23 +859,27 @@ BPlusTreeParser::BPlusTreeParser(const std::vector<uint8_t>& page_data)
 }
 
 bool BPlusTreeParser::parse() noexcept {
-    // ✅ P0-1 修复：添加页校验和验证（防止解析损坏页）
-    // 在解析任何结构之前，必须先验证页的完整性
-    uint32_t stored_checksum = 0, computed_checksum = 0;
-    bool checksum_valid = dbrecovery::innodb::PageReader::validate_checksum(
-        page_data_, true, &stored_checksum, &computed_checksum);
-
-    if (!checksum_valid) {
-        std::cerr << "[ERROR] BPlusTreeParser: Page checksum validation failed. Stored="
-                  << stored_checksum << ", Computed=" << computed_checksum << ". Aborting parse." << std::endl;
-        return false;
-    }
-
     // ✅ 修复：使用 page_defs.hpp 中定义的常量进行边界检查
     constexpr size_t min_page_size = dbrecovery::innodb::FIL_HEADER_SIZE + 16; // FIL header (38) + minimal page header space
     if (page_data_.size() < min_page_size) {
         std::cerr << "[ERROR] BPlusTreeParser: Page too small. Required: " << min_page_size
                   << ", Actual: " << page_data_.size() << std::endl;
+        return false;
+    }
+
+    // ✅ P0-1 修复：添加页校验和验证（防止解析损坏页）
+    // 在解析任何结构之前，必须先验证页的完整性
+    // 对于小页（< 52 bytes），跳过校验和验证（因为校验和字段可能不存在）
+    uint32_t stored_checksum = 0, computed_checksum = 0;
+    bool checksum_valid = true;
+    if (page_data_.size() >= 52) {
+        checksum_valid = dbrecovery::innodb::PageReader::validate_checksum(
+            page_data_, true, &stored_checksum, &computed_checksum);
+    }
+
+    if (!checksum_valid) {
+        std::cerr << "[ERROR] BPlusTreeParser: Page checksum validation failed. Stored="
+                  << stored_checksum << ", Computed=" << computed_checksum << ". Aborting parse." << std::endl;
         return false;
     }
 
@@ -991,11 +995,13 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
 
     infimum_offset_ = static_cast<uint16_t>(infimum_abs);
 
-    // ✅ 新增：验证 INFIMUM 记录头（必须是 REC_STATUS_INFIMUM = 0x02）
+    // ✅ 修复：验证 INFIMUM 记录头（必须是 REC_STATUS_INFIMUM = 0x02）
+    // REC_INFO_STATUS_MASK = 0x07 (lowest 3 bits) is used to distinguish INFIMUM/SUPREMUM/ORDINARY/Node Pointer
     uint8_t infimum_info_bits = page_data_[infimum_offset_];
-    if ((infimum_info_bits & dbrecovery::innodb::REC_INFO_STATUS_MASK) != dbrecovery::innodb::REC_STATUS_INFIMUM) {
-        std::cerr << "[ERROR] BPlusTreeParser: INFIMUM record type mismatch. Expected 0x02, got 0x"
-                  << std::hex << static_cast<int>(infimum_info_bits & dbrecovery::innodb::REC_INFO_STATUS_MASK) << std::dec << std::endl;
+    uint8_t infimum_type = infimum_info_bits & dbrecovery::innodb::REC_INFO_STATUS_MASK;
+    if (infimum_type != dbrecovery::innodb::REC_STATUS_INFIMUM) {
+        std::cerr << "[ERROR] BPlusTreeParser: INFIMUM record type mismatch. Expected 0x02 (REC_STATUS_INFIMUM), got 0x"
+                  << std::hex << static_cast<int>(infimum_type) << std::dec << std::endl;
         return false;
     }
 
@@ -1134,8 +1140,9 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
         return health;
     }
 
-    // ✅ 新增：使用正确的偏移计算页类型（参考 page_defs.hpp）
-    constexpr size_t page_type_offset_in_header = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::FIL_PAGE_TYPE_OFFSET;
+    // ✅ 修复：使用正确的偏移计算页类型（参考 page_defs.hpp）
+    // FIL_PAGE_TYPE is at offset 16 (relative to page start), not FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET
+    constexpr size_t page_type_offset_in_header = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_in_header);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX && page_type != dbrecovery::innodb::FIL_PAGE_SDI) {
         health.is_valid = false;

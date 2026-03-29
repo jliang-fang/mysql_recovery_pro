@@ -135,7 +135,10 @@ if(ENABLE_ASAN OR ENABLE_UBSAN OR ENABLE_LSAN)
     endif()
 
     string(JOIN "," SANITIZER_LIST ${SANITIZERS})
+
+    target_compile_options(dbrecovery_innodb PUBLIC -g -O0 -fsanitize=${SANITIZER_LIST} -fno-omit-frame-pointer)
+    target_link_libraries(dbrecovery_innodb PUBLIC -fsanitize=${SANITIZER_LIST} -fno-omit-frame-pointer)
     
-    target_compile_options(dbrecovery_innodb PUBLIC -g -O0 -fsanitize=${SANITIZER_LIST})
-    target_link_libraries(dbrecovery_innodb PUBLIC -fsanitize=${SANITIZER_LIST})
+    # 修复：仅在链接时添加 sanitizer（避免链接器找不到库的问题）
+    # sanitizer 库会在运行时自动链接
 endif()

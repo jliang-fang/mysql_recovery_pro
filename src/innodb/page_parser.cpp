@@ -49,9 +49,11 @@ bool PageParser::parse_header() {
     fil_next_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 4);
     // LSN (8 bytes)
     uint64_t fil_lsn = dbrecovery::innodb::read_le<uint64_t>(buffer_, 8);
-    page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 12); // FIL_PAGE_TYPE offset
-    uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16);
-    page_offset_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 20);
+    // ✅ P0-1 修复：使用正确的偏移量（相对于页起始位置）
+    // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
+    page_type_ = dbrecovery::innodb::read_le<uint16_t>(buffer_, 16);
+    uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16 + 4);
+    page_offset_ = dbrecovery::innodb::read_le<uint32_t>(buffer_, 16 + 6);
 
     // ✅ Step 1.1: 校验页校验和（FIL_PAGE_SPACE_CHECKSUM at offset 4, 8, 24, 28）
     bool checksum_valid = true;

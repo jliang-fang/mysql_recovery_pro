@@ -20,6 +20,11 @@ add_executable(test_sdi_manager innodb/sdi_manager_test.cpp)
 target_link_libraries(test_sdi_manager PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_sdi_manager)
 
+# parse_records tests (P1-1)
+add_executable(test_parse_records innodb/parse_records_test.cpp)
+target_link_libraries(test_parse_records PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_parse_records)
+
 # Integration tests (requires generated .ibd files)
 add_executable(test_integration test_integration.cpp)
 target_link_libraries(test_integration PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)

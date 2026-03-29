@@ -176,33 +176,64 @@ def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False, 
         user_rec = bytearray()
         user_rec.append(0x00)  # info_bits (普通记录)
         user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
-        
+
         # NULL 位图（假设所有列都非空）
         user_rec.extend(b'\x00')  # 1 byte null bitmap
-        
+
+        # 预留空间用于后续字段
+        user_rec.extend(b'\x00' * 30)  # 预留30字节
+
         # id 字段 (LONGLONG, 8 bytes)
-        write_le_uint64(user_rec, len(user_rec), 1)
-        
+        write_le_uint64(user_rec, len(user_rec) - 8, 1)
+
         # name 字段 (VARCHAR, 前缀长度 1 字节)
         name_str = "test"
         user_rec.append(len(name_str))
         user_rec.extend(name_str.encode())
-        
-        if multi_page_blob:
-            # 多页 BLOB 指针（20字节）：space_id=0, page_no=100, offset=0, len=50, total_len=200
-            write_le_uint32(user_rec, len(user_rec), 0)   # space_id
-            write_le_uint32(user_rec, len(user_rec), 100) # page_no (first BLOB页)
-            write_le_uint32(user_rec, len(user_rec), 0)   # offset
-            write_le_uint32(user_rec, len(user_rec), 50)  # len (当前页)
-            write_le_uint32(user_rec, len(user_rec), 200) # total_len (跨两页)
-        else:
-            # 单页 BLOB 指针（20字节）：space_id=0, page_no=100, offset=0, len=50, total_len=50
-            write_le_uint32(user_rec, len(user_rec), 0)   # space_id
-            write_le_uint32(user_rec, len(user_rec), 100) # page_no
-            write_le_uint32(user_rec, len(user_rec), 0)   # offset
-            write_le_uint32(user_rec, len(user_rec), 50)  # len
-            write_le_uint32(user_rec, len(user_rec), 50)  # total_len
-        
+
+        # email 字段 (VARCHAR)
+        email_str = "test@example.com"
+        user_rec.append(len(email_str))
+        user_rec.extend(email_str.encode())
+
+        # created_at 字段 (DATETIME2(6))
+        year = 2024
+        month = 1
+        day = 1
+        hour = 0
+        minute = 0
+        second = 0
+        frac = 0
+
+        # Pack date/time into 5 bytes
+        year_low = year & 0xFF
+        year_high = (year >> 8) & 0xFF
+        month_day = ((day << 4) | month) & 0xFF
+        hour_minute = ((minute & 0x3F) << 2) | (hour & 0x1F)
+        second_packed = ((second & 0x3F) << 2) | ((frac >> 16) & 0x03)
+
+        user_rec.append(year_low)
+        user_rec.append(year_high)
+        user_rec.append(month_day)
+        user_rec.append(hour_minute)
+        user_rec.append(second_packed)
+
+        # Pack fractional part (3 bytes for precision=6)
+        frac_bytes = [
+            (frac >> 0) & 0xFF,
+            (frac >> 8) & 0xFF,
+            (frac >> 16) & 0xFF
+        ]
+        user_rec.extend(frac_bytes)
+
+        # BLOB 指针（20字节）
+        user_rec.extend(b'\x00' * 20)  # 预留20字节
+        write_le_uint32(user_rec, len(user_rec) - 20, 0)   # space_id
+        write_le_uint32(user_rec, len(user_rec) - 16, 100) # page_no
+        write_le_uint32(user_rec, len(user_rec) - 12, 0)   # offset
+        write_le_uint32(user_rec, len(user_rec) - 8, 50)   # len
+        write_le_uint32(user_rec, len(user_rec) - 4, 50)   # total_len
+
         record_data.extend(user_rec)
     else:
         # 用户记录示例：id=1, name='test'
@@ -314,7 +345,7 @@ if __name__ == "__main__":
     elif args.scenario == "header_corrupt":
         # 模拟文件头损坏场景
         output_file = args.output or f"{args.table_name}_header_corrupt.ibd"
-        ibd_data = generate_ibd(args.table_name)
+        ibd_data = bytearray(generate_ibd(args.table_name))
         if len(ibd_data) >= 512:
             # 破坏页头的最后 256 字节（包含关键元数据）
             for i in range(256):

@@ -19,10 +19,14 @@ namespace innodb {
 /// @brief Size of the FIL header (fixed at 38 bytes)
 constexpr uint16_t FIL_HEADER_SIZE      = 38;
 
-/// @brief Offset of page type within FIL Header (relative to start of FIL header)
-constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 12;
-/// @brief Absolute offset of page type within a page (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 50)
-constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET; // 38 + 12 = 50
+/// @brief Offset of page type within FIL Header (relative to start of page)
+/// In InnoDB, FIL_PAGE_TYPE is at offset 16 (relative to page start)
+/// This is NOT relative to FIL_HEADER_SIZE!
+constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 16;
+/// @brief Absolute offset of page type within a page (FIL_PAGE_TYPE_OFFSET = 16)
+/// Note: The old definition (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 54) was WRONG!
+/// The page type is at offset 16 (relative to page start), not 54!
+constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_PAGE_TYPE_OFFSET; // 16 (relative to page start)
 /// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
 constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
@@ -36,17 +40,17 @@ constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;
 
 // ✅ 新增：页类型值定义（MySQL 8.0 官方定义，参考 include/fil0fil.h）
 /// @brief B+Tree index page type
-constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x2041 — B+Tree index page
+constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x26f1 — B+Tree index page (MySQL 8.0.36)
 /// @brief Undo log page type
-constexpr uint16_t FIL_PAGE_UNDO_LOG    = 9970;  // 0x2042 — Undo log page
+constexpr uint16_t FIL_PAGE_UNDO_LOG    = 9970;  // 0x26f2 — Undo log page (MySQL 8.0.36)
 /// @brief Freshly allocated page type
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
 /// @brief SDI (Space Descriptor Index) page type
-constexpr uint16_t FIL_PAGE_SDI         = 9971;  // 0x2043 — SDI metadata page
+constexpr uint16_t FIL_PAGE_SDI         = 9971;  // 0x26f3 — SDI metadata page (MySQL 8.0.36)
 /// @brief BLOB page type
-constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 9972;  // 0x2044 — BLOB page
+constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 9972;  // 0x26f4 — BLOB page (MySQL 8.0.36)
 /// @brief Compressed page type
-constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x2045 — Compressed page
+constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x26f5 — Compressed page (MySQL 8.0.36)
 
 // ✅ 新增：页类型读取辅助函数（使用绝对偏移，更直观）
 inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
@@ -55,7 +59,7 @@ inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
 
 // ✅ 新增：静态断言验证关键常量的正确性（编译时检查）
 static_assert(FIL_HEADER_SIZE == 38, "FIL_HEADER_SIZE must be 38 bytes");
-static_assert(FIL_PAGE_TYPE_ABS == 50, "FIL_PAGE_TYPE_ABS must be 38 + 12 = 50");
+static_assert(FIL_PAGE_TYPE_ABS == 16, "FIL_PAGE_TYPE_ABS must be 16 (relative to page start)");
 
 // ✅ 新增：页类型字符串化辅助函数（用于调试输出）
 inline std::string page_type_to_string(uint16_t type) {
