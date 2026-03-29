@@ -18,10 +18,8 @@ namespace innodb {
  * @brief InnoDB 行格式常量（参考 MySQL 8.0 dict0dict.h）
  * 注意：这些常量已在 page_defs.hpp 中定义，此处仅作引用
  */
-namespace row_formats {
-    // ✅ 修复：使用 page_defs.hpp 中定义的常量（uint32_t）
-    using namespace dbrecovery::innodb::row_formats;
-}
+// ✅ P1-1 修复：移除重复命名空间包含，直接使用 page_defs.hpp 中定义的常量
+// using namespace dbrecovery::innodb::row_formats;
 
 /**
  * @brief B+Tree 节点类型
