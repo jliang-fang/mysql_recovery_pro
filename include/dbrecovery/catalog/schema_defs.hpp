@@ -140,25 +140,21 @@ struct TableSchema {
                 std::cerr << "[ERROR] Index " << index.name << " has no columns" << std::endl;
                 return false;
             }
-            
+
             // 验证索引列存在于表中
+            // ✅ P2-1 优化：使用 std::any_of 算法替代原始循环
             for (const auto& col_name : index.columns) {
-                bool found = false;
-                for (const auto& pair : columns) {
-                    if (pair.second.name == col_name) {
-                        found = true;
-                        break;
-                    }
-                }
+                bool found = std::any_of(columns.begin(), columns.end(),
+                    [&col_name](const auto& pair) { return pair.second.name == col_name; });
                 
                 if (!found) {
-                    std::cerr << "[ERROR] Index " << index.name << " references non-existent column " 
+                    std::cerr << "[ERROR] Index " << index.name << " references non-existent column "
                               << col_name << std::endl;
                     return false;
                 }
             }
         }
-        
+
         return true;
     }
     

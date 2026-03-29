@@ -16,8 +16,7 @@ template uint64_t read_le<std::uint64_t>(const uint8_t*, size_t);
 #include <gtest/gtest.h>
 #include "dbrecovery/utils/math_helper.hpp"
 
-namespace dbrecovery {
-namespace utils {
+namespace dbrecovery::utils {
 
 TEST(MathHelperTest, FactorialZero) {
     EXPECT_EQ(factorial(0), 1);
@@ -36,7 +35,6 @@ TEST(MathHelperTest, FactorialOverflow) {
     EXPECT_THROW(factorial(21), std::overflow_error);
 }
 
-} // namespace utils
-} // namespace dbrecovery
+} // namespace dbrecovery::utils
 
 #endif // DBRECOVERY_ENABLE_TESTS

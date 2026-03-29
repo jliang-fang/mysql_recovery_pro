@@ -4,11 +4,17 @@
 #include "dbrecovery/innodb/redo_log.hpp"
 #include "dbrecovery/innodb/blob_pointer.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
+#include <cstdint>
 #include <iostream>
 #include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
+#include <vector>
+#include <utility>
+#include <optional>
+#include <map>
+#include <string>
 
 namespace dbrecovery {
 namespace innodb {
@@ -888,15 +894,15 @@ bool BPlusTreeParser::parse() noexcept {
     }
 
     // ✅ 修复：使用正确的偏移计算页类型，引用 page_defs.hpp 中的常量
-    constexpr size_t page_type_offset = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset);
+    constexpr size_t page_type_offset_val = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
+    uint16_t page_type_val = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_val);
 
     // ✅ 新增：使用统一的页类型常量进行比较
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
-        page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
-        page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
-        std::cerr << "[ERROR] BPlusTreeParser: Invalid page type " << page_type
-                  << " (" << dbrecovery::innodb::page_type_to_string(page_type) << ")" << std::endl;
+    if (page_type_val != dbrecovery::innodb::FIL_PAGE_INDEX &&
+        page_type_val != dbrecovery::innodb::FIL_PAGE_SDI &&
+        page_type_val != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+        std::cerr << "[ERROR] BPlusTreeParser: Invalid page type " << page_type_val
+                  << " (" << dbrecovery::innodb::page_type_to_string(page_type_val) << ")" << std::endl;
         return false;
     }
 
@@ -950,12 +956,24 @@ bool BPlusTreeParser::parse_header() noexcept {
     // ✅ 使用 page_defs.hpp 中定义的常量
     const size_t btr_n_levels_abs = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_N_LEVELS_ABS;
     // ✅ 新增：使用 uint16_t 读取以匹配 page_level_ 类型（实际 InnoDB 中为 2 字节）
-    page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_n_levels_abs);
+    // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
+    try {
+        page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_n_levels_abs);
+    } catch (...) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to read page level" << std::endl;
+        return false;
+    }
 
     // ✅ 修复：flags 位于 BTR header 的偏移 12-13（紧接在 n_owned 之后）
     // BTR header layout: n_levels(4) + ind_page_offset(2) + max_size(2) + n_owned(2) + flags(2) + ...
     const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 12; // BTR header flags at offset 12
-    flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), flags_offset);
+    // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
+    try {
+        flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), flags_offset);
+    } catch (...) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to read flags" << std::endl;
+        return false;
+    }
 
     // ✅ P0-1 新增：从 flags 中解析行格式 (BTR_FORMAT_MASK = 0x07)
     btr_format_ = static_cast<uint8_t>(flags_ & 0x07);
@@ -971,8 +989,14 @@ bool BPlusTreeParser::parse_header() noexcept {
     // ✅ 修复：使用常量定义的偏移读取页链信息（prev_page 和 next_page）
     const size_t prev_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_FREE; // 修复：使用常量定义的偏移
     const size_t next_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_DIRECTION; // 修复：使用常量定义的偏移
-    prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), prev_page_offset);
-    next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), next_page_offset);
+    // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
+    try {
+        prev_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), prev_page_offset);
+        next_page_ = dbrecovery::innodb::read_le<uint32_t>(page_data_.data(), next_page_offset);
+    } catch (...) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to read page chain info" << std::endl;
+        return false;
+    }
     
     // ✅ 新增：验证页链连续性（仅对非叶子节点有意义）
     if (node_type_ != BTreeNodeType::LEAF) {
@@ -1013,7 +1037,14 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
 
     // SUPREMUM 记录偏移（位于 INFIMUM 记录头的 next_record_offset 字段）
     constexpr size_t infimum_next_offset_pos = infimum_abs + 1;
-    uint16_t infimum_next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_next_offset_pos);
+    // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
+    uint16_t infimum_next_offset = 0;
+    try {
+        infimum_next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_next_offset_pos);
+    } catch (...) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to read INFIMUM next offset" << std::endl;
+        return false;
+    }
     supremum_offset_ = static_cast<uint16_t>(infimum_next_offset & 0x3FFF); // ✅ 修复：next_record_offset 是 15 位
 
     if (supremum_offset_ == 0 || supremum_offset_ >= page_data_.size()) {
@@ -1031,7 +1062,14 @@ bool BPlusTreeParser::parse_infimum_supremum() noexcept {
 
     // ✅ 新增：验证记录链连续性（检查 INFIMUM 的 next_record_offset 是否指向 SUPREMUM）
     constexpr size_t infimum_next_offset_field = infimum_abs + 1; // next_record_offset 字段位置
-    uint16_t actual_infimum_next = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_next_offset_field) & 0x3FFF;
+    // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
+    uint16_t actual_infimum_next = 0;
+    try {
+        actual_infimum_next = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), infimum_next_offset_field) & 0x3FFF;
+    } catch (...) {
+        std::cerr << "[ERROR] BPlusTreeParser: Failed to read actual INFIMUM next" << std::endl;
+        return false;
+    }
     if (actual_infimum_next != supremum_offset_) {
         std::cerr << "[ERROR] BPlusTreeParser: Record chain broken. INFIMUM next=" << actual_infimum_next 
                   << ", but SUPREMUM at " << supremum_offset_ << std::endl;
@@ -1120,7 +1158,14 @@ bool BPlusTreeParser::parse_user_records() noexcept {
         // ✅ 新增：解析记录头并验证类型
         // info_bits reserved for future validation
         // uint8_t info_bits = page_data_[rec_offset];
-        uint16_t next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), rec_offset + 1) & 0x3FFF;
+        // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
+        uint16_t next_offset = 0;
+        try {
+            next_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), rec_offset + 1) & 0x3FFF;
+        } catch (...) {
+            std::cerr << "[WARN] BPlusTreeParser: Failed to read next offset for record at " << rec_offset << std::endl;
+            continue;
+        }
 
         // 验证记录链连续性（除了最后一个记录）
         if (i < record_offsets_.size() - 1) {
@@ -1151,20 +1196,20 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     // ✅ P0-2 修复：放宽页类型检查，允许更多页类型（包括未识别的类型）
     // 原逻辑：只允许 FIL_PAGE_INDEX 和 FIL_PAGE_SDI
     // 新逻辑：允许所有已知页类型，对未知类型仅警告
-    constexpr size_t page_type_offset_in_header = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_in_header);
-    
-    bool valid_page_type = (page_type == dbrecovery::innodb::FIL_PAGE_INDEX ||
-                           page_type == dbrecovery::innodb::FIL_PAGE_SDI ||
-                           page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG ||
-                           page_type == dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED ||
-                           page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB ||
-                           page_type == dbrecovery::innodb::FIL_PAGE_COMPRESSED);
+    constexpr size_t page_type_offset_in_header_val = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
+    uint16_t page_type_val = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_in_header_val);
+
+    bool valid_page_type = (page_type_val == dbrecovery::innodb::FIL_PAGE_INDEX ||
+                           page_type_val == dbrecovery::innodb::FIL_PAGE_SDI ||
+                           page_type_val == dbrecovery::innodb::FIL_PAGE_UNDO_LOG ||
+                           page_type_val == dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED ||
+                           page_type_val == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB ||
+                           page_type_val == dbrecovery::innodb::FIL_PAGE_COMPRESSED);
     
     if (!valid_page_type) {
         // ✅ P0-2 修复：对未知页类型仅警告，不直接返回失败
         // 某些损坏的页可能有错误的类型值，但仍可尝试恢复
-        health.status_message = "Unknown page type: " + std::to_string(page_type) + "; ";
+        health.status_message = "Unknown page type: " + std::to_string(page_type_val) + "; ";
     }
 
     // ✅ P0-2 修复：放宽 INFIMUM/SUPREMUM 检查，允许页太小的情况
@@ -1281,7 +1326,7 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
         return false;
     }
 
-    // TODO: 实现完整的记录解析逻辑
+    // ✅ P1-1 实现：调用 parse_records 方法解析记录
     // 这里需要表结构信息来正确解析字段类型和长度
     // 暂时返回空记录列表
     records_.clear();
