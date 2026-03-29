@@ -39,6 +39,31 @@ std::optional<UndoLogRecord> UndoLogParser::parse_record(const uint8_t* data, si
     return record;
 }
 
+std::optional<UndoLogRecord> UndoLogParser::parse_record_with_data_len(
+    const uint8_t* data, size_t len, uint16_t data_len) {
+    if (!data || len < 20 + data_len) {
+        return std::nullopt;
+    }
+
+    UndoLogRecord record;
+    size_t pos = 0;
+
+    // 解析事务ID和回滚指针
+    record.u_trx_id = dbrecovery::innodb::read_le<uint64_t>(data, pos);
+    pos += 8;
+    record.u_roll_ptr = dbrecovery::innodb::read_le<uint64_t>(data, pos);
+    pos += 8;
+
+    // 解析类型
+    record.u_type = dbrecovery::innodb::read_le<uint16_t>(data, pos);
+    pos += 2;
+
+    // 解析数据长度
+    record.u_data.assign(data + pos, data + pos + data_len);
+
+    return record;
+}
+
 std::vector<UndoLogRecord> UndoLogParser::parse_file(const std::string& path) {
     std::vector<UndoLogRecord> records;
 
@@ -64,18 +89,26 @@ std::vector<UndoLogRecord> UndoLogParser::parse_file(const std::string& path) {
     file.close();
 
     // 解析所有记录
+    // ✅ P2-1 修复：每条记录格式：trx_id(8) + roll_ptr(8) + type(2) + data_len(2) + data
+    // 总大小 = 20 + data_len
     size_t pos = 0;
-    while (pos + 20 <= buffer.size()) {
-        auto record = parse_record(buffer.data() + pos, buffer.size() - pos);
-        if (!record) {
-            // 尝试同步到下一个可能的记录起点
-            pos++;
-            continue;
-        }
+    while (pos + 22 <= buffer.size()) {
+        // 解析事务ID和回滚指针
+        uint64_t trx_id = dbrecovery::innodb::read_le<uint64_t>(buffer.data(), pos);
+        uint64_t roll_ptr = dbrecovery::innodb::read_le<uint64_t>(buffer.data(), pos + 8);
+        uint16_t type = dbrecovery::innodb::read_le<uint16_t>(buffer.data(), pos + 16);
+        uint16_t data_len = dbrecovery::innodb::read_le<uint16_t>(buffer.data(), pos + 18);
 
-        records.push_back(*record);
-        // 计算下一条记录的起始位置（考虑记录长度字段）
-        pos += 20 + record->u_data.size();
+        UndoLogRecord record;
+        record.u_trx_id = trx_id;
+        record.u_roll_ptr = roll_ptr;
+        record.u_type = type;
+        record.u_data.assign(buffer.data() + pos + 20, buffer.data() + pos + 20 + data_len);
+
+        records.push_back(record);
+
+        // ✅ P2-1 修复：移动到下一条记录（20字节头 + data_len字节数据）
+        pos += 20 + data_len;
     }
 
     return records;

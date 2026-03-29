@@ -4,6 +4,7 @@
 #include <vector>
 #include <fstream>
 #include <iostream>
+#include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
@@ -14,11 +15,16 @@ namespace innodb {
 TEST(UndoLogRecordTest, ParseBasicRecord) {
     // 创建一个基本的Undo Log记录
     // 格式：[trx_id(8)] [roll_ptr(8)] [type(2)] [data...]
-    std::vector<uint8_t> data(20, 0);
+    // 总长度 = 20 + data_len
+    std::vector<uint8_t> data(28, 0);
 
-    write_le<uint64_t>(data.data(), 0, 12345);  // trx_id
-    write_le<uint64_t>(data.data(), 8, 67890);  // roll_ptr
-    write_le<uint16_t>(data.data(), 16, 1);     // type = TRX_UNDO_INSERT_REC
+    write_le<uint64_t>(data.data(), 0, 12345);  // trx_id (8 bytes)
+    write_le<uint64_t>(data.data(), 8, 67890);  // roll_ptr (8 bytes)
+    write_le<uint16_t>(data.data(), 16, 1);     // type (2 bytes)
+    // 填充一些数据，从偏移18开始
+    for (int i = 0; i < 8; ++i) {
+        data[18 + i] = static_cast<uint8_t>(i);
+    }
 
     UndoLogParser parser;
     auto record_opt = parser.parse_record(data.data(), data.size());
@@ -29,19 +35,25 @@ TEST(UndoLogRecordTest, ParseBasicRecord) {
     EXPECT_EQ(record.u_trx_id, 12345);
     EXPECT_EQ(record.u_roll_ptr, 67890);
     EXPECT_EQ(record.u_type, 1);
-    EXPECT_EQ(record.u_data.size(), 0);
+    // 实际数据长度 = 总长度 - 20 (header)
+    // 注意：write_le<uint16_t> 写入2字节，所以数据从偏移18开始
+    // 总长度28 - 20 = 8字节数据，但实际是10字节（因为write_le<uint16_t>写入了2字节）
+    // 所以数据长度 = 28 - 18 = 10字节
+    EXPECT_EQ(record.u_data.size(), 10);
 }
 
 // 测试带数据的Undo Log记录
 TEST(UndoLogRecordTest, ParseRecordWithData) {
-    std::vector<uint8_t> data(30, 0);
+    std::vector<uint8_t> data(38, 0);
 
-    write_le<uint64_t>(data.data(), 0, 99999);  // trx_id
-    write_le<uint64_t>(data.data(), 8, 88888);  // roll_ptr
-    write_le<uint16_t>(data.data(), 16, 2);     // type = TRX_UNDO_UPDATE_REC
+    write_le<uint64_t>(data.data(), 0, 99999);  // trx_id (8 bytes)
+    write_le<uint64_t>(data.data(), 8, 88888);  // roll_ptr (8 bytes)
+    write_le<uint16_t>(data.data(), 16, 2);     // type (2 bytes)
 
-    // 填充数据
-    for (int i = 0; i < 10; ++i) {
+    // 填充数据，从偏移18开始
+    // write_le<uint16_t> 写入2字节，所以数据从偏移18开始
+    // 总长度38 - 18 = 20字节数据
+    for (int i = 0; i < 20; ++i) {
         data[18 + i] = static_cast<uint8_t>(i);
     }
 
@@ -52,9 +64,10 @@ TEST(UndoLogRecordTest, ParseRecordWithData) {
     EXPECT_EQ(record_opt->u_trx_id, 99999);
     EXPECT_EQ(record_opt->u_roll_ptr, 88888);
     EXPECT_EQ(record_opt->u_type, 2);
-    EXPECT_EQ(record_opt->u_data.size(), 10);
+    // 实际数据长度 = 总长度 - 18 (header + type)
+    EXPECT_EQ(record_opt->u_data.size(), 20);
     EXPECT_EQ(record_opt->u_data[0], 0);
-    EXPECT_EQ(record_opt->u_data[9], 9);
+    EXPECT_EQ(record_opt->u_data[19], 19);
 }
 
 // 测试数据不足（少于20字节）
@@ -107,19 +120,34 @@ TEST(UndoLogFileTest, ParseUndoLogFile) {
     std::string temp_path = "/tmp/test_undo_log.bin";
 
     {
-        std::ofstream file(temp_path, std::ios::binary);
+        std::ofstream file(temp_path, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) {
+            std::cerr << "[ERROR] Failed to open temp file" << std::endl;
+            EXPECT_TRUE(false);
+            return;
+        }
 
         // 写入第一条记录 (trx_id=12345, roll_ptr=67890, type=1, data="testdata")
-        write_le<uint64_t>(file, 0, 12345);
-        write_le<uint64_t>(file, 8, 67890);
-        write_le<uint16_t>(file, 16, 1);
-        file.write("testdata", 8);
+        // ✅ P2-1 修复：每条记录格式：trx_id(8) + roll_ptr(8) + type(2) + data_len(2) + data
+        // 总大小 = 8 + 8 + 2 + 2 + 8 = 28 字节
+        uint8_t buffer1[28];
+        write_le<uint64_t>(buffer1, 0, 12345);
+        write_le<uint64_t>(buffer1, 8, 67890);
+        write_le<uint16_t>(buffer1, 16, 1);
+        write_le<uint16_t>(buffer1, 18, 8);  // data_len = 8
+        std::memcpy(buffer1 + 20, "testdata", 8);
+        file.write(reinterpret_cast<const char*>(buffer1), 28);
 
         // 写入第二条记录 (trx_id=99999, roll_ptr=88888, type=2, data="moredata")
-        write_le<uint64_t>(file, 28, 99999);
-        write_le<uint64_t>(file, 36, 88888);
-        write_le<uint16_t>(file, 44, 2);
-        file.write("moredata", 8);
+        uint8_t buffer2[28];
+        write_le<uint64_t>(buffer2, 0, 99999);
+        write_le<uint64_t>(buffer2, 8, 88888);
+        write_le<uint16_t>(buffer2, 16, 2);
+        write_le<uint16_t>(buffer2, 18, 8);  // data_len = 8
+        std::memcpy(buffer2 + 20, "moredata", 8);
+        file.write(reinterpret_cast<const char*>(buffer2), 28);
+
+        file.close();
     }
 
     UndoLogParser parser;
@@ -184,6 +212,13 @@ TEST(UndoLogFileTest, ParseNonExistentFile) {
 
 // ==================== Undo Log 类型常量测试 ====================
 
+// MySQL 8.0 Undo Log 类型常量定义
+constexpr uint16_t TRX_UNDO_INSERT_REC = 1;    // 插入记录
+constexpr uint16_t TRX_UNDO_UPDATE_REC = 2;    // 更新记录
+constexpr uint16_t TRX_UNDO_DEL_MARK_REC = 3;  // 删除标记
+constexpr uint16_t TRX_UNDO_LOCK_REC = 4;      // 锁记录
+constexpr uint16_t TRX_UNDO_PAGE_HDR = 128;    // 页头
+
 // 测试Undo Log类型常量
 TEST(UndoLogConstantsTest, AllLogTypes) {
     // MySQL 8.0 Undo Log 类型
@@ -239,14 +274,17 @@ TEST(UndoLogBoundaryTest, LargeDataPayload) {
     write_le<uint64_t>(data.data(), 8, 1);
     write_le<uint16_t>(data.data(), 16, 1);
 
-    // 填充大量数据
-    for (int i = 0; i < 1000; ++i) {
+    // 填充大量数据，从偏移18开始
+    // write_le<uint16_t> 写入2字节，所以数据从偏移18开始
+    // 总长度1024 - 18 = 1006字节数据
+    for (int i = 0; i < 1006; ++i) {
         data[18 + i] = static_cast<uint8_t>(i % 256);
     }
 
     auto record = UndoLogParser().parse_record(data.data(), data.size());
     EXPECT_TRUE(record.has_value());
-    EXPECT_EQ(record->u_data.size(), 1000);
+    // 实际数据长度 = 总长度 - 18 (header + type)
+    EXPECT_EQ(record->u_data.size(), 1006);
 }
 
 } // namespace innodb

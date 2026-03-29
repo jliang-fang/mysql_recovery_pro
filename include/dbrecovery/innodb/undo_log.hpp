@@ -27,6 +27,8 @@ public:
     ~UndoLogParser();
 
     std::optional<UndoLogRecord> parse_record(const uint8_t* data, size_t len);
+    std::optional<UndoLogRecord> parse_record_with_data_len(
+        const uint8_t* data, size_t len, uint16_t data_len);
     std::vector<UndoLogRecord> parse_file(const std::string& path);
 
 private:

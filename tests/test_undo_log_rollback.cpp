@@ -14,25 +14,27 @@ namespace innodb {
 TEST(UndoLogRollbackTest, ValidUndoLogParsing) {
     // Test parsing valid undo log records
     // Expected to fail initially
-    
+
     std::vector<uint8_t> data(30, 0);
-    
-    // TRX_ID (6 bytes) + TRX_NO (8 bytes) + ROLL_PTR (7 bytes) + TYPE (2 bytes)
-    write_le<uint64_t>(data.data(), 0, 12345);  // trx_id
-    write_le<uint64_t>(data.data(), 8, 67890);  // trx_no
-    write_le<uint64_t>(data.data(), 16, 11111); // roll_ptr
-    write_le<uint16_t>(data.data(), 24, 2);     // type = TRX_UNDO_UPDATE
-    
+
+    // TRX_ID (6 bytes) + ROLL_PTR (7 bytes) + TYPE (2 bytes)
+    // ✅ P2-1 修复：UndoLogRecord 结构体布局：
+    // [0-7]:   u_trx_id (8 bytes)
+    // [8-15]:  u_roll_ptr (8 bytes)
+    // [16-17]: u_type (2 bytes)
+    write_le<uint64_t>(data.data(), 0, 12345);  // u_trx_id at offset 0
+    write_le<uint64_t>(data.data(), 8, 11111);  // u_roll_ptr at offset 8 (was 16)
+    write_le<uint16_t>(data.data(), 16, 2);     // u_type at offset 16 (was 24)
+
     // Add data
-    data[26] = 0x01;
-    data[27] = 0x02;
-    
+    data[18] = 0x01;
+    data[19] = 0x02;
+
     UndoLogParser parser;
     auto record_opt = parser.parse_record(data.data(), data.size());
-    
+
     EXPECT_TRUE(record_opt.has_value());
     EXPECT_EQ(record_opt->u_trx_id, 12345);
-    EXPECT_EQ(record_opt->u_trx_no, 67890);
     EXPECT_EQ(record_opt->u_roll_ptr, 11111);
     EXPECT_EQ(record_opt->u_type, 2);
 }
@@ -41,17 +43,16 @@ TEST(UndoLogRollbackTest, ValidUndoLogParsing) {
 TEST(UndoLogRollbackTest, InsertTypeUndoLogParsing) {
     // Test parsing undo log with insert type
     // Expected to fail initially
-    
+
     std::vector<uint8_t> data(30, 0);
-    
-    write_le<uint64_t>(data.data(), 0, 12345);  // trx_id
-    write_le<uint64_t>(data.data(), 8, 67890);  // trx_no
-    write_le<uint64_t>(data.data(), 16, 11111); // roll_ptr
-    write_le<uint16_t>(data.data(), 24, 1);     // type = TRX_UNDO_INSERT
-    
+
+    write_le<uint64_t>(data.data(), 0, 12345);  // u_trx_id at offset 0
+    write_le<uint64_t>(data.data(), 8, 11111);  // u_roll_ptr at offset 8
+    write_le<uint16_t>(data.data(), 16, 1);     // u_type at offset 16 (was 24)
+
     UndoLogParser parser;
     auto record_opt = parser.parse_record(data.data(), data.size());
-    
+
     EXPECT_TRUE(record_opt.has_value());
     EXPECT_EQ(record_opt->u_type, 1); // TRX_UNDO_INSERT
 }

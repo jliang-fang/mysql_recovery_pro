@@ -56,7 +56,20 @@
       "Bash(./build/mysql8_recover *)",
       "Bash(./tests/test_parse_records *)",
       "Bash(./mysql8_recover *)",
-      "Bash(./mysql8_recover)"
+      "Bash(./mysql8_recover)",
+      "Bash(file.close)",
+      "Bash(dbrecovery::innodb::redologparser *)",
+      "Bash(auto *)",
+      "Bash(temp_path)",
+      "Bash(./tests/test_redo_log_replay *)",
+      "Bash(xargs *)",
+      "Bash(./tests/test_blob_recovery)",
+      "Bash(./tests/test_redo_log)",
+      "Bash(./tests/test_integration)",
+      "Bash(./tests/test_undo_log)",
+      "Bash(/tmp/test_write_le)",
+      "Bash(./tests/test_undo_log_rollback *)",
+      "Bash(/tmp/test_write)"
     ]
   },
   "$version": 3

@@ -43,3 +43,13 @@ if(TARGET test_integration)
     add_test(NAME test_integration COMMAND test_integration)
     set_property(TEST test_integration APPEND PROPERTY ENVIRONMENT "TEST_DATA_DIR=${CMAKE_SOURCE_DIR}/tests/data")
 endif()
+
+# Undo log tests (P2-1)
+add_executable(test_undo_log innodb/undo_log_test.cpp)
+target_link_libraries(test_undo_log PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_undo_log)
+
+# Undo log rollback tests
+add_executable(test_undo_log_rollback test_undo_log_rollback.cpp)
+target_link_libraries(test_undo_log_rollback PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_undo_log_rollback)
