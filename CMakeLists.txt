@@ -40,6 +40,8 @@ set(SOURCES
     src/recovery/engine.cpp
     src/utils/cli_parser.cpp
     src/utils/file_mapper.cpp
+    # ✅ 新增：IBD 导出器
+    src/export/ibd_exporter.cpp
 )
 
 # ✅ 新增：确保 file_mapper.cpp 被正确包含（如果尚未存在则创建）

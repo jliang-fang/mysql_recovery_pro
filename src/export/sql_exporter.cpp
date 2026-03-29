@@ -2,7 +2,7 @@
 #include <sstream>
 
 namespace dbrecovery {
-namespace export {
+namespace exporter {
 
 SQLOutputter::SQLOutputter(const std::string& table_name) : table_name_(table_name) {}
 

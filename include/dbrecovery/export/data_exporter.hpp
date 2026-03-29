@@ -9,7 +9,7 @@
 #include <iostream>
 
 namespace dbrecovery {
-namespace export {
+namespace exporter {
 
 /**
  * @brief DataExporter: 数据导出基类
@@ -165,7 +165,7 @@ public:
                               const std::string& output_path);
 };
 
-} // namespace export
+} // namespace exporter
 } // namespace dbrecovery
 
 #endif // DBRECOVERY_EXPORT_DATA_EXPORTER_HPP

@@ -2,7 +2,7 @@
 #include <sstream>
 
 namespace dbrecovery {
-namespace export {
+namespace exporter {
 
 DataExporter::DataExporter() {}
 
