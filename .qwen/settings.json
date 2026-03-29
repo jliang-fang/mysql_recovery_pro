@@ -86,7 +86,8 @@
       "Bash(./tests/test_sdi_manager)",
       "Bash(./tests/test_fuzz_sdi)",
       "Bash(gdb *)",
-      "Bash(valgrind *)"
+      "Bash(valgrind *)",
+      "Bash(git reset *)"
     ]
   },
   "$version": 3
