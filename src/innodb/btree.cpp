@@ -938,19 +938,21 @@ bool BPlusTreeParser::parse() noexcept {
 bool BPlusTreeParser::parse_header() noexcept {
     const size_t min_header_size = dbrecovery::innodb::FIL_HEADER_SIZE + 24; // 确保有足够空间读取到 PAGE_NEXT
     if (page_data_.size() < min_header_size) {
-        std::cerr << "[ERROR] BPlusTreeParser: Page header too small. Required: " << min_header_size 
+        std::cerr << "[ERROR] BPlusTreeParser: Page header too small. Required: " << min_header_size
                   << ", Actual: " << page_data_.size() << std::endl;
         return false;
     }
-    
+
     // ✅ 使用 page_defs.hpp 中定义的常量
     const size_t btr_n_levels_abs = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_N_LEVELS_ABS;
     // ✅ 新增：使用 uint16_t 读取以匹配 page_level_ 类型（实际 InnoDB 中为 2 字节）
     page_level_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), btr_n_levels_abs);
-    
-    const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_HEAP_TOP; // 修复：使用常量定义的偏移
+
+    // ✅ 修复：flags 位于 BTR header 的偏移 12-13（紧接在 n_owned 之后）
+    // BTR header layout: n_levels(4) + ind_page_offset(2) + max_size(2) + n_owned(2) + flags(2) + ...
+    const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 12; // BTR header flags at offset 12
     flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), flags_offset);
-    
+
     // ✅ P0-1 新增：从 flags 中解析行格式 (BTR_FORMAT_MASK = 0x07)
     btr_format_ = static_cast<uint8_t>(flags_ & 0x07);
 
@@ -958,10 +960,10 @@ bool BPlusTreeParser::parse_header() noexcept {
     if (page_level_ > 5) {
         std::cerr << "[WARN] BPlusTreeParser: Unreasonably high page level: " << page_level_ << std::endl;
     }
-    
+
     // 判断节点类型
     node_type_ = (page_level_ == 0) ? BTreeNodeType::LEAF : BTreeNodeType::INTERNAL;
-    
+
     // ✅ 修复：使用常量定义的偏移读取页链信息（prev_page 和 next_page）
     const size_t prev_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_FREE; // 修复：使用常量定义的偏移
     const size_t next_page_offset = dbrecovery::innodb::FIL_HEADER_SIZE + dbrecovery::innodb::BTR_PAGE_OFFSET_DIRECTION; // 修复：使用常量定义的偏移

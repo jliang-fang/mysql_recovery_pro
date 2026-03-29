@@ -51,15 +51,19 @@ std::vector<RedoLogRecord> RedoLogParser::parse_file(const std::string& path) {
     size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
+    std::cerr << "[DEBUG] File size: " << file_size << " for path: " << path << std::endl;
+
     if (file_size < 9) {
-        std::cerr << "[ERROR] Redo log file too small" << std::endl;
-        return records;
+        std::cerr << "[ERROR] Redo log file too small, returning empty records" << std::endl;
+        return records; // Empty vector
     }
 
     // 读取整个文件
     std::vector<uint8_t> buffer(file_size);
     file.read(reinterpret_cast<char*>(buffer.data()), file_size);
     file.close();
+
+    std::cerr << "[DEBUG] Buffer size: " << buffer.size() << std::endl;
 
     // 解析所有记录
     // 格式：type(1) + space_id(4) + page_no(4) + data(...)
