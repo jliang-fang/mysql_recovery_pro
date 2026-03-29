@@ -53,3 +53,8 @@ gtest_discover_tests(test_undo_log)
 add_executable(test_undo_log_rollback test_undo_log_rollback.cpp)
 target_link_libraries(test_undo_log_rollback PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_undo_log_rollback)
+
+# MySQL 5.6/5.7 compatibility tests (P1-4)
+add_executable(test_mysql56_57_compatibility innodb/mysql56_57_compatibility_test.cpp)
+target_link_libraries(test_mysql56_57_compatibility PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_mysql56_57_compatibility)
