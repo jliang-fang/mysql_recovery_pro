@@ -18,14 +18,14 @@ TEST(ParseRecordsTest, ValidCompactFormat) {
     std::vector<uint8_t> page_data(16384, 0);
 
     // Set page type to INDEX (9969 = 0x26f1)
-    // Note: FIL_PAGE_TYPE is at offset 54 (FIL_HEADER_SIZE + 16 = 38 + 16 = 54)
+    // Note: FIL_PAGE_TYPE is at offset 16 (relative to page start)
     write_le<uint16_t>(page_data.data(), 16, 9969);  // 0x26f1
 
     // Set page level to 0 (leaf)
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format (bit 0-2 = 1)
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0001);
 
     // Set heap_top (enough space for records)
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -33,15 +33,15 @@ TEST(ParseRecordsTest, ValidCompactFormat) {
     // Set n_dir_slots (at least 2 for INFIMUM/SUPREMUM)
     write_le<uint16_t>(page_data.data(), 38, 2);
 
-    // Set INFIMUM record at offset 56 (after page type at 54-55)
+    // Set INFIMUM record at offset 54
     // ✅ 修复：设置正确的 INFIMUM 记录头（info_bits = 0x02 = REC_STATUS_INFIMUM）
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;  // info_bits
     write_le<uint16_t>(page_data.data(), 55, 99);  // next_record_offset
 
     // Set SUPREMUM record at offset 99
     // ✅ 修复：设置正确的 SUPREMUM 记录头（info_bits = 0x03 = REC_STATUS_SUPREMUM）
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;  // info_bits
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);  // next_record_offset = end
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;  // info_bits
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);  // next_record_offset = end
 
     // Set n_heap (4 records: INFIMUM, SUPREMUM, plus 2 user records)
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -84,7 +84,7 @@ TEST(ParseRecordsTest, ValidRedundantFormat) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with REDUNDANT format (bit 0-2 = 0)
-    write_le<uint16_t>(page_data.data(), 44, 0x0700);
+    write_le<uint16_t>(page_data.data(), 80, 0x0000);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -97,8 +97,8 @@ TEST(ParseRecordsTest, ValidRedundantFormat) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -134,7 +134,7 @@ TEST(ParseRecordsTest, ValidDynamicFormatWithBlob) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with DYNAMIC format (bit 0-2 = 2)
-    write_le<uint16_t>(page_data.data(), 44, 0x0702);
+    write_le<uint16_t>(page_data.data(), 80, 0x0002);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -147,8 +147,8 @@ TEST(ParseRecordsTest, ValidDynamicFormatWithBlob) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -190,7 +190,7 @@ TEST(ParseRecordsTest, DeletedRecords) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 150);
@@ -200,20 +200,19 @@ TEST(ParseRecordsTest, DeletedRecords) {
 
     // Set INFIMUM record
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 75);
+    write_le<uint16_t>(page_data.data(), 55, 75);  // next_record_offset = 75 (user record 1)
 
     // Set user record 1 (deleted)
     page_data[75] = dbrecovery::innodb::REC_INFO_DELETED_FLAG;  // Mark as deleted
-    write_le<uint16_t>(page_data.data(), 76, 99);
+    write_le<uint16_t>(page_data.data(), 76, 99);  // next_record_offset = 99 (user record 2)
 
     // Set user record 2 (valid)
     page_data[99] = 0x00;  // info_bits (not deleted)
-    write_le<uint16_t>(page_data.data(), 100, 0x1000);  // n_fields_low = 1
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    write_le<uint16_t>(page_data.data(), 100, 120);  // next_record_offset = 120 (SUPREMUM)
 
-    // Set SUPREMUM record
-    page_data[99] = 0x00;  // info_bits
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    // Set SUPREMUM record at offset 120
+    page_data[120] = dbrecovery::innodb::REC_STATUS_SUPREMUM;  // info_bits
+    write_le<uint16_t>(page_data.data(), 121, 0xFFFF);  // next_record_offset = end
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 5);
@@ -249,7 +248,7 @@ TEST(ParseRecordsTest, TruncatedPage) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -262,7 +261,7 @@ TEST(ParseRecordsTest, TruncatedPage) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -298,7 +297,7 @@ TEST(ParseRecordsTest, Datetime2Column) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -311,8 +310,8 @@ TEST(ParseRecordsTest, Datetime2Column) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -355,7 +354,7 @@ TEST(ParseRecordsTest, JsonColumn) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -368,8 +367,8 @@ TEST(ParseRecordsTest, JsonColumn) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -411,7 +410,7 @@ TEST(ParseRecordsTest, MultipleNullableColumns) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -424,8 +423,8 @@ TEST(ParseRecordsTest, MultipleNullableColumns) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);
@@ -487,7 +486,7 @@ TEST(ParseRecordsTest, EmptySchema) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -500,8 +499,8 @@ TEST(ParseRecordsTest, EmptySchema) {
     write_le<uint16_t>(page_data.data(), 55, 99);
 
     // Set SUPREMUM record
-    page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-    write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
+    page_data[99] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page_data.data(), 100, 0xFFFF);
 
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 4);

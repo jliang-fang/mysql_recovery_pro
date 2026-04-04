@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <nlohmann/json.hpp>
 
 namespace dbrecovery {
 namespace recovery {
@@ -136,15 +137,17 @@ bool RecoveryEngine::repair_header(const std::string& output_path) {
 
 bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
                                    const std::string& csv_path) {
-    if (records.empty()) {
-        std::cerr << "[WARN] No records to export" << std::endl;
-        return false;
-    }
-
     std::ofstream out(csv_path);
     if (!out) {
         std::cerr << "[ERROR] Failed to open CSV file: " << csv_path << std::endl;
         return false;
+    }
+
+    // 如果没有记录，只写入空文件（或可选的空表头）
+    if (records.empty()) {
+        std::cout << "[INFO] No records to export, created empty CSV file: " << csv_path << std::endl;
+        out.close();
+        return true;
     }
 
     // 写入表头（从第一条记录中提取列名）
@@ -176,11 +179,6 @@ bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string, std::
 bool RecoveryEngine::export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
                                    const std::string& table_name,
                                    const std::string& sql_path) {
-    if (records.empty()) {
-        std::cerr << "[WARN] No records to export" << std::endl;
-        return false;
-    }
-
     std::ofstream out(sql_path);
     if (!out) {
         std::cerr << "[ERROR] Failed to open SQL file: " << sql_path << std::endl;
@@ -191,6 +189,13 @@ bool RecoveryEngine::export_to_sql(const std::vector<std::map<std::string, std::
     out << "-- MySQL Recovery Export\n";
     out << "-- Table: " << table_name << "\n";
     out << "-- Records: " << records.size() << "\n\n";
+
+    // 如果没有记录，只写入头信息
+    if (records.empty()) {
+        std::cout << "[INFO] No records to export, created SQL file with header: " << sql_path << std::endl;
+        out.close();
+        return true;
+    }
 
     for (const auto& record : records) {
         std::ostringstream oss;
@@ -230,6 +235,151 @@ bool RecoveryEngine::export_to_sql(const std::vector<std::map<std::string, std::
     out.close();
     std::cout << "[INFO] Exported " << records.size() << " records to SQL: " << sql_path << std::endl;
 
+    return true;
+}
+
+bool RecoveryEngine::export_to_sql_with_user(const std::vector<std::map<std::string, std::string>>& records,
+                                              const std::string& table_name,
+                                              const std::string& sql_path,
+                                              const std::string& user,
+                                              const std::string& database) {
+    std::ofstream out(sql_path);
+    if (!out) {
+        std::cerr << "[ERROR] Failed to open SQL file: " << sql_path << std::endl;
+        return false;
+    }
+
+    // 写入 SQL 头（带用户和数据库信息）
+    out << "-- MySQL Recovery Export\n";
+    out << "-- User: " << user << "\n";
+    out << "-- Database: " << database << "\n";
+    out << "-- Table: " << table_name << "\n";
+    out << "-- Records: " << records.size() << "\n\n";
+
+    // 添加 USE DATABASE 语句
+    if (!database.empty()) {
+        out << "USE `" << database << "`;\n\n";
+    }
+
+    // 如果没有记录，只写入头信息
+    if (records.empty()) {
+        std::cout << "[INFO] No records to export, created SQL file with header: " << sql_path << std::endl;
+        out.close();
+        return true;
+    }
+
+    for (const auto& record : records) {
+        std::ostringstream oss;
+        oss << "INSERT INTO `" << table_name << "` (";
+
+        // 列名
+        bool first = true;
+        for (const auto& pair : record) {
+            if (!first) oss << ", ";
+            oss << "`" << pair.first << "`";
+            first = false;
+        }
+        oss << ") VALUES (";
+
+        // 值
+        first = true;
+        for (const auto& pair : record) {
+            if (!first) oss << ", ";
+
+            // 简单转义处理
+            std::string value = pair.second;
+            if (value == "NULL") {
+                oss << "NULL";
+            } else {
+                // 基本的 SQL 转义（实际应使用更完善的转义函数）
+                value.erase(0, value.find_first_not_of("'"));
+                value.erase(value.find_last_not_of("'") + 1);
+                oss << "'" << value << "'";
+            }
+            first = false;
+        }
+        oss << ");\n";
+
+        out << oss.str();
+    }
+
+    out.close();
+    std::cout << "[INFO] Exported " << records.size() << " records to SQL (user: " << user << ", db: " << database << "): " << sql_path << std::endl;
+
+    return true;
+}
+
+bool RecoveryEngine::export_to_json(const std::vector<std::map<std::string, std::string>>& records,
+                                    const std::string& json_path) {
+    std::ofstream out(json_path);
+    if (!out) {
+        std::cerr << "[ERROR] Failed to open JSON file: " << json_path << std::endl;
+        return false;
+    }
+
+    // 使用 nlohmann/json 构建 JSON
+    nlohmann::json json;
+    json["records"] = nlohmann::json::array();
+
+    for (const auto& record : records) {
+        nlohmann::json obj;
+        for (const auto& pair : record) {
+            // 简单处理：将值作为字符串存储
+            // 对于 NULL 值，存储为 JSON null
+            if (pair.second == "NULL") {
+                obj[pair.first] = nullptr;
+            } else {
+                // 检查字符串是否包含有效的UTF-8
+                const std::string& value = pair.second;
+                bool is_valid_utf8 = true;
+                for (size_t i = 0; i < value.size(); ) {
+                    unsigned char byte = static_cast<unsigned char>(value[i]);
+                    if (byte < 0x80) {
+                        i++;
+                    } else if ((byte & 0xE0) == 0xC0) {
+                        if (i + 1 >= value.size() || (static_cast<unsigned char>(value[i+1]) & 0xC0) != 0x80) {
+                            is_valid_utf8 = false;
+                            break;
+                        }
+                        i += 2;
+                    } else if ((byte & 0xF0) == 0xE0) {
+                        if (i + 2 >= value.size() || (static_cast<unsigned char>(value[i+1]) & 0xC0) != 0x80 ||
+                            (static_cast<unsigned char>(value[i+2]) & 0xC0) != 0x80) {
+                            is_valid_utf8 = false;
+                            break;
+                        }
+                        i += 3;
+                    } else if ((byte & 0xF8) == 0xF0) {
+                        if (i + 3 >= value.size() || (static_cast<unsigned char>(value[i+1]) & 0xC0) != 0x80 ||
+                            (static_cast<unsigned char>(value[i+2]) & 0xC0) != 0x80 ||
+                            (static_cast<unsigned char>(value[i+3]) & 0xC0) != 0x80) {
+                            is_valid_utf8 = false;
+                            break;
+                        }
+                        i += 4;
+                    } else {
+                        is_valid_utf8 = false;
+                        break;
+                    }
+                }
+                
+                if (is_valid_utf8) {
+                    obj[pair.first] = value;
+                } else {
+                    // 对于非UTF-8数据（如BLOB），存储为base64编码
+                    obj[pair.first] = "__BLOB_BASE64__" + pair.second;
+                }
+            }
+        }
+        json["records"].push_back(obj);
+    }
+
+    // 写入格式化的 JSON
+    // Use error_handler_t::replace to handle non-UTF-8 data
+    out << json.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << std::endl;
+    out.close();
+
+    std::cout << "[INFO] Exported " << records.size() << " records to JSON: " << json_path << std::endl;
     return true;
 }
 

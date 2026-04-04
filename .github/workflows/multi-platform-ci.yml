@@ -1,0 +1,618 @@
+name: Multi-Platform CI/CD
+
+on:
+  push:
+    branches: [ master, develop, feature/* ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+  pull_request:
+    branches: [ master, develop ]
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: 'Enable debug logging'
+        required: false
+        default: 'false'
+      platform:
+        description: 'Build for specific platform'
+        required: false
+        default: 'all'
+        options:
+          - 'all'
+          - 'linux'
+          - 'macos'
+          - 'windows'
+
+env:
+  CMAKE_BUILD_TYPE: Release
+  CC: clang
+  CXX: clang++
+
+jobs:
+  # ==================== Linux Builds ====================
+  build-linux-gcc:
+    name: Linux (GCC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup GCC
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: '12'
+
+      - name: Setup dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libgtest-dev \
+            nlohmann-json3-dev \
+            zlib1g-dev \
+            liburing-dev \
+            lcov
+
+      - name: Build project (Debug)
+        run: |
+          mkdir -p build_debug
+          cd build_debug
+          cmake .. -DCMAKE_BUILD_TYPE=Debug
+          make -j$(nproc)
+
+      - name: Build project (Release)
+        run: |
+          mkdir -p build_release
+          cd build_release
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Run tests (Debug)
+        run: |
+          cd build_debug
+          ctest --verbose --output-on-failure
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-linux-gcc
+          path: |
+            build_release/mysql8_recover
+            build_release/libdbrecovery_innodb.a
+          retention-days: 7
+
+  build-linux-clang:
+    name: Linux (Clang)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup Clang
+        uses: egor-tensin/setup-clang@v1
+        with:
+          version: '16'
+
+      - name: Setup dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libgtest-dev \
+            nlohmann-json3-dev \
+            zlib1g-dev \
+            liburing-dev
+
+      - name: Build project
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release
+          make -j$(nproc)
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --verbose --output-on-failure
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-linux-clang
+          path: |
+            build/mysql8_recover
+            build/libdbrecovery_innodb.a
+          retention-days: 7
+
+  build-linux-arm64:
+    name: Linux ARM64
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Build for ARM64
+        run: |
+          mkdir -p build_arm64
+          cd build_arm64
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DCMAKE_CXX_COMPILER=aarch64-linux-gnu-g++
+          make -j$(nproc)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-linux-arm64
+          path: |
+            build_arm64/mysql8_recover
+            build_arm64/libdbrecovery_innodb.a
+          retention-days: 7
+
+  # ==================== macOS Builds ====================
+  build-macos:
+    name: macOS (${{ matrix.version }})
+    runs-on: macos-${{ matrix.version }}
+    timeout-minutes: 45
+
+    strategy:
+      matrix:
+        version: [12, 13, 14]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup dependencies (Homebrew)
+        run: |
+          brew update
+          brew install \
+            nlohmann-json \
+            zlib \
+            gtest \
+            cmake
+
+      - name: Build project (Debug)
+        run: |
+          mkdir -p build_debug
+          cd build_debug
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -DGUI_ENABLED=OFF
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Build project (Release)
+        run: |
+          mkdir -p build_release
+          cd build_release
+          cmake .. -DCMAKE_BUILD_TYPE=Release -DGUI_ENABLED=OFF
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Run tests
+        run: |
+          cd build_debug
+          ctest --verbose --output-on-failure
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-macos-${{ matrix.version }}
+          path: |
+            build_release/mysql8_recover
+            build_release/libdbrecovery_innodb.a
+          retention-days: 7
+
+  build-macos-arm64:
+    name: macOS ARM64 (Apple Silicon)
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup dependencies (Homebrew)
+        run: |
+          brew update
+          brew install \
+            nlohmann-json \
+            zlib \
+            gtest
+
+      - name: Build for ARM64
+        run: |
+          mkdir -p build_arm64
+          cd build_arm64
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DGUI_ENABLED=OFF
+          make -j$(sysctl -n hw.ncpu)
+
+      - name: Run tests
+        run: |
+          cd build_arm64
+          ctest --verbose --output-on-failure
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-macos-arm64
+          path: |
+            build_arm64/mysql8_recover
+            build_arm64/libdbrecovery_innodb.a
+          retention-days: 7
+
+  # ==================== Windows Builds ====================
+  build-windows-msvc:
+    name: Windows (MSVC)
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup vcpkg
+        uses: lukka/setup-vcpkg@v11
+        with:
+          version: '2023.11.20'
+
+      - name: Install dependencies via vcpkg
+        run: |
+          vcpkg install nlohmann-json:x64-windows
+          vcpkg install zlib:x64-windows
+          vcpkg install gtest:x64-windows
+
+      - name: Build project (Debug)
+        run: |
+          mkdir -p build_debug
+          cd build_debug
+          cmake .. -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+          cmake --build . --config Debug
+
+      - name: Build project (Release)
+        run: |
+          mkdir -p build_release
+          cd build_release
+          cmake .. -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+          cmake --build . --config Release
+
+      - name: Run tests (Debug)
+        run: |
+          cd build_debug
+          ctest --verbose --output-on-failure -C Debug
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-windows-msvc
+          path: |
+            build_release/mysql8_recover.exe
+            build_release/dbrecovery_innodb.lib
+          retention-days: 7
+
+  build-windows-mingw:
+    name: Windows (MinGW-w64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup MinGW-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 mingw-w64-tools
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Build for MinGW-w64
+        run: |
+          mkdir -p build_mingw
+          cd build_mingw
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Windows \
+            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
+            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++
+          make -j$(nproc)
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mysql8-recovery-windows-mingw
+          path: |
+            build_mingw/mysql8_recover.exe
+            build_mingw/libdbrecovery_innodb.a
+          retention-days: 7
+
+  # ==================== Code Quality ====================
+  code-quality:
+    name: Code Quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup Clang
+        uses: egor-tensin/setup-clang@v1
+        with:
+          version: '16'
+
+      - name: Setup clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy-16
+
+      - name: Generate compile_commands.json
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Run clang-tidy
+        run: |
+          cd build
+          clang-tidy-16 \
+            ../src/**/*.cpp \
+            ../include/**/*.hpp \
+            --checks=modernize-*,performance-*,readability-*,bugprone-*,cert-*,misc-* \
+            -p . 2>&1 | tee clang-tidy-report.txt || true
+
+      - name: Upload clang-tidy report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: clang-tidy-report
+          path: build/clang-tidy-report.txt
+          retention-days: 7
+
+  # ==================== Code Coverage ====================
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup GCC
+        uses: egor-tensin/setup-gcc@v1
+        with:
+          version: '12'
+
+      - name: Install lcov
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lcov
+
+      - name: Build with coverage
+        run: |
+          mkdir -p build
+          cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Debug -DENABLE_COVERAGE=ON
+          make -j$(nproc)
+
+      - name: Run tests
+        run: |
+          cd build
+          ctest --verbose
+
+      - name: Generate coverage report
+        run: |
+          cd build
+          lcov --capture --directory . --output-file coverage.info
+          lcov --remove coverage.info '/usr/*' --output-file coverage.info
+          lcov --list coverage.info
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: build/coverage.info
+          retention-days: 7
+
+  # ==================== Fuzz Testing ====================
+  fuzz-testing:
+    name: Fuzz Testing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: '3.20.x'
+
+      - name: Setup Clang
+        uses: egor-tensin/setup-clang@v1
+        with:
+          version: '16'
+
+      - name: Build fuzz targets
+        run: |
+          mkdir -p build/fuzz
+          cd tools
+          python3 run_fuzz_test.py all
+
+      - name: Run fuzz tests
+        run: |
+          cd build/fuzz
+          timeout 60s ./fuzz_page_parser corpus/page_parser || true
+          timeout 60s ./fuzz_blob_pointer corpus/blob_pointer || true
+          timeout 60s ./fuzz_sdi_json corpus/sdi_json || true
+
+  # ==================== Documentation ====================
+  documentation:
+    name: Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check documentation
+        run: |
+          echo "Checking documentation files..."
+
+          # Check if required docs exist
+          required_docs=(
+            "docs/zh/README.md"
+            "docs/zh/architecture.md"
+            "docs/zh/user_guide.md"
+            "docs/zh/audit_report.md"
+            "docs/en/README.md"
+            "docs/en/architecture.md"
+            "docs/en/user_guide.md"
+            "docs/en/audit_report.md"
+          )
+
+          for doc in "${required_docs[@]}"; do
+            if [ ! -f "$doc" ]; then
+              echo "Missing documentation: $doc"
+              exit 1
+            fi
+          done
+
+          echo "All documentation files present"
+
+          # Check for Chinese/English pairs
+          for doc in docs/zh/*.md; do
+            filename=$(basename "$doc")
+            if [ ! -f "docs/en/$filename" ]; then
+              echo "Missing English translation: docs/en/$filename"
+              exit 1
+            fi
+          done
+
+          echo "All translations present"
+
+  # ==================== Release ====================
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [build-linux-gcc, build-linux-clang, build-macos, build-windows-msvc, code-quality, coverage]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set version
+        run: |
+          VERSION=$(cat include/version.hpp | grep VERSION | grep -oP '\d+' | tr '\n' '.')
+          VERSION=${VERSION%.}
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: mysql8-recovery-*
+          merge-multiple: false
+
+      - name: Create release package
+        run: |
+          mkdir -p release
+          cp -r artifacts/* release/
+          cp README.md release/
+          cp LICENSE release/
+          
+          # Create archive
+          cd release
+          tar -czf ../mysql8-recovery-v${{ env.VERSION }}-linux.tar.gz *
+          
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Release v${{ env.VERSION }}
+          tag_name: v${{ env.VERSION }}
+          generate_release_notes: true
+          files: |
+            release/mysql8-recovery-v${{ env.VERSION }}-linux.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,119 @@
+{
+  "generator_version": "1.0.0",
+  "generated_at": "2026-03-31T19:54:50.164441",
+  "page_size": 16384,
+  "scenarios": [
+    {
+      "name": "page_header_corruption",
+      "file": "test_header_corrupt_scenario.ibd",
+      "type": "critical",
+      "description": "Corrupted page header with all zeros",
+      "corruptions": [
+        "PAGE_HEADER_CORRUPTED"
+      ]
+    },
+    {
+      "name": "invalid_page_type",
+      "file": "test_page_type_invalid.ibd",
+      "type": "critical",
+      "description": "Invalid page type 0xFFFF",
+      "corruptions": [
+        "PAGE_TYPE_INVALID"
+      ]
+    },
+    {
+      "name": "checksum_mismatch",
+      "file": "test_checksum_mismatch.ibd",
+      "type": "warning",
+      "description": "Invalid checksum value",
+      "corruptions": [
+        "PAGE_CHECKSUM_MISMATCH"
+      ]
+    },
+    {
+      "name": "page_chain_broken",
+      "file": "test_page_chain_broken.ibd",
+      "type": "warning",
+      "description": "Next page pointer points to invalid page",
+      "corruptions": [
+        "PAGE_CHAIN_BROKEN"
+      ]
+    },
+    {
+      "name": "infimum_corruption",
+      "file": "test_infimum_corrupt.ibd",
+      "type": "critical",
+      "description": "INFIMUM record type corrupted",
+      "corruptions": [
+        "RECORD_HEADER_CORRUPTED"
+      ]
+    },
+    {
+      "name": "supremum_corruption",
+      "file": "test_supremum_corrupt.ibd",
+      "type": "critical",
+      "description": "SUPREMUM record type corrupted",
+      "corruptions": [
+        "RECORD_HEADER_CORRUPTED"
+      ]
+    },
+    {
+      "name": "record_chain_broken",
+      "file": "test_record_chain_corrupt.ibd",
+      "type": "critical",
+      "description": "Record chain broken",
+      "corruptions": [
+        "RECORD_CHAIN_BROKEN"
+      ]
+    },
+    {
+      "name": "blob_chain_corruption",
+      "file": "test_blob_chain_corrupt.ibd",
+      "type": "critical",
+      "description": "BLOB chain circular reference",
+      "corruptions": [
+        "BLOB_CHAIN_BROKEN"
+      ]
+    },
+    {
+      "name": "mixed_corruption",
+      "file": "test_mixed_corruption.ibd",
+      "type": "mixed",
+      "description": "Multiple pages with different corruption types",
+      "corruptions": [
+        "PAGE_HEADER_CORRUPTED",
+        "PAGE_TYPE_INVALID",
+        "PAGE_CHECKSUM_MISMATCH",
+        "PAGE_CHAIN_BROKEN"
+      ]
+    },
+    {
+      "name": "truncate_header_corruption",
+      "file": "test_truncate_header_corrupt.ibd",
+      "type": "mixed",
+      "description": "Truncated file with corrupted header",
+      "corruptions": [
+        "PAGE_HEADER_CORRUPTED",
+        "PAGE_OVERFLOW_CORRUPTED"
+      ]
+    },
+    {
+      "name": "rmrf_scenario",
+      "file": "test_rmrf_scenario.ibd",
+      "type": "warning",
+      "description": "Simulated deleted file with zeroed checksum",
+      "corruptions": [
+        "PAGE_CHECKSUM_MISMATCH"
+      ]
+    },
+    {
+      "name": "sdi_corruption",
+      "file": "test_sdi_corrupt.ibd",
+      "type": "critical",
+      "description": "SDI page with corrupted header",
+      "corruptions": [
+        "SDI_CORRUPTED"
+      ]
+    }
+  ]
+}

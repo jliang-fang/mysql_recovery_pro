@@ -1,376 +1,739 @@
 #!/usr/bin/env python3
-"""InnoDB .ibd 文件生成器，用于创建测试用的 InnoDB 页结构"""
+"""
+MySQL IBD Test Data Generator
+=============================
+生成 MySQL 5.6/5.7/8.0 的测试 IBD 文件，用于验证页解析器
 
-import json
-import zlib
+支持的测试场景：
+1. Compact 行格式测试
+2. Redundant 行格式测试  
+3. 坏块场景测试
+4. Truncate 场景测试
+5. SDI 页测试 (8.0+)
+"""
 
-# ==================== 常量定义 ====================
-PAGE_SIZE = 4096  # ✅ 修复：使用 4KB 页大小（与 C++ 代码兼容）
+import struct
+import os
+import random
+import argparse
+from typing import List, Tuple
 
-# MySQL 类型常量（参考 MySQL 8.0 源码 include/mysql_com.h）
-MYSQL_TYPE_DECIMAL     = 0
-MYSQL_TYPE_TINY        = 1
-MYSQL_TYPE_SHORT       = 2
-MYSQL_TYPE_LONG        = 3
-MYSQL_TYPE_FLOAT       = 4
-MYSQL_TYPE_DOUBLE      = 5
-MYSQL_TYPE_NULL        = 6
-MYSQL_TYPE_TIMESTAMP   = 7
-MYSQL_TYPE_LONGLONG    = 8
-MYSQL_TYPE_INT24       = 9
-MYSQL_TYPE_DATE        = 10
-MYSQL_TYPE_TIME        = 11
-MYSQL_TYPE_DATETIME    = 12
-MYSQL_TYPE_YEAR        = 13
-MYSQL_TYPE_NEWDATE     = 14
-MYSQL_TYPE_VARCHAR     = 15
-MYSQL_TYPE_BIT         = 16
-MYSQL_TYPE_TIMESTAMP2  = 17
-MYSQL_TYPE_DATETIME2   = 18
-MYSQL_TYPE_TIME2       = 19
-MYSQL_TYPE_JSON        = 245
-
-# InnoDB 页类型常量（参考 MySQL 8.0 源码 include/fil0fil.h）
-# ✅ 新增：与 C++ 头文件 page_defs.hpp 保持一致
+# InnoDB 常量
+FIL_PAGE_TYPE_INDEX = 9969      # 0x26F1
+FIL_PAGE_TYPE_SDI = 9971        # 0x26F3
+FIL_PAGE_TYPE_UNDO_LOG = 9970   # 0x26F2
 FIL_PAGE_TYPE_ALLOCATED = 0
-FIL_PAGE_INDEX        = 9969   # B+Tree 索引页 (0x2041)
-FIL_PAGE_UNDO_LOG     = 9970   # Undo 日志页 (0x2042) — MySQL 8.0 中替代了旧版的 FIL_PAGE_RTREE
-FIL_PAGE_SDI          = 9971   # SDI 元数据页 (0x2043)
-FIL_PAGE_TYPE_BLOB    = 9972   # BLOB页 (0x2044)
-FIL_PAGE_COMPRESSED   = 9973   # 压缩页 (0x2045)
 
-# ✅ 新增：页类型字符串映射（用于调试）
-PAGE_TYPE_NAMES = {
-    FIL_PAGE_TYPE_ALLOCATED: "ALLOCATED",
-    FIL_PAGE_INDEX:        "INDEX",
-    FIL_PAGE_UNDO_LOG:     "UNDO_LOG",
-    FIL_PAGE_SDI:          "SDI",
-    FIL_PAGE_TYPE_BLOB:    "BLOB",
-    FIL_PAGE_COMPRESSED:   "COMPRESSED"
-}
+UNIV_PAGE_SIZE = 16384
+FIL_HEADER_SIZE = 38
 
-# ==================== 辅助函数 ====================
-def write_le_uint32(data, offset, value):
-    """在指定偏移处写入小端序的 32 位无符号整数"""
-    data[offset]     = (value >> 0) & 0xFF
-    data[offset + 1] = (value >> 8) & 0xFF
-    data[offset + 2] = (value >> 16) & 0xFF
-    data[offset + 3] = (value >> 24) & 0xFF
+# Page Header Offsets (relative to page start)
+PAGE_N_DIR_SLOTS = 38 + 0
+PAGE_HEAP_TOP = 38 + 2
+PAGE_N_HEAP = 38 + 4
+PAGE_FREE = 38 + 6
+PAGE_GARBAGE_END = 38 + 8
+PAGE_LAST_INSERT = 38 + 10
+PAGE_DIRECTION = 38 + 12
+PAGE_N_DIRECT_PAGES = 38 + 14
 
-def write_le_uint64(data, offset, value):
-    """在指定偏移处写入小端序的 64 位无符号整数"""
-    for i in range(8):
-        data[offset + i] = (value >> (i * 8)) & 0xFF
+# Record Constants
+REC_INFO_BITS_MASK = 0x07
+REC_INFO_DELETED_FLAG = 0x08
+REC_INFO_MIN_REC_FLAG = 0x10
+REC_INFO_EXTERN_FLAG = 0x20
 
-def write_le_uint16(data, offset, value):
-    """在指定偏移处写入小端序的 16 位无符号整数"""
-    data[offset]     = (value >> 0) & 0xFF
-    data[offset + 1] = (value >> 8) & 0xFF
+REC_STATUS_ORDINARY = 0x00
+REC_STATUS_NODE_PTR = 0x01
+REC_STATUS_INFIMUM = 0x02
+REC_STATUS_SUPREMUM = 0x03
 
-# ==================== 页面生成函数 ====================
-def create_page_header(page_type):
-    """Create a minimal InnoDB page header"""
-    page = bytearray(PAGE_SIZE)
 
-    # ✅ 修复：FIL Header (38 bytes) - 使用正确的偏移量（相对于页起始位置）
-    # 参考 MySQL 8.0 源码 include/fil0fil.h
-    # 所有偏移都是相对于页起始位置的相对偏移（0-based）
-    # offset 0:   space_id (4 bytes)
-    # offset 4:   checksum1 (4 bytes)
-    # offset 8:   LSN low (4 bytes)
-    # offset 12:  LSN high (4 bytes)
-    # offset 16:  page_type (2 bytes) - ✅ 修复：正确偏移是 16，不是 12！
-    # offset 18:  page_no (2 bytes)
-    # offset 20:  prev_page (2 bytes)
-    # offset 22:  next_page (2 bytes)
-    # offset 24:  btree_index (4 bytes)
-    # offset 26:  reserved/unused (12 bytes)
-    # offset 38:  page data starts here
+def create_fil_header(
+    prev_page: int = 0xFFFFFFFF,
+    next_page: int = 0xFFFFFFFF,
+    lsn: int = 1,
+    page_type: int = FIL_PAGE_TYPE_INDEX,
+    space_id: int = 1,
+    page_offset: int = 0,
+    file_flush_lsn: int = 0
+) -> bytes:
+    """创建 FIL_HEADER (38 bytes)"""
+    header = bytearray(38)
+    
+    # FIL_PAGE_PREV (offset 0-3)
+    struct.pack_into('<I', header, 0, prev_page)
+    
+    # FIL_PAGE_NEXT (offset 4-7)
+    struct.pack_into('<I', header, 4, next_page)
+    
+    # FIL_PAGE_LSN (offset 8-15)
+    struct.pack_into('<Q', header, 8, lsn)
+    
+    # FIL_PAGE_TYPE (offset 16-17)
+    struct.pack_into('<H', header, 16, page_type)
+    
+    # FIL_PAGE_SPACE_ID (offset 18-21)
+    struct.pack_into('<I', header, 18, space_id)
+    
+    # FIL_PAGE_SPACE_OFFSET (offset 22-23)
+    struct.pack_into('<H', header, 22, page_offset)
+    
+    # FIL_PAGE_FILE_FLUSH_LSN (offset 24-31, 8 bytes in 8.0+)
+    struct.pack_into('<Q', header, 24, file_flush_lsn)
+    
+    return bytes(header)
 
-    # ✅ 修复：写入正确的 FIL Header 偏移（相对于页起始位置）
-    write_le_uint32(page, 0x00, 0)              # space_id (offset 0)
-    write_le_uint32(page, 0x04, 0)              # checksum1 (offset 4)
-    write_le_uint32(page, 0x08, 0)              # LSN low (offset 8)
-    write_le_uint32(page, 0x0C, 0)              # LSN high (offset 12)
-    write_le_uint16(page, 0x10, page_type)      # page_type at offset 16 (relative to page start)
-    write_le_uint16(page, 0x12, 0)              # page_no at offset 18
-    write_le_uint16(page, 0x14, 0xFFFF)         # prev_page at offset 20
-    write_le_uint16(page, 0x16, 0xFFFF)         # next_page at offset 22
-    write_le_uint32(page, 0x18, 0)              # btree_index at offset 24
 
-    return page
+def create_page_header_56_57(
+    n_dir_slots: int = 2,
+    heap_top: int = 120,  # After INFIMUM/SUPREMUM + headers
+    n_heap: int = 2,      # INFIMUM + SUPREMUM
+    free_offset: int = 0,
+    garbage_end: int = 0,
+    last_insert: int = 0,
+    direction: int = 0,
+    n_direct_pages: int = 0,
+    page_level: int = 0,
+    max_trx_id: int = 0,
+    header_version: int = 0
+) -> bytes:
+    """创建 MySQL 5.6/5.7 Page Header (16 bytes)"""
+    header = bytearray(16)
+    
+    # PAGE_N_DIR_SLOTS
+    struct.pack_into('<H', header, 0, n_dir_slots)
+    
+    # PAGE_HEAP_TOP
+    struct.pack_into('<H', header, 2, heap_top)
+    
+    # PAGE_N_HEAP (15-bit, bit 15 is REC_INFO_NEW_CHUNK_FLAG)
+    struct.pack_into('<H', header, 4, n_heap & 0x7FFF)
+    
+    # PAGE_FREE
+    struct.pack_into('<H', header, 6, free_offset)
+    
+    # PAGE_GARBAGE_END
+    struct.pack_into('<H', header, 8, garbage_end)
+    
+    # PAGE_LAST_INSERT
+    struct.pack_into('<H', header, 10, last_insert)
+    
+    # PAGE_DIRECTION
+    struct.pack_into('<H', header, 12, direction)
+    
+    # PAGE_N_DIRECT_PAGES
+    struct.pack_into('<H', header, 14, n_direct_pages)
+    
+    return bytes(header)
 
-def create_sdi_page(table_name):
-    """Create a SDI page with compressed JSON (raw deflate, no zlib header)"""
-    schema = {
-        "schema": {"name": "test_recovery"},
-        "table": {
-            "name": table_name,
-            "columns": [
-                {"name": "id", "type": MYSQL_TYPE_LONGLONG, "is_nullable": False},
-                {"name": "name", "type": MYSQL_TYPE_VARCHAR, "is_nullable": False,
-                 "length": 128, "charset_id": 255, "collation_id": 255,
-                 "default_value": "unknown"},
-                {"name": "email", "type": MYSQL_TYPE_VARCHAR, "is_nullable": True,
-                 "length": 255, "charset_id": 255, "collation_id": 255},
-                {"name": "created_at", "type": MYSQL_TYPE_DATETIME, "is_nullable": True,
-                 "default_value": "CURRENT_TIMESTAMP"},
-                {"name": "metadata", "type": MYSQL_TYPE_JSON, "is_nullable": True}
-            ],
-            "indexes": [
-                {"name": "PRIMARY", "columns": ["id"], "is_primary": True},
-                {"name": "idx_name", "columns": ["name"], "is_unique": False}
-            ]
-        }
-    }
 
-    json_str = json.dumps(schema, separators=(',', ':'))
-    # ✅ 修复：使用 raw deflate（无 zlib 头），与 MySQL SDI 格式一致
-    # zlib.compress() 返回带 zlib header 的数据，需要手动压缩为 raw deflate
-    import zlib
-    compressor = zlib.compressobj(zlib.Z_DEFAULT_COMPRESSION, zlib.DEFLATED, -zlib.MAX_WBITS)
-    compressed = compressor.compress(json_str.encode())
-    compressed += compressor.flush()
+def create_page_header_80(
+    n_dir_slots: int = 2,
+    heap_top: int = 120,
+    n_heap: int = 2,
+    free_offset: int = 0,
+    garbage_end: int = 0,
+    last_insert: int = 0,
+    direction: int = 0,
+    n_direct_pages: int = 0,
+    page_level: int = 0,
+    header_version: int = 1
+) -> bytes:
+    """创建 MySQL 8.0+ Page Header (24 bytes)"""
+    header = bytearray(24)
+    
+    # PAGE_N_DIR_SLOTS
+    struct.pack_into('<H', header, 0, n_dir_slots)
+    
+    # PAGE_HEAP_TOP
+    struct.pack_into('<H', header, 2, heap_top)
+    
+    # PAGE_N_HEAP
+    struct.pack_into('<H', header, 4, n_heap & 0x7FFF)
+    
+    # PAGE_FREE
+    struct.pack_into('<H', header, 6, free_offset)
+    
+    # PAGE_GARBAGE_END
+    struct.pack_into('<H', header, 8, garbage_end)
+    
+    # PAGE_LAST_INSERT
+    struct.pack_into('<H', header, 10, last_insert)
+    
+    # PAGE_DIRECTION
+    struct.pack_into('<H', header, 12, direction)
+    
+    # PAGE_N_DIRECT_PAGES
+    struct.pack_into('<H', header, 14, n_direct_pages)
+    
+    # PAGE_HEADER_VERSION (8.0+)
+    struct.pack_into('<H', header, 16, header_version)
+    
+    return bytes(header)
 
-    sdi_header = bytearray(20)
-    write_le_uint32(sdi_header, 0, 1)           # type
-    write_le_uint64(sdi_header, 4, 1)           # id
-    write_le_uint32(sdi_header, 12, len(json_str))  # uncompressed_len
-    write_le_uint32(sdi_header, 16, len(compressed)) # compressed_len
 
-    payload = sdi_header + compressed
-    page = create_page_header(FIL_PAGE_SDI)
+def create_infimum_record() -> bytes:
+    """创建 INFIMUM 系统记录 (13 bytes)"""
+    record = bytearray(13)
+    
+    # info_bits = REC_STATUS_INFIMUM (0x02)
+    record[0] = REC_STATUS_INFIMUM
+    
+    # next_record_offset = 54 (SUPREMUM offset)
+    struct.pack_into('<H', record, 1, 54)
+    
+    # heap_no = 0
+    struct.pack_into('<H', record, 3, 0)
+    
+    # n_fields = 1
+    record[5] = 1
+    
+    # extra_bytes = 6 (Redundant) or 5 (Compact)
+    record[6] = 6
+    
+    # rest is zero
+    return bytes(record)
 
-    # Write SDI payload at offset 38 (after FIL header)
-    page[38:38+len(payload)] = payload
 
+def create_supremum_record() -> bytes:
+    """创建 SUPREMUM 系统记录 (8 bytes)"""
+    record = bytearray(8)
+    
+    # info_bits = REC_STATUS_SUPREMUM (0x03)
+    record[0] = REC_STATUS_SUPREMUM
+    
+    # next_record_offset = 0xFFFF (end of chain)
+    struct.pack_into('<H', record, 1, 0xFFFF)
+    
+    # heap_no = 1
+    struct.pack_into('<H', record, 3, 1)
+    
+    return bytes(record)
+
+
+def create_user_record_compact(
+    values: List[bytes],
+    is_deleted: bool = False,
+    is_min_rec: bool = False
+) -> bytes:
+    """
+    创建 COMPACT 行格式用户记录
+    
+    Record format:
+    - 1 byte: info_bits
+    - 2 bytes: next_record_offset
+    - 2 bytes: heap_no
+    - n bytes: column data
+    """
+    record = bytearray()
+    
+    # info_bits
+    info_bits = REC_STATUS_ORDINARY
+    if is_deleted:
+        info_bits |= REC_INFO_DELETED_FLAG
+    if is_min_rec:
+        info_bits |= REC_INFO_MIN_REC_FLAG
+    record.append(info_bits)
+    
+    # next_record_offset (will be set later)
+    record.extend(b'\x00\x00')
+    
+    # heap_no
+    record.extend(b'\x00\x00')
+    
+    # n_fields (high 5 bits in info_bits, low 4 bits in next byte)
+    n_fields = len(values)
+    record[0] |= (n_fields << 3) & 0xF8
+    record.append((n_fields >> 2) & 0x0F)
+    
+    # extra_bytes = 5 (Compact)
+    record.append(5)
+    
+    # null bitmap (1 bit per nullable column)
+    null_bitmap = 0
+    null_count = 0
+    for val in values:
+        if val is None:
+            null_bitmap |= (1 << null_count)
+        null_count += 1
+    
+    if null_count > 0:
+        record.append(null_bitmap)
+    
+    # column data
+    for val in values:
+        if val is None:
+            continue
+        # Variable length: 1-2 bytes length + data
+        if len(val) < 256:
+            record.append(len(val))
+        else:
+            record.append(0xFF)
+            record.append((len(val) >> 8) & 0xFF)
+        record.extend(val)
+    
+    # Set next_record_offset
+    next_offset = len(record)
+    struct.pack_into('<H', record, 1, next_offset)
+    
+    return bytes(record)
+
+
+def create_user_record_redundant(
+    values: List[bytes],
+    is_deleted: bool = False,
+    is_min_rec: bool = False
+) -> bytes:
+    """
+    创建 REDUNDANT 行格式用户记录
+    
+    Record format:
+    - 1 byte: info_bits
+    - 2 bytes: next_record_offset
+    - 2 bytes: heap_no
+    - 1 byte: n_fields
+    - n bytes: column lengths
+    - n bytes: column data
+    """
+    record = bytearray()
+    
+    # info_bits
+    info_bits = REC_STATUS_ORDINARY
+    if is_deleted:
+        info_bits |= REC_INFO_DELETED_FLAG
+    if is_min_rec:
+        info_bits |= REC_INFO_MIN_REC_FLAG
+    record.append(info_bits)
+    
+    # next_record_offset
+    record.extend(b'\x00\x00')
+    
+    # heap_no
+    record.extend(b'\x00\x00')
+    
+    # n_fields
+    record.append(len(values))
+    
+    # extra_bytes = 6 (Redundant)
+    record.append(6)
+    
+    # column lengths (2 bytes each for Redundant)
+    for val in values:
+        if val is None:
+            record.extend(b'\xFF\xFF')  # NULL marker
+        else:
+            record.extend(struct.pack('<H', len(val)))
+    
+    # column data
+    for val in values:
+        if val is not None:
+            record.extend(val)
+    
+    # Set next_record_offset
+    next_offset = len(record)
+    struct.pack_into('<H', record, 1, next_offset)
+    
+    return bytes(record)
+
+
+def create_btr_header(page_level: int = 0) -> bytes:
+    """创建 BTR_HEADER (12 bytes)"""
+    header = bytearray(12)
+    
+    # n_levels (number of levels in tree) - 4 bytes
+    struct.pack_into('<I', header, 0, page_level + 1)
+    
+    # index_id (8 bytes)
+    struct.pack_into('<Q', header, 4, 0x123456789ABCDEF0)
+    
+    return bytes(header)
+
+
+def create_page(
+    page_type: int = FIL_PAGE_TYPE_INDEX,
+    space_id: int = 1,
+    page_offset: int = 0,
+    records: List[bytes] = None,
+    page_level: int = 0,
+    mysql_version: int = 57,
+    row_format: str = 'compact'
+) -> bytes:
+    """创建完整的 InnoDB 页"""
+    page = bytearray(UNIV_PAGE_SIZE)
+    
+    # Handle None records
+    if records is None:
+        records = []
+    
+    # 1. Create FIL_HEADER
+    fil_header = create_fil_header(
+        prev_page=0xFFFFFFFF,
+        next_page=0xFFFFFFFF,
+        lsn=1,
+        page_type=page_type,
+        space_id=space_id,
+        page_offset=page_offset
+    )
+    page[0:38] = fil_header
+    
+    # 2. Create BTR_HEADER (after FIL_HEADER)
+    btr_header = create_btr_header(page_level)
+    page[38:50] = btr_header  # Fixed: 12 bytes, not 8
+    
+    # 3. Create PAGE_HEADER
+    if mysql_version >= 80:
+        page_header = create_page_header_80(
+            heap_top=54,  # INFIMUM at 54
+            n_heap=2,
+            page_level=page_level
+        )
+    else:
+        page_header = create_page_header_56_57(
+            heap_top=54,
+            n_heap=2,
+            page_level=page_level
+        )
+    page[38:54] = page_header
+    
+    # 4. Create system records (INFIMUM/SUPREMUM)
+    infimum = create_infimum_record()
+    supremum = create_supremum_record()
+    
+    page[54:54+len(infimum)] = infimum
+    page[54+len(infimum):54+len(infimum)+len(supremum)] = supremum
+    
+    # 5. Add user records
+    current_offset = 54 + len(infimum) + len(supremum)
+    
+    if records:
+        for record in records:
+            page[current_offset:current_offset+len(record)] = record
+            current_offset += len(record)
+    
+    # Update heap_top
+    heap_top = current_offset
+    if mysql_version >= 80:
+        struct.pack_into('<H', page, PAGE_HEAP_TOP, heap_top)
+        struct.pack_into('<H', page, PAGE_N_HEAP, 2 + len(records))
+    else:
+        struct.pack_into('<H', page, PAGE_HEAP_TOP, heap_top)
+        struct.pack_into('<H', page, PAGE_N_HEAP, 2 + len(records))
+    
+    # 6. Create page directory (2-byte slots pointing to records)
+    # INFIMUM at offset 54, SUPREMUM at offset 54+13=67
+    dir_slots = bytearray()
+    dir_slots.extend(struct.pack('<H', 54))      # INFIMUM
+    dir_slots.extend(struct.pack('<H', 54+13))   # SUPREMUM
+    
+    # Add user record slots
+    if records:
+        offset = 54 + len(infimum) + len(supremum)
+        for record in records:
+            dir_slots.extend(struct.pack('<H', offset))
+            offset += len(record)
+    
+    # Directory slots go after the last record
+    dir_offset = heap_top
+    page[dir_offset:dir_offset+len(dir_slots)] = dir_slots
+    
+    # Update n_dir_slots
+    n_dir_slots = 2 + len(records) if records else 2
+    if mysql_version >= 80:
+        struct.pack_into('<H', page, PAGE_N_DIR_SLOTS, n_dir_slots)
+    else:
+        struct.pack_into('<H', page, PAGE_N_DIR_SLOTS, n_dir_slots)
+    
+    # 7. Create FIL_PAGE_END_LSN (page tail)
+    # LSN reversed (last 8 bytes of page)
+    lsn = struct.unpack('<Q', fil_header[8:16])[0]
+    page[-8:] = struct.pack('<Q', lsn)
+    
+    # 8. Create checksum (simplified - use zeros for now)
+    # In production, use CRC32C
+    struct.pack_into('<I', page, 4, 0)   # checksum_a
+    struct.pack_into('<I', page, 8, 0)   # checksum_b
+    struct.pack_into('<I', page, 24, 0)  # checksum_a (duplicate)
+    struct.pack_into('<I', page, 28, 0)  # checksum_b (duplicate)
+    
     return bytes(page)
 
-def generate_ibd(table_name="users", include_blob=False, multi_page_blob=False, row_format="DYNAMIC"):
-    """Generate a minimal .ibd file with SDI + B+ tree with optional test data"""
-    pages = []
+
+def create_sdi_page(
+    space_id: int = 1,
+    page_offset: int = 1
+) -> bytes:
+    """创建 SDI 页 (MySQL 8.0+)"""
+    page = bytearray(UNIV_PAGE_SIZE)
     
-    # Page 0: SDI
-    pages.append(create_sdi_page(table_name))
+    # 1. FIL_HEADER
+    fil_header = create_fil_header(
+        prev_page=0xFFFFFFFF,
+        next_page=0xFFFFFFFF,
+        lsn=1,
+        page_type=FIL_PAGE_TYPE_SDI,
+        space_id=space_id,
+        page_offset=page_offset
+    )
+    page[0:38] = fil_header
     
-    # Page 1: Root page of clustered index (with test records)
-    root_page = create_page_header(FIL_PAGE_INDEX)
-    write_le_uint32(root_page, 38, 0)   # PAGE_LEVEL = 0 (leaf)
+    # 2. Page Header (24 bytes for 8.0+)
+    page_header = create_page_header_80(
+        heap_top=128,
+        n_heap=1
+    )
+    page[38:62] = page_header
     
-    # ✅ 新增：根据行格式设置 flags（BTR 标志位）
-    row_format_flags = {"REDUNDANT": 0, "COMPACT": 1, "DYNAMIC": 2, "COMPRESSED": 3}
-    flags = row_format_flags.get(row_format.upper(), 2)  # 默认 DYNAMIC
-    write_le_uint16(root_page, 40, flags << 8 | 0x07)   # 设置行格式标志
+    # 3. SDI Signature (8 bytes at offset 64)
+    sdi_sig = b'\x08SDI0000'
+    page[64:72] = sdi_sig
     
-    # 构建测试记录
-    record_data = bytearray()
+    # 4. SDI JSON data (simplified)
+    sdi_data = b'{"type": "table", "table_name": "test_table"}'
+    page[72:72+len(sdi_data)] = sdi_data
     
-    # INFIMUM 记录（固定偏移 54）
-    infimum = bytearray(13)
-    infimum[0] = 0x02  # info_bits: REC_INFO_MIN_REC_FLAG
-    write_le_uint16(infimum, 1, 56)  # next_record_offset
-    record_data.extend(infimum)
+    # 5. Page tail
+    page[-8:] = b'\x00' * 8
     
-    if include_blob:
-        # 用户记录示例：包含 BLOB 字段
-        user_rec = bytearray()
-        user_rec.append(0x00)  # info_bits (普通记录)
-        user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
+    return bytes(page)
 
-        # NULL 位图（假设所有列都非空）
-        user_rec.extend(b'\x00')  # 1 byte null bitmap
 
-        # 预留空间用于后续字段
-        user_rec.extend(b'\x00' * 30)  # 预留30字节
-
-        # id 字段 (LONGLONG, 8 bytes)
-        write_le_uint64(user_rec, len(user_rec) - 8, 1)
-
-        # name 字段 (VARCHAR, 前缀长度 1 字节)
-        name_str = "test"
-        user_rec.append(len(name_str))
-        user_rec.extend(name_str.encode())
-
-        # email 字段 (VARCHAR)
-        email_str = "test@example.com"
-        user_rec.append(len(email_str))
-        user_rec.extend(email_str.encode())
-
-        # created_at 字段 (DATETIME2(6))
-        year = 2024
-        month = 1
-        day = 1
-        hour = 0
-        minute = 0
-        second = 0
-        frac = 0
-
-        # Pack date/time into 5 bytes
-        year_low = year & 0xFF
-        year_high = (year >> 8) & 0xFF
-        month_day = ((day << 4) | month) & 0xFF
-        hour_minute = ((minute & 0x3F) << 2) | (hour & 0x1F)
-        second_packed = ((second & 0x3F) << 2) | ((frac >> 16) & 0x03)
-
-        user_rec.append(year_low)
-        user_rec.append(year_high)
-        user_rec.append(month_day)
-        user_rec.append(hour_minute)
-        user_rec.append(second_packed)
-
-        # Pack fractional part (3 bytes for precision=6)
-        frac_bytes = [
-            (frac >> 0) & 0xFF,
-            (frac >> 8) & 0xFF,
-            (frac >> 16) & 0xFF
-        ]
-        user_rec.extend(frac_bytes)
-
-        # BLOB 指针（20字节）
-        user_rec.extend(b'\x00' * 20)  # 预留20字节
-        write_le_uint32(user_rec, len(user_rec) - 20, 0)   # space_id
-        write_le_uint32(user_rec, len(user_rec) - 16, 100) # page_no
-        write_le_uint32(user_rec, len(user_rec) - 12, 0)   # offset
-        write_le_uint32(user_rec, len(user_rec) - 8, 50)   # len
-        write_le_uint32(user_rec, len(user_rec) - 4, 50)   # total_len
-
-        record_data.extend(user_rec)
-    else:
-        # 用户记录示例：id=1, name='test'
-        user_rec = bytearray()
-        user_rec.append(0x00)  # info_bits (普通记录)
-        user_rec.append(0x00)  # n_fields_high + next_record_offset[15:8]
-        # ✅ 修复：确保 user_rec 有足够的空间（预留 2 字节用于 next_record_offset）
-        while len(user_rec) < 3:
-            user_rec.append(0)
-        write_le_uint16(user_rec, 1, 56 + len(record_data) + 2)  # next_record_offset
-
-        # NULL 位图（假设所有列都非空）
-        user_rec.extend(b'\x00')  # 1 byte null bitmap
-
-        # id 字段 (LONGLONG, 8 bytes)
-        # ✅ 修复：确保有足够空间
-        while len(user_rec) < 12:
-            user_rec.append(0)
-        write_le_uint64(user_rec, len(user_rec) - 8, 1)
-        
-        # name 字段 (VARCHAR, 前缀长度 1 字节)
-        name_str = "test"
-        user_rec.append(len(name_str))
-        user_rec.extend(name_str.encode())
-        
-        # email 字段 (VARCHAR, 可为空，这里设为非空)
-        email_str = "test@example.com"
-        user_rec.append(len(email_str))
-        user_rec.extend(email_str.encode())
-        
-        # created_at 字段 (DATETIME2(6), 8 bytes for precision=6)
-        import struct
-        # ✅ 修复：正确的 DATETIME2 编码（参考 MySQL 8.0 源码 sql/field.cc）
-        # 前5字节 packed format: [year_low, year_high, month_day, hour_minute, second_packed]
-        # 后3字节小数部分 (precision=6)
-        
-        year = 2024
-        month = 1
-        day = 1
-        hour = 0
-        minute = 0
-        second = 0
-        frac = 0
-        
-        # Pack date/time into 5 bytes
-        year_low = year & 0xFF
-        year_high = (year >> 8) & 0xFF
-        month_day = ((day << 4) | month) & 0xFF
-        hour_minute = ((minute & 0x3F) << 2) | (hour & 0x1F)
-        second_packed = ((second & 0x3F) << 2) | ((frac >> 16) & 0x03)
-        
-        user_rec.append(year_low)
-        user_rec.append(year_high)
-        user_rec.append(month_day)
-        user_rec.append(hour_minute)
-        user_rec.append(second_packed)
-        
-        # Pack fractional part (3 bytes for precision=6)
-        # ✅ 修复：MySQL DATETIME2 小数部分使用小端序存储（低位在前）
-        frac_bytes = [
-            (frac >> 0) & 0xFF,
-            (frac >> 8) & 0xFF,
-            (frac >> 16) & 0xFF
-        ]
-        user_rec.extend(frac_bytes)
-        
-        record_data.extend(user_rec)
+def create_corrupted_page(
+    corruption_type: str = 'header',
+    page_type: int = FIL_PAGE_TYPE_INDEX,
+    space_id: int = 1,
+    page_offset: int = 0
+) -> bytes:
+    """创建损坏的页用于测试"""
+    page = bytearray(create_page(
+        page_type=page_type,
+        space_id=space_id,
+        page_offset=page_offset,
+        records=[]
+    ))
     
-    # SUPREMUM 记录
-    supremum = bytearray(5)
-    supremum[0] = 0x03  # info_bits: REC_STATUS_SUPREMUM (0x03) - matches C++ parser expectation
-    write_le_uint16(supremum, 1, 0xFFFF)  # next_record_offset = 0xFFFF marks end
+    if corruption_type == 'header':
+        # Corrupt page header
+        page[38:54] = b'\xFF' * 16
+    elif corruption_type == 'checksum':
+        # Corrupt checksum
+        struct.pack_into('<I', page, 4, 0xDEADBEEF)
+        struct.pack_into('<I', page, 24, 0xDEADBEEF)
+    elif corruption_type == 'type':
+        # Corrupt page type
+        struct.pack_into('<H', page, 16, 0xFFFF)
+    elif corruption_type == 'data':
+        # Corrupt record data
+        page[100:200] = b'\xFF' * 100
     
-    record_data.extend(supremum)
-    
-    # 写入记录数据到页
-    rec_start = 38 + 16  # PAGE_HEADER 后开始
-    root_page[rec_start:rec_start+len(record_data)] = record_data
-    
-    write_le_uint16(root_page, 42, 4)   # PAGE_N_HEAP = 4 (infimum + user + supremum + dummy)
-    
-    pages.append(bytes(root_page))
-    
-    return b''.join(pages)
+    return bytes(page)
 
-# ==================== 主程序入口 ====================
-if __name__ == "__main__":
-    import sys
-    import argparse
+
+def create_truncated_page(
+    original_page: bytes,
+    truncate_size: int = 8192
+) -> bytes:
+    """创建截断的页"""
+    return original_page[:truncate_size]
+
+
+def generate_test_files(output_dir: str = '.'):
+    """生成所有测试文件"""
+    os.makedirs(output_dir, exist_ok=True)
     
-    parser = argparse.ArgumentParser(description="Generate InnoDB test data for recovery testing")
-    parser.add_argument("table_name", nargs="?", default="users", help="Table name")
-    parser.add_argument("--scenario", choices=["default", "rm_rf", "header_corrupt", "truncate_partial"], 
-                       default="default", help="Scenario type")
-    parser.add_argument("--output", "-o", default=None, help="Output file path (default: <table_name>.ibd)")
-    parser.add_argument("--rows_kept", type=int, default=0, help="For truncate_partial: number of rows to keep")
+    # 1. Compact 行格式测试页
+    print("[*] Generating Compact row format test page...")
+    compact_records = [
+        create_user_record_compact([b'John', b'Doe', b'30']),
+        create_user_record_compact([b'Jane', b'Smith', b'25']),
+        create_user_record_compact([b'Bob', b'Johnson', b'35']),
+    ]
+    compact_page = create_page(
+        records=compact_records,
+        row_format='compact'
+    )
+    with open(os.path.join(output_dir, 'test_compact.ibd'), 'wb') as f:
+        f.write(compact_page)
+    print(f"    [+] Created test_compact.ibd ({len(compact_page)} bytes)")
+    
+    # 2. Redundant 行格式测试页
+    print("[*] Generating Redundant row format test page...")
+    redundant_records = [
+        create_user_record_redundant([b'John', b'Doe', b'30']),
+        create_user_record_redundant([b'Jane', b'Smith', b'25']),
+        create_user_record_redundant([b'Bob', b'Johnson', b'35']),
+    ]
+    redundant_page = create_page(
+        records=redundant_records,
+        row_format='redundant'
+    )
+    with open(os.path.join(output_dir, 'test_redundant.ibd'), 'wb') as f:
+        f.write(redundant_page)
+    print(f"    [+] Created test_redundant.ibd ({len(redundant_page)} bytes)")
+    
+    # 3. 坏块测试页
+    print("[*] Generating corrupted page test file...")
+    corrupted_page = create_corrupted_page('header')
+    with open(os.path.join(output_dir, 'test_header_corrupt.ibd'), 'wb') as f:
+        f.write(corrupted_page)
+    print(f"    [+] Created test_header_corrupt.ibd ({len(corrupted_page)} bytes)")
+    
+    # 4. SDI 页测试 (8.0+)
+    print("[*] Generating SDI page test file...")
+    sdi_page = create_sdi_page()
+    with open(os.path.join(output_dir, 'test_sdi.ibd'), 'wb') as f:
+        f.write(sdi_page)
+    print(f"    [+] Created test_sdi.ibd ({len(sdi_page)} bytes)")
+    
+    # 5. 截断测试页
+    print("[*] Generating truncated page test file...")
+    original_page = create_page()
+    truncated_page = create_truncated_page(original_page, 8192)
+    with open(os.path.join(output_dir, 'test_truncated.ibd'), 'wb') as f:
+        f.write(truncated_page)
+    print(f"    [+] Created test_truncated.ibd ({len(truncated_page)} bytes)")
+    
+    # 6. 多版本混合测试
+    print("[*] Generating multi-version test files...")
+    
+    # MySQL 5.6 页
+    page_56 = create_page(mysql_version=56, row_format='compact')
+    with open(os.path.join(output_dir, 'test_mysql56.ibd'), 'wb') as f:
+        f.write(page_56)
+    print(f"    [+] Created test_mysql56.ibd")
+    
+    # MySQL 8.0 页
+    page_80 = create_page(mysql_version=80, row_format='dynamic')
+    with open(os.path.join(output_dir, 'test_mysql80.ibd'), 'wb') as f:
+        f.write(page_80)
+    print(f"    [+] Created test_mysql80.ibd")
+    
+    # 7. 完整的 IBD 文件模拟
+    print("[*] Generating complete IBD file simulation...")
+    
+    # Page 0: FSP_HDR
+    fsp_hdr = create_page(
+        page_type=0x45BF,
+        page_offset=0,
+        mysql_version=80
+    )
+    
+    # Page 1: IBUF_BITMAP
+    ibuf_bitmap = create_page(
+        page_type=0x45BD,
+        page_offset=1,
+        mysql_version=80
+    )
+    
+    # Page 2: INODE
+    inode = create_page(
+        page_type=0x45BB,
+        page_offset=2,
+        mysql_version=80
+    )
+    
+    # Page 3: INDEX (root page)
+    index_records = [
+        create_user_record_compact([b'Key1', b'Value1']),
+        create_user_record_compact([b'Key2', b'Value2']),
+    ]
+    root_page = create_page(
+        page_type=FIL_PAGE_TYPE_INDEX,
+        page_offset=3,
+        page_level=0,
+        records=index_records,
+        mysql_version=80,
+        row_format='compact'
+    )
+    
+    # Write as a single file
+    with open(os.path.join(output_dir, 'test_complete.ibd'), 'wb') as f:
+        f.write(fsp_hdr)
+        f.write(ibuf_bitmap)
+        f.write(inode)
+        f.write(root_page)
+        # Pad to 64KB
+        f.write(b'\x00' * (65536 - len(fsp_hdr) - len(ibuf_bitmap) - len(inode) - len(root_page)))
+    print(f"    [+] Created test_complete.ibd")
+    
+    print("\n[+] All test files generated successfully!")
+    print(f"    Output directory: {output_dir}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='MySQL IBD Test Data Generator'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        default='.',
+        help='Output directory for test files'
+    )
+    parser.add_argument(
+        '--compact',
+        action='store_true',
+        help='Generate only Compact format test file'
+    )
+    parser.add_argument(
+        '--redundant',
+        action='store_true',
+        help='Generate only Redundant format test file'
+    )
+    parser.add_argument(
+        '--corrupted',
+        action='store_true',
+        help='Generate only corrupted page test file'
+    )
+    parser.add_argument(
+        '--sdi',
+        action='store_true',
+        help='Generate only SDI page test file'
+    )
+    parser.add_argument(
+        '--truncated',
+        action='store_true',
+        help='Generate only truncated page test file'
+    )
     
     args = parser.parse_args()
     
-    if args.scenario == "rm_rf":
-        # 模拟 rm -rf 场景：生成一个空文件或损坏的文件
-        output_file = args.output or f"{args.table_name}_rm_rf.ibd"
-        with open(output_file, 'wb') as f:
-            # 写入一个损坏的页头（FIL_PAGE_TYPE 错误）
-            page = bytearray(16384)
-            page[0] = 0xFF  # 故意设置错误的页类型
+    if args.compact:
+        records = [
+            create_user_record_compact([b'John', b'Doe', b'30']),
+            create_user_record_compact([b'Jane', b'Smith', b'25']),
+        ]
+        page = create_page(records=records, row_format='compact')
+        with open(os.path.join(args.output, 'test_compact.ibd'), 'wb') as f:
             f.write(page)
-        print(f"Generated {output_file} (simulated rm -rf scenario)")
-    elif args.scenario == "header_corrupt":
-        # 模拟文件头损坏场景
-        output_file = args.output or f"{args.table_name}_header_corrupt.ibd"
-        ibd_data = bytearray(generate_ibd(args.table_name))
-        if len(ibd_data) >= 512:
-            # 破坏页头的最后 256 字节（包含关键元数据）
-            for i in range(256):
-                ibd_data[256 + i] = 0xFF
-        with open(output_file, 'wb') as f:
-            f.write(ibd_data)
-        print(f"Generated {output_file} (header corrupted scenario)")
-    elif args.scenario == "truncate_partial":
-        # 模拟部分 Truncate 场景：只保留前 N 行数据
-        output_file = args.output or f"{args.table_name}_truncated.ibd"
-        ibd_data = generate_ibd(args.table_name, include_blob=True)
-        
-        # 简单模拟：截断文件到一半大小（实际应更精细地处理页结构）
-        if len(ibd_data) > 16384:
-            truncated_size = len(ibd_data) // 2
-            ibd_data = ibd_data[:truncated_size]
-        
-        with open(output_file, 'wb') as f:
-            f.write(ibd_data)
-        print(f"Generated {output_file} (partial truncate scenario)")
-    else:  # default
-        output_file = args.output or f"{args.table_name}.ibd"
-        ibd_data = generate_ibd(args.table_name)
-        
-        with open(output_file, 'wb') as f:
-            f.write(ibd_data)
-            
-        print(f"Generated {output_file} ({len(ibd_data)} bytes)")
+        print(f"[+] Created test_compact.ibd ({len(page)} bytes)")
+    elif args.redundant:
+        records = [
+            create_user_record_redundant([b'John', b'Doe', b'30']),
+            create_user_record_redundant([b'Jane', b'Smith', b'25']),
+        ]
+        page = create_page(records=records, row_format='redundant')
+        with open(os.path.join(args.output, 'test_redundant.ibd'), 'wb') as f:
+            f.write(page)
+        print(f"[+] Created test_redundant.ibd ({len(page)} bytes)")
+    elif args.corrupted:
+        page = create_corrupted_page('header')
+        with open(os.path.join(args.output, 'test_corrupted.ibd'), 'wb') as f:
+            f.write(page)
+        print(f"[+] Created test_corrupted.ibd ({len(page)} bytes)")
+    elif args.sdi:
+        page = create_sdi_page()
+        with open(os.path.join(args.output, 'test_sdi.ibd'), 'wb') as f:
+            f.write(page)
+        print(f"[+] Created test_sdi.ibd ({len(page)} bytes)")
+    elif args.truncated:
+        original = create_page()
+        truncated = create_truncated_page(original, 8192)
+        with open(os.path.join(args.output, 'test_truncated.ibd'), 'wb') as f:
+            f.write(truncated)
+        print(f"[+] Created test_truncated.ibd ({len(truncated)} bytes)")
+    else:
+        generate_test_files(args.output)
+
+
+if __name__ == '__main__':
+    main()

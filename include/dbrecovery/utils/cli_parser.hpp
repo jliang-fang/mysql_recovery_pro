@@ -115,6 +115,14 @@ public:
     static void print_help(const std::string& program_name,
                           const std::vector<std::string>& usage);
 
+    /**
+     * @brief 获取完整的帮助信息（包含所有选项和详细示例）
+     *
+     * @param program_name 程序名
+     * @return std::string 完整的帮助信息
+     */
+    static std::string get_full_help(const std::string& program_name);
+
 private:
     std::unordered_map<std::string, std::string> options_;
 };

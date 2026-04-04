@@ -276,7 +276,7 @@ tests/
 
 **运行所有测试**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 ctest --verbose
 ```
 

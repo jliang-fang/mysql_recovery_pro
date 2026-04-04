@@ -116,17 +116,17 @@ cmake -DCMAKE_BUILD_TYPE=Debug \
       ..
 
 # Run program
-./build/mysql8_recover --ibd=test.ibd
+./build/mysql_recovery_pro --ibd=test.ibd
 
 # Generate profile report
-gprof ./build/mysql8_recover gmon.out > profile.txt
+gprof ./build/mysql_recovery_pro gmon.out > profile.txt
 ```
 
 ### 3.2 perf
 
 ```bash
 # Record performance data
-perf record -g ./build/mysql8_recover --ibd=test.ibd
+perf record -g ./build/mysql_recovery_pro --ibd=test.ibd
 
 # View report
 perf report
@@ -142,10 +142,10 @@ perf script | stackcollapse-perf.pl | flamegraph.pl > profile.svg
 valgrind --leak-check=full \
          --show-leak-kinds=all \
          --track-origins=yes \
-         ./build/mysql8_recover --ibd=test.ibd
+         ./build/mysql_recovery_pro --ibd=test.ibd
 
 # Data race detection (requires compilation with -fsanitize=thread)
-valgrind --tool=helgrind ./build/mysql8_recover --ibd=test.ibd
+valgrind --tool=helgrind ./build/mysql_recovery_pro --ibd=test.ibd
 ```
 
 ## 4. CI/CD Integration

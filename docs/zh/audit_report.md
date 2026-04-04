@@ -29,14 +29,14 @@
 ## 1. 项目目录树（关键源/头文件）
 
 ```
-/app/mysql8_recovery/
+/app/mysql_recovery_proy/
 ├── CMakeLists.txt                          # 主构建配置
 ├── .clang-tidy                            # 静态分析配置（⚠️ 需修复格式）
 ├── .gitignore
 ├── build/                                 # 构建输出目录
 │   ├── CMakeCache.txt
 │   ├── Makefile
-│   ├── mysql8_recover                     # CLI 工具（✅ 已编译）
+│   ├── mysql_recovery_pro                     # CLI 工具（✅ 已编译）
 │   ├── libdbrecovery_innodb.a             # 静态库
 │   └── tests/                             # 测试可执行文件
 │       ├── test_page_header               # 页头测试（✅ 5/5 通过）
@@ -245,7 +245,7 @@ CheckOptions:
 
 **验证命令**：
 ```bash
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 clang-tidy src/innodb/page_parser.cpp --checks=modernize-* -p build
 ```
 
@@ -257,7 +257,7 @@ add_subdirectory(gui)
 
 **验证命令**：
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
@@ -276,7 +276,7 @@ TEST(UndoLogRecordTest, ParseBasicRecord) {
 
 **验证命令**：
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 make test_undo_log
 ./tests/test_undo_log
 ```
@@ -427,7 +427,7 @@ make fuzz_page_parser
 #### clang-tidy
 ```bash
 # 配置修复后运行
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 clang-tidy src/innodb/*.cpp --checks=modernize-*,performance-*,readability-*,bugprone-*,cert-*,misc-* -p build
 
 # 修复建议

@@ -1,0 +1,45 @@
+{
+  "mysql_versions": ["5.6", "5.7", "8.0", "8.4", "9.0"],
+  "corruption_scenarios": [
+    "random_3_pages",
+    "random_5_pages", 
+    "random_10_pages",
+    "all_headers",
+    "btree_chain_broken",
+    "metadata_lost",
+    "file_fragments",
+    "undo_log_corrupt",
+    "record_chain_broken",
+    "sdn_only",
+    "header_only"
+  ],
+  "record_counts": [1000, 10000, 100000],
+  "page_sizes": [4096, 8192, 16384, 32768, 65536],
+  "output_formats": ["csv", "sql", "json"],
+  "docker_enabled": true,
+  "parallel_tests": 4,
+  "timeout_seconds": 600,
+  "recovery_modes": [
+    "default",
+    "truncate",
+    "rmrf",
+    "header",
+    "blob"
+  ],
+  "validation_thresholds": {
+    "min_record_recovery_rate": 0.95,
+    "max_hash_mismatch_tolerance": 0.0,
+    "max_recovery_time_seconds": 300
+  },
+  "test_data": {
+    "base_dir": "test_data",
+    "results_dir": "test_results",
+    "ground_truth_dir": "ground_truth"
+  },
+  "automation": {
+    "auto_fix_enabled": true,
+    "regression_enabled": true,
+    "email_notifications": false,
+    "slack_webhook": ""
+  }
+}

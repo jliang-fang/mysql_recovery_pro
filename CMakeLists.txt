@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(mysql8_recovery VERSION 1.0.0 LANGUAGES CXX)
+project(mysql_recovery_pro VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+
+# GUI option
+option(GUI_ENABLED "Enable GUI support" OFF)
 
 # 集成 nlohmann/json 库
 # ✅ P0-1 修复：使用系统安装的 nlohmann-json 库
@@ -21,6 +24,17 @@ endif()
 find_package(ZLIB REQUIRED)
 message(STATUS "Found zlib at: ${ZLIB_LIBRARIES}")
 
+# 查找 liburing（用于 io_uring 高性能 I/O）
+find_library(LIBURING_LIBRARY NAMES uring liburing)
+find_path(LIBURING_INCLUDE_DIR NAMES liburing.h PATHS /usr/include /usr/local/include)
+if(LIBURING_LIBRARY AND LIBURING_INCLUDE_DIR)
+    message(STATUS "Found liburing at: ${LIBURING_LIBRARY}")
+    set(HAVE_IO_URING ON)
+else()
+    message(STATUS "liburing not found, io_uring support disabled")
+    set(HAVE_IO_URING OFF)
+endif()
+
 # 添加源文件
 set(SOURCES
     # ✅ P0-1 修复：移除 schema_defs.cpp（函数已在头文件中内联实现）
@@ -37,14 +51,73 @@ set(SOURCES
     src/innodb/redo_log.cpp
     src/innodb/redo_log_replayer.cpp
     src/innodb/thread_pool.cpp
-    src/innodb/undo_log.cpp
+    # ✅ 修复：移除 undo_log.cpp（重复定义，已在 src/page/page_factory.cpp 中实现）
     src/recovery/blob_reconstructor.cpp
     src/recovery/engine.cpp
+    src/recovery/rmrf_recovery.cpp
+    # ✅ 新增：增强恢复功能
+    src/recovery/enhanced_recovery.cpp
+    # ✅ 新增：坏块修复功能
+    src/repair/corruption_detector.cpp
+    src/repair/header_repairer.cpp
+    src/repair/repair.cpp
     src/utils/cli_parser.cpp
     src/utils/file_mapper.cpp
     # ✅ 新增：IBD 导出器
     src/export/ibd_exporter.cpp
+    # ✅ 新增：页解析层 (page module)
+    src/page/page_v56.cpp
+    src/page/page_v80.cpp
+    src/page/page_factory.cpp
+    # ✅ 新增：MySQL 5.5/5.1 兼容支持
+    src/page/page_v55.cpp
+    # ✅ 新增：MySQL 8.4/9.0 兼容支持
+    src/page/page_v84.cpp
+    # ✅ 新增：页解析器 V3
+    src/innodb/page_parser_v3.cpp
+    # ✅ 新增：MySQL 8.1/8.2/8.3 兼容支持
+    src/innodb/page_parser_v82.cpp
+    # ✅ 新增：Schemaless heuristic recovery parser
+    src/innodb/heuristic_parser.cpp
+    # ✅ 新增：io_uring 高性能 I/O
+    src/disk/io_uring_scanner.cpp
+    # ✅ 新增：MySQL版本检测器
+    src/common/mysql_version_detector.cpp
+    # ✅ 新增：平台特定实现
+    src/platform/linux/file_system_linux.cpp
+    src/platform/linux/memory_linux.cpp
+    src/platform/linux/thread_linux.cpp
 )
+
+# 根据平台选择性地添加文件
+if(ENV_PLATFORM_LINUX)
+    list(APPEND SOURCES
+        src/platform/linux/file_system_linux.cpp
+        src/platform/linux/memory_linux.cpp
+        src/platform/linux/thread_linux.cpp
+    )
+elseif(ENV_PLATFORM_MACOS)
+    list(APPEND SOURCES
+        src/platform/macos/file_system_macos.cpp
+        src/platform/macos/memory_macos.cpp
+        src/platform/macos/thread_macos.cpp
+    )
+elseif(ENV_PLATFORM_WINDOWS)
+    list(APPEND SOURCES
+        src/platform/windows/file_system_windows.cpp
+        src/platform/windows/memory_windows.cpp
+        src/platform/windows/thread_windows.cpp
+    )
+endif()
+
+# 添加CPU优化实现（仅在对应架构上）
+if(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    list(APPEND SOURCES
+        src/platform/arm64/cpu_optimizations_arm64.cpp
+    )
+elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQUAL "AMD64")
+    # x86_64 优化已在头文件中实现
+endif()
 
 # ✅ 新增：确保 file_mapper.cpp 被正确包含（如果尚未存在则创建）
 if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/utils/file_mapper.cpp")
@@ -56,6 +129,7 @@ add_library(dbrecovery_innodb STATIC ${SOURCES})
 target_include_directories(dbrecovery_innodb PUBLIC
     include
     $<$<BOOL:${MYSQL_INCLUDE_DIR}>:${MYSQL_INCLUDE_DIR}>
+    $<$<BOOL:${LIBURING_INCLUDE_DIR}>:${LIBURING_INCLUDE_DIR}>
 )
 
 # 包含 src/CMakeLists.txt 以添加额外的源文件
@@ -67,8 +141,14 @@ target_link_libraries(dbrecovery_innodb PUBLIC nlohmann_json::nlohmann_json)
 # 链接 zlib（用于 SDI 解压缩）
 target_link_libraries(dbrecovery_innodb PUBLIC ZLIB::ZLIB)
 
-add_executable(mysql8_recover src/main.cpp)
-target_link_libraries(mysql8_recover dbrecovery_innodb)
+# 链接 liburing（用于 io_uring 高性能 I/O）
+if(HAVE_IO_URING)
+    target_link_libraries(dbrecovery_innodb PUBLIC ${LIBURING_LIBRARY})
+    target_compile_definitions(dbrecovery_innodb PUBLIC HAVE_IO_URING=1)
+endif()
+
+add_executable(mysql_recovery_pro src/main.cpp)
+target_link_libraries(mysql_recovery_pro dbrecovery_innodb)
 
 enable_testing()
 
@@ -95,6 +175,52 @@ else()
     add_executable(test_recovery_engine tests/test_recovery_engine.cpp)
     target_link_libraries(test_recovery_engine dbrecovery_innodb GTest::GTest GTest::Main)
     add_test(NAME test_recovery_engine COMMAND test_recovery_engine)
+
+    # 添加页类型 V2 测试
+    add_executable(test_page_types_v2 test/test_page_types_v2.cpp)
+    target_link_libraries(test_page_types_v2 dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_page_types_v2 COMMAND test_page_types_v2)
+
+    # 添加损坏场景测试
+    add_executable(test_corruption_scenarios test/test_corruption_scenarios.cpp)
+    target_link_libraries(test_corruption_scenarios dbrecovery_innodb GTest::GTest GTest::Main)
+    target_compile_definitions(test_corruption_scenarios PRIVATE TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test/test_data")
+    add_test(NAME test_corruption_scenarios COMMAND test_corruption_scenarios)
+
+    # 添加 corruption detector 测试
+    add_executable(test_corruption_detector test/test_corruption_detector.cpp)
+    target_link_libraries(test_corruption_detector dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_corruption_detector COMMAND test_corruption_detector)
+
+    # 添加多版本兼容性测试
+    add_executable(test_multi_version_compat test/test_multi_version_compat.cpp)
+    target_link_libraries(test_multi_version_compat dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_multi_version_compat COMMAND test_multi_version_compat)
+
+    # 添加多环境兼容性测试
+    add_executable(test_multi_environment_compat test/test_multi_environment_compat.cpp)
+    target_link_libraries(test_multi_environment_compat dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_multi_environment_compat COMMAND test_multi_environment_compat)
+
+    # 添加CPU优化测试
+    add_executable(test_cpu_optimizations test/test_cpu_optimizations.cpp)
+    target_link_libraries(test_cpu_optimizations dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_cpu_optimizations COMMAND test_cpu_optimizations)
+
+    # 添加环境兼容性测试
+    add_executable(test_environment_compat test/test_environment_compat.cpp)
+    target_link_libraries(test_environment_compat dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_environment_compat COMMAND test_environment_compat)
+
+    # 添加平台检测测试
+    add_executable(test_platform_detection test/test_platform_detection.cpp)
+    target_link_libraries(test_platform_detection dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_platform_detection COMMAND test_platform_detection)
+
+    # 添加SIMD操作测试
+    add_executable(test_simd_operations test/test_simd_operations.cpp)
+    target_link_libraries(test_simd_operations dbrecovery_innodb GTest::GTest GTest::Main)
+    add_test(NAME test_simd_operations COMMAND test_simd_operations)
 
     # 启用tests子目录（即使GTest未找到）
     add_subdirectory(tests)
@@ -144,7 +270,15 @@ if(ENABLE_ASAN OR ENABLE_UBSAN OR ENABLE_LSAN)
 
     target_compile_options(dbrecovery_innodb PUBLIC -g -O0 -fsanitize=${SANITIZER_LIST} -fno-omit-frame-pointer)
     target_link_libraries(dbrecovery_innodb PUBLIC -fsanitize=${SANITIZER_LIST} -fno-omit-frame-pointer)
-    
+
     # 修复：仅在链接时添加 sanitizer（避免链接器找不到库的问题）
     # sanitizer 库会在运行时自动链接
+endif()
+
+# GUI support (optional)
+if(GUI_ENABLED)
+    add_subdirectory(gui)
+    message(STATUS "GUI enabled - building MySQL Recovery Pro GUI")
+else()
+    message(STATUS "GUI disabled - use -DGUI_ENABLED=ON to enable")
 endif()

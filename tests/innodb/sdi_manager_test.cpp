@@ -208,11 +208,11 @@ TEST(SDIManagerTest, ParseValidSDIRecord) {
 // 测试SDI payload太小
 TEST(SDIManagerTest, ParseSDIPayloadTooSmall) {
     std::vector<uint8_t> payload(15, 0);
-    
-    EXPECT_THROW(
-        SDIManager::parse_sdi_record(payload.data(), payload.size()),
-        std::runtime_error
-    );
+
+    // 期望返回空 schema，而不是抛出异常
+    auto schema = SDIManager::parse_sdi_record(payload.data(), payload.size());
+    EXPECT_TRUE(schema.table_name.empty());
+    EXPECT_TRUE(schema.columns.empty());
 }
 
 // 测试无效的compressed_len
@@ -222,11 +222,11 @@ TEST(SDIManagerTest, ParseSDIInvalidCompressedLen) {
     write_le<uint64_t>(payload.data(), 4, 12345);
     write_le<uint32_t>(payload.data(), 12, 100);
     write_le<uint32_t>(payload.data(), 16, 0); // compressed_len = 0
-    
-    EXPECT_THROW(
-        SDIManager::parse_sdi_record(payload.data(), payload.size()),
-        std::runtime_error
-    );
+
+    // 期望返回空 schema，而不是抛出异常
+    auto schema = SDIManager::parse_sdi_record(payload.data(), payload.size());
+    EXPECT_TRUE(schema.table_name.empty());
+    EXPECT_TRUE(schema.columns.empty());
 }
 
 // ==================== 表结构定义测试 ====================

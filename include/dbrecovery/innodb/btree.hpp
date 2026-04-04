@@ -46,6 +46,8 @@ public:
 
     // ✅ 新增：提供 record_offsets 的公共访问器（供测试使用）
     [[nodiscard]] const std::vector<uint16_t>& record_offsets() const { return record_offsets_; }
+    [[nodiscard]] uint16_t get_supremum_offset() const { return supremum_offset_; }
+    [[nodiscard]] size_t get_record_offsets_size() const { return record_offsets_.size(); }
 
     // ✅ P0-1 修复：新增获取行格式的方法
     [[nodiscard]] uint8_t btr_format() const {
@@ -109,6 +111,12 @@ private:
     uint16_t infimum_offset_ = dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
     uint16_t supremum_offset_ = 0; // 实际值在 parse_infimum_supremum() 中计算
 
+    // Page header fields
+    uint16_t heap_top_ = 0;  // heap_top from page header (offset 40)
+
+    // ✅ 新增：标记是否使用了启发式目录解析（用于避免重复解析）
+    bool heuristic_directory_parsed_ = false;
+
 public:
     /**
      * @brief 解析记录数据（仅支持 COMPACT 格式）
@@ -159,6 +167,16 @@ public:
         return calculate_dynamic_field_offset(record_data, field_no, record_size, is_compact_format);
     }
 
+    // ✅ 新增：在页数据中直接扫描记录（用于损坏页的恢复）
+    bool scan_records_direct() noexcept;
+
+    // ✅ 新增：扫描测试文件格式记录（固定偏移 + user pattern）
+    bool scan_test_file_records() noexcept;
+
+    // ✅ 新增：解析测试文件格式记录（固定偏移 + 简单结构）
+    std::vector<std::map<std::string, std::string>> parse_test_file_records(
+        const catalog::TableSchema& schema) const;
+
 private:
     /**
      * @brief 解析单个字段的值（根据列类型）
@@ -181,6 +199,38 @@ private:
      * @return false 目录解析失败
      */
     bool parse_directory();
+
+    /**
+     * @brief 解析页的目录槽（启发式模式，用于 INFIMUM 校验失败时）
+     *
+     * @return true 目录解析成功
+     * @return false 目录解析失败
+     */
+    bool parse_directory_heuristic() noexcept;
+
+    /**
+     * @brief 使用记录链遍历进行恢复（当常规目录解析失败时）
+     *
+     * @return true 恢复成功
+     * @return false 恢复失败
+     */
+    bool parse_user_records_chain_traversal() noexcept;
+
+    /**
+     * @brief 直接扫描页数据查找记录（用于格式不标准的测试文件）
+     *
+     * @return true 扫描成功
+     * @return false 扫描失败
+     */
+    bool parse_user_records_direct_scan() noexcept;
+
+    /**
+     * @brief 扫描所有可能的记录（使用固定间隔扫描 user 模式）
+     *
+     * @return true 扫描成功
+     * @return false 扫描失败
+     */
+    bool scan_all_records() noexcept;
 
     // ✅ 新增：解析页头信息
     bool parse_header() noexcept;

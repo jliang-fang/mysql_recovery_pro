@@ -46,7 +46,7 @@ A high-performance C++ library for offline MySQL 8.0+ data recovery.
 
 ```bash
 # Clone project
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 
 # Create build directory
 mkdir -p build && cd build
@@ -65,13 +65,13 @@ ctest --verbose
 
 ```bash
 # Recover table data
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered
 
 # Specify table ID
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
 # Show help
-./mysql8_recover --help
+./mysql_recovery_pro --help
 ```
 
 ### GUI Tool
@@ -79,7 +79,7 @@ ctest --verbose
 ```bash
 # Launch GUI
 cd build/gui
-./mysql8_recovery_gui
+./mysql_recovery_proy_gui
 ```
 
 ## 📚 API Reference

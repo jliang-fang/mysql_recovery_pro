@@ -1,0 +1,289 @@
+[
+  {
+    "test_name": "truncation",
+    "description": "Test recovery of completely truncated file",
+    "test_file": "/tmp/extreme_test_pyisas0p/truncated.ibd",
+    "file_size": 100,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_pyisas0p/truncated.ibd (100 bytes, 0 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_pyisas0p/truncated.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_pyisas0p/truncated.ibd, table_id=0\n[INFO] Total pages: 0\n[WARN] No standard InnoDB page types found or parsing failed, attempting heuristic scan\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_pyisas0p/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_pyisas0p/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_pyisas0p/output\n",
+      "stderr": "[WARN] Cannot determine page size from file size, using default 16KB\n[WARN] Cannot determine page size from file size, using default 16KB\n[WARN] Cannot determine page size from file size, using default 16KB\n[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] No standard InnoDB page types found or parsing failed, attempting heuristic scan",
+        "[WARN] Default recovery returned no records.",
+        "[WARN] Cannot determine page size from file size, using default 16KB",
+        "[WARN] Cannot determine page size from file size, using default 16KB",
+        "[WARN] Cannot determine page size from file size, using default 16KB"
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1347
+    }
+  },
+  {
+    "test_name": "header_corruption",
+    "description": "Test recovery with corrupted page header",
+    "test_file": "/tmp/extreme_test_phv7gjy9/header_corrupt.ibd",
+    "file_size": 16384,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_phv7gjy9/header_corrupt.ibd (16384 bytes, 4 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_phv7gjy9/header_corrupt.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_phv7gjy9/header_corrupt.ibd, table_id=0\n[INFO] Total pages: 4\n[WARN] No standard InnoDB page types found or parsing failed, attempting heuristic scan\n[INFO] Heuristic scan found 4 index pages\n[INFO] Processing 4 index pages from heuristic scan\n[INFO] No table schema available, skipping BLOB reconstruction\n[INFO] Recovery completed successfully. Total records: 0\n[INFO] Default recovery completed. Found 0 records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_phv7gjy9/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_phv7gjy9/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_phv7gjy9/output\n",
+      "stderr": "[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 16383\n[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 16383\n[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 16383\n[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 16383\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] No standard InnoDB page types found or parsing failed, attempting heuristic scan",
+        "[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 16383",
+        "[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 16383",
+        "[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 16383",
+        "[WARN] Invalid page type: 0xffff, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 16383"
+      ],
+      "errors": [],
+      "output_length": 2050
+    }
+  },
+  {
+    "test_name": "checksum_mismatch",
+    "description": "Test recovery with checksum mismatch",
+    "test_file": "/tmp/extreme_test_mqv18d2f/checksum_mismatch.ibd",
+    "file_size": 16384,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_mqv18d2f/checksum_mismatch.ibd (16384 bytes, 4 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_mqv18d2f/checksum_mismatch.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_mqv18d2f/checksum_mismatch.ibd, table_id=0\n[INFO] Total pages: 4\n[INFO] Found 1 index pages (type 9969)\n[INFO] Page 0: type=9969, level=\u0000\n[WARN] No table schema available for record parsing\n[INFO] Found 3 allocated pages (type 0)\n[INFO] No table schema available, skipping BLOB reconstruction\n[INFO] Recovery completed successfully. Total records: 0\n[INFO] Default recovery completed. Found 0 records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_mqv18d2f/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_mqv18d2f/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_mqv18d2f/output\n",
+      "stderr": "[WARN] Page checksum mismatch (non-strict mode)\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 0\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 0\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] No table schema available for record parsing",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 0",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 0"
+      ],
+      "errors": [],
+      "output_length": 1526
+    }
+  },
+  {
+    "test_name": "page_chain_broken",
+    "description": "Test recovery with broken page chain",
+    "test_file": "/tmp/extreme_test_tmiamijl/chain_broken.ibd",
+    "file_size": 81920,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_tmiamijl/chain_broken.ibd (81920 bytes, 20 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_tmiamijl/chain_broken.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_tmiamijl/chain_broken.ibd, table_id=0\n[INFO] Total pages: 20\n[INFO] Found 20 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_tmiamijl/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_tmiamijl/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_tmiamijl/output\n",
+      "stderr": "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records."
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1106
+    }
+  },
+  {
+    "test_name": "record_chain_corruption",
+    "description": "Test recovery with corrupted record chain",
+    "test_file": "/tmp/extreme_test_99j9r637/record_chain_corrupt.ibd",
+    "file_size": 16384,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_99j9r637/record_chain_corrupt.ibd (16384 bytes, 4 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_99j9r637/record_chain_corrupt.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_99j9r637/record_chain_corrupt.ibd, table_id=0\n[INFO] Total pages: 4\n[INFO] Found 4 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_99j9r637/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_99j9r637/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_99j9r637/output\n",
+      "stderr": "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records."
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1127
+    }
+  },
+  {
+    "test_name": "blob_chain_corruption",
+    "description": "Test recovery with corrupted BLOB chain",
+    "test_file": "/tmp/extreme_test_uk4b28tb/blob_chain_corrupt.ibd",
+    "file_size": 16384,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_uk4b28tb/blob_chain_corrupt.ibd (16384 bytes, 4 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_uk4b28tb/blob_chain_corrupt.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_uk4b28tb/blob_chain_corrupt.ibd, table_id=0\n[INFO] Total pages: 4\n[INFO] Found 4 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_uk4b28tb/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_uk4b28tb/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_uk4b28tb/output\n",
+      "stderr": "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records."
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1121
+    }
+  },
+  {
+    "test_name": "mixed_corruption",
+    "description": "Test recovery with multiple corruption types",
+    "test_file": "/tmp/extreme_test_mi_87pjv/mixed_corrupt.ibd",
+    "file_size": 163840,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_mi_87pjv/mixed_corrupt.ibd (163840 bytes, 40 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_mi_87pjv/mixed_corrupt.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_mi_87pjv/mixed_corrupt.ibd, table_id=0\n[INFO] Total pages: 40\n[INFO] Found 39 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_mi_87pjv/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_mi_87pjv/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_mi_87pjv/output\n",
+      "stderr": "[WARN] Page checksum mismatch (non-strict mode)\n[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records.",
+        "[WARN] Page checksum mismatch (non-strict mode)"
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1158
+    }
+  },
+  {
+    "test_name": "empty_file",
+    "description": "Test recovery of empty/zero-filled file",
+    "test_file": "/tmp/extreme_test_7fcs169u/empty.ibd",
+    "file_size": 16384,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_7fcs169u/empty.ibd (16384 bytes, 4 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_7fcs169u/empty.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_7fcs169u/empty.ibd, table_id=0\n[INFO] Total pages: 4\n[INFO] Found 4 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_7fcs169u/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_7fcs169u/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_7fcs169u/output\n",
+      "stderr": "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records."
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1082
+    }
+  },
+  {
+    "test_name": "random_data",
+    "description": "Test recovery of random data file",
+    "test_file": "/tmp/extreme_test_j9hcy5aa/random.ibd",
+    "file_size": 32768,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_j9hcy5aa/random.ibd (32768 bytes, 8 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_j9hcy5aa/random.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_j9hcy5aa/random.ibd, table_id=0\n[INFO] Total pages: 8\n[WARN] No standard InnoDB page types found or parsing failed, attempting heuristic scan\n[INFO] Heuristic scan found 8 index pages\n[INFO] Processing 8 index pages from heuristic scan\n[INFO] No table schema available, skipping BLOB reconstruction\n[INFO] Recovery completed successfully. Total records: 0\n[INFO] Default recovery completed. Found 0 records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_j9hcy5aa/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_j9hcy5aa/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_j9hcy5aa/output\n",
+      "stderr": "[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0x70d6, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 13757\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0x7569, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 14758\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0x589a, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 6732\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0xfb2a, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 8236\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0xc680, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 13292\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0xed5b, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 12374\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0xda27, but page structure appears valid, attempting recovery\n[WARN] SUPREMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 12196\n[WARN] Page checksum mismatch (non-strict mode)\n[WARN] Invalid page type: 0xebcc, but page structure appears valid, attempting recovery\n[WARN] INFIMUM record not found, but page structure appears valid\n[WARN] Invalid record offset: 7785\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] No standard InnoDB page types found or parsing failed, attempting heuristic scan",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0x70d6, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 13757",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0x7569, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 14758",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0x589a, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 6732",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0xfb2a, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 8236",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0xc680, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 13292",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0xed5b, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 12374",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0xda27, but page structure appears valid, attempting recovery",
+        "[WARN] SUPREMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 12196",
+        "[WARN] Page checksum mismatch (non-strict mode)",
+        "[WARN] Invalid page type: 0xebcc, but page structure appears valid, attempting recovery",
+        "[WARN] INFIMUM record not found, but page structure appears valid",
+        "[WARN] Invalid record offset: 7785"
+      ],
+      "errors": [],
+      "output_length": 3552
+    }
+  },
+  {
+    "test_name": "circular_reference",
+    "description": "Test recovery with circular page chain reference",
+    "test_file": "/tmp/extreme_test_s9vhqx77/circular.ibd",
+    "file_size": 81920,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_s9vhqx77/circular.ibd (81920 bytes, 20 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_s9vhqx77/circular.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_s9vhqx77/circular.ibd, table_id=0\n[INFO] Total pages: 20\n[INFO] Found 20 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_s9vhqx77/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_s9vhqx77/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_s9vhqx77/output\n",
+      "stderr": "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records."
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1094
+    }
+  },
+  {
+    "test_name": "large_page",
+    "description": "Test recovery with 64KB page size",
+    "test_file": "/tmp/extreme_test_cfzkllh7/large_page.ibd",
+    "file_size": 65536,
+    "recovery_result": {
+      "stdout": "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n=====================================================\nNew Features:\n  - Full disk scanning\n  - Table name search\n  - Bulk recovery\n  - Auto schema inference\n  - rm -rf disaster recovery\n\n[INFO] RecoveryEngine initialized\n[INFO] Successfully opened file: /tmp/extreme_test_cfzkllh7/large_page.ibd (65536 bytes, 16 pages)\n[INFO] Successfully opened file: /tmp/extreme_test_cfzkllh7/large_page.ibd\n[INFO] File size: 1 (valid)\n[INFO] Starting default recovery mode...\n[WARN] Failed to parse schema from SDI, using default schema\n[INFO] recover_table called: /tmp/extreme_test_cfzkllh7/large_page.ibd, table_id=0\n[INFO] Total pages: 16\n[INFO] Found 16 allocated pages (type 0)\n[WARN] Default recovery returned no records.\n[INFO] No records to export, created empty CSV file: /tmp/extreme_test_cfzkllh7/output/recovered.csv\n[INFO] Exported 0 records to CSV: /tmp/extreme_test_cfzkllh7/output/recovered.csv\n\n\u2705 Recovery completed: /tmp/extreme_test_cfzkllh7/output\n",
+      "stderr": "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file\n",
+      "returncode": 0
+    },
+    "analysis": {
+      "warnings": [
+        "[WARN] Failed to parse schema from SDI, using default schema",
+        "[WARN] Default recovery returned no records."
+      ],
+      "errors": [
+        "[ERROR] No index pages found in file - file may be corrupted or not an InnoDB data file"
+      ],
+      "output_length": 1100
+    }
+  }
+]

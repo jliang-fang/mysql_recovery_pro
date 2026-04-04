@@ -100,8 +100,8 @@ def write_ibd_with_sdi(filepath):
         f.write(sdi_json + padding)
 
 if __name__ == '__main__':
-    os.makedirs('/app/mysql8_recovery/test_data', exist_ok=True)
-    ibd_path = '/app/mysql8_recovery/test_data/test_table.ibd'
+    os.makedirs('/app/mysql_recovery_proy/test_data', exist_ok=True)
+    ibd_path = '/app/mysql_recovery_proy/test_data/test_table.ibd'
     write_ibd_with_sdi(ibd_path)
     print(f"✅ Generated test files:")
     print(f"   - {ibd_path}")

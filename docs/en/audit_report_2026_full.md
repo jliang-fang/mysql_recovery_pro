@@ -3,14 +3,14 @@
 **Auditor**: jliang.fang  
 **Date**: 2026-03-29  
 **Version**: v1.0.0  
-**Project**: /app/mysql8_recovery  
+**Project**: /app/mysql_recovery_proy  
 **Status**: ✅ 192/192 Unit Tests Passed
 
 ---
 
 ## Executive Summary
 
-This report presents a comprehensive architecture audit of the mysql8_recovery project, covering code quality, module design, test coverage, performance optimization, and industrial-grade delivery readiness. Audit results:
+This report presents a comprehensive architecture audit of the mysql_recovery_proy project, covering code quality, module design, test coverage, performance optimization, and industrial-grade delivery readiness. Audit results:
 
 | Assessment Dimension | Score | Status |
 |---------------------|-------|--------|
@@ -29,7 +29,7 @@ This report presents a comprehensive architecture audit of the mysql8_recovery p
 ### 1.1 Directory Tree Structure
 
 ```
-/app/mysql8_recovery/
+/app/mysql_recovery_proy/
 ├── CMakeLists.txt                    # Build configuration (✅ P0-1 Fixed)
 ├── cmake/                            # CMake modules
 ├── docs/                             # Documentation directory
@@ -451,7 +451,7 @@ mach_read.hpp (Base Utilities)
 
 **Enable Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_ASAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -463,7 +463,7 @@ ctest --output-on-failure
 
 **Enable Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_UBSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -475,7 +475,7 @@ ctest --output-on-failure
 
 **Enable Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_LSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -487,7 +487,7 @@ ctest --output-on-failure
 
 **Enable Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug ..
 make clean && make
 ctest --output-on-failure
@@ -789,7 +789,7 @@ clang-tidy -p build -fix -checks=misc-include-cleaner src/innodb/btree.cpp
 ### 11.1 Run All Tests
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 ctest --output-on-failure
 ```
 
@@ -815,7 +815,7 @@ ctest -R PageChecksum --output-on-failure
 ### 11.3 Enable ASAN
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_ASAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -824,7 +824,7 @@ ctest --output-on-failure
 ### 11.4 Enable UBSAN
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_UBSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -833,7 +833,7 @@ ctest --output-on-failure
 ### 11.5 Enable LSAN
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_LSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -842,7 +842,7 @@ ctest --output-on-failure
 ### 11.6 Code Coverage
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug ..
 make clean && make
 ctest --output-on-failure
@@ -852,14 +852,14 @@ genhtml coverage/*.gcov -o coverage_report
 ### 11.7 clang-tidy
 
 ```bash
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 clang-tidy src/innodb/btree.cpp --checks="*" -p build
 ```
 
 ### 11.8 cppcheck
 
 ```bash
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 cppcheck --enable=all --suppress=missingIncludeSystem -Iinclude src/innodb/btree.cpp
 ```
 

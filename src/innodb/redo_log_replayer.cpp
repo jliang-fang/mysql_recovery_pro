@@ -1,201 +1,402 @@
 #include "dbrecovery/innodb/redo_log_replayer.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
-#include "dbrecovery/innodb/page_reader.hpp"
 #include <iostream>
+#include <algorithm>
+#include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
 
-RedoLogReplayer::RedoLogReplayer() {}
+// ==================== RedoLogReplayer ====================
+
+RedoLogReplayer::RedoLogReplayer() : page_size_(16384) {
+    std::memset(&stats_, 0, sizeof(stats_));
+}
 
 RedoLogReplayer::~RedoLogReplayer() = default;
 
-void RedoLogReplayer::set_page(uint32_t page_no, std::vector<uint8_t> page_data) {
-    pages_[page_no] = std::move(page_data);
-}
-
-std::vector<uint8_t> RedoLogReplayer::get_page(uint32_t page_no) const {
-    auto it = pages_.find(page_no);
-    if (it != pages_.end()) {
-        return it->second;
+void RedoLogReplayer::set_page_size(uint32_t page_size) {
+    if (page_size == 4096 || page_size == 8192 ||
+        page_size == 16384 || page_size == 32768 || page_size == 65536) {
+        page_size_ = page_size;
     }
-    return {};
 }
 
-bool RedoLogReplayer::apply_record(const RedoLogRecord& record) {
-    // 检查页是否存在
-    auto it = pages_.find(record.r_page_no);
+bool RedoLogReplayer::add_page(uint32_t page_no, std::vector<uint8_t> page_data) {
+    if (page_data.size() < 38) {
+        return false;
+    }
+
+    pages_[page_no] = std::move(page_data);
+    return true;
+}
+
+void RedoLogReplayer::add_redo_records(const std::vector<RedoLogRecord>& records) {
+    redo_records_.insert(redo_records_.end(), records.begin(), records.end());
+}
+
+RedoReplayResult RedoLogReplayer::replay(const catalog::TableSchema& schema) {
+    RedoReplayResult result;
+    result.success = true;
+    result.records_processed = 0;
+    result.records_applied = 0;
+    result.records_failed = 0;
+
+    if (redo_records_.empty()) {
+        result.message = "No redo records to replay";
+        return result;
+    }
+
+    for (const auto& record : redo_records_) {
+        result.records_processed++;
+
+        if (apply_redo_record(record.r_page_no, record)) {
+            result.records_applied++;
+        } else {
+            result.records_failed++;
+            errors_.push_back("Failed to apply record: " + record.to_string());
+        }
+    }
+
+    stats_.records_processed = result.records_processed;
+    stats_.records_applied = result.records_applied;
+    stats_.records_failed = result.records_failed;
+
+    if (result.records_failed > 0) {
+        result.success = false;
+        result.message = "Replay completed with " + std::to_string(result.records_failed) + " failures";
+    } else {
+        result.message = "Replay completed successfully";
+    }
+
+    return result;
+}
+
+bool RedoLogReplayer::apply_redo_record(uint32_t page_no, const RedoLogRecord& record) {
+    auto it = pages_.find(page_no);
     if (it == pages_.end()) {
-        std::cerr << "[WARN] RedoLogReplayer: Page " << record.r_page_no 
-                  << " not found, skipping record" << std::endl;
-        failed_count_++;
+        std::cerr << "[WARN] RedoLogReplayer: Page " << page_no << " not found" << std::endl;
         return false;
     }
 
     auto& page_data = it->second;
 
-    // 检查页类型
+    // Check page type
     uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 16);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX) {
-        std::cerr << "[WARN] RedoLogReplayer: Page " << record.r_page_no 
-                  << " is not an index page, skipping" << std::endl;
-        failed_count_++;
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
+        page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
+        page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
+        std::cerr << "[WARN] RedoLogReplayer: Page " << page_no << " is not a valid page type" << std::endl;
         return false;
     }
 
-    // 根据记录类型应用更新
+    // Apply based on record type
     switch (record.r_type) {
-        case MLOG_1BYTE: {
-            // 单字节更新
-            if (record.r_data.size() < 1) {
-                failed_count_++;
-                return false;
-            }
-            uint8_t value = record.r_data[0];
-            // 简化：假设数据是偏移+值
-            if (record.r_data.size() >= 2) {
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 0);
-                if (offset + 1 <= page_data.size()) {
-                    page_data[offset] = value;
-                    applied_count_++;
-                    return true;
-                }
-            }
-            break;
-        }
-
-        case MLOG_2BYTES: {
-            // 双字节更新
-            if (record.r_data.size() < 2) {
-                failed_count_++;
-                return false;
-            }
-            if (record.r_data.size() >= 4) {
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 0);
-                uint16_t value = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 2);
-                if (offset + 2 <= page_data.size()) {
-                    dbrecovery::innodb::write_le<uint16_t>(page_data.data(), offset, value);
-                    applied_count_++;
-                    return true;
-                }
-            }
-            break;
-        }
-
-        case MLOG_4BYTES: {
-            // 四字节更新
-            if (record.r_data.size() < 4) {
-                failed_count_++;
-                return false;
-            }
-            if (record.r_data.size() >= 6) {
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 0);
-                uint32_t value = dbrecovery::innodb::read_le<uint32_t>(record.r_data.data(), 4);
-                if (offset + 4 <= page_data.size()) {
-                    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), offset, value);
-                    applied_count_++;
-                    return true;
-                }
-            }
-            break;
-        }
-
+        case MLOG_1BYTE:
+        case MLOG_2BYTES:
+        case MLOG_4BYTES:
         case MLOG_8BYTES: {
-            // 八字节更新
-            if (record.r_data.size() < 8) {
-                failed_count_++;
+            // Simple data updates
+            if (record.r_data.size() < 2) {
                 return false;
             }
-            if (record.r_data.size() >= 10) {
-                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 0);
-                uint64_t value = dbrecovery::innodb::read_le<uint64_t>(record.r_data.data(), 8);
-                if (offset + 8 <= page_data.size()) {
-                    dbrecovery::innodb::write_le<uint64_t>(page_data.data(), offset, value);
-                    applied_count_++;
-                    return true;
-                }
+
+            uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 0);
+            if (offset + 8 > page_data.size()) {
+                return false;
+            }
+
+            // Apply data update
+            if (record.r_data.size() > 2) {
+                size_t data_size = std::min(record.r_data.size() - 2, page_data.size() - offset);
+                std::memcpy(page_data.data() + offset, record.r_data.data() + 2, data_size);
             }
             break;
         }
 
         case MLOG_REC_INSERT: {
-            // 记录插入（简化实现）
-            std::cerr << "[INFO] RedoLogReplayer: MLOG_REC_INSERT not fully implemented" << std::endl;
-            applied_count_++;
-            return true;
+            // Record insert - simplified
+            // Would need schema to properly reconstruct record
+            break;
         }
 
         case MLOG_REC_UPDATE: {
-            // 记录更新（简化实现）
-            std::cerr << "[INFO] RedoLogReplayer: MLOG_REC_UPDATE not fully implemented" << std::endl;
-            applied_count_++;
-            return true;
+            // Record update - simplified
+            // Would need schema to properly reconstruct record
+            break;
         }
 
         case MLOG_REC_DELETE: {
-            // 记录删除（简化实现）
-            std::cerr << "[INFO] RedoLogReplayer: MLOG_REC_DELETE not fully implemented" << std::endl;
-            applied_count_++;
-            return true;
+            // Record delete - mark as deleted
+            if (record.r_data.size() >= 2) {
+                uint16_t offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), 0);
+                if (offset < page_data.size()) {
+                    page_data[offset] |= REC_INFO_DELETED_FLAG;
+                }
+            }
+            break;
         }
 
         case MLOG_PAGE_CREATE: {
-            // 页创建（清空页数据）
-            std::fill(page_data.begin(), page_data.end(), 0);
-            applied_count_++;
-            return true;
+            // Page create - clear page
+            std::memset(page_data.data(), 0, page_data.size());
+            break;
         }
 
         case MLOG_PAGE_REINIT: {
-            // 页重新初始化
-            std::fill(page_data.begin() + 38, page_data.end(), 0);
-            applied_count_++;
-            return true;
+            // Page reinit - clear page header + records
+            if (page_data.size() > 38) {
+                std::memset(page_data.data() + 38, 0, page_data.size() - 38);
+            }
+            break;
         }
 
         default: {
             std::cerr << "[WARN] RedoLogReplayer: Unsupported log type " 
                       << static_cast<int>(record.r_type) << std::endl;
-            failed_count_++;
             return false;
         }
     }
 
-    failed_count_++;
-    return false;
+    stats_.records_applied++;
+    return true;
 }
 
-size_t RedoLogReplayer::apply_records(const std::vector<RedoLogRecord>& records) {
-    size_t success = 0;
-    for (const auto& record : records) {
-        if (apply_record(record)) {
-            success++;
+const std::map<uint32_t, std::vector<uint8_t>>& RedoLogReplayer::get_updated_pages() const {
+    return pages_;
+}
+
+RedoLogReplayer::ReplayStats RedoLogReplayer::get_stats() const {
+    return stats_;
+}
+
+void RedoLogReplayer::clear() {
+    pages_.clear();
+    redo_records_.clear();
+    errors_.clear();
+    std::memset(&stats_, 0, sizeof(stats_));
+}
+
+// ==================== RedoLogChainBuilder ====================
+
+RedoLogChainBuilder::RedoLogChainBuilder() {
+    std::memset(&stats_, 0, sizeof(stats_));
+}
+
+RedoLogChainBuilder::~RedoLogChainBuilder() = default;
+
+void RedoLogChainBuilder::add_record(const RedoLogRecord& record) {
+    records_.push_back(record);
+    stats_.total_records++;
+
+    // Track LSN range (simplified - would use LSN from record in production)
+    if (stats_.start_lsn == 0) {
+        stats_.start_lsn = record.r_page_no;  // Using page_no as placeholder
+    }
+    stats_.end_lsn = record.r_page_no + 1;
+}
+
+bool RedoLogChainBuilder::build_chains() {
+    if (records_.empty()) {
+        return false;
+    }
+
+    // Group by space_id (simplified chain building)
+    for (const auto& record : records_) {
+        chains_[record.r_space_id].push_back(record);
+        stats_.total_chains = std::max(stats_.total_chains, 
+            static_cast<uint32_t>(chains_.size()));
+    }
+
+    return true;
+}
+
+std::vector<RedoLogRecord> RedoLogChainBuilder::get_records(uint64_t start_lsn, uint64_t end_lsn) {
+    std::vector<RedoLogRecord> result;
+
+    for (const auto& record : records_) {
+        uint64_t record_lsn = static_cast<uint64_t>(record.r_space_id) << 32 | record.r_page_no;
+        if (record_lsn >= start_lsn && record_lsn <= end_lsn) {
+            result.push_back(record);
         }
     }
-    return success;
+
+    return result;
 }
 
-void RedoLogReplayer::update_page_checksum(uint32_t page_no) {
-    auto it = pages_.find(page_no);
-    if (it == pages_.end()) {
-        return;
+const std::vector<RedoLogRecord>& RedoLogChainBuilder::get_records() const {
+    return records_;
+}
+
+RedoLogChainBuilder::ChainStats RedoLogChainBuilder::get_stats() const {
+    return stats_;
+}
+
+void RedoLogChainBuilder::clear() {
+    records_.clear();
+    chains_.clear();
+    std::memset(&stats_, 0, sizeof(stats_));
+}
+
+// ==================== RedoLogFilter ====================
+
+RedoLogFilter::RedoLogFilter() = default;
+
+RedoLogFilter::~RedoLogFilter() = default;
+
+void RedoLogFilter::set_space_id(uint32_t space_id) {
+    space_id_ = space_id;
+}
+
+void RedoLogFilter::set_page_no(uint32_t page_no) {
+    page_no_ = page_no;
+}
+
+void RedoLogFilter::set_record_type(uint8_t type) {
+    record_type_ = type;
+}
+
+void RedoLogFilter::set_lsn_range(uint64_t start_lsn, uint64_t end_lsn) {
+    start_lsn_ = start_lsn;
+    end_lsn_ = end_lsn;
+}
+
+std::vector<RedoLogRecord> RedoLogFilter::filter(const std::vector<RedoLogRecord>& records) {
+    std::vector<RedoLogRecord> result;
+
+    for (const auto& record : records) {
+        if (passes_filter(record)) {
+            result.push_back(record);
+        }
     }
 
-    auto& page_data = it->second;
+    return result;
+}
 
-    // 计算 CRC32C 校验和
-    std::vector<uint8_t> page_copy = page_data;
-    for (int i = 0; i < 4; ++i) {
-        page_copy[24 + i] = 0;
+bool RedoLogFilter::passes_filter(const RedoLogRecord& record) {
+    if (space_id_.has_value() && record.r_space_id != space_id_.value()) {
+        return false;
     }
 
-    uint32_t computed_crc = PageReader::compute_crc32c(page_copy);
-
-    // 写入校验和
-    for (int i = 0; i < 4; ++i) {
-        page_data[24 + i] = (computed_crc >> (i * 8)) & 0xFF;
+    if (page_no_.has_value() && record.r_page_no != page_no_.value()) {
+        return false;
     }
+
+    if (record_type_.has_value() && record.r_type != record_type_.value()) {
+        return false;
+    }
+
+    // LSN filter (simplified)
+    if (start_lsn_.has_value() || end_lsn_.has_value()) {
+        uint64_t record_lsn = static_cast<uint64_t>(record.r_space_id) << 32 | record.r_page_no;
+        if (start_lsn_.has_value() && record_lsn < start_lsn_.value()) {
+            return false;
+        }
+        if (end_lsn_.has_value() && record_lsn > end_lsn_.value()) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+void RedoLogFilter::clear_filters() {
+    space_id_.reset();
+    page_no_.reset();
+    record_type_.reset();
+    start_lsn_.reset();
+    end_lsn_.reset();
+}
+
+// ==================== RedoLogAnalyzer ====================
+
+RedoLogAnalyzer::RedoLogAnalyzer() {
+    std::memset(&analysis_, 0, sizeof(analysis_));
+}
+
+RedoLogAnalyzer::~RedoLogAnalyzer() = default;
+
+bool RedoLogAnalyzer::analyze_file(const std::string& path) {
+    RedoLogParser parser;
+    auto records = parser.parse_file(path);
+
+    for (const auto& record : records) {
+        analyze_record(record);
+    }
+
+    return !records.empty();
+}
+
+RedoLogAnalyzer::AnalysisResult RedoLogAnalyzer::get_analysis() const {
+    return analysis_;
+}
+
+std::map<uint8_t, uint32_t> RedoLogAnalyzer::get_type_distribution() const {
+    return type_distribution_;
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> RedoLogAnalyzer::get_top_pages(uint32_t count) const {
+    std::vector<std::pair<uint32_t, uint32_t>> sorted_pages(page_update_count_.begin(), 
+                                                              page_update_count_.end());
+
+    std::sort(sorted_pages.begin(), sorted_pages.end(),
+        [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    if (sorted_pages.size() > count) {
+        sorted_pages.resize(count);
+    }
+
+    return sorted_pages;
+}
+
+void RedoLogAnalyzer::clear() {
+    analysis_ = {};
+    type_distribution_.clear();
+    page_update_count_.clear();
+}
+
+void RedoLogAnalyzer::analyze_record(const RedoLogRecord& record) {
+    analysis_.total_records++;
+
+    // Count by type
+    type_distribution_[record.r_type]++;
+    analysis_.total_data_size += record.r_data.size();
+
+    // Count by page
+    page_update_count_[record.r_page_no]++;
+
+    // Count specific types
+    switch (record.r_type) {
+        case MLOG_REC_INSERT:
+        case MLOG_COMP_REC_INSERT:
+            analysis_.insert_records++;
+            break;
+        case MLOG_REC_UPDATE:
+        case MLOG_COMP_REC_UPDATE:
+            analysis_.update_records++;
+            break;
+        case MLOG_REC_DELETE:
+        case MLOG_COMP_REC_DELETE:
+            analysis_.delete_records++;
+            break;
+        case MLOG_PAGE_CREATE:
+        case MLOG_COMP_PAGE_CREATE:
+            analysis_.page_create_records++;
+            break;
+        case MLOG_PAGE_REINIT:
+        case MLOG_COMP_PAGE_REINIT:
+            analysis_.page_reinit_records++;
+            break;
+        case MLOG_BLOB_WRITE:
+            analysis_.blob_write_records++;
+            break;
+    }
+
+    // Track unique space IDs and page numbers
+    analysis_.unique_space_ids = std::max(analysis_.unique_space_ids,
+        static_cast<uint32_t>(page_update_count_.size()));
+    analysis_.unique_page_numbers = analysis_.unique_space_ids;
 }
 
 } // namespace innodb

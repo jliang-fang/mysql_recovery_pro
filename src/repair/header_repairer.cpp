@@ -52,8 +52,8 @@ bool HeaderRepairer::validate_page_header(const uint8_t* page_data, size_t page_
         return false;
     }
 
-    // 检查页类型
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 38 + 12);
+    // 检查页类型 - correct offset is FIL_PAGE_TYPE_ABS = 16
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
         page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG &&
@@ -82,8 +82,9 @@ std::optional<uint16_t> HeaderRepairer::extract_page_type(const uint8_t* page_da
         return std::nullopt;
     }
 
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 38 + 12);
-    
+    // Use correct offset FIL_PAGE_TYPE_ABS = 16
+    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+
     // 验证页类型是否有效
     if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX ||
         page_type == dbrecovery::innodb::FIL_PAGE_SDI ||
@@ -122,8 +123,8 @@ bool HeaderRepairer::rebuild_page_header(uint8_t* page_data, size_t page_size,
     dbrecovery::innodb::write_le<uint32_t>(page_data, 24, 0);
     dbrecovery::innodb::write_le<uint32_t>(page_data, 28, 0);
     
-    // type (offset 38+12 = 50)
-    dbrecovery::innodb::write_le<uint16_t>(page_data, 50, page_type);
+    // type (offset FIL_PAGE_TYPE_ABS = 16)
+    dbrecovery::innodb::write_le<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS, page_type);
 
     // Step 2: 重建 Page Header
     uint8_t* page_header = page_data + 38;

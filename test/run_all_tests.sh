@@ -1,7 +1,7 @@
 #!/bin/
 set -e
 
-BASE_DIR="/app/mysql8_recovery"
+BASE_DIR="/app/mysql_recovery_proy"
 BUILD_DIR="$BASE_DIR/build"
 TEST_DATA_DIR="$BASE_DIR/test/test_data"
 TEST_OUTPUT_DIR="$BASE_DIR/test/output"
@@ -12,8 +12,8 @@ echo "=== MySQL 8.0 InnoDB Recovery Test Suite ==="
 echo "Build dir: $BUILD_DIR"
 echo "Test data dir: $TEST_DATA_DIR"
 
-if [[ ! -x "$BUILD_DIR/mysql8_recovery" ]]; then
-    echo "[错误] mysql8_recovery 可执行文件不存在，请先编译：cmake .. && make"
+if [[ ! -x "$BUILD_DIR/mysql_recovery_proy" ]]; then
+    echo "[错误] mysql_recovery_proy 可执行文件不存在，请先编译：cmake .. && make"
     exit 1
 fi
 
@@ -22,7 +22,7 @@ cd "$BUILD_DIR"
 echo ""
 echo "测试1: Page 结构解析..."
 if [[ -f "$TEST_DATA_DIR/valid_ibd_file.ibd" ]]; then
-    ./mysql8_recovery "$TEST_DATA_DIR/valid_ibd_file.ibd" > "$TEST_OUTPUT_DIR/page_parse.log" 2>&1 || {
+    ./mysql_recovery_proy "$TEST_DATA_DIR/valid_ibd_file.ibd" > "$TEST_OUTPUT_DIR/page_parse.log" 2>&1 || {
         echo "[错误] Page 解析失败，查看日志: $TEST_OUTPUT_DIR/page_parse.log"
         exit 1
     }
@@ -34,11 +34,11 @@ fi
 echo ""
 echo "测试2: 加密/解密..."
 if [[ -f "$TEST_DATA_DIR/valid_ibd_file.ibd" ]]; then
-    ./mysql8_recovery -e "$TEST_DATA_DIR/valid_ibd_file.ibd" "$TEST_OUTPUT_DIR/encrypted.ibd" "testpassword123" || {
+    ./mysql_recovery_proy -e "$TEST_DATA_DIR/valid_ibd_file.ibd" "$TEST_OUTPUT_DIR/encrypted.ibd" "testpassword123" || {
         echo "[错误] 加密失败"
         exit 1
     }
-    ./mysql8_recovery -c "$TEST_OUTPUT_DIR/encrypted.ibd" "$TEST_OUTPUT_DIR/decrypted.ibd" -p "testpassword123" || {
+    ./mysql_recovery_proy -c "$TEST_OUTPUT_DIR/encrypted.ibd" "$TEST_OUTPUT_DIR/decrypted.ibd" -p "testpassword123" || {
         echo "[错误] 解密失败"
         exit 1
     }
@@ -54,7 +54,7 @@ fi
 echo ""
 echo "测试3: 磁盘扫描..."
 if [[ -d "$TEST_DATA_DIR" ]]; then
-    ./mysql8_recovery -d "$TEST_DATA_DIR" "$TEST_OUTPUT_DIR/recovered_disk" || {
+    ./mysql_recovery_proy -d "$TEST_DATA_DIR" "$TEST_OUTPUT_DIR/recovered_disk" || {
         echo "[错误] 磁盘扫描失败"
         exit 1
     }
@@ -66,7 +66,7 @@ fi
 echo ""
 echo "测试4: 文件信息扫描..."
 if [[ -f "$TEST_DATA_DIR/valid_ibd_file.ibd" ]]; then
-    ./mysql8_recovery -s "$TEST_DATA_DIR/valid_ibd_file.ibd" > /dev/null || {
+    ./mysql_recovery_proy -s "$TEST_DATA_DIR/valid_ibd_file.ibd" > /dev/null || {
         echo "[错误] 信息扫描失败"
         exit 1
     }

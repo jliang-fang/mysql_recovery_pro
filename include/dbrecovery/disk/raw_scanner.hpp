@@ -6,9 +6,17 @@
 #include <vector>
 #include <memory>
 
+#ifdef HAVE_IO_URING
+#include "dbrecovery/disk/io_uring_scanner.hpp"
+#endif
+
 namespace dbrecovery {
 namespace disk {
 
+/**
+ * @brief Raw disk scanner with io_uring support
+ * @details Automatically uses io_uring when available, falls back to POSIX I/O
+ */
 class RawScanner {
 public:
     RawScanner();
@@ -29,17 +37,26 @@ public:
     // 判断是否已打开有效设备/文件
     bool is_open() const;
 
+#ifdef HAVE_IO_URING
+    // Get underlying io_uring scanner (if available)
+    IOUringScanner* get_io_uring_scanner() { return io_uring_scanner_.get(); }
+#endif
+
 private:
     class Impl {
     public:
         Impl() : fd_(-1), size_(0), is_open_(false) {}
-        
+
         int fd_;
         uint64_t size_;
         bool is_open_;
     };
 
     std::unique_ptr<Impl> impl_;
+
+#ifdef HAVE_IO_URING
+    std::unique_ptr<IOUringScanner> io_uring_scanner_;
+#endif
 };
 
 }  // namespace disk

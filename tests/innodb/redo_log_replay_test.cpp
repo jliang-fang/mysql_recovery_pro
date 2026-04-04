@@ -311,8 +311,8 @@ TEST(RedoLogReplayTest, ReplayCompactFormat) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format (bit 0-2 = 1)
-    // BTR header flags at offset FIL_HEADER_SIZE + 12 = 38 + 12 = 50
-    write_le<uint16_t>(page_data.data(), 50, 0x0701);
+    // BTR header flags at offset 80 (FIL_HEADER_SIZE=38 + BTR_HEADER_SIZE=42)
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -322,7 +322,7 @@ TEST(RedoLogReplayTest, ReplayCompactFormat) {
 
     // Set INFIMUM record
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // Set SUPREMUM record
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
@@ -335,16 +335,16 @@ TEST(RedoLogReplayTest, ReplayCompactFormat) {
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
     EXPECT_EQ(parser.btr_format(), 1);  // COMPACT format
-    
+
     // Create redo log record for INSERT
     RedoLogRecord record;
     record.r_type = MLOG_COMP_REC_INSERT;
     record.r_space_id = 0;
     record.r_page_no = 0;
-    
+
     // Record data: info_bits(1) + next_offset(2) + heap_no(2)
     record.r_data = {0x00, 0x00, 0x00, 0x00, 0x00};
-    
+
     // Apply redo record
     parser.apply_redo_record(record);
 }
@@ -360,8 +360,8 @@ TEST(RedoLogReplayTest, ReplayRedundantFormat) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with REDUNDANT format (bit 0-2 = 0)
-    // BTR header flags at offset FIL_HEADER_SIZE + 12 = 38 + 12 = 50
-    write_le<uint16_t>(page_data.data(), 50, 0x0700);
+    // BTR header flags at offset 80 (FIL_HEADER_SIZE=38 + BTR_HEADER_SIZE=42)
+    write_le<uint16_t>(page_data.data(), 80, 0x0700);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -371,7 +371,7 @@ TEST(RedoLogReplayTest, ReplayRedundantFormat) {
 
     // Set INFIMUM record
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // Set SUPREMUM record
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
@@ -384,14 +384,14 @@ TEST(RedoLogReplayTest, ReplayRedundantFormat) {
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
     EXPECT_EQ(parser.btr_format(), 0);  // REDUNDANT format
-    
+
     // Create redo log record for INSERT
     RedoLogRecord record;
     record.r_type = MLOG_COMP_REC_INSERT;
     record.r_space_id = 0;
     record.r_page_no = 0;
     record.r_data = {0x00, 0x00, 0x00, 0x00, 0x00};
-    
+
     // Apply redo record
     parser.apply_redo_record(record);
 }
@@ -407,7 +407,7 @@ TEST(RedoLogReplayTest, ReplayUpdate) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -417,7 +417,7 @@ TEST(RedoLogReplayTest, ReplayUpdate) {
 
     // Set INFIMUM record
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // Set SUPREMUM record
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
@@ -462,7 +462,7 @@ TEST(RedoLogReplayTest, ReplayDelete) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
 
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -472,7 +472,7 @@ TEST(RedoLogReplayTest, ReplayDelete) {
 
     // Set INFIMUM record
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // Set SUPREMUM record
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
@@ -509,37 +509,37 @@ TEST(RedoLogReplayTest, ReplayPageCreate) {
     
     // Set page level to 0
     write_le<uint16_t>(page_data.data(), 42, 0);
-    
+
     // Set flags with COMPACT format
-    write_le<uint16_t>(page_data.data(), 44, 0x0701);
-    
+    write_le<uint16_t>(page_data.data(), 80, 0x0701);
+
     // Set heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
-    
+
     // Set n_dir_slots
     write_le<uint16_t>(page_data.data(), 38, 2);
-    
+
     // Set INFIMUM record
     page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
-    
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
+
     // Set SUPREMUM record
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
     write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
-    
+
     // Set n_heap
     write_le<uint16_t>(page_data.data(), 42, 3);
-    
+
     // Create parser
     BPlusTreeParser parser(page_data);
     EXPECT_TRUE(parser.parse());
-    
+
     // Create redo log record for PAGE_CREATE
     RedoLogRecord record;
     record.r_type = MLOG_COMP_PAGE_CREATE;
     record.r_space_id = 0;
     record.r_page_no = 0;
-    
+
     // Apply redo record
     parser.apply_redo_record(record);
 }

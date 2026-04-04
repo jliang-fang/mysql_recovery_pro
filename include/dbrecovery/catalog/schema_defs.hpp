@@ -109,27 +109,22 @@ struct TableSchema {
     // ✅ 新增：表结构验证
     bool validate() const {
         if (table_name.empty()) {
-            std::cerr << "[ERROR] Table name is empty" << std::endl;
             return false;
         }
-        
+
         if (columns.empty()) {
-            std::cerr << "[ERROR] Table has no columns" << std::endl;
             return false;
         }
-        
+
         // 验证列定义
         for (const auto& pair : columns) {
             const auto& col = pair.second;
             if (col.name.empty()) {
-                std::cerr << "[ERROR] Column has empty name at ordinal " << pair.first << std::endl;
                 return false;
             }
-            
+
             // 验证 MySQL 类型
             if (col.mysql_type_id > 255) {
-                std::cerr << "[ERROR] Invalid MySQL type ID " << col.mysql_type_id 
-                          << " for column " << col.name << std::endl;
                 return false;
             }
         }
@@ -137,7 +132,6 @@ struct TableSchema {
         // 验证索引定义
         for (const auto& index : indexes) {
             if (index.columns.empty()) {
-                std::cerr << "[ERROR] Index " << index.name << " has no columns" << std::endl;
                 return false;
             }
 
@@ -146,10 +140,8 @@ struct TableSchema {
             for (const auto& col_name : index.columns) {
                 bool found = std::any_of(columns.begin(), columns.end(),
                     [&col_name](const auto& pair) { return pair.second.name == col_name; });
-                
+
                 if (!found) {
-                    std::cerr << "[ERROR] Index " << index.name << " references non-existent column "
-                              << col_name << std::endl;
                     return false;
                 }
             }

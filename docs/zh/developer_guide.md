@@ -51,7 +51,7 @@ sudo yum install -y \
 
 ```bash
 # 克隆项目
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 
 # 创建构建目录
 mkdir -p build && cd build
@@ -100,7 +100,7 @@ make -j$(nproc)
 ## 项目结构
 
 ```
-mysql8_recovery/
+mysql_recovery_proy/
 ├── include/dbrecovery/     # 头文件
 │   ├── catalog/           # 元数据目录
 │   ├── crypt/             # 加密扫描
@@ -236,7 +236,7 @@ make new_feature_test
 ### 使用 GDB
 
 ```bash
-gdb ./build/mysql8_recover
+gdb ./build/mysql_recovery_pro
 (gdb) break main
 (gdb) run --ibd=/path/to/file.ibd
 (gdb) backtrace
@@ -245,13 +245,13 @@ gdb ./build/mysql8_recover
 ### 使用 Valgrind
 
 ```bash
-valgrind --leak-check=full ./build/mysql8_recover --ibd=/path/to/file.ibd
+valgrind --leak-check=full ./build/mysql_recovery_pro --ibd=/path/to/file.ibd
 ```
 
 ### 使用 perf
 
 ```bash
-perf record -g ./build/mysql8_recover --ibd=/path/to/file.ibd
+perf record -g ./build/mysql_recovery_pro --ibd=/path/to/file.ibd
 perf report
 ```
 

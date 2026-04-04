@@ -5,6 +5,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <cmath>  // ✅ 新增：std::pow 需要
+#include <limits>
 
 // ✅ 新增：引入 mysql_types 命名空间
 using namespace dbrecovery::innodb::mysql_types;
@@ -14,6 +15,7 @@ namespace engine {
 
 std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::TableSchema& schema) const {
     std::vector<FieldValue> fields;
+    fields.reserve(schema.columns.size());  // 🚀 性能优化：预分配 vector 空间
 
     // 基础校验：至少包含记录头（5 字节）+ 1 字节数据
     if (!page_base_ || size_ == 0) {
@@ -21,7 +23,10 @@ std::vector<FieldValue> RowDecoder::decode_record(size_t origin, const catalog::
     }
 
     constexpr size_t MAX_PAGE_SIZE = 65536; // InnoDB 最大页大小 (64KB)
-    if (origin + 6 > size_ || origin + 6 > MAX_PAGE_SIZE) {
+    constexpr size_t MIN_RECORD_SIZE = 10;  // 🚀 新增：最小记录大小（提高效率）
+
+    // ✅ 新增：边界检查优化（避免重复计算）
+    if (origin + MIN_RECORD_SIZE > size_ || origin + MIN_RECORD_SIZE > MAX_PAGE_SIZE) {
         return fields;
     }
 

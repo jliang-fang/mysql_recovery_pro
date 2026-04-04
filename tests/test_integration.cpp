@@ -22,7 +22,7 @@ TEST(IntegrationTest, BPlusTreeTraversal) {
     
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     // 尝试找到测试数据文件
     bool found_test_data = false;
@@ -52,7 +52,7 @@ TEST(IntegrationTest, BPlusTreeTraversal) {
 TEST(IntegrationTest, SDIParsing) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     try {
@@ -79,7 +79,7 @@ TEST(IntegrationTest, SDIParsing) {
 TEST(IntegrationTest, RowDecoding) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     try {
@@ -106,7 +106,7 @@ TEST(IntegrationTest, RowDecoding) {
 TEST(IntegrationTest, FileReading) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     std::string test_file;
@@ -144,7 +144,7 @@ TEST(IntegrationTest, FileReading) {
 TEST(IntegrationTest, CRC32CChecksum) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     std::string test_file;
@@ -187,7 +187,7 @@ TEST(IntegrationTest, CRC32CChecksum) {
 TEST(IntegrationTest, MultiPageBlobRecovery) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     try {
@@ -214,7 +214,7 @@ TEST(IntegrationTest, MultiPageBlobRecovery) {
 TEST(IntegrationTest, RedoLogParsing) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     std::string redo_file;
@@ -248,7 +248,7 @@ TEST(IntegrationTest, RedoLogParsing) {
 TEST(IntegrationTest, TableSchemaReconstruction) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     try {
@@ -275,7 +275,7 @@ TEST(IntegrationTest, TableSchemaReconstruction) {
 TEST(IntegrationTest, ExportToCSV) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     try {
@@ -302,7 +302,7 @@ TEST(IntegrationTest, ExportToCSV) {
 TEST(IntegrationTest, HeaderRecovery) {
     std::string test_data_dir = std::getenv("TEST_DATA_DIR") 
         ? std::getenv("TEST_DATA_DIR") 
-        : "/app/mysql8_recovery/tests/data";
+        : "/app/mysql_recovery_pro/tests/data";
     
     bool found_test_data = false;
     try {

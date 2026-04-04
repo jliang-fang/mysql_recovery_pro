@@ -22,7 +22,7 @@ cmake -E chdir "build" make -j$(nproc)
 sudo cmake -E chdir "build" make install
 
 # Build the project with benchmark support
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 mkdir -p build
 cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release -DENABLE_BENCHMARK=ON

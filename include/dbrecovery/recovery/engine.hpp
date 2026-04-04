@@ -89,6 +89,35 @@ records,
                        const std::string& sql_path);
 
     /**
+     * @brief 导出为 SQL 格式（带用户和数据库名）
+     *
+     * @param records 记录数据
+     * @param table_name 目标表名
+     * @param sql_path 输出文件路径
+     * @param user 数据库用户
+     * @param database 数据库名
+     * @return true 成功导出
+     * @return false 失败
+     */
+    bool export_to_sql_with_user(const std::vector<std::map<std::string, std::string>>&
+records,
+                                  const std::string& table_name,
+                                  const std::string& sql_path,
+                                  const std::string& user,
+                                  const std::string& database);
+
+    /**
+     * @brief 导出为 JSON 格式
+     *
+     * @param records 记录数据
+     * @param json_path 输出文件路径
+     * @return true 成功导出
+     * @return false 失败
+     */
+    bool export_to_json(const std::vector<std::map<std::string, std::string>>& records,
+                        const std::string& json_path);
+
+    /**
      * @brief 获取文件有效性状态
      *
      * @return true 文件有效且已成功初始化

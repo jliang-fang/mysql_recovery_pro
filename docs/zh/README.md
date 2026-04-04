@@ -46,7 +46,7 @@
 
 ```bash
 # 克隆项目
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 
 # 创建构建目录
 mkdir -p build && cd build
@@ -65,13 +65,13 @@ ctest --verbose
 
 ```bash
 # 恢复表数据
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered
 
 # 指定表 ID
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
 # 查看帮助
-./mysql8_recover --help
+./mysql_recovery_pro --help
 ```
 
 ### GUI 工具
@@ -79,7 +79,7 @@ ctest --verbose
 ```bash
 # 启动图形界面
 cd build/gui
-./mysql8_recovery_gui
+./mysql_recovery_proy_gui
 ```
 
 ## 📚 API 参考

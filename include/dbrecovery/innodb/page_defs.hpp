@@ -57,6 +57,12 @@ inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
     return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_ABS);
 }
 
+// ✅ 新增：兼容函数 get_fil_page_type（用于旧代码兼容）
+inline uint16_t get_fil_page_type(const uint8_t* data, size_t page_size = 16384) {
+    (void)page_size; // unused parameter for compatibility
+    return dbrecovery::innodb::read_le<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+}
+
 // ✅ 新增：静态断言验证关键常量的正确性（编译时检查）
 static_assert(FIL_HEADER_SIZE == 38, "FIL_HEADER_SIZE must be 38 bytes");
 static_assert(FIL_PAGE_TYPE_ABS == 16, "FIL_PAGE_TYPE_ABS must be 16 (relative to page start)");

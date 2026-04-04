@@ -116,17 +116,17 @@ cmake -DCMAKE_BUILD_TYPE=Debug \
       ..
 
 # 运行程序
-./build/mysql8_recover --ibd=test.ibd
+./build/mysql_recovery_pro --ibd=test.ibd
 
 # 生成分析报告
-gprof ./build/mysql8_recover gmon.out > profile.txt
+gprof ./build/mysql_recovery_pro gmon.out > profile.txt
 ```
 
 ### 3.2 perf
 
 ```bash
 # 记录性能数据
-perf record -g ./build/mysql8_recover --ibd=test.ibd
+perf record -g ./build/mysql_recovery_pro --ibd=test.ibd
 
 # 查看报告
 perf report
@@ -142,10 +142,10 @@ perf script | stackcollapse-perf.pl | flamegraph.pl > profile.svg
 valgrind --leak-check=full \
          --show-leak-kinds=all \
          --track-origins=yes \
-         ./build/mysql8_recover --ibd=test.ibd
+         ./build/mysql_recovery_pro --ibd=test.ibd
 
 # 数据竞争检测（需要编译时添加 -fsanitize=thread）
-valgrind --tool=helgrind ./build/mysql8_recover --ibd=test.ibd
+valgrind --tool=helgrind ./build/mysql_recovery_pro --ibd=test.ibd
 ```
 
 ## 4. 集成到 CI/CD

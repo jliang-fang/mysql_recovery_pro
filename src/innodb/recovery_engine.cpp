@@ -118,8 +118,8 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
             continue;
         }
 
-        // 解析页类型
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 16);
+        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 26-27，不是偏移 16
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 26);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
 
@@ -264,12 +264,11 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             continue;
         }
 
-        // ✅ P0-1 修复：解析页类型 - 使用正确的偏移量（相对于页起始位置）
-        // MySQL 8.0: FIL_PAGE_TYPE = 16 (relative to page start)
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 16);
+        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 26-27，不是偏移 16
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 26);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
-    
+
     // ✅ Step 2: 处理 SDI 页（FIL_PAGE_SDI = 9971）- 必须先解析SDI获取表结构
     catalog::TableSchema table_schema;
     if (pages_by_type.count(9971)) {
@@ -380,13 +379,29 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
     }
 
     // ✅ Step 3: 实现 B+树重建逻辑
+    // 🔧 修复：支持通过 PAGE_N_RECS 识别的页（即使页类型是 0x0000）
+    // 构建 additional_index_pages 映射：使用 PAGE_N_RECS 识别有效的索引页
+    std::map<uint32_t, std::vector<uint8_t>> additional_index_pages;
+    constexpr size_t PAGE_N_RECS_OFFSET = 36;
+    for (const auto& [page_type, pages_vec] : pages_by_type) {
+        for (const auto& [pno, page_data] : pages_vec) {
+            if (page_data.size() > PAGE_N_RECS_OFFSET + 2) {
+                uint16_t n_recs = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), PAGE_N_RECS_OFFSET);
+                if (n_recs > 0 && n_recs < 10000) {
+                    additional_index_pages[pno] = page_data;
+                }
+            }
+        }
+    }
+    
+    // 如果没有找到类型为 9969 的页，尝试使用 additional_index_pages
     if (pages_by_type.count(9969)) {
         std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
 
         // 使用 BPlusTreeParser 解析所有索引页
         for (const auto& [page_no, page_data] : pages_by_type[9969]) {
             dbrecovery::innodb::BPlusTreeParser parser(page_data);
-            
+
             if (!parser.parse()) {
                 std::cerr << "[WARN] Failed to parse B+Tree page " << page_no << "\n";
                 continue;
@@ -399,14 +414,42 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             if (!table_schema.columns.empty()) {
                 auto records = parser.parse_records(table_schema);
                 std::cout << "[INFO] Page " << page_no << ": found " << records.size() << " records\n";
-                
+
                 // 将记录添加到恢复结果
                 recovered_records_.insert(recovered_records_.end(), records.begin(), records.end());
             } else {
                 std::cout << "[WARN] No table schema available for record parsing\n";
             }
         }
-    } else {
+    }
+    
+    // ✅ 修复：如果没找到类型为 9969 的页，尝试通过 PAGE_N_RECS 识别的页
+    if (!pages_by_type.count(9969) && !additional_index_pages.empty()) {
+        std::cout << "[INFO] Recovering " << additional_index_pages.size() << " pages via PAGE_N_RECS check\n";
+        
+        for (const auto& [page_no, page_data] : additional_index_pages) {
+            dbrecovery::innodb::BPlusTreeParser parser(page_data);
+
+            if (!parser.parse()) {
+                std::cerr << "[WARN] Failed to parse B+Tree page " << page_no << "\n";
+                continue;
+            }
+
+            std::cout << "[INFO] PAGE_N_RECS Page " << page_no << ": type=" << parser.page_type()
+                      << ", level=" << parser.btr_format() << "\n";
+
+            // 解析记录（需要表结构）
+            if (!table_schema.columns.empty()) {
+                auto records = parser.parse_records(table_schema);
+                if (!records.empty()) {
+                    std::cout << "[INFO] PAGE_N_RECS Page " << page_no << ": found " << records.size() << " records\n";
+                    recovered_records_.insert(recovered_records_.end(), records.begin(), records.end());
+                }
+            } else {
+                std::cout << "[WARN] No table schema available for record parsing\n";
+            }
+        }
+    } else if (!pages_by_type.count(9969)) {
         std::cerr << "[WARN] No index pages found in file\n";
         return false;
     }

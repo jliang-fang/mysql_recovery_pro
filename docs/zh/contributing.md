@@ -13,8 +13,8 @@
 ### 2. 克隆仓库
 
 ```bash
-git clone https://github.com/your-username/mysql8_recovery.git
-cd mysql8_recovery
+git clone https://github.com/your-username/mysql_recovery_proy.git
+cd mysql_recovery_proy
 ```
 
 ### 3. 创建分支

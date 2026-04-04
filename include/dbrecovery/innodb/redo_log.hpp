@@ -41,6 +41,9 @@ struct RedoLogRecord {
     uint64_t r_trx_id = 0;
     uint64_t r_roll_ptr = 0;
 
+    // LSN 信息
+    uint64_t r_lsn = 0;
+
     std::string to_string() const {
         return "RedoLogRecord{type=" + std::to_string(r_type) +
                ", space_id=" + std::to_string(r_space_id) +

@@ -40,7 +40,7 @@ MySQL 8.x 数据恢复引擎是一个高性能的离线 MySQL 数据恢复工具
 
 ```bash
 # 克隆项目
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 
 # 创建构建目录
 mkdir -p build && cd build
@@ -59,19 +59,19 @@ ctest --verbose
 
 ```bash
 # 恢复表数据
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered
 
 # 指定表 ID
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
 # Truncate 恢复
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --truncate-recovery
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --truncate-recovery
 
 # rm -rf 恢复
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --rmrf-recovery
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --rmrf-recovery
 
 # 查看帮助
-./mysql8_recover --help
+./mysql_recovery_pro --help
 ```
 
 ### 2.3 GUI 工具
@@ -79,7 +79,7 @@ ctest --verbose
 ```bash
 # 启动图形界面
 cd build/gui
-./mysql8_recovery_gui
+./mysql_recovery_proy_gui
 ```
 
 ---
@@ -99,7 +99,11 @@ cd build/gui
 | `--output=<dir>` | 输出目录 | `/tmp/recovered` | `--output=/data/recovered` |
 | `--table-id=<id>` | 表 ID 用于 SDI 查找 | 0 | `--table-id=12345` |
 | `--page-size=<size>` | 页大小: 4096/8192/16384/32768/65536 | 16384 | `--page-size=8192` |
-| `--check-headers` | 仅检查页头 | false | `--check-headers` |
+| `--check-headers            Check page headers only
+  --check-corruption         Check for corruption in pages
+  --repair                   Repair corrupted pages` | 仅检查页头 | false | `--check-headers            Check page headers only
+  --check-corruption         Check for corruption in pages
+  --repair                   Repair corrupted pages` |
 | `--truncate-recovery` | Truncate 恢复模式 | false | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf 恢复模式 | false | `--rmrf-recovery` |
 | `--blob-recovery` | 启用 BLOB 恢复 | false | `--blob-recovery` |
@@ -109,19 +113,21 @@ cd build/gui
 
 ```bash
 # 基本恢复
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd --output=/tmp/users_recovered
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd --output=/tmp/users_recovered
 
 # Truncate 恢复
-./mysql8_recover --ibd=/var/lib/mysql/test/orders.ibd --output=/tmp/orders_recovered --truncate-recovery --format=sql
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/orders.ibd --output=/tmp/orders_recovered --truncate-recovery --format=sql
 
 # rm -rf 恢复
-./mysql8_recover --ibd=/var/lib/mysql/test/products.ibd --output=/tmp/products_recovered --rmrf-recovery --format=csv
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/products.ibd --output=/tmp/products_recovered --rmrf-recovery --format=csv
 
 # 指定页大小（用于非标准页大小）
-./mysql8_recover --ibd=/var/lib/mysql/test/large.ibd --output=/tmp/large_recovered --page-size=32768
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/large.ibd --output=/tmp/large_recovered --page-size=32768
 
 # 仅检查页头
-./mysql8_recover --ibd=/var/lib/mysql/test/check.ibd --check-headers
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/check.ibd --check-headers            Check page headers only
+  --check-corruption         Check for corruption in pages
+  --repair                   Repair corrupted pages
 ```
 
 ---
@@ -189,7 +195,7 @@ cd build/gui
 
 ```bash
 # 命令行
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --format=csv
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=csv
 
 # GUI
 1. 打开 GUI
@@ -202,7 +208,7 @@ cd build/gui
 
 ```bash
 # 命令行
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --format=sql
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=sql
 
 # GUI
 1. 打开 GUI
@@ -215,7 +221,7 @@ cd build/gui
 
 ```bash
 # 命令行
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/repaired --format=ibd
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/repaired --format=ibd
 
 # GUI
 1. 打开 GUI
@@ -245,7 +251,7 @@ cd build/gui
 #### 6.1.3 命令行示例
 
 ```bash
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd \
     --output=/tmp/users_recovered \
     --truncate-recovery \
     --format=sql
@@ -268,7 +274,7 @@ cd build/gui
 #### 6.2.3 命令行示例
 
 ```bash
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd \
     --output=/tmp/users_recovered \
     --rmrf-recovery \
     --format=csv
@@ -291,7 +297,7 @@ cd build/gui
 #### 6.3.3 命令行示例
 
 ```bash
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd \
     --output=/tmp/users_repaired \
     --format=ibd
 ```
@@ -412,7 +418,7 @@ Redo Log 记录所有数据修改操作，恢复工具支持：
 
 ### 11.2 社区
 
-- GitHub Issues: https://github.com/your-org/mysql8_recovery/issues
+- GitHub Issues: https://github.com/your-org/mysql_recovery_proy/issues
 - 邮件: support@mysql8-recovery.com
 
 ---

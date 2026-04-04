@@ -9,13 +9,13 @@ echo "##active_line10##"
 echo "##active_line11##"
 # 检查头文件偏移定义
 echo "##active_line12##"
-grep -E "PAGE_N_DIR_SLOTS|PAGE_HEAP_TOP" /app/mysql8_recovery/include/dbrecovery/innodb/v2/page_parser.hpp | head -5
+grep -E "PAGE_N_DIR_SLOTS|PAGE_HEAP_TOP" /app/mysql_recovery_proy/include/dbrecovery/innodb/v2/page_parser.hpp | head -5
 echo "##active_line13##"
 
 echo "##active_line14##"
 # 运行测试
 echo "##active_line15##"
-/app/mysql8_recovery/build/test_page_v2
+/app/mysql_recovery_proy/build/test_page_v2
 echo "##active_line16##"
 
 echo "##active_line17##"

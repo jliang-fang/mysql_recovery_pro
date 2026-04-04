@@ -159,5 +159,104 @@ void CliParser::print_help(const std::string& program_name,
     std::cout << get_help_message(program_name, usage);
 }
 
+std::string CliParser::get_full_help(const std::string& program_name) {
+    std::ostringstream oss;
+
+    oss << "MySQL Recovery Pro v2.1.0 - Enhanced Recovery Features\n";
+    oss << "=====================================================\n\n";
+    oss << "Usage: " << program_name << " [options]\n\n";
+
+    oss << "Basic Options:\n";
+    oss << "  --ibd=<path>               Path to .ibd file (required for single file recovery)\n";
+    oss << "  --data-dir=<dir>           MySQL data directory path (required for scan/search/bulk)\n";
+    oss << "  --table-name=<name>        Table name to search (supports * and ? wildcards)\n";
+    oss << "  --output=<dir>             Output directory (default: /tmp/recovered)\n";
+    oss << "  --table-id=<id>            Table ID for SDI lookup (default: 0)\n";
+    oss << "  --page-size=<size>         Page size: 4096/8192/16384/32768/65536 (default: 16384)\n";
+    oss << "  --max-depth=<depth>        Max directory depth for scan (default: 10)\n";
+    oss << "  --format=<csv|sql|json>    Output format (default: csv)\n";
+    oss << "  --user=<name>              Database user for SQL export (default: root)\n";
+    oss << "  --database=<name>          Database name for SQL export (default: recovered_db)\n";
+    oss << "  --verbose                  Enable verbose output\n";
+    oss << "  --debug                    Enable debug output\n\n";
+
+    oss << "Recovery Modes:\n";
+    oss << "  --check-headers            Check page headers only\n";
+    oss << "  --check-corruption         Check for corruption in pages\n";
+    oss << "  --repair                   Repair corrupted pages\n";
+    oss << "  --truncate-recovery        Recover from truncated table\n";
+    oss << "  --rmrf-recovery            Recover from rm -rf scenario\n";
+    oss << "  --blob-recovery            Enable BLOB recovery\n";
+    oss << "  --redo-forward             Enable redo log forward recovery\n";
+    oss << "  --redo-log=<path>          Path to redo log file\n";
+    oss << "  --disaster-recovery        Full disaster recovery from deleted data directory\n";
+    oss << "  --validate                 Validate data integrity\n";
+    oss << "  --schemaless               Schemaless recovery mode (heuristic parsing without SDI)\n\n";
+
+    oss << "Enhanced Modes:\n";
+    oss << "  --scan                     Scan mode: scan data directory for tables\n";
+    oss << "  --search                   Search mode: search for tables by name\n";
+    oss << "  --bulk                     Bulk mode: recover all found tables\n\n";
+
+    oss << "Output Formats:\n";
+    oss << "  csv                        Export to CSV format\n";
+    oss << "  sql                        Export to SQL file with CREATE TABLE and INSERT\n";
+    oss << "  json                       Export to JSON format\n";
+    oss << "  ibd                        Repair and save as IBD file\n\n";
+
+    oss << "Examples:\n\n";
+
+    oss << "  # 1. Basic recovery from specific .ibd file\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --output=/tmp/recovery\n\n";
+
+    oss << "  # 2. Recovery with specific table name and user\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/test/users.ibd --table-name=users --user=admin --database=testdb --output=/tmp/recovery\n\n";
+
+    oss << "  # 3. Recovery with SQL output format\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --format=sql --output=/tmp/recovery\n\n";
+
+    oss << "  # 4. Recovery with JSON output format\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --format=json --output=/tmp/recovery\n\n";
+
+    oss << "  # 5. Scan entire data directory for all tables\n";
+    oss << "  " << program_name << " --data-dir=/var/lib/mysql --scan --output=/tmp/scanned\n\n";
+
+    oss << "  # 6. Search for table by name (supports wildcards)\n";
+    oss << "  " << program_name << " --data-dir=/var/lib/mysql --table-name=users* --search --output=/tmp/search\n\n";
+
+    oss << "  # 7. Bulk recovery from rm -rf scenario\n";
+    oss << "  " << program_name << " --data-dir=/var/lib/mysql --rmrf-recovery --bulk --format=sql --output=/tmp/recovered\n\n";
+
+    oss << "  # 8. Truncate recovery with specific page size\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --truncate-recovery --page-size=8192 --output=/tmp/recovery\n\n";
+
+    oss << "  # 9. Corruption check and repair\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --check-corruption --repair --output=/tmp/repair\n\n";
+
+    oss << "  # 10. Full disaster recovery from deleted data directory\n";
+    oss << "  " << program_name << " --data-dir=/var/lib/mysql --disaster-recovery --format=all --output=/tmp/disaster\n\n";
+
+    oss << "  # 11. Redo log forward recovery\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --redo-forward --redo-log=/var/lib/mysql/ib_logfile0 --output=/tmp/redo\n\n";
+
+    oss << "  # 12. BLOB recovery with verbose output\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --blob-recovery --verbose --output=/tmp/blob\n\n";
+
+    oss << "  # 13. Validate data integrity\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --validate --output=/tmp/validate\n\n";
+
+    oss << "  # 14. Recovery with custom table ID\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --table-id=12345 --output=/tmp/recovery\n\n";
+
+    oss << "  # 15. Multiple format export (CSV + SQL)\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --format=csv --output=/tmp/recovery\n";
+    oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --format=sql --output=/tmp/recovery\n\n";
+
+    oss << "=====================================================\n";
+    oss << "For more information, visit: https://github.com/example/mysql-recovery\n";
+
+    return oss.str();
+}
+
 } // namespace utils
 } // namespace dbrecovery

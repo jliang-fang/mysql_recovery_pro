@@ -3,14 +3,14 @@
 **审计人**: jliang.fang  
 **日期**: 2026-03-29  
 **版本**: v1.0.0  
-**项目**: /app/mysql8_recovery  
+**项目**: /app/mysql_recovery_proy  
 **状态**: ✅ 通过 192/192 单元测试
 
 ---
 
 ## 执行摘要
 
-本报告对 mysql8_recovery 项目进行了全面的架构审计，涵盖代码质量、模块设计、测试覆盖、性能优化和工业级交付准备度。审计结果如下：
+本报告对 mysql_recovery_proy 项目进行了全面的架构审计，涵盖代码质量、模块设计、测试覆盖、性能优化和工业级交付准备度。审计结果如下：
 
 | 评估维度 | 评分 | 状态 |
 |---------|------|------|
@@ -29,7 +29,7 @@
 ### 1.1 目录树结构
 
 ```
-/app/mysql8_recovery/
+/app/mysql_recovery_proy/
 ├── CMakeLists.txt                    # 构建配置（✅ P0-1 已修复）
 ├── cmake/                            # CMake 模块
 ├── docs/                             # 文档目录
@@ -451,7 +451,7 @@ mach_read.hpp (基础工具)
 
 **启用命令**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_ASAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -463,7 +463,7 @@ ctest --output-on-failure
 
 **启用命令**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_UBSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -475,7 +475,7 @@ ctest --output-on-failure
 
 **启用命令**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_LSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -487,7 +487,7 @@ ctest --output-on-failure
 
 **启用命令**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug ..
 make clean && make
 ctest --output-on-failure
@@ -789,7 +789,7 @@ clang-tidy -p build -fix -checks=misc-include-cleaner src/innodb/btree.cpp
 ### 11.1 运行所有测试
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 ctest --output-on-failure
 ```
 
@@ -815,7 +815,7 @@ ctest -R PageChecksum --output-on-failure
 ### 11.3 启用 ASAN
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_ASAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -824,7 +824,7 @@ ctest --output-on-failure
 ### 11.4 启用 UBSAN
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_UBSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -833,7 +833,7 @@ ctest --output-on-failure
 ### 11.5 启用 LSAN
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_LSAN=ON ..
 make clean && make
 ctest --output-on-failure
@@ -842,7 +842,7 @@ ctest --output-on-failure
 ### 11.6 代码覆盖率
 
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake -DENABLE_COVERAGE=ON -DCMAKE_BUILD_TYPE=Debug ..
 make clean && make
 ctest --output-on-failure
@@ -852,14 +852,14 @@ genhtml coverage/*.gcov -o coverage_report
 ### 11.7 clang-tidy
 
 ```bash
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 clang-tidy src/innodb/btree.cpp --checks="*" -p build
 ```
 
 ### 11.8 cppcheck
 
 ```bash
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 cppcheck --enable=all --suppress=missingIncludeSystem -Iinclude src/innodb/btree.cpp
 ```
 

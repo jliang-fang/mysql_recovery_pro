@@ -2,7 +2,7 @@
 import os
 import subprocess
 
-BASE_DIR = "/app/mysql8_recovery"
+BASE_DIR = "/app/mysql_recovery_proy"
 BUILD_DIR = os.path.join(BASE_DIR, "build")
 TEST_DATA_DIR = os.path.join(BASE_DIR, "test", "test_data")
 TEST_OUTPUT_DIR = os.path.join(BASE_DIR, "test", "output")
@@ -14,9 +14,9 @@ print(f"Build dir: {BUILD_DIR}")
 print(f"Test data dir: {TEST_DATA_DIR}")
 
 # 检查可执行文件
-exe_path = os.path.join(BUILD_DIR, "mysql8_recovery_cli")
+exe_path = os.path.join(BUILD_DIR, "mysql_recovery_proy_cli")
 if not os.access(exe_path, os.X_OK):
-    print("[错误] mysql8_recovery_cli 可执行文件不存在，请先编译：cmake .. && make")
+    print("[错误] mysql_recovery_proy_cli 可执行文件不存在，请先编译：cmake .. && make")
     exit(1)
 
 os.chdir(BUILD_DIR)

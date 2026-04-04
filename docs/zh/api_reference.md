@@ -272,19 +272,19 @@ engine.close();
 
 ```bash
 # 恢复表数据
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered
 
 # 指定表 ID
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
 # Truncate 恢复
-./mysql8_recover --ibd=/path/to/table.ibd --truncate-recovery --format=csv
+./mysql_recovery_pro --ibd=/path/to/table.ibd --truncate-recovery --format=csv
 
 # rm -rf 恢复
-./mysql8_recover --ibd=/path/to/table.ibd --rmrf-recovery --format=sql
+./mysql_recovery_pro --ibd=/path/to/table.ibd --rmrf-recovery --format=sql
 
 # BLOB 恢复
-./mysql8_recover --ibd=/path/to/table.ibd --blob-recovery
+./mysql_recovery_pro --ibd=/path/to/table.ibd --blob-recovery
 ```
 
 ## 错误处理

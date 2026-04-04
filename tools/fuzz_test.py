@@ -127,7 +127,7 @@ def main():
         sys.exit(1)
     
     # Find the binary to fuzz
-    binary_path = os.path.join(build_dir, "mysql8_recover")
+    binary_path = os.path.join(build_dir, "mysql_recovery_pro")
     if not os.path.exists(binary_path):
         print(f"[ERROR] Binary not found: {binary_path}")
         sys.exit(1)

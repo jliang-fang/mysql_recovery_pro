@@ -2,7 +2,7 @@
 
 **Auditor**: jliang.fang (Chief Database Kernel Architect)  
 **Date**: 2026-03-28  
-**Project**: /app/mysql8_recovery  
+**Project**: /app/mysql_recovery_proy  
 **Version**: v1.0 (Initial Audit)
 
 ---
@@ -280,7 +280,7 @@ tests/
 
 **Test Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 ctest -R "ParseRecordsTest" --verbose
 ```
 
@@ -295,8 +295,8 @@ ctest -R "ParseRecordsTest" --verbose
 
 **Test Command**:
 ```bash
-cd /app/mysql8_recovery/build
-./mysql8_recover --ibd=/app/mysql8_recovery/test_table.ibd --output=/tmp/recovered
+cd /app/mysql_recovery_proy/build
+./mysql_recovery_pro --ibd=/app/mysql_recovery_proy/test_table.ibd --output=/tmp/recovered
 ```
 
 ### 5.2 Phase 2: Code Quality Optimization (Estimated: 3-4 days)
@@ -484,7 +484,7 @@ index 1234567..abcdefg 100664
 | ASAN | `cmake -DENABLE_ASAN=ON .. && make` | Address Sanitizer | Each build (Debug) |
 | UBSAN | `cmake -DENABLE_UBSAN=ON .. && make` | Undefined Behavior | Each build (Debug) |
 | LSAN | `cmake -DENABLE_LSAN=ON .. && make` | Leak Sanitizer | Each build (Debug) |
-| Valgrind | `valgrind --leak-check=full ./mysql8_recover` | Memory leaks | Weekly |
+| Valgrind | `valgrind --leak-check=full ./mysql_recovery_pro` | Memory leaks | Weekly |
 
 ### 8.3 Integration Recommendations
 

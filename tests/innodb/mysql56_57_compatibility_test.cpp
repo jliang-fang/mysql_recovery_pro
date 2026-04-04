@@ -34,7 +34,7 @@ TEST(MySQL5657CompatibilityTest, RedundantFormatCompatibility) {
 
     // 设置 INFIMUM 记录
     page_data[54] = REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // 设置 SUPREMUM 记录
     page_data[97] = REC_STATUS_SUPREMUM;
@@ -62,9 +62,8 @@ TEST(MySQL5657CompatibilityTest, CompactFormatCompatibility) {
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // 设置 flags 为 COMPACT 格式（bit 0-2 = 1）
-    // BTR header flags at absolute offset 38 + 12 = 50
-    // BTR header layout: n_levels(4) + ind_page_offset(2) + max_size(2) + n_owned(2) + flags(2) + ...
-    write_le<uint16_t>(page_data.data(), 50, 0x01); // flags = 1 (COMPACT)
+    // BTR header flags at absolute offset 80 (FIL_HEADER_SIZE=38 + BTR_HEADER_SIZE=42)
+    write_le<uint16_t>(page_data.data(), 80, 0x0701); // flags = 0x0701 (COMPACT format)
 
     // 设置 heap_top
     write_le<uint16_t>(page_data.data(), 40, 100);
@@ -74,7 +73,7 @@ TEST(MySQL5657CompatibilityTest, CompactFormatCompatibility) {
 
     // 设置 INFIMUM 记录
     page_data[54] = REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // 设置 SUPREMUM 记录
     page_data[97] = REC_STATUS_SUPREMUM;
@@ -112,7 +111,7 @@ TEST(MySQL5657CompatibilityTest, ChecksumCompatibility) {
 
     // 设置 INFIMUM 记录
     page_data[54] = REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 99);
+    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
     // 设置 SUPREMUM 记录
     page_data[97] = REC_STATUS_SUPREMUM;
@@ -274,7 +273,7 @@ TEST(MySQL5657CompatibilityTest, PageSizeCompatibility) {
 
         // 设置 INFIMUM 记录
         page_data[54] = REC_STATUS_INFIMUM;
-        write_le<uint16_t>(page_data.data(), 55, 99);
+        write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
 
         // 设置 SUPREMUM 记录
         page_data[97] = REC_STATUS_SUPREMUM;

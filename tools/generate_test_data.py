@@ -326,7 +326,7 @@ def create_header_corrupt_scenario():
 
 def main():
     """主函数"""
-    data_dir = "/app/mysql8_recovery/tests/data"
+    data_dir = "/app/mysql_recovery_proy/tests/data"
     os.makedirs(data_dir, exist_ok=True)
 
     scenarios = [

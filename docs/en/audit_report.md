@@ -29,14 +29,14 @@ This project is a high-performance offline MySQL 8.0+ data recovery engine devel
 ## 1. Project Directory Tree (Key Source/Header Files)
 
 ```
-/app/mysql8_recovery/
+/app/mysql_recovery_proy/
 ├── CMakeLists.txt                          # Main build configuration
 ├── .clang-tidy                            # Static analysis config (⚠️ needs format fix)
 ├── .gitignore
 ├── build/                                 # Build output directory
 │   ├── CMakeCache.txt
 │   ├── Makefile
-│   ├── mysql8_recover                     # CLI tool (✅ compiled)
+│   ├── mysql_recovery_pro                     # CLI tool (✅ compiled)
 │   ├── libdbrecovery_innodb.a             # Static library
 │   └── tests/                             # Test executables
 │       ├── test_page_header               # Page header test (✅ 5/5 passed)
@@ -245,7 +245,7 @@ CheckOptions:
 
 **Verification Command**:
 ```bash
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 clang-tidy src/innodb/page_parser.cpp --checks=modernize-* -p build
 ```
 
@@ -257,7 +257,7 @@ add_subdirectory(gui)
 
 **Verification Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 ```
@@ -276,7 +276,7 @@ TEST(UndoLogRecordTest, ParseBasicRecord) {
 
 **Verification Command**:
 ```bash
-cd /app/mysql8_recovery/build
+cd /app/mysql_recovery_proy/build
 make test_undo_log
 ./tests/test_undo_log
 ```
@@ -427,7 +427,7 @@ make fuzz_page_parser
 #### clang-tidy
 ```bash
 # Run after configuration fix
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 clang-tidy src/innodb/*.cpp --checks=modernize-*,performance-*,readability-*,bugprone-*,cert-*,misc-* -p build
 
 # Fix suggestions

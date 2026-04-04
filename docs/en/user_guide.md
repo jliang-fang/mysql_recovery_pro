@@ -40,7 +40,7 @@ MySQL 8.x Data Recovery Engine is a high-performance offline MySQL data recovery
 
 ```bash
 # Clone project
-cd /app/mysql8_recovery
+cd /app/mysql_recovery_proy
 
 # Create build directory
 mkdir -p build && cd build
@@ -59,19 +59,19 @@ ctest --verbose
 
 ```bash
 # Recover table data
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered
 
 # Specify table ID
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
 # Truncate recovery
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --truncate-recovery
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --truncate-recovery
 
 # rm -rf recovery
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --rmrf-recovery
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --rmrf-recovery
 
 # Show help
-./mysql8_recover --help
+./mysql_recovery_pro --help
 ```
 
 ### 2.3 GUI Tool
@@ -79,7 +79,7 @@ ctest --verbose
 ```bash
 # Launch GUI
 cd build/gui
-./mysql8_recovery_gui
+./mysql_recovery_proy_gui
 ```
 
 ---
@@ -99,7 +99,11 @@ cd build/gui
 | `--output=<dir>` | Output directory | `/tmp/recovered` | `--output=/data/recovered` |
 | `--table-id=<id>` | Table ID for SDI lookup | 0 | `--table-id=12345` |
 | `--page-size=<size>` | Page size: 4096/8192/16384/32768/65536 | 16384 | `--page-size=8192` |
-| `--check-headers` | Check page headers only | false | `--check-headers` |
+| `--check-headers            Check page headers only
+  --check-corruption         Check for corruption in pages
+  --repair                   Repair corrupted pages` | Check page headers only | false | `--check-headers            Check page headers only
+  --check-corruption         Check for corruption in pages
+  --repair                   Repair corrupted pages` |
 | `--truncate-recovery` | Truncate recovery mode | false | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf recovery mode | false | `--rmrf-recovery` |
 | `--blob-recovery` | Enable BLOB recovery | false | `--blob-recovery` |
@@ -109,19 +113,21 @@ cd build/gui
 
 ```bash
 # Basic recovery
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd --output=/tmp/users_recovered
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd --output=/tmp/users_recovered
 
 # Truncate recovery
-./mysql8_recover --ibd=/var/lib/mysql/test/orders.ibd --output=/tmp/orders_recovered --truncate-recovery --format=sql
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/orders.ibd --output=/tmp/orders_recovered --truncate-recovery --format=sql
 
 # rm -rf recovery
-./mysql8_recover --ibd=/var/lib/mysql/test/products.ibd --output=/tmp/products_recovered --rmrf-recovery --format=csv
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/products.ibd --output=/tmp/products_recovered --rmrf-recovery --format=csv
 
 # Specify page size (for non-standard page sizes)
-./mysql8_recover --ibd=/var/lib/mysql/test/large.ibd --output=/tmp/large_recovered --page-size=32768
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/large.ibd --output=/tmp/large_recovered --page-size=32768
 
 # Check headers only
-./mysql8_recover --ibd=/var/lib/mysql/test/check.ibd --check-headers
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/check.ibd --check-headers            Check page headers only
+  --check-corruption         Check for corruption in pages
+  --repair                   Repair corrupted pages
 ```
 
 ---
@@ -189,7 +195,7 @@ cd build/gui
 
 ```bash
 # Command line
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --format=csv
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=csv
 
 # GUI
 1. Open GUI
@@ -202,7 +208,7 @@ cd build/gui
 
 ```bash
 # Command line
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/recovered --format=sql
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=sql
 
 # GUI
 1. Open GUI
@@ -215,7 +221,7 @@ cd build/gui
 
 ```bash
 # Command line
-./mysql8_recover --ibd=/path/to/table.ibd --output=/tmp/repaired --format=ibd
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/repaired --format=ibd
 
 # GUI
 1. Open GUI
@@ -245,7 +251,7 @@ When `TRUNCATE TABLE` command is executed, data pages are marked as unallocated,
 #### 6.1.3 Command Line Example
 
 ```bash
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd \
     --output=/tmp/users_recovered \
     --truncate-recovery \
     --format=sql
@@ -268,7 +274,7 @@ When `rm -rf *.ibd` is executed, file system entries are deleted, but data may s
 #### 6.2.3 Command Line Example
 
 ```bash
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd \
     --output=/tmp/users_recovered \
     --rmrf-recovery \
     --format=csv
@@ -291,7 +297,7 @@ File header corruption may be caused by disk bad sectors, file system errors, fo
 #### 6.3.3 Command Line Example
 
 ```bash
-./mysql8_recover --ibd=/var/lib/mysql/test/users.ibd \
+./mysql_recovery_pro --ibd=/var/lib/mysql/test/users.ibd \
     --output=/tmp/users_repaired \
     --format=ibd
 ```
@@ -412,7 +418,7 @@ Log files are located at `recovery.log` in the output directory, containing:
 
 ### 11.2 Community
 
-- GitHub Issues: https://github.com/your-org/mysql8_recovery/issues
+- GitHub Issues: https://github.com/your-org/mysql_recovery_proy/issues
 - Email: support@mysql8-recovery.com
 
 ---

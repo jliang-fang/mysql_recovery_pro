@@ -8,6 +8,7 @@
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/heuristic_parser.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
 #include "dbrecovery/recovery/engine.hpp"
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
@@ -111,7 +112,7 @@ dbrecovery::catalog::TableSchema create_default_schema() {
 }
 
 int main(int argc, char** argv) {
-    std::cout << "MySQL 8.x Recovery Engine v1.0.0 (jliang.fang)\n";
+    std::cout << "MySQL Recovery Engine v1.0.0 (jliang.fang)\n";
     std::cout << "========================================\n\n";
 
     dbrecovery::utils::CliParser parser(argc, argv);
@@ -125,6 +126,7 @@ int main(int argc, char** argv) {
     bool truncate_recovery = parser.get_bool_option("truncate-recovery", false);
     bool blob_recovery = parser.get_bool_option("blob-recovery", false);
     bool rmrf_recovery = parser.get_bool_option("rmrf-recovery", false);
+    bool schemaless_recovery = parser.get_bool_option("schemaless", false);
     std::string format = parser.get_option("format", "csv");
     auto page_size_opt = parser.get_int_option("page-size", 16384);
     uint32_t page_size = static_cast<uint32_t>(page_size_opt.value_or(16384));
@@ -135,11 +137,12 @@ int main(int argc, char** argv) {
         std::cerr << "  --ibd=<path>               Path to .ibd file (required)\n";
         std::cerr << "  --output=<dir>             Output directory (default: /tmp/recovered)\n";
         std::cerr << "  --table-id=<id>            Table ID for SDI lookup (default: 0)\n";
-        std::cerr << "  --page-size=<size>         Page size: 4096/8192/16384/32768/65536 (default: 16384)\n";
+        std::cerr << "  --page-size=<size>         Page size: 4096/8192/16384/32768/32768 (default: 16384)\n";
         std::cerr << "  --check-headers            Check page headers only\n";
         std::cerr << "  --truncate-recovery        Recover from truncated table\n";
         std::cerr << "  --rmrf-recovery            Recover from rm -rf scenario\n";
         std::cerr << "  --blob-recovery            Enable BLOB recovery\n";
+        std::cerr << "  --schemaless               Schemaless recovery (heuristic parsing without SDI)\n";
         std::cerr << "  --format=<csv|sql|ibd>     Output format (default: csv)\n";
         std::cerr << "  --help                     Show this help message\n";
         return 1;
@@ -177,7 +180,7 @@ int main(int argc, char** argv) {
     // ✅ P0-1 新增：页头检查模式
     if (check_headers) {
         std::cout << "[INFO] Checking page headers...\n";
-        
+
         // 遍历所有页检查头
         uint32_t total_pages = 0;
         if (engine.is_valid()) {
@@ -185,7 +188,81 @@ int main(int argc, char** argv) {
             auto page_data = engine.recover_truncate(dbrecovery::catalog::TableSchema());
             std::cout << "[INFO] Page header check completed.\n";
         }
-        
+
+        engine.close();
+        return 0;
+    }
+
+    // ✅ Schemaless 恢复模式（无需 SDI 元数据）
+    if (schemaless_recovery) {
+        std::cout << "[INFO] Starting schemaless heuristic recovery...\n";
+        std::cout << "[INFO] File: " << ibd_path << "\n";
+        std::cout << "[INFO] Page size: " << page_size << "\n\n";
+
+        // 从文件名推断表名
+        std::string inferred_table_name = "recovered_table";
+        if (!ibd_path.empty()) {
+            fs::path ibd_filepath(ibd_path);
+            inferred_table_name = ibd_filepath.stem().string();
+        }
+
+        dbrecovery::innodb::HeuristicScanner scanner(page_size);
+        auto recovered_records_heuristic = scanner.scan_file(ibd_path);
+        const auto& stats = scanner.get_stats();
+
+        std::cout << "\n=== Schemaless Recovery Results ===\n";
+        std::cout << "Pages scanned: " << stats.pages_scanned << "\n";
+        std::cout << "Pages with records: " << stats.pages_with_records << "\n";
+        std::cout << "Total records recovered: " << stats.total_records << "\n";
+        std::cout << "NULL markers found: " << stats.null_markers_found << "\n";
+        std::cout << "Invalid records: " << stats.invalid_records << "\n";
+        std::cout << "\n[INFO] Recovered records preview:\n";
+
+        // Print first 10 records as preview
+        int count = 0;
+        for (const auto& record : recovered_records_heuristic) {
+            if (count >= 10) break;
+            if (!record.is_infimum && !record.is_supremum && !record.is_deleted) {
+                std::cout << "  Record " << count + 1 << ": " << record.to_csv() << "\n";
+                count++;
+            }
+        }
+
+        // Export to requested formats
+        if (format == "csv" || format == "all") {
+            std::string csv_path = output_dir + "/" + inferred_table_name + ".csv";
+            std::string csv_content = dbrecovery::innodb::export_records_to_csv(recovered_records_heuristic, inferred_table_name);
+            std::ofstream csv_file(csv_path);
+            if (csv_file) {
+                csv_file << csv_content;
+                csv_file.close();
+                std::cout << "[INFO] CSV exported to: " << csv_path << "\n";
+            }
+        }
+
+        if (format == "json" || format == "all") {
+            std::string json_path = output_dir + "/" + inferred_table_name + ".json";
+            std::string json_content = dbrecovery::innodb::export_records_to_json(recovered_records_heuristic, inferred_table_name);
+            std::ofstream json_file(json_path);
+            if (json_file) {
+                json_file << json_content;
+                json_file.close();
+                std::cout << "[INFO] JSON exported to: " << json_path << "\n";
+            }
+        }
+
+        if (format == "sql" || format == "all") {
+            std::string sql_path = output_dir + "/" + inferred_table_name + ".sql";
+            std::string sql_content = dbrecovery::innodb::export_records_to_sql(recovered_records_heuristic, inferred_table_name);
+            std::ofstream sql_file(sql_path);
+            if (sql_file) {
+                sql_file << sql_content;
+                sql_file.close();
+                std::cout << "[INFO] SQL exported to: " << sql_path << "\n";
+            }
+        }
+
+        std::cout << "\n[INFO] Schemaless recovery completed.\n";
         engine.close();
         return 0;
     }
