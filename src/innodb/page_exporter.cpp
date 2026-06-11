@@ -213,9 +213,7 @@ std::string PageExporter::to_json(const PageParseResult& result) {
         case MySQLVersion::MYSQL_56: oss << "56"; break;
         case MySQLVersion::MYSQL_57: oss << "57"; break;
         case MySQLVersion::MYSQL_80: oss << "80"; break;
-        case MySQLVersion::MYSQL_81: oss << "81"; break;
         case MySQLVersion::MYSQL_84: oss << "84"; break;
-        case MySQLVersion::MYSQL_90: oss << "90"; break;
         default: oss << "0";
     }
     oss << ",\n";

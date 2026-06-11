@@ -429,7 +429,6 @@ mysql_recovery::RowFormat HeuristicInference::infer_row_format(const uint8_t* pa
             return mysql_recovery::RowFormat::COMPACT;
         case mysql_recovery::MySQLVersion::MYSQL_80:
         case mysql_recovery::MySQLVersion::MYSQL_84:
-        case mysql_recovery::MySQLVersion::MYSQL_90:
             return mysql_recovery::RowFormat::DYNAMIC;
         default:
             return mysql_recovery::RowFormat::COMPACT;

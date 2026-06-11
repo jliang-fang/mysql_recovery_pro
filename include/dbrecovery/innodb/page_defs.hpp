@@ -13,70 +13,98 @@ namespace dbrecovery {
 namespace innodb {
 
 // ==================== InnoDB File Header Constants ====================
-// From MySQL 8.0.36: include/fil0fil.h & inlude/page0page.h
+// From MySQL 8.0.36: include/fil0fil.h & include/page0page.h
 // FIL_HEADER_SIZE = 38 bytes
 
 /// @brief Size of the FIL header (fixed at 38 bytes)
 constexpr uint16_t FIL_HEADER_SIZE      = 38;
 
 /// @brief Offset of page type within FIL Header (relative to start of page)
-/// In InnoDB, FIL_PAGE_TYPE is at offset 16 (relative to page start)
-/// This is NOT relative to FIL_HEADER_SIZE!
-constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 16;
-/// @brief Absolute offset of page type within a page (FIL_PAGE_TYPE_OFFSET = 16)
-/// Note: The old definition (FIL_HEADER_SIZE + FIL_PAGE_TYPE_OFFSET = 54) was WRONG!
-/// The page type is at offset 16 (relative to page start), not 54!
-constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_PAGE_TYPE_OFFSET; // 16 (relative to page start)
+/// In InnoDB, FIL_PAGE_TYPE is at offset 24 (relative to page start)
+/// Per MySQL source code page0page.h: FIL_PAGE_TYPE = 24
+/// Offset 16-19 is FIL_PAGE_SPACE_ID (4 bytes), not the page type!
+constexpr uint16_t FIL_PAGE_TYPE_OFFSET = 24;
+/// @brief Absolute offset of page type within a page (FIL_PAGE_TYPE_OFFSET = 24)
+/// Note: Offset 16-19 is FIL_PAGE_SPACE_ID (4 bytes)
+/// Note: Offset 20-23 is FIL_PAGE_OFFSET (4 bytes, the page number)
+/// Note: Offset 24-25 is FIL_PAGE_TYPE (2 bytes, the page type)
+constexpr uint16_t FIL_PAGE_TYPE_ABS    = FIL_PAGE_TYPE_OFFSET; // 24 (relative to page start)
 /// @brief Alias for FIL_PAGE_TYPE_ABS, more explicit
 constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 
 /// @brief Offset of page number within FIL Header (relative to start of FIL header)
 constexpr uint16_t FIL_PAGE_OFFSET      = 4;
-/// @brief Absolute offset of LSN within a page (FIL_HEADER_SIZE + 8 = 46)
-constexpr uint16_t FIL_PAGE_LSN_ABS     = FIL_HEADER_SIZE + 8; // 46
+/// @brief Absolute offset of LSN within a page (offset 16-23 in FIL header)
+constexpr uint16_t FIL_PAGE_LSN_ABS     = 16;  // Corrected: LSN is at offset 16-23
 
+/// @brief Offset of FIL_PAGE_PREV within FIL Header (relative to page start)
+constexpr uint16_t FIL_PAGE_PREV_ABS    = 8;   // Previous page in page chain (offset 8-11)
+/// @brief Offset of FIL_PAGE_NEXT within FIL Header (relative to page start)
+constexpr uint16_t FIL_PAGE_NEXT_ABS    = 12;  // Next page in page chain (offset 12-15)
 /// @brief Offset of space ID within FIL Header (relative to start of FIL header)
-constexpr uint16_t FIL_PAGE_SPACE_ID    = 0;
+constexpr uint16_t FIL_PAGE_SPACE_ID    = 34;  // Corrected: space_id is at offset 34-37, not 0
 
-// ✅ 新增：页类型值定义（MySQL 8.0 官方定义，参考 include/fil0fil.h）
-/// @brief B+Tree index page type
-constexpr uint16_t FIL_PAGE_INDEX       = 9969;  // 0x26f1 — B+Tree index page (MySQL 8.0.36)
-/// @brief Undo log page type
-constexpr uint16_t FIL_PAGE_UNDO_LOG    = 9970;  // 0x26f2 — Undo log page (MySQL 8.0.36)
+// ✅ 新增：页类型值定义
+/// MySQL 8.0+ 官方定义（参考 include/fil0fil.h）
+/// InnoDB stores FIL header fields in BIG-ENDIAN format.
+/// Page type values read with read_be():
+
+/// @brief B+Tree index page type (0x45BF in big-endian = 17855)
+constexpr uint16_t FIL_PAGE_INDEX       = 17855; // 0x45BF — B+Tree index page (MySQL 5.6+)
+/// @brief Undo log page type (0x45B2 = 17842)
+constexpr uint16_t FIL_PAGE_UNDO_LOG    = 17842; // 0x45B2 — Undo log page (MySQL 5.6+)
 /// @brief Freshly allocated page type
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
-/// @brief SDI (Space Descriptor Index) page type
-constexpr uint16_t FIL_PAGE_SDI         = 9971;  // 0x26f3 — SDI metadata page (MySQL 8.0.36)
-/// @brief BLOB page type
-constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 9972;  // 0x26f4 — BLOB page (MySQL 8.0.36)
-/// @brief Compressed page type
-constexpr uint16_t FIL_PAGE_COMPRESSED  = 9973;  // 0x26f5 — Compressed page (MySQL 8.0.36)
+/// @brief SDI (Space Descriptor Index) page type - MySQL 8.0+ (0x45BE = 17854)
+constexpr uint16_t FIL_PAGE_SDI         = 17854; // 0x45BE — SDI metadata page (MySQL 8.0+)
+/// @brief BLOB page type (0x45BD = 17853)
+constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 17853; // 0x45BD — BLOB page
+/// @brief Compressed BLOB page type (0x45B5 = 17845)
+constexpr uint16_t FIL_PAGE_COMPRESSED  = 17845; // 0x45B5 — Compressed page
+
+// Page type validation functions (using big-endian read values)
+inline bool is_valid_index_page_type(uint16_t type) {
+    // MySQL 5.6+: 0x45BF (17855) - the standard INDEX page type
+    return type == FIL_PAGE_INDEX;  // 0x45BF = 17855
+}
+
+inline bool is_valid_page_type(uint16_t type) {
+    return type == FIL_PAGE_INDEX ||         // 0x45BF = 17855
+           type == FIL_PAGE_UNDO_LOG ||      // 0x45B2 = 17842
+           type == FIL_PAGE_SDI ||           // 0x45BE = 17854
+           type == FIL_PAGE_TYPE_BLOB ||     // 0x45BD = 17853
+           type == FIL_PAGE_TYPE_ALLOCATED;  // 0x0000 = 0
+}
 
 // ✅ 新增：页类型读取辅助函数（使用绝对偏移，更直观）
 inline uint16_t get_page_type(const uint8_t* data, size_t offset = 0) {
-    return dbrecovery::innodb::read_le<uint16_t>(data, offset + FIL_PAGE_TYPE_ABS);
+    return dbrecovery::innodb::read_be<uint16_t>(data, offset + FIL_PAGE_TYPE_ABS);
 }
 
 // ✅ 新增：兼容函数 get_fil_page_type（用于旧代码兼容）
 inline uint16_t get_fil_page_type(const uint8_t* data, size_t page_size = 16384) {
     (void)page_size; // unused parameter for compatibility
-    return dbrecovery::innodb::read_le<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    return dbrecovery::innodb::read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
 }
 
 // ✅ 新增：静态断言验证关键常量的正确性（编译时检查）
 static_assert(FIL_HEADER_SIZE == 38, "FIL_HEADER_SIZE must be 38 bytes");
-static_assert(FIL_PAGE_TYPE_ABS == 16, "FIL_PAGE_TYPE_ABS must be 16 (relative to page start)");
+static_assert(FIL_PAGE_TYPE_ABS == 24, "FIL_PAGE_TYPE_ABS must be 24 (relative to page start)");
 
 // ✅ 新增：页类型字符串化辅助函数（用于调试输出）
 inline std::string page_type_to_string(uint16_t type) {
     switch (type) {
-        case FIL_PAGE_INDEX:       return "FIL_PAGE_INDEX";
-        case FIL_PAGE_UNDO_LOG:    return "FIL_PAGE_UNDO_LOG";
-        case FIL_PAGE_TYPE_ALLOCATED: return "FIL_PAGE_TYPE_ALLOCATED";
-        case FIL_PAGE_SDI:         return "FIL_PAGE_SDI";
-        case FIL_PAGE_TYPE_BLOB:   return "FIL_PAGE_TYPE_BLOB";
-        case FIL_PAGE_COMPRESSED:  return "FIL_PAGE_COMPRESSED";
-        default:                   return "UNKNOWN";
+        case FIL_PAGE_INDEX:           return "FIL_PAGE_INDEX";       // 0x45BF
+        case FIL_PAGE_UNDO_LOG:        return "FIL_PAGE_UNDO_LOG";    // 0x45B2
+        case FIL_PAGE_TYPE_ALLOCATED:  return "FIL_PAGE_TYPE_ALLOCATED"; // 0x0000
+        case FIL_PAGE_SDI:             return "FIL_PAGE_SDI";        // 0x45BE
+        case FIL_PAGE_TYPE_BLOB:       return "FIL_PAGE_TYPE_BLOB";  // 0x45BD
+        case FIL_PAGE_COMPRESSED:      return "FIL_PAGE_COMPRESSED"; // 0x45BF (context)
+        default: {
+            std::ostringstream oss;
+            oss << "UNKNOWN(0x" << std::hex << type << std::dec << ")";
+            return oss.str();
+        }
     }
 }
 
@@ -198,11 +226,21 @@ constexpr uint16_t REC_NEXT_OFFSET_POS = 1;
 // Use explicit parsing functions instead.
 
 struct alignas(1) RecordHeader {
-    uint8_t info_bits;
-    uint8_t next_rec_off_0;  // bits 0-7 of offset
-    uint8_t next_rec_off_1;  // bits 8-15 of offset
-    uint8_t heap_no_0;       // bits 0-7 of heap_no
-    uint8_t heap_no_1;       // bits 8-13 of heap_no (only 6 bits used)
+    // 5-byte COMPACT record header layout (big-endian bit order):
+    // Byte 0-2: info_and_heap (24 bits)
+    //   bit 23: instant_flag
+    //   bit 22: version_flag
+    //   bit 21: deleted_flag
+    //   bit 20: min_rec_flag
+    //   bits 19-16: n_owned (4 bits)
+    //   bits 15-3: heap_no (13 bits)
+    //   bits 2-0: rec_type (3 bits)
+    // Byte 3-4: next_record_offset (signed 16-bit, relative to record start)
+    uint8_t byte0;
+    uint8_t byte1;
+    uint8_t byte2;
+    uint8_t next_off_0;  // low byte of next_record offset
+    uint8_t next_off_1;  // high byte of next_record offset
 
     static std::optional<RecordHeader> parse(const uint8_t* ptr, size_t max_size = 5) {
         if (!ptr || max_size < 5) {
@@ -210,33 +248,52 @@ struct alignas(1) RecordHeader {
         }
 
         RecordHeader header{};
-        header.info_bits = ptr[0];
-        header.next_rec_off_0 = ptr[1];
-        header.next_rec_off_1 = ptr[2];
-        header.heap_no_0 = ptr[3];
-        header.heap_no_1 = ptr[4];
+        header.byte0 = ptr[0];
+        header.byte1 = ptr[1];
+        header.byte2 = ptr[2];
+        header.next_off_0 = ptr[3];
+        header.next_off_1 = ptr[4];
 
         return header;
     }
 
-    uint16_t get_next_record_offset() const {
-        // ✅ 修复：next_record_offset 是 15 位（bit 0-14），高1位是其他标志
-        // bit 0-7 来自 next_rec_off_0, bit 8-14 来自 next_rec_off_1 的低7位
-        return static_cast<uint16_t>((static_cast<uint16_t>(next_rec_off_1 & 0x7F) << 8) | next_rec_off_0);
+    // REC_NEXT is a signed 16-bit value, relative to current record start
+    int16_t get_next_record_offset() const {
+        // Byte 3-4: signed 16-bit in little-endian order within InnoDB
+        // InnoDB stores this as a machine-independent 2-byte value
+        return static_cast<int16_t>(
+            static_cast<uint16_t>(next_off_0) |
+            (static_cast<uint16_t>(next_off_1) << 8)
+        );
     }
 
     bool is_deleted() const { 
-        return (info_bits & REC_INFO_DELETED_FLAG) != 0; 
+        return (byte0 & 0x20) != 0;  // bit 21 of 24-bit field = deleted
     }
     
     bool is_min_rec() const { 
-        // ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名
-        return (info_bits & REC_INFO_MIN_REC_FLAG) != 0; 
+        return (byte0 & 0x10) != 0;  // bit 20 of 24-bit field = min_rec
     }
 
     uint16_t get_heap_no() const {
-        // heap_no 是 15 位（bit 0-14），高1位是其他标志
-        return static_cast<uint16_t>((static_cast<uint16_t>(heap_no_1 & 0x7F) << 8) | heap_no_0);
+        // bits 15-3 of 24-bit field
+        return ((static_cast<uint16_t>(byte1) & 0x7F) << 3) |
+               (static_cast<uint16_t>(byte2) >> 5);
+    }
+
+    uint8_t get_n_owned() const {
+        // bits 19-16 of 24-bit field
+        return byte0 & 0x0F;
+    }
+
+    uint8_t get_rec_type() const {
+        // bits 2-0 of 24-bit field
+        return byte2 & 0x07;
+    }
+
+    // Accessor for compatibility - info_bits is encoded in byte0/byte1/byte2
+    uint8_t get_info_bits() const {
+        return byte0;
     }
 
     std::string to_string() const {
@@ -245,7 +302,9 @@ struct alignas(1) RecordHeader {
             << ", deleted=" << is_deleted()
             << ", min_rec=" << is_min_rec()
             << ", heap_no=" << get_heap_no()
-            << ", info_bits=0x" << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(info_bits) << std::dec;
+            << ", n_owned=" << (int)get_n_owned()
+            << ", rec_type=" << (int)get_rec_type()
+            << "}";
         return oss.str();
     }
 };
@@ -264,20 +323,20 @@ struct PageHeader {
     uint16_t n_direct_pages;// PAGE_N_DIRECT_PAGES
 
     static std::optional<PageHeader> parse(const uint8_t* ptr, size_t max_size = 38) {
-        // ✅ 修复：max_size 是相对于 ptr 的偏移，至少需要 16 字节才能读取到 PAGE_N_DIRECT_PAGES
         if (!ptr || max_size < 16) {
             return std::nullopt;
         }
 
         PageHeader header{};
-        header.n_dir_slots = read_le<uint16_t>(ptr, 0);
-        header.heap_top = read_le<uint16_t>(ptr, 2);
-        header.n_heap = read_le<uint16_t>(ptr, 4) & 0x7FFF;
-        header.free_offset = read_le<uint16_t>(ptr, 6);
-        header.garbage_end = read_le<uint16_t>(ptr, 8);
-        header.last_insert = read_le<uint16_t>(ptr, 10);
-        header.direction = read_le<uint16_t>(ptr, 12);
-        header.n_direct_pages = read_le<uint16_t>(ptr, 14);
+        // Page header fields are BIG-ENDIAN in InnoDB
+        header.n_dir_slots = read_be<uint16_t>(ptr, 0);
+        header.heap_top = read_be<uint16_t>(ptr, 2);
+        header.n_heap = read_be<uint16_t>(ptr, 4) & 0x7FFF;
+        header.free_offset = read_be<uint16_t>(ptr, 6);
+        header.garbage_end = read_be<uint16_t>(ptr, 8);
+        header.last_insert = read_be<uint16_t>(ptr, 10);
+        header.direction = read_be<uint16_t>(ptr, 12);
+        header.n_direct_pages = read_be<uint16_t>(ptr, 14);
 
         return header;
     }
@@ -299,11 +358,11 @@ struct PageHeader {
 // ==================== Record Info (parsed from record header) ====================
 struct Record {
     uint16_t offset;          // absolute offset in page
-    uint16_t next_offset;     // next record's absolute offset
-    bool is_deleted;          // REC_INFO_DELETED_FLAG
+    int16_t next_offset;      // next record's RELATIVE offset (signed, add to current position)
+    bool is_deleted;          // deleted flag
     uint16_t heap_no;         // heap number for ordering
-    uint8_t info_bits;        // 原始 info_bits 用于进一步分析
-    uint16_t n_fields;        // 字段数量（COMPACT格式）
+    uint8_t info_bits;        // raw first byte for further analysis
+    uint16_t n_fields;        // field count (COMPACT format)
 
     static std::optional<Record> parse(const uint8_t* ptr, size_t offset, size_t max_size = 6) {
         if (!ptr || max_size < 5) {
@@ -320,14 +379,8 @@ struct Record {
         record.next_offset = header_opt->get_next_record_offset();
         record.is_deleted = header_opt->is_deleted();
         record.heap_no = header_opt->get_heap_no();
-        record.info_bits = header_opt->info_bits;
-        
-        // n_fields 需要额外解析（位于第5字节，即偏移 5）
-        if (max_size >= 6) {
-            record.n_fields = ptr[5];
-        } else {
-            record.n_fields = 0; // 默认值
-        }
+        record.info_bits = header_opt->byte0;
+        record.n_fields = 0;
 
         return record;
     }
@@ -364,6 +417,7 @@ constexpr uint8_t BIT         = 16;
 constexpr uint8_t TIMESTAMP2  = 17;
 constexpr uint8_t DATETIME2   = 18;
 constexpr uint8_t TIME2       = 19;
+constexpr uint8_t NEWDECIMAL  = 246;
 constexpr uint8_t JSON        = 245;
 
 // BLOB 类型

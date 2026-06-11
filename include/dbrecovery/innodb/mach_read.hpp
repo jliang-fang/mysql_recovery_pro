@@ -180,5 +180,43 @@ inline T read_be(const uint8_t* ptr, size_t offset = 0) noexcept(false) {
     }
 }
 
+template<typename T>
+inline void write_be(uint8_t* ptr, size_t offset, T value) noexcept(false) {
+    static_assert(std::is_integral_v<T> && std::is_unsigned_v<T>, "T must be an unsigned integral type");
+
+    if (ptr == nullptr) {
+        throw std::invalid_argument("Pointer is null in write_be");
+    }
+
+    uint8_t* p = ptr + offset;
+
+    if constexpr (sizeof(T) == 1) {
+        *p = static_cast<uint8_t>(value);
+    } else if constexpr (sizeof(T) == 2) {
+        p[0] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        p[1] = static_cast<uint8_t>(value & 0xFF);
+    } else if constexpr (sizeof(T) == 3) {
+        p[0] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        p[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        p[2] = static_cast<uint8_t>(value & 0xFF);
+    } else if constexpr (sizeof(T) == 4) {
+        p[0] = static_cast<uint8_t>((value >> 24) & 0xFF);
+        p[1] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        p[2] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        p[3] = static_cast<uint8_t>(value & 0xFF);
+    } else if constexpr (sizeof(T) == 8) {
+        p[0] = static_cast<uint8_t>((value >> 56) & 0xFF);
+        p[1] = static_cast<uint8_t>((value >> 48) & 0xFF);
+        p[2] = static_cast<uint8_t>((value >> 40) & 0xFF);
+        p[3] = static_cast<uint8_t>((value >> 32) & 0xFF);
+        p[4] = static_cast<uint8_t>((value >> 24) & 0xFF);
+        p[5] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        p[6] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        p[7] = static_cast<uint8_t>(value & 0xFF);
+    } else {
+        static_assert(sizeof(T) <= 8, "Unsupported integer size for write_be");
+    }
+}
+
 } // namespace innodb
 } // namespace dbrecovery

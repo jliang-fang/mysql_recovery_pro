@@ -12,16 +12,13 @@
 namespace mysql_recovery {
 
 // ==================== 基础类型定义 ====================
+// MySQL versions supported: 5.6, 5.7, 8.0, 8.4
 enum class MySQLVersion {
     UNKNOWN = 0,
-    MYSQL_50 = 50,      // MySQL 5.0/4.x (legacy)
-    MYSQL_51 = 51,      // MySQL 5.1 (old checksum)
-    MYSQL_55 = 55,      // MySQL 5.5 (old checksum)
     MYSQL_56 = 56,      // MySQL 5.6
     MYSQL_57 = 57,      // MySQL 5.7
     MYSQL_80 = 80,      // MySQL 8.0
     MYSQL_84 = 84,      // MySQL 8.4
-    MYSQL_90 = 90,      // MySQL 9.0
 };
 
 enum class RowFormat {

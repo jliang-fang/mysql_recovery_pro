@@ -14,22 +14,8 @@ namespace dbrecovery {
 namespace innodb {
 
 // 前向声明
-bool is_valid_page_type(uint16_t type);
-
-// 实现 is_valid_page_type 函数
-inline bool is_valid_page_type(uint16_t type) {
-    switch (type) {
-        case FIL_PAGE_TYPE_ALLOCATED:
-        case FIL_PAGE_INDEX:
-        case FIL_PAGE_UNDO_LOG:
-        case FIL_PAGE_SDI:
-        case FIL_PAGE_TYPE_BLOB:
-        case FIL_PAGE_COMPRESSED:
-            return true;
-        default:
-            return false;
-    }
-}
+// ✅ 使用 page_defs.hpp 中的 is_valid_page_type 定义（避免重复定义）
+// inline bool is_valid_page_type(uint16_t type);  // 已在 page_defs.hpp 中定义
 
 // ==================== Heuristic Scan Result ====================
 /**

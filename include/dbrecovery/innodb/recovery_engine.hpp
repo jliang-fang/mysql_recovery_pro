@@ -8,6 +8,9 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/recovery/blob_reconstructor.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/forensic_manager.hpp"
+
+// schema_defs.hpp 和 blob_reconstructor.hpp 已经正确关闭了 dbrecovery 命名空间
 
 // schema_defs.hpp 和 blob_reconstructor.hpp 已经正确关闭了 dbrecovery 命名空间
 // 此处重新打开 dbrecovery 和 innodb 命名空间
@@ -41,6 +44,16 @@ public:
      * @return false 失败
      */
     bool recover_from_checkpoint(const std::string& ibdata_path, const std::string& output_dir);
+
+    /**
+     * @brief 执行深度取证恢复（用于 TRUNCATE 或 rm -rf 场景）
+     *
+     * @param target_path 目标文件或设备路径
+     * @param output_csv 输出 CSV 文件路径
+     * @return true 成功
+     * @return false 失败
+     */
+    bool deep_recover(const std::string& target_path, const std::string& output_csv);
 
     /**
      * @brief 从单个 .ibd 文件恢复表数据
@@ -80,11 +93,13 @@ public:
      * @brief 导出为 CSV 格式
      *
      * @param records 记录数据
+     * @param schema 表结构（用于确定列顺序）
      * @param csv_path 输出文件路径
      * @return true 成功导出
      * @return false 失败
      */
     bool export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
+                       const catalog::TableSchema& schema,
                        const std::string& csv_path);
 
     /**

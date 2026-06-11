@@ -1,10 +1,15 @@
 #ifndef DBRECOVERY_INNODB_TDE_DECRYPTOR_HPP
 #define DBRECOVERY_INNODB_TDE_DECRYPTOR_HPP
 
-#include "dbrecovery/innodb/page_types_v2.hpp"
 #include <vector>
 #include <cstdint>
 #include <optional>
+#include <map>
+#include <sstream>
+#include <iomanip>
+#include <cstring>
+
+#include "dbrecovery/innodb/mach_read.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -42,13 +47,13 @@ struct TDEKey {
     std::vector<uint8_t> key_data;
     std::vector<uint8_t> iv;      // 初始化向量 (CBC/CTR 模式)
     std::vector<uint8_t> salt;    // 盐值
-    
+
     // 密钥元数据
     uint32_t key_id;
     uint32_t rotation_count;
     uint64_t created_at;
     uint64_t rotated_at;
-    
+
     bool is_valid() const;
     size_t key_size() const;
     size_t iv_size() const;
@@ -62,10 +67,10 @@ struct TDEPageHeader {
     uint8_t algorithm;      // 加密算法
     uint8_t key_id[4];      // 密钥ID
     uint8_t iv[12];         // 初始化向量
-    
+
     // 原始页头 (加密后)
     uint8_t encrypted_header[28];  // 加密的页头数据
-    
+
     bool parse(const uint8_t* data, size_t size);
     std::string to_string() const;
 };
@@ -76,44 +81,44 @@ struct TDEPageHeader {
 class TDEDecryptor {
 public:
     TDEDecryptor();
-    
+
     /**
      * @brief 设置主密钥
      */
     void set_primary_key(const std::vector<uint8_t>& key);
-    
+
     /**
      * @brief 添加表密钥
      */
     void add_table_key(uint32_t key_id, const std::vector<uint8_t>& key,
                        TDEAlgorithm algorithm);
-    
+
     /**
      * @brief 从 Keyring 文件加载密钥
      */
     bool load_keyring(const std::string& keyring_path);
-    
+
     /**
      * @brief 解密页数据
      */
     std::vector<uint8_t> decrypt_page(const uint8_t* encrypted_data, size_t size,
                                       uint32_t space_id, uint32_t page_no);
-    
+
     /**
      * @brief 解密页头
      */
     std::optional<TDEPageHeader> decrypt_page_header(const uint8_t* data, size_t size);
-    
+
     /**
      * @brief 验证解密后的页校验和
      */
     bool verify_checksum(const uint8_t* data, size_t size);
-    
+
     /**
      * @brief 检查页是否加密
      */
     static bool is_encrypted(const uint8_t* data, size_t size);
-    
+
     /**
      * @brief 获取解密统计信息
      */
@@ -122,14 +127,14 @@ public:
         size_t pages_failed;
         size_t keys_loaded;
     };
-    
+
     Stats get_stats() const;
-    
+
 private:
     std::vector<uint8_t> primary_key_;
     std::map<uint32_t, TDEKey> table_keys_;
     Stats stats_;
-    
+
     std::vector<uint8_t> derive_table_key(const TDEKey& primary_key,
                                           uint32_t space_id, uint32_t page_no);
     std::vector<uint8_t> aes_decrypt(const std::vector<uint8_t>& key,
@@ -149,9 +154,9 @@ struct KeyringFile {
         std::vector<uint8_t> key_data;
         std::vector<uint8_t> metadata;
     };
-    
+
     std::vector<Entry> entries;
-    
+
     bool load(const std::string& path);
     std::optional<Entry> find_key(uint32_t key_id) const;
 };
@@ -194,12 +199,12 @@ inline bool TDEPageHeader::parse(const uint8_t* data, size_t size) {
     if (size < 44) {  // 1 + 4 + 12 + 28
         return false;
     }
-    
+
     algorithm = data[0];
     std::memcpy(key_id, data + 1, 4);
     std::memcpy(iv, data + 5, 12);
     std::memcpy(encrypted_header, data + 17, 28);
-    
+
     return true;
 }
 
@@ -229,7 +234,7 @@ inline void TDEDecryptor::add_table_key(uint32_t key_id, const std::vector<uint8
     tde_key.algorithm = algorithm;
     tde_key.key_data = key;
     tde_key.key_id = key_id;
-    
+
     table_keys_[key_id] = tde_key;
     stats_.keys_loaded++;
 }
@@ -238,7 +243,7 @@ inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
     if (size < 44) {
         return false;
     }
-    
+
     // 检查 TDE 页头标志
     uint8_t algo = data[0];
     return algo >= 0x01 && algo <= 0x09;
@@ -253,7 +258,7 @@ inline bool KeyringFile::load(const std::string& path) {
     // - 4 bytes: version
     // - 4 bytes: entry count
     // - entries...
-    
+
     return false;
 }
 

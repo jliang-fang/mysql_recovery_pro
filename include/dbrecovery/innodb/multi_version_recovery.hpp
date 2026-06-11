@@ -9,13 +9,15 @@
 #include <filesystem>
 #include <memory>
 #include <algorithm>
+#include <chrono>
+#include <sstream>
+#include <fstream>
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/page_parser.hpp"
 #include "dbrecovery/innodb/page_parser_v2.hpp"
 #include "dbrecovery/innodb/page_parser_v3.hpp"
-#include "dbrecovery/innodb/page_parser_v82.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -23,19 +25,14 @@ namespace innodb {
 
 /**
  * @brief MySQL 版本
+ * 支持：MySQL 5.6, 5.7, 8.0, 8.4
  */
-enum class MySQLVersion {
+enum class MySQLVersion : uint8_t {
     UNKNOWN = 0,
-    MYSQL_55 = 55,
-    MYSQL_56 = 56,
-    MYSQL_57 = 57,
-    MYSQL_80 = 80,
-    MYSQL_81 = 81,
-    MYSQL_82 = 82,
-    MYSQL_83 = 83,
-    MYSQL_84 = 84,
-    MYSQL_85 = 85,
-    MYSQL_90 = 90,
+    MYSQL_56 = 56,      // MySQL 5.6.x
+    MYSQL_57 = 57,      // MySQL 5.7.x
+    MYSQL_80 = 80,      // MySQL 8.0.x
+    MYSQL_84 = 84,      // MySQL 8.4.x
 };
 
 /**
@@ -296,7 +293,6 @@ inline std::vector<std::map<std::string, std::string>> MultiVersionRecovery::par
         bool parsed = false;
 
         switch (version) {
-            case MySQLVersion::MYSQL_55:
             case MySQLVersion::MYSQL_56:
             case MySQLVersion::MYSQL_57: {
                 // 使用 v2 解析器
@@ -308,12 +304,9 @@ inline std::vector<std::map<std::string, std::string>> MultiVersionRecovery::par
                 }
                 break;
             }
-            case MySQLVersion::MYSQL_80:
-            case MySQLVersion::MYSQL_81:
-            case MySQLVersion::MYSQL_82:
-            case MySQLVersion::MYSQL_83: {
-                // 使用 v82 解析器
-                dbrecovery::innodb::PageParserV82 parser(page_data);
+            case MySQLVersion::MYSQL_80: {
+                // 使用 v2 解析器（MySQL 8.0）
+                dbrecovery::innodb::PageParserV2 parser(page_data);
                 parsed = parser.parse();
                 if (parsed) {
                     auto page_records = parser.parse_records(schema_);
@@ -321,10 +314,8 @@ inline std::vector<std::map<std::string, std::string>> MultiVersionRecovery::par
                 }
                 break;
             }
-            case MySQLVersion::MYSQL_84:
-            case MySQLVersion::MYSQL_85:
-            case MySQLVersion::MYSQL_90: {
-                // 使用 v3 解析器
+            case MySQLVersion::MYSQL_84: {
+                // 使用 v3 解析器（MySQL 8.4）
                 dbrecovery::innodb::PageParserV3 parser(page_data);
                 parsed = parser.parse();
                 if (parsed) {

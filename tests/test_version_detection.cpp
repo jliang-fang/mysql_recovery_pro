@@ -173,11 +173,10 @@ TEST(VersionDetection, DetectMySQL55) {
     dbrecovery::innodb::write_le<uint16_t>(page.data(), 40, 0);  // header_version = 0
 
     MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
-    // Accept 55, 51, or 57 as valid detections for 5.5/5.1 pages
-    EXPECT_TRUE(version == MySQLVersion::MYSQL_55 || 
-                version == MySQLVersion::MYSQL_51 ||
+    // Accept 56, 57 as valid detections
+    EXPECT_TRUE(version == MySQLVersion::MYSQL_56 ||
                 version == MySQLVersion::MYSQL_57)
-        << "Should detect 5.5/5.1/5.7 version, got " << static_cast<int>(version);
+        << "Should detect 5.6/5.7 version, got " << static_cast<int>(version);
 }
 
 TEST(VersionDetection, DetectMySQL80) {
@@ -194,8 +193,8 @@ TEST(VersionDetection, DetectMySQL84) {
     auto page = create_test_page_v84(0, static_cast<uint16_t>(PageType::INDEX));
 
     MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
-    EXPECT_TRUE(version == MySQLVersion::MYSQL_84 || version == MySQLVersion::MYSQL_90)
-        << "Should detect 8.4/9.0 version, got " << static_cast<int>(version);
+    EXPECT_EQ(version, MySQLVersion::MYSQL_84)
+        << "Should detect 8.4 version, got " << static_cast<int>(version);
 }
 
 TEST(VersionDetection, DetectSDIPage) {
@@ -224,11 +223,10 @@ TEST(VersionDetection, CreatePageHeaderV55) {
     auto header = PageFactory::create_page_header(page.data(), page.size());
     ASSERT_NE(header, nullptr);
 
-    // 5.5/5.1 pages should be detected as 55, 51, or 57
-    EXPECT_TRUE(header->get_version() == MySQLVersion::MYSQL_55 || 
-                header->get_version() == MySQLVersion::MYSQL_51 ||
+    // 5.5/5.1 pages should be detected as 56 or 57
+    EXPECT_TRUE(header->get_version() == MySQLVersion::MYSQL_56 ||
                 header->get_version() == MySQLVersion::MYSQL_57)
-        << "Should be 5.5/5.1/5.7, got " << static_cast<int>(header->get_version());
+        << "Should be 5.6/5.7, got " << static_cast<int>(header->get_version());
     EXPECT_EQ(header->get_page_type(), PageType::INDEX);
     EXPECT_EQ(header->get_n_recs(), 2);
 }
@@ -411,13 +409,10 @@ TEST(PageFactoryEnhanced, DetectVersionFromPageData) {
 }
 
 TEST(PageFactoryEnhanced, VersionToString) {
-    EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_50), "MySQL 5.0/4.x");
-    EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_55), "MySQL 5.5/5.1");
     EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_56), "MySQL 5.6");
     EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_57), "MySQL 5.7");
     EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_80), "MySQL 8.0");
     EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_84), "MySQL 8.4");
-    EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::MYSQL_90), "MySQL 9.0");
     EXPECT_EQ(PageFactoryEnhanced::version_to_string(MySQLVersion::UNKNOWN), "Unknown");
 }
 
@@ -449,9 +444,8 @@ TEST(VersionDetection, EmptyPage) {
 
     MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
     // Empty page defaults to 5.7 (similar to 5.6)
-    EXPECT_TRUE(version == MySQLVersion::MYSQL_56 || 
-                version == MySQLVersion::MYSQL_57 ||
-                version == MySQLVersion::MYSQL_55);
+    EXPECT_TRUE(version == MySQLVersion::MYSQL_56 ||
+                version == MySQLVersion::MYSQL_57);
 }
 
 TEST(VersionDetection, InvalidPageSize) {

@@ -17,17 +17,19 @@ namespace innodb {
 struct ScannedPage {
     uint32_t offset;        // 页在文件中的偏移
     uint16_t type;          // 页类型
+    uint16_t level;         // 页级别（B+Tree层数）
     uint32_t page_no;       // 页号
     uint32_t prev_page;     // 前一个页
     uint32_t next_page;     // 后一个页
     bool is_valid;          // 是否有效页
     uint64_t lsn;           // LSN
     uint32_t space_id;      // 空间ID
-    
+
     std::string to_string() const {
         std::ostringstream oss;
         oss << "ScannedPage{offset=" << offset
             << ", type=0x" << std::hex << type << std::dec
+            << ", level=" << level
             << ", page_no=" << page_no
             << ", prev=" << prev_page
             << ", next=" << next_page
@@ -118,9 +120,11 @@ inline PageScanner::PageScanner(size_t page_size)
 }
 
 inline bool PageScanner::is_valid_page_type(uint16_t type) {
+    // MySQL 5.6 和 8.0 的页类型兼容性
     switch (type) {
         case FIL_PAGE_TYPE_ALLOCATED:
         case FIL_PAGE_INDEX:
+        case 17852:  // MySQL 5.6 索引页 (0x45BC)
         case FIL_PAGE_UNDO_LOG:
         case FIL_PAGE_SDI:
         case FIL_PAGE_TYPE_BLOB:
@@ -135,9 +139,9 @@ inline bool PageScanner::is_innodb_page(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 38) {
         return false;
     }
-    
-    // 读取页类型
-    uint16_t type = read_le<uint16_t>(data, 16);
+
+    // 读取页类型 - 根据 page_defs.hpp，FIL_PAGE_TYPE 在偏移 24
+    uint16_t type = read_le<uint16_t>(data, FIL_PAGE_TYPE_ABS);
     return is_valid_page_type(type);
 }
 
@@ -150,13 +154,20 @@ inline std::optional<ScannedPage> PageScanner::scan_single_page(const uint8_t* d
     page.offset = static_cast<uint32_t>(file_offset);  // 文件中的绝对偏移
     page.is_valid = false;
 
-    // 读取 FIL Header
-    page.prev_page = read_le<uint32_t>(data, 0);
-    page.next_page = read_le<uint32_t>(data, 4);
-    page.lsn = read_le<uint64_t>(data, 8);
-    page.type = read_le<uint16_t>(data, 16);
-    page.page_no = read_le<uint32_t>(data, 20);
-    page.space_id = read_le<uint32_t>(data, 24);
+    // 读取 FIL Header - 偏移量参考 page_defs.hpp
+    // 0-3:   space_id (FIL_PAGE_SPACE_ID = 0)
+    // 4-7:   page_no (FIL_PAGE_OFFSET = 4)
+    // 8-15:  prev_page (4 bytes) + next_page (4 bytes) (FIL_PAGE_PREV = 8, FIL_PAGE_NEXT = 12)
+    // 16-23: lsn (FIL_PAGE_LSN = 16, 8 bytes)
+    // 24-25: type (FIL_PAGE_TYPE = 24)
+    // 26-27: level (FIL_PAGE_LEVEL = 26)
+    page.space_id = read_le<uint32_t>(data, 0);
+    page.page_no = read_le<uint32_t>(data, 4);
+    page.prev_page = read_le<uint32_t>(data, 8);
+    page.next_page = read_le<uint32_t>(data, 12);
+    page.lsn = read_le<uint64_t>(data, 16);
+    page.type = read_le<uint16_t>(data, 24);
+    page.level = read_le<uint16_t>(data, 26);  // 页级别
 
     // 验证页类型
     if (!is_valid_page_type(page.type)) {
@@ -196,17 +207,18 @@ inline std::vector<ScannedPage> PageScanner::scan_buffer(const uint8_t* data, si
     // 扫描每个页
     for (size_t offset = 0; offset + page_size_ <= size; offset += page_size_) {
         auto page_opt = scan_single_page(data + offset);
-        
+
         if (page_opt.has_value()) {
             auto& page = page_opt.value();
             pages.push_back(page);
             stats_.total_pages++;
-            
+
             if (page.is_valid) {
                 stats_.valid_pages++;
-                
-                // 统计页类型
+
+                // 统计页类型（支持 MySQL 5.6 和 8.0）
                 switch (page.type) {
+                    case 17852:  // MySQL 5.6 索引页 (0x45BC)
                     case FIL_PAGE_INDEX:
                         stats_.index_pages++;
                         break;
@@ -230,7 +242,7 @@ inline std::vector<ScannedPage> PageScanner::scan_buffer(const uint8_t* data, si
             }
         }
     }
-    
+
     return pages;
 }
 

@@ -6,10 +6,14 @@
 #include <span>
 #include <memory>
 #include <map>
+#include <iostream>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/utils/file_mapper.hpp"
+
+// 前向声明 TDEDecryptor，避免循环依赖
+namespace dbrecovery { namespace innodb { class TDEDecryptor; } }
 
 namespace dbrecovery {
 namespace innodb {
@@ -91,6 +95,7 @@ public:
 class InnoDBFileReader {
 public:
     explicit InnoDBFileReader(const std::string& file_path);
+    explicit InnoDBFileReader(const std::string& file_path, uint32_t page_size_hint);
     ~InnoDBFileReader();
 
     // 禁止拷贝
@@ -116,6 +121,16 @@ public:
      * @return std::vector<uint8_t> 页数据，失败返回空
      */
     std::vector<uint8_t> read_page_raw(uint32_t page_no);
+
+    /**
+     * @brief 读取指定页号的数据并尝试解密（TDE）
+     *
+     * @param page_no 页号（从0开始）
+     * @param decryptor TDE 解密器
+     * @return std::vector<uint8_t> 页数据（已解密或原始），失败返回空
+     */
+    std::vector<uint8_t> read_page_with_decrypt(uint32_t page_no,
+                                                innodb::TDEDecryptor& decryptor);
 
     /**
      * @brief 获取指定页号的数据视图（零拷贝，不校验）
@@ -154,10 +169,36 @@ public:
      */
     [[nodiscard]] bool is_valid() const { return is_valid_; }
 
+    /**
+     * @brief 设置表空间ID（用于TDE密钥派生）
+     *
+     * @param space_id 表空间ID
+     */
+    void set_space_id(uint32_t space_id) { space_id_ = space_id; }
+
+    /**
+     * @brief 设置页大小提示（用于覆盖自动检测）
+     *
+     * @param page_size 页大小
+     */
+    void set_page_size_hint(uint32_t page_size) {
+        std::cout << "[DEBUG] set_page_size_hint called with: " << page_size << std::endl;
+        page_size_hint_ = page_size;
+        // 如果文件已打开且设置了有效的页大小提示，重新计算页大小
+        if (page_size > 0 && page_size <= 65536 && file_size_ > 0 && file_size_ % page_size == 0) {
+            std::cout << "[DEBUG] Applying page_size_hint: " << page_size << " to file_size: " << file_size_ << std::endl;
+            page_size_ = page_size;
+            total_pages_ = static_cast<uint32_t>(file_size_ / page_size);
+            is_valid_ = (total_pages_ > 0 || file_size_ > 0);
+        }
+    }
+
 private:
     uint64_t file_size_;
     uint32_t page_size_;
     uint32_t total_pages_;
+    uint32_t space_id_ = 0;  // 表空间ID（用于TDE）
+    uint32_t page_size_hint_ = 0;  // 页大小提示（非零时覆盖自动检测）
     std::unique_ptr<utils::FileMapper> mapper_;
     bool is_valid_;
 };

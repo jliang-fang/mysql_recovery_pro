@@ -17,13 +17,15 @@ struct ChainRebuildStats {
     size_t fixed_chains = 0;
     size_t orphan_pages = 0;
     size_t circular_references = 0;
+    uint32_t page_size = 16384;  // 页大小
 
     std::string to_string() const {
         std::ostringstream oss;
         oss << "ChainRebuildStats{total=" << total_pages
             << ", fixed=" << fixed_chains
             << ", orphan=" << orphan_pages
-            << ", circular=" << circular_references << "}";
+            << ", circular=" << circular_references
+            << ", page_size=" << page_size << "}";
         return oss.str();
     }
 };
@@ -35,6 +37,7 @@ struct ChainRebuildStats {
 class PageChainRebuilder {
 public:
     PageChainRebuilder();
+    explicit PageChainRebuilder(uint32_t page_size);
 
     /**
      * @brief 重连页链
@@ -79,10 +82,21 @@ public:
      */
     std::unordered_map<uint32_t, size_t> build_page_index_map() const;
 
+    /**
+     * @brief 设置页大小
+     */
+    void set_page_size(uint32_t page_size) { page_size_ = page_size; }
+
+    /**
+     * @brief 获取页大小
+     */
+    uint32_t get_page_size() const { return page_size_; }
+
 private:
     std::vector<ScannedPage> rebuilt_pages_;
     ChainRebuildStats rebuild_stats_;
     std::unordered_map<uint32_t, size_t> page_index_map_;
+    uint32_t page_size_ = 16384;  // 页大小
 
     // 检测循环引用
     bool detect_circular_reference() const;
@@ -98,6 +112,17 @@ inline PageChainRebuilder::PageChainRebuilder() {
     rebuild_stats_.fixed_chains = 0;
     rebuild_stats_.orphan_pages = 0;
     rebuild_stats_.circular_references = 0;
+    rebuild_stats_.page_size = 16384;
+    page_size_ = 16384;
+}
+
+inline PageChainRebuilder::PageChainRebuilder(uint32_t page_size) {
+    rebuild_stats_.total_pages = 0;
+    rebuild_stats_.fixed_chains = 0;
+    rebuild_stats_.orphan_pages = 0;
+    rebuild_stats_.circular_references = 0;
+    rebuild_stats_.page_size = page_size;
+    page_size_ = page_size;
 }
 
 inline bool PageChainRebuilder::rebuild_chain(const std::vector<ScannedPage>& pages) {

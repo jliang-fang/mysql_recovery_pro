@@ -71,8 +71,8 @@ bool Repairer::is_page_valid(const uint8_t* page, size_t page_size) {
         return false;
     }
 
-    // 检查页类型 - 使用正确的偏移量（相对于页起始位置）
-    uint16_t type = dbrecovery::innodb::read_le<uint16_t>(page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    // 检查页类型 - 使用正确的偏移量（相对于页起始位置），大端序
+    uint16_t type = dbrecovery::innodb::read_be<uint16_t>(page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
     // 检查页头（基本有效性检查）
     if (page[0] == 0 && page[1] == 0 && page[2] == 0 && page[3] == 0) {
@@ -226,7 +226,7 @@ std::optional<dbrecovery::innodb::BlobPointer> Repairer::get_blob_info_from_neig
         const uint8_t* neighbor_page = file_data.data() + offset;
 
         // 检查是否是有效的BLOB页
-        uint16_t type = dbrecovery::innodb::read_le<uint16_t>(neighbor_page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+        uint16_t type = dbrecovery::innodb::read_be<uint16_t>(neighbor_page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
         if (type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
             // 从BLOB页中提取BLOB指针（简化处理）
             if (page_size >= 20) {

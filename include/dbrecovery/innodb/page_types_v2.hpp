@@ -26,18 +26,10 @@ namespace innodb {
 // ==================== MySQL 版本枚举 ====================
 enum class MySQLVersion : uint8_t {
     UNKNOWN = 0,
-    MYSQL_41 = 41,      // MySQL 4.1.x (早期 Redundant 格式)
-    MYSQL_50 = 50,      // MySQL 5.0.x (引入 COMPACT 格式)
-    MYSQL_51 = 51,      // MySQL 5.1.x
-    MYSQL_55 = 55,      // MySQL 5.5.x
     MYSQL_56 = 56,      // MySQL 5.6.x
     MYSQL_57 = 57,      // MySQL 5.7.x
     MYSQL_80 = 80,      // MySQL 8.0.x
-    MYSQL_81 = 81,      // MySQL 8.1.x
-    MYSQL_82 = 82,      // MySQL 8.2.x
-    MYSQL_83 = 83,      // MySQL 8.3.x
     MYSQL_84 = 84,      // MySQL 8.4.x
-    MYSQL_90 = 90,      // MySQL 9.0.x (预览版)
 };
 
 // ==================== 行格式枚举 ====================
@@ -274,21 +266,6 @@ public:
     bool parse_header(const uint8_t* data, size_t size) override;
     std::optional<catalog::TableSchema> parse_sdi_metadata(
         const uint8_t* data, size_t size) override;
-};
-
-// ==================== MySQL 9.0 页解析器 ====================
-/**
- * @brief MySQL90PageParser: MySQL 9.0 页解析器
- *
- * 特征：
- * - 支持所有 MySQL 8.x 行格式
- * - 预留新特性支持
- */
-class MySQL90PageParser : public MySQL84PageParser {
-public:
-    explicit MySQL90PageParser(RowFormat format);
-
-    bool parse_header(const uint8_t* data, size_t size) override;
 };
 
 // ==================== 页解析结果 ====================

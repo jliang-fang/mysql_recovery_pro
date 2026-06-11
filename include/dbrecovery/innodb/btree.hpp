@@ -263,7 +263,7 @@ TEST(BPlusTreeParserTest, ParseInvalidPageHeader) {
     std::vector<uint8_t> page_data(1024, 0);
 
     // 设置一个无效的页类型（非 FIL_PAGE_INDEX/SDI/UNDO_LOG）
-    write_le<uint16_t>(page_data.data(), 38 + 12, 0xFFFF);
+    write_le<uint16_t>(page_data.data(), 54, 0xFFFF);
 
     BPlusTreeParser parser(page_data);
     EXPECT_FALSE(parser.parse());
@@ -274,7 +274,7 @@ TEST(BPlusTreeParserTest, ParseInvalidInfimumSupremum) {
     std::vector<uint8_t> page_data(1024, 0);
 
     // 设置有效的页类型
-    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_INDEX);
+    write_le<uint16_t>(page_data.data(), 54, FIL_PAGE_INDEX);
 
     // 设置堆顶位置（使 INFIMUM/SUPREMUM 解析失败）
     write_le<uint16_t>(page_data.data(), 38 + 4, 50); // heap_top = 50
@@ -288,7 +288,7 @@ TEST(BPlusTreeParserTest, ParseValidPage) {
     std::vector<uint8_t> page_data(16384, 0);
 
     // 设置有效的页类型
-    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_INDEX);
+    write_le<uint16_t>(page_data.data(), 54, FIL_PAGE_INDEX);
 
     // 设置堆顶位置（足够大以包含 INFIMUM 和 SUPREMUM）
     write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
@@ -309,7 +309,7 @@ TEST(BPlusTreeParserTest, ParseSDIPage) {
     std::vector<uint8_t> page_data(16384, 0);
 
     // 设置有效的 SDI 页类型
-    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_SDI);
+    write_le<uint16_t>(page_data.data(), 54, FIL_PAGE_SDI);
 
     // 设置堆顶位置
     write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100
@@ -330,7 +330,7 @@ TEST(BPlusTreeParserTest, ParseUndoLogPage) {
     std::vector<uint8_t> page_data(16384, 0);
 
     // 设置有效的 Undo Log 页类型
-    write_le<uint16_t>(page_data.data(), 38 + 12, FIL_PAGE_UNDO_LOG);
+    write_le<uint16_t>(page_data.data(), 54, FIL_PAGE_UNDO_LOG);
 
     // 设置堆顶位置
     write_le<uint16_t>(page_data.data(), 38 + 4, 100); // heap_top = 100

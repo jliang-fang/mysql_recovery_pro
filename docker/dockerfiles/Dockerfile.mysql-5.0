@@ -1,0 +1,10 @@
+# MySQL 5.0.96 - Far Ancient Branch
+# Target: Testing .frm file recovery and Antelope format
+FROM mysql/mysql-server:5.0.96
+
+# Override entrypoint to disable strict modes
+COPY docker-entrypoint.sh /docker-entrypoint.sh
+RUN chmod +x /docker-entrypoint.sh
+
+ENTRYPOINT ["/docker-entrypoint.sh"]
+CMD ["mysqld"]

@@ -266,6 +266,18 @@ private:
     QPushButton* pauseButton_;
     QPushButton* resumeButton_;
 
+    // TDE 加密设置
+    QLineEdit* encryptionKeyEdit_;
+    QLineEdit* tableKeyEdit_;
+    QLineEdit* tablespaceIdEdit_;
+    QCheckBox* detectEncryptionCheck_;
+    QCheckBox* tryNoKeyCheck_;
+
+    // MySQL 版本设置
+    QSpinBox* mysqlVersionSpin_;
+    QCheckBox* detectVersionCheck_;
+    QComboBox* rowFormatCombo_;
+
     // 设备扫描设置
     QLineEdit* devicePathEdit_;
     QPushButton* scanDeviceButton_;

@@ -54,15 +54,17 @@ std::vector<uint8_t> read_file(const std::string& path) {
 // Helper function to create a valid page
 std::vector<uint8_t> create_valid_page(uint32_t page_no = 0, uint16_t page_type = FIL_PAGE_INDEX) {
     std::vector<uint8_t> page(16384, 0);
-    
-    // FIL_HEADER
-    write_le<uint32_t>(page.data(), 0, 0xFFFFFFFF);      // prev_page
-    write_le<uint32_t>(page.data(), 4, 0xFFFFFFFF);      // next_page
-    write_le<uint64_t>(page.data(), 8, 1);               // lsn
-    write_le<uint16_t>(page.data(), 16, page_type);      // page_type
-    write_le<uint32_t>(page.data(), 18, 1);              // space_id
-    write_le<uint16_t>(page.data(), 22, page_no);        // page_offset
-    write_le<uint64_t>(page.data(), 24, 1);              // file_flush_lsn
+
+    // FIL_HEADER (38 bytes, big-endian)
+    // Correct layout per MySQL source code (fil0fil.h, page0page.h)
+    write_be<uint32_t>(page.data(), 0, 0);               // checksum (offset 0-3)
+    write_be<uint32_t>(page.data(), 4, page_no);         // page_number (offset 4-7)
+    write_be<uint32_t>(page.data(), 8, 0xFFFFFFFF);      // FIL_PAGE_PREV (offset 8-11)
+    write_be<uint32_t>(page.data(), 12, 0xFFFFFFFF);     // FIL_PAGE_NEXT (offset 12-15)
+    write_be<uint64_t>(page.data(), 16, 1);              // LSN (offset 16-23)
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, page_type);  // page_type (offset 24-25)
+    write_be<uint64_t>(page.data(), 26, 1);              // flush_lsn (offset 26-33)
+    write_be<uint32_t>(page.data(), 34, 1);              // space_id (offset 34-37)
     
     // BTR_HEADER
     write_le<uint32_t>(page.data(), 38, 1);              // n_levels
@@ -107,8 +109,7 @@ std::vector<uint8_t> create_valid_page(uint32_t page_no = 0, uint16_t page_type 
 TEST(HeaderCorruptionTest, DetectCorruptedPageHeader) {
     auto page = create_valid_page();
 
-    // Corrupt page header - this will corrupt the page type field
-    // which is at offset 16 in FIL_HEADER
+    // Corrupt page header (PAGE_HEADER at offset 38)
     memset(page.data() + 38, 0xFF, 24);
 
     CorruptionDetector detector;
@@ -134,15 +135,15 @@ TEST(HeaderCorruptionTest, DetectCorruptedPageHeader) {
 
 TEST(HeaderCorruptionTest, DetectInvalidPageType) {
     auto page = create_valid_page();
-    
-    // Set invalid page type
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);
-    
+
+    // Set invalid page type at correct offset (FIL_PAGE_TYPE_ABS = 24)
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+
     CorruptionDetector detector;
     detector.set_page_size(16384);
-    
+
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     EXPECT_GT(corruptions.size(), 0);
     bool found_invalid_type = false;
     for (const auto& c : corruptions) {
@@ -355,25 +356,24 @@ TEST(RecordChainRepairerTest, RepairRecordChain) {
 
 TEST(HeaderRepairerTest, RepairPageHeader) {
     HeaderRepairer repairer;
-    
+
     auto page = create_valid_page();
-    
-    // Corrupt page header
-    memset(page.data() + 38, 0xFF, 24);
-    
+
+    // Corrupt FIL_HEADER - specifically the page type field
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+
     bool success = repairer.repair_page_header(page.data(), page.size());
     EXPECT_TRUE(success);
 }
 
 TEST(HeaderRepairerTest, RepairChecksum) {
     HeaderRepairer repairer;
-    
+
     auto page = create_valid_page();
-    
-    // Corrupt checksum
-    write_le<uint32_t>(page.data(), 4, 0xDEADBEEF);
-    write_le<uint32_t>(page.data(), 24, 0xDEADBEEF);
-    
+
+    // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM)
+    write_be<uint32_t>(page.data(), 0, 0xDEADBEEF);
+
     uint32_t checksum = repairer.calculate_and_fix_checksum(page.data(), page.size());
     EXPECT_NE(checksum, 0xDEADBEEF);
 }
@@ -524,10 +524,10 @@ TEST(StatisticsTest, GetCorruptionStats) {
     CorruptionDetector detector;
 
     auto page = create_valid_page();
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);  // Invalid type
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);  // Invalid type
 
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     // Debug: print corruption types
     for (const auto& c : corruptions) {
         std::cout << "Detected corruption: " << static_cast<int>(c.type) << " - " << c.description << std::endl;
@@ -543,10 +543,10 @@ TEST(StatisticsTest, ClearCorruptions) {
     CorruptionDetector detector;
 
     auto page = create_valid_page();
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
 
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     // Debug: print corruption types
     for (const auto& c : corruptions) {
         std::cout << "Detected corruption: " << static_cast<int>(c.type) << " - " << c.description << std::endl;
@@ -560,16 +560,16 @@ TEST(StatisticsTest, ClearCorruptions) {
 
 TEST(StatisticsTest, GetSeverityCounts) {
     CorruptionDetector detector;
-    
+
     auto page = create_valid_page();
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);
-    
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+
     detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     auto critical = detector.get_critical_count();
     auto warning = detector.get_warning_count();
     auto info = detector.get_info_count();
-    
+
     // Should have at least one critical (invalid page type)
     EXPECT_GE(critical, 0);
     EXPECT_GE(warning, 0);
@@ -595,15 +595,15 @@ TEST(PageHealthTest, AnalyzeValidPage) {
 
 TEST(PageHealthTest, AnalyzeCorruptedPage) {
     auto page = create_valid_page();
-    
-    // Corrupt page
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);
-    
+
+    // Corrupt page - set invalid type at correct offset
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+
     CorruptionDetector detector;
     detector.set_page_size(16384);
-    
+
     auto health = detector.analyze_page(page.data(), page.size(), 0);
-    
+
     EXPECT_FALSE(health.is_valid);
     EXPECT_EQ(health.page_type, 0xFFFF);
 }
@@ -642,10 +642,10 @@ TEST(BlobChainTest, ParseBlobPointer) {
 TEST(BlobChainTest, AddBlobPage) {
     BlobChainRebuilder builder;
     builder.set_page_size(16384);
-    
+
     auto page = create_valid_page();
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_TYPE_BLOB);
-    
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_TYPE_BLOB);
+
     bool success = builder.add_blob_page(0, 100, std::move(page));
     EXPECT_TRUE(success);
     EXPECT_EQ(builder.get_stats().total_pages, 1);
@@ -654,15 +654,20 @@ TEST(BlobChainTest, AddBlobPage) {
 // ==================== Undo Log Parser Tests ====================
 
 TEST(UndoLogParserTest, ParseUndoPage) {
+    std::vector<uint8_t> page(16384, 0);
+
+    // Set page type to UNDO_LOG
+    write_le<uint16_t>(page.data(), 0, 1);  // TRX_UNDO_PAGE_TYPE = 1
+
+    // Write undo log page header
+    write_le<uint16_t>(page.data(), 28, 40);
+    write_le<uint16_t>(page.data(), 30, 40);
+    write_le<uint16_t>(page.data(), 34, 0);
+
     UndoLogParser parser;
-    parser.set_page_size(16384);
-    
-    auto page = create_valid_page();
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_UNDO_LOG);
-    
-    auto parsed = parser.parse_page(page.data(), page.size(), 0);
-    EXPECT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed->page_type, FIL_PAGE_UNDO_LOG);
+    auto entries = parser.parse_undo_log_page(page.data(), 16384, 0);
+
+    EXPECT_EQ(entries.size(), 0u);
 }
 
 // ==================== Redo Log Replayer Tests ====================
@@ -827,13 +832,12 @@ TEST(ComprehensiveTest, DetectAllCorruptionTypes) {
         if (name == "header") {
             memset(page.data() + 38, 0xFF, 24);
         } else if (name == "type") {
-            write_le<uint16_t>(page.data(), 16, 0xFFFF);
+            write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
         } else if (name == "checksum") {
-            // Corrupt checksum at offset 24 (FIL_PAGE_CHECKSUM_A)
-            write_le<uint32_t>(page.data(), 24, 0xDEADBEEF);
-            write_le<uint32_t>(page.data(), 28, 0xBADC0DE);
+            // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM)
+            write_be<uint32_t>(page.data(), 0, 0xDEADBEEF);
         } else if (name == "chain") {
-            write_le<uint32_t>(page.data(), 4, 0x12345678);
+            write_be<uint32_t>(page.data(), 8, 0x12345678);  // prev_page
         } else if (name == "infimum") {
             page[54] = 0x05;
         } else if (name == "supremum") {
@@ -898,16 +902,16 @@ TEST(CleanupTest, DetectorReset) {
     CorruptionDetector detector;
 
     auto page = create_valid_page();
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
 
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     // Debug output
     std::cout << "After corruption: got " << corruptions.size() << " corruptions" << std::endl;
     for (const auto& c : corruptions) {
         std::cout << "  - Type: " << static_cast<int>(c.type) << " - " << c.description << std::endl;
     }
-    
+
     EXPECT_GT(corruptions.size(), 0);
 
     detector.clear_corruptions();

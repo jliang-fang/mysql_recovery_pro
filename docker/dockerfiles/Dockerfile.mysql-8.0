@@ -1,0 +1,24 @@
+# MySQL 8.0.36 (LTS) - SDI & Data Dictionary
+# Target: Testing SDI page recovery and JSON table dictionary
+FROM mysql/mysql-server:8.0.36
+
+ENV MYSQL_ROOT_PASSWORD=root123
+ENV MYSQL_DATABASE=testdb
+ENV MYSQL_CHARACTER_SET_SERVER=utf8mb4
+ENV MYSQL_COLLATION_SERVER=utf8mb4_0900_ai_ci
+
+CMD [
+  "--innodb_file_per_table=1",
+  "--sql-mode=NO_ENGINE_SUBSTITUTION",
+  "--character-set-server=utf8mb4",
+  "--collation-server=utf8mb4_0900_ai_ci",
+  "--max_allowed_packet=512M",
+  "--innodb_buffer_pool_size=1G",
+  "--innodb_log_file_size=1G",
+  "--innodb_log_buffer_size=64M",
+  "--sync_binlog=0",
+  "--innodb_flush_log_at_trx_commit=0",
+  "--tmp_table_size=512M",
+  "--max_heap_table_size=512M",
+  "--binlog_format=ROW"
+]

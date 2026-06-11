@@ -11,39 +11,18 @@
 namespace dbrecovery {
 
 // ==================== 版本特征表 ====================
-const std::array<MySQLVersionDetector::VersionFeature, 11> MySQLVersionDetector::version_features_ = {{
-    // MySQL 5.0 - 早期版本，无LSN扩展，无SDI
-    {MySQLVersion::MYSQL_50, "MySQL 5.0", 1024, 65536, false, false, false, false, false, 0},
-    
-    // MySQL 5.1 - 引入压缩页
-    {MySQLVersion::MYSQL_51, "MySQL 5.1", 1024, 65536, false, false, false, false, false, 0},
-    
-    // MySQL 5.5 - 旧校验和
-    {MySQLVersion::MYSQL_55, "MySQL 5.5", 1024, 65536, false, false, false, false, false, 0},
-    
+const std::array<MySQLVersionDetector::VersionFeature, 4> MySQLVersionDetector::version_features_ = {{
     // MySQL 5.6 - 引入COMPACT格式，新校验和
     {MySQLVersion::MYSQL_56, "MySQL 5.6", 1024, 65536, false, false, false, false, true, 0},
-    
+
     // MySQL 5.7 - 增强的页头
     {MySQLVersion::MYSQL_57, "MySQL 5.7", 1024, 65536, false, false, false, false, true, 0},
-    
+
     // MySQL 8.0 - LSN扩展，SDI页
     {MySQLVersion::MYSQL_80, "MySQL 8.0", 1024, 65536, true, true, false, false, true, 0x26F3},
-    
-    // MySQL 8.1 - 8.1特定版本
-    {MySQLVersion::MYSQL_81, "MySQL 8.1", 1024, 65536, true, true, false, false, true, 0x26F3},
-    
-    // MySQL 8.2 - 8.2特定版本
-    {MySQLVersion::MYSQL_82, "MySQL 8.2", 1024, 65536, true, true, false, false, true, 0x26F3},
-    
-    // MySQL 8.3 - 8.3特定版本
-    {MySQLVersion::MYSQL_83, "MySQL 8.3", 1024, 65536, true, true, false, false, true, 0x26F3},
-    
+
     // MySQL 8.4 - 加密，临时页
     {MySQLVersion::MYSQL_84, "MySQL 8.4", 1024, 65536, true, true, true, true, true, 0x26F3},
-    
-    // MySQL 9.0 - 增强校验和
-    {MySQLVersion::MYSQL_90, "MySQL 9.0", 1024, 65536, true, true, true, true, true, 0x26F3},
 }};
 
 // ==================== MySQLVersionDetector实现 ====================
@@ -314,7 +293,7 @@ MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
         if (checksum_score >= 8) {
             return MySQLVersion::MYSQL_56;  // 5.6+
         }
-        return MySQLVersion::MYSQL_55;  // 5.5-
+        return MySQLVersion::MYSQL_56;  // Fallback to 5.6 for older versions
     }
 
     // 默认返回5.6
@@ -358,22 +337,15 @@ VersionDetectionResult DetailedVersionDetector::detect(const uint8_t* page_data,
 }
 
 std::pair<MySQLVersion, MySQLVersion> DetailedVersionDetector::get_supported_version_range() {
-    return {MySQLVersion::MYSQL_50, MySQLVersion::MYSQL_90};
+    return {MySQLVersion::MYSQL_56, MySQLVersion::MYSQL_84};
 }
 
 std::vector<MySQLVersion> DetailedVersionDetector::get_supported_versions() {
     return {
-        MySQLVersion::MYSQL_50,
-        MySQLVersion::MYSQL_51,
-        MySQLVersion::MYSQL_55,
         MySQLVersion::MYSQL_56,
         MySQLVersion::MYSQL_57,
         MySQLVersion::MYSQL_80,
-        MySQLVersion::MYSQL_81,
-        MySQLVersion::MYSQL_82,
-        MySQLVersion::MYSQL_83,
-        MySQLVersion::MYSQL_84,
-        MySQLVersion::MYSQL_90
+        MySQLVersion::MYSQL_84
     };
 }
 
@@ -467,7 +439,7 @@ MySQLVersion DetailedVersionDetector::match_version(const std::vector<FeatureChe
         if (checksum_matches > 0) {
             return MySQLVersion::MYSQL_56;  // 5.6+
         }
-        return MySQLVersion::MYSQL_55;  // 5.5-
+        return MySQLVersion::MYSQL_56;  // Fallback to 5.6 for older versions
     }
 
     return MySQLVersion::MYSQL_56;

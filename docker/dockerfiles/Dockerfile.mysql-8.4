@@ -1,0 +1,25 @@
+# MySQL 8.4.0 (LTS) - Improved Vector Support
+# Target: Testing Vector column type (8.4+ feature)
+FROM mysql/mysql-server:8.4.0
+
+ENV MYSQL_ROOT_PASSWORD=root123
+ENV MYSQL_DATABASE=testdb
+ENV MYSQL_CHARACTER_SET_SERVER=utf8mb4
+ENV MYSQL_COLLATION_SERVER=utf8mb4_0900_ai_ci
+
+CMD [
+  "--innodb_file_per_table=1",
+  "--sql-mode=NO_ENGINE_SUBSTITUTION",
+  "--character-set-server=utf8mb4",
+  "--collation-server=utf8mb4_0900_ai_ci",
+  "--max_allowed_packet=1G",
+  "--innodb_buffer_pool_size=2G",
+  "--innodb_log_file_size=2G",
+  "--innodb_log_buffer_size=64M",
+  "--sync_binlog=0",
+  "--innodb_flush_log_at_trx_commit=0",
+  "--tmp_table_size=1G",
+  "--max_heap_table_size=1G",
+  "--binlog_format=ROW",
+  "--innodb_large_prefix=ON"
+]

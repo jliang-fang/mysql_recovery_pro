@@ -107,7 +107,7 @@ cd build/gui
 | `--truncate-recovery` | Truncate 恢复模式 | false | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf 恢复模式 | false | `--rmrf-recovery` |
 | `--blob-recovery` | 启用 BLOB 恢复 | false | `--blob-recovery` |
-| `--format=<csv\|sql\|ibd>` | 输出格式 | csv | `--format=sql` |
+| `--format=<csv\|sql\|json\|xml\|yaml\|avro\|text\|ibd>` | 输出格式 | csv | `--format=json` |
 
 ### 3.3 示例
 
@@ -191,7 +191,22 @@ cd build/gui
 
 ## 5. 数据导出
 
+mysql_recovery_pro 支持 **8 种导出模式**，满足不同场景的需求：
+
+| 格式 | 扩展名 | 说明 | 适用场景 |
+|------|--------|------|----------|
+| CSV | `.csv` | 逗号分隔值 | Excel、数据分析 |
+| SQL | `.sql` | SQL INSERT 语句 | MySQL 数据库恢复 |
+| JSON | `.json` | JSON 格式 | Web 应用、API |
+| XML | `.xml` | XML 格式 | 系统集成、配置 |
+| YAML | `.yaml` | YAML 格式 | 配置文件、脚本 |
+| Avro | `.avro` | Avro 格式 | Hadoop、大数据 |
+| TEXT | `.txt` | 纯文本格式 | 人工阅读、日志 |
+| IBD | `.ibd` | 修复后的 IBD 文件 | 文件级恢复 |
+
 ### 5.1 CSV 导出
+
+CSV (Comma-Separated Values) 是最常用的导出格式，可以用 Excel 直接打开：
 
 ```bash
 # 命令行
@@ -204,7 +219,17 @@ cd build/gui
 4. 在 Log 选项卡查看导出结果
 ```
 
+**输出示例**:
+```csv
+id,name,email,status,score
+1,张三,zhangsan@example.com,active,95
+2,李四,lisiji@example.com,inactive,88
+3,王五,wangwu@example.com,active,92
+```
+
 ### 5.2 SQL 导出
+
+SQL 格式包含完整的 CREATE TABLE 和 INSERT 语句，可以直接导入 MySQL：
 
 ```bash
 # 命令行
@@ -217,7 +242,161 @@ cd build/gui
 4. 在 Log 选项卡查看导出结果
 ```
 
-### 5.3 IBD 导出
+**输出示例**:
+```sql
+-- Table: users
+
+INSERT INTO users VALUES (1,'张三','zhangsan@example.com','active',95);
+INSERT INTO users VALUES (2,'李四','lisiji@example.com','inactive',88);
+INSERT INTO users VALUES (3,'王五','wangwu@example.com','active',92);
+```
+
+### 5.3 JSON 导出
+
+JSON 格式适用于 Web 应用和 API 数据交换：
+
+```bash
+# 命令行
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=json
+
+# GUI
+1. 打开 GUI
+2. 选择 Recovery 选项卡
+3. 点击 "Start Recovery"
+4. 在 Log 选项卡查看导出结果
+```
+
+**输出示例**:
+```json
+[
+  {
+    "id": "1",
+    "name": "张三",
+    "email": "zhangsan@example.com",
+    "status": "active",
+    "score": "95"
+  },
+  {
+    "id": "2",
+    "name": "李四",
+    "email": "lisiji@example.com",
+    "status": "inactive",
+    "score": "88"
+  }
+]
+```
+
+### 5.4 XML 导出
+
+XML 格式适用于系统集成和配置文件：
+
+```bash
+# 命令行
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=xml
+
+# GUI
+1. 打开 GUI
+2. 选择 Recovery 选项卡
+3. 点击 "Start Recovery"
+4. 在 Log 选项卡查看导出结果
+```
+
+**输出示例**:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<records>
+  <record>
+    <id>1</id>
+    <name>张三</name>
+    <email>zhangsan@example.com</email>
+    <status>active</status>
+    <score>95</score>
+  </record>
+  <record>
+    <id>2</id>
+    <name>李四</name>
+    <email>lisiji@example.com</email>
+    <status>inactive</status>
+    <score>88</score>
+  </record>
+</records>
+```
+
+### 5.5 YAML 导出
+
+YAML 格式适用于配置文件和脚本：
+
+```bash
+# 命令行
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=yaml
+
+# GUI
+1. 打开 GUI
+2. 选择 Recovery 选项卡
+3. 点击 "Start Recovery"
+4. 在 Log 选项卡查看导出结果
+```
+
+**输出示例**:
+```yaml
+- id: "1"
+  name: "张三"
+  email: "zhangsan@example.com"
+  status: "active"
+  score: "95"
+- id: "2"
+  name: "李四"
+  email: "lisiji@example.com"
+  status: "inactive"
+  score: "88"
+```
+
+### 5.6 Avro 导出
+
+Avro 格式适用于 Hadoop 和大数据处理：
+
+```bash
+# 命令行
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=avro
+
+# GUI
+1. 打开 GUI
+2. 选择 Recovery 选项卡
+3. 点击 "Start Recovery"
+4. 在 Log 选项卡查看导出结果
+```
+
+**输出示例** (二进制格式):
+```
+Obj
+{"type":"record","name":"users","fields":[{"name":"id","type":"long"},...]}
+...
+```
+
+### 5.7 TEXT 导出
+
+TEXT (纯文本) 格式适用于人工阅读和日志：
+
+```bash
+# 命令行
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=text
+
+# GUI
+1. 打开 GUI
+2. 选择 Recovery 选项卡
+3. 点击 "Start Recovery"
+4. 在 Log 选项卡查看导出结果
+```
+
+**输出示例**:
+```
+id=1 | name=张三 | email=zhangsan@example.com | status=active | score=95
+id=2 | name=李四 | email=lisiji@example.com | status=inactive | score=88
+```
+
+### 5.8 IBD 导出
+
+IBD 格式用于修复损坏的表空间文件：
 
 ```bash
 # 命令行
@@ -229,6 +408,10 @@ cd build/gui
 3. 点击 "Start Recovery"
 4. 在 Log 选项卡查看导出结果
 ```
+
+**说明**: IBD 导出模式用于修复损坏的页头和校验和，生成可重新挂载的 IBD 文件。
+
+---
 
 ---
 

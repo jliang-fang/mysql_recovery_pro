@@ -1,0 +1,24 @@
+# MySQL 5.6.51 - Complete Barracuda Support
+# Target: Testing REDUNDANT/COMPACT/COMPRESSED/DYNAMIC row formats
+FROM mysql/mysql-server:5.6.51
+
+ENV MYSQL_ROOT_PASSWORD=root123
+ENV MYSQL_DATABASE=testdb
+ENV MYSQL_CHARACTER_SET_SERVER=utf8mb4
+ENV MYSQL_COLLATION_SERVER=utf8mb4_unicode_ci
+
+CMD [
+  "--innodb_file_per_table=1",
+  "--innodb_file_format=Barracuda",
+  "--innodb_large_prefix=ON",
+  "--sql-mode=",
+  "--character-set-server=utf8mb4",
+  "--collation-server=utf8mb4_unicode_ci",
+  "--max_allowed_packet=512M",
+  "--innodb_buffer_pool_size=1G",
+  "--innodb_log_file_size=512M",
+  "--innodb_log_buffer_size=64M",
+  "--sync_binlog=0",
+  "--innodb_flush_log_at_trx_commit=0",
+  "--explicit_defaults_for_timestamp=ON"
+]

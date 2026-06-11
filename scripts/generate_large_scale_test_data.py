@@ -250,28 +250,23 @@ class InnoDBPageBuilder:
         # info_bits should be REC_STATUS_INFIMUM (0x02) only for status bits
         # REC_INFO_MIN_REC_FLAG (0x10) is a separate flag bit, not part of status
         page[54] = REC_STATUS_INFIMUM  # Only status bits, not OR with flag
-        infimum_next = 54 + 7  # Next record starts after 7-byte header
-        write_le_uint16(page, 55, infimum_next)    # next_record_offset = 61
-
-        # Write heap_no and record_length for INFIMUM
-        write_le_uint16(page, 57, 0)          # heap_no
-        write_le_uint16(page, 59, 7)          # record_length = 7
+        write_le_uint16(page, 55, 68)   # next_record_offset = 68 (first user record)
+        write_le_uint16(page, 57, 0)    # heap_no
+        write_le_uint16(page, 59, 7)    # record_length = 7
 
         # SUPREMUM record (fixed at 61, 7 bytes header)
-        # SUPREMUM should be the last system record before user records
-        # SUPREMUM's next_offset should be 0xFFFF (65535) to mark the end of record chain
-        # This is different from the old code which set it to 68 (first user record)
-        page[54 + 7] = REC_STATUS_SUPREMUM  # offset 61
-        supremum_next = 0x3FFF  # next_record_offset = 0x3FFF (15-bit with flag bit)
-        write_le_uint16(page, 62, supremum_next)  # next_record_offset at 62-63
-        write_le_uint16(page, 64, 1)              # heap_no at 64-65 (not 63-64!)
-        write_le_uint16(page, 66, 7)              # record_length at 66-67 (not 65-66!)
+        # SUPREMUM is the last system record, user records come before it
+        page[61] = REC_STATUS_SUPREMUM  # offset 61
+        write_le_uint16(page, 62, 0x3FFF)   # next_record_offset = 0x3FFF (end of chain)
+        write_le_uint16(page, 64, 1)        # heap_no
+        write_le_uint16(page, 66, 7)        # record_length = 7
 
-        # User records - start after SUPREMUM (offset 68)
+        # User records - start after INFIMUM but before SUPREMUM (offset 68)
+        # Each user record has a 7-byte header, + data (variable, ~800 bytes max)
         current_offset = 68
         prev_offset = 54  # INFIMUM
         user_record_offsets = []  # Track user record offsets for directory slots
-        record_end = 61 + 7  # SUPREMUM end offset (61 + 7 = 68)
+        record_end = 61  # SUPREMUM start offset
 
         for i, record in enumerate(records):
             # Calculate required space for this record
@@ -326,20 +321,20 @@ class InnoDBPageBuilder:
             # email (VARCHAR 255 - 1 byte length + data)
             email_bytes = record["email"].encode('utf-8')
             email_len = min(len(email_bytes), 255)
-            email_start = data_offset + 9 + 255
+            email_start = data_offset + 9 + name_len
             page[email_start] = email_len
             page[email_start + 1:email_start + 1 + email_len] = email_bytes[:email_len]
 
             # username (VARCHAR 255)
             username_bytes = record["username"].encode('utf-8')
             username_len = min(len(username_bytes), 255)
-            username_start = email_start + 1 + 255
+            username_start = email_start + 1 + email_len
             page[username_start] = username_len
             page[username_start + 1:username_start + 1 + username_len] = username_bytes[:username_len]
 
             # password_hash (CHAR 64 - fixed)
             password_bytes = record["password_hash"].encode('utf-8')
-            password_start = username_start + 1 + 255
+            password_start = username_start + 1 + username_len
             page[password_start:password_start + 64] = password_bytes[:64]
 
             # status (TINYINT - 1 byte)
@@ -360,12 +355,12 @@ class InnoDBPageBuilder:
             # json_data (JSON - stored inline with length prefix)
             json_bytes = record["json_data"].encode('utf-8')
             json_len = min(len(json_bytes), 255)
-            json_start = desc_start + 1 + 255
+            json_start = desc_start + 1 + desc_len
             page[json_start] = json_len
             page[json_start + 1:json_start + 1 + json_len] = json_bytes[:json_len]
 
             # blob_data (LONGBLOB - NULL marker for simplicity)
-            blob_start = json_start + 1 + 255
+            blob_start = json_start + 1 + json_len
             page[blob_start] = 0xFF  # NULL marker
 
             # created_at (DATETIME - 8 bytes)
@@ -450,10 +445,15 @@ class InnoDBPageBuilder:
         dir_slots = [54]  # INFIMUM record offset (offset 54)
         dir_slots.extend(user_record_offsets)  # User records
         dir_slots.append(61)  # SUPREMUM record offset (offset 61)
+        
+        # Debug: verify dir_slots before writing
+        print(f"DEBUG: user_record_offsets = {user_record_offsets}", file=sys.stderr)
+        print(f"DEBUG: dir_slots before reverse = {dir_slots}", file=sys.stderr)
+        print(f"DEBUG: n_dir_slots = {len(dir_slots)}", file=sys.stderr)
 
         # Update n_dir_slots to reflect total slot count
         n_dir_slots = len(dir_slots)
-        
+
         # Calculate directory slot position properly:
         # The page directory should be placed after all user records
         # and before the heap_top
@@ -482,16 +482,26 @@ class InnoDBPageBuilder:
 
         # Write directory slots at the calculated position
         # Directory slots are written in descending order of record offsets
-        for i, rec_offset in enumerate(dir_slots):
+        # dir_slots is [INFIMUM, user_records..., SUPREMUM]
+        # but slots in memory should be [SUPREMUM, user_records..., INFIMUM] (descending)
+        for i, rec_offset in enumerate(reversed(dir_slots)):
             # Directory slot format: 15-bit offset + 1-bit flag (0 for most records)
             slot_value = rec_offset & 0x7FFF
             write_le_uint16(page, dir_slot_position + i * 2, slot_value)
 
+        # Verify written slots
+        import struct
+        for i in range(n_dir_slots):
+            slot_offset = dir_slot_position + i * 2
+            val = struct.unpack('<H', page[slot_offset:slot_offset+2])[0]
+            expected = list(reversed(dir_slots))[i]
+            if val != expected:
+                print(f"DEBUG MISMATCH: Slot {i} = {val}, expected {expected}", file=sys.stderr)
+
         # Update heap_top to be after all records and directory slots
-        # heap_top points to the first free byte in the record area
-        # It should be after the last directory slot
-        dir_slots_end = dir_slot_position + n_dir_slots * 2
-        final_heap_top = dir_slots_end + 2  # Add 2 bytes for alignment
+        # heap_top should be dir_slot_position + n_dir_slots * 2
+        # so that dir_start = heap_top - n_dir_slots * 2 = dir_slot_position
+        final_heap_top = dir_slot_position + n_dir_slots * 2
         write_le_uint16(page, 40, final_heap_top)
 
         return page

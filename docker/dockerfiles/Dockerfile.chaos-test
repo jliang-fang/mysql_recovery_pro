@@ -1,0 +1,37 @@
+# Chaos Test Runner Image
+# Purpose: Run chaos testing suite on MySQL Recovery Pro
+FROM python:3.11-slim
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    mysql-client \
+    dd \
+    coreutils \
+    time \
+    curl \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir \
+    mysql-connector-python \
+    requests \
+    numpy \
+    scipy \
+    pandas \
+    psutil
+
+# Create working directory
+WORKDIR /chaos-scripts
+
+# Copy chaos testing scripts
+COPY scripts/*.py /chaos-scripts/
+
+# Set permissions
+RUN chmod +x /chaos-scripts/*.py
+
+# Create output directory
+RUN mkdir -p /chaos-test /recovery-output
+
+# Default command
+CMD ["python3", "/chaos-scripts/chaos_injection_suite.py", "--seed", "42", "--full-suite"]

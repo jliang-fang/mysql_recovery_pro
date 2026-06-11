@@ -18,7 +18,10 @@ enum class ExportFormat {
     CSV,        // CSV 格式
     JSON,       // JSON 格式
     XML,        // XML 格式
+    YAML,       // YAML 格式
+    Avro,       // Avro 格式
     TEXT,       // 纯文本格式
+    IBD,        // 修复后的 IBD 文件
 };
 
 /**

@@ -443,6 +443,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 恢复模式
     dbrecovery::recovery::RecoveryEngine engine;
 
+    // 🔧 修复：在打开文件之前设置页大小提示
+    // 这确保 InnoDBFileReader 使用用户指定的页大小，而不是自动检测
+    if (page_size > 0) {
+        std::cout << "[DEBUG] Setting page_size hint before engine open: " << page_size << std::endl;
+        engine.set_page_size(page_size);
+    }
+
     if (!engine.open(ibd_path)) {
         std::cerr << "[ERROR] Failed to open file: " << ibd_path << "\n";
         return 1;

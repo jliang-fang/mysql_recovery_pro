@@ -277,10 +277,10 @@ engine.close();
 # 指定表 ID
 ./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --table-id=12345
 
-# Truncate 恢复
-./mysql_recovery_pro --ibd=/path/to/table.ibd --truncate-recovery --format=csv
+# Truncate 恢复 (支持: csv|sql|json|xml|yaml|avro|text|ibd)
+./mysql_recovery_pro --ibd=/path/to/table.ibd --truncate-recovery --format=json
 
-# rm -rf 恢复
+# rm -rf 恢复 (支持: csv|sql|json|xml|yaml|avro|text|ibd)
 ./mysql_recovery_pro --ibd=/path/to/table.ibd --rmrf-recovery --format=sql
 
 # BLOB 恢复

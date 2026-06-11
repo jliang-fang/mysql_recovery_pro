@@ -244,15 +244,20 @@ class ComprehensiveRecoveryTestRunner:
                           seed: int = 42) -> str:
         """Generate test data with optional corruption"""
         script = "scripts/generate_large_scale_test_data.py"
-        output_name = f"test_large_rec{num_records}_ps{page_size}"
 
         if corruption_type:
-            output_name += f"_corrupted_{corruption_type}_r{corruption_ratio}"
-
-        output_path = os.path.join(
-            self.test_data_dir,
-            f"{output_name}.ibd"
-        )
+            # Use generator's naming convention: test_large_corrupted_{type}_rec{N}_ps{S}.ibd
+            output_name = f"test_large_corrupted_{corruption_type}_rec{num_records}_ps{page_size}"
+            output_path = os.path.join(
+                self.test_data_dir,
+                f"{output_name}.ibd"
+            )
+        else:
+            output_name = f"test_large_rec{num_records}_ps{page_size}"
+            output_path = os.path.join(
+                self.test_data_dir,
+                f"{output_name}.ibd"
+            )
 
         if os.path.exists(output_path):
             return output_path
@@ -288,19 +293,29 @@ class ComprehensiveRecoveryTestRunner:
         os.makedirs(output_dir, exist_ok=True)
 
         mode_suffix = f"_{recovery_mode}" if recovery_mode != "default" else ""
-        output_file = os.path.join(
-            output_dir,
-            f"recovered_{os.path.basename(input_file).replace('.ibd', '')}{mode_suffix}.{output_format}"
-        )
+        # The tool outputs to output_dir/recovered.{ext} by default
+        # We rename it after each run to avoid overwriting
+        expected_default_name = os.path.join(output_dir, f"recovered.{output_format}")
+        output_file = os.path.join(output_dir, f"recovered_{recovery_mode}.{output_format}")
 
+        # Clean up old output file if exists
+        if os.path.exists(expected_default_name):
+            os.remove(expected_default_name)
+
+        # Map recovery mode to appropriate flags
         cmd = [
             self.recovery_tool_path,
-            "--mode", recovery_mode,
-            "--input", input_file,
-            "--output", output_file,
-            "--format", output_format,
-            "--verbose"
+            f"--ibd={input_file}",
+            f"--output={output_dir}",
         ]
+
+        if recovery_mode == "scan":
+            cmd.append("--schemaless")
+        elif recovery_mode == "search":
+            cmd.append("--truncate-recovery")
+
+        # Add format
+        cmd.append(f"--format={output_format}")
 
         try:
             start_time = time.time()
@@ -312,11 +327,28 @@ class ComprehensiveRecoveryTestRunner:
             )
             elapsed = time.time() - start_time
 
+            # Rename the output file to include mode suffix
+            if result.returncode == 0 and os.path.exists(expected_default_name):
+                os.rename(expected_default_name, output_file)
+
+            # Find the actual output file
+            actual_output = None
+            if result.returncode == 0:
+                if os.path.exists(output_file):
+                    actual_output = output_file
+                else:
+                    # Try to find any output file
+                    import glob
+                    pattern = os.path.join(output_dir, f"recovered*.{output_format}")
+                    found_files = glob.glob(pattern)
+                    if found_files:
+                        actual_output = found_files[0]
+
             return {
                 "returncode": result.returncode,
                 "stdout": result.stdout,
                 "stderr": result.stderr,
-                "output_file": output_file if result.returncode == 0 else None,
+                "output_file": actual_output,
                 "success": result.returncode == 0,
                 "elapsed_seconds": elapsed
             }
@@ -354,9 +386,9 @@ class ComprehensiveRecoveryTestRunner:
             verification["data_integrity"] = "no_output"
             return verification
 
-        # Count records in output
+        # Count records in output - handle encoding issues
         try:
-            with open(recovered_file, 'r', encoding='utf-8') as f:
+            with open(recovered_file, 'r', encoding='utf-8', errors='replace') as f:
                 content = f.read()
 
             if output_format == "sql":
@@ -644,14 +676,18 @@ class ComprehensiveRecoveryTestRunner:
 
 
 def main():
+    # Get the script's directory to resolve relative paths
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(script_dir)
+
     parser = argparse.ArgumentParser(
         description='Comprehensive Recovery Testing for MySQL Recovery Pro'
     )
-    parser.add_argument('--tool-path', default='./mysql_recovery_pro',
+    parser.add_argument('--tool-path', default=os.path.join(project_root, 'build', 'mysql_recovery_pro'),
                         help='Path to recovery tool')
-    parser.add_argument('--test-data-dir', default='test_data',
+    parser.add_argument('--test-data-dir', default=os.path.join(project_root, 'test_data'),
                         help='Test data directory')
-    parser.add_argument('--output-dir', default='recovery_test_results',
+    parser.add_argument('--output-dir', default=os.path.join(project_root, 'recovery_test_results'),
                         help='Output directory for results')
     parser.add_argument('--scenario', type=str, default=None,
                         help='Run specific scenario only')

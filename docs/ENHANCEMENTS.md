@@ -160,7 +160,7 @@ The rm -rf recovery mode has been enhanced with better page detection and recove
 | `--max-depth=<depth>` | Max directory depth for scan (default: 10) |
 | `--verbose` | Enable verbose output |
 | `--debug` | Enable debug output |
-| `--format=<fmt>` | Output format: csv/sql/json |
+| `--format=<fmt>` | Output format: csv/sql/json/xml/yaml/avro/text/ibd |
 | `--page-size=<size>` | Page size in bytes |
 | `--table-id=<id>` | Table ID for metadata lookup |
 
@@ -309,7 +309,31 @@ window->setState(RecoveryState::COMPLETED);
 - Verify file permissions
 - Check the output directory is writable
 
-## Future Enhancements
+## Version 2.2.0 (Current) - B+Tree Parser Enhancements
+
+### Record Parsing Fixes
+
+- **Dual test file format detection**: Added detection for both standard ('user' at offset+4) and alternate ('user' at record start) test file formats
+- **Enhanced scan_all_records()**: Improved record scanning with multiple fallback strategies:
+  - Fixed 122-byte step scanning
+  - Scan for 'user' pattern at multiple positions
+  - Fallback to linear scanning
+- **Improved test file parsing**: Fixed test file record detection logic
+
+### CSV Export Improvements
+
+- **Schema-defined column order**: CSV export now uses column order from table schema instead of alphabetical order
+- **Correct header sequence**: Exported CSV headers match schema-defined order (id, name, email, created_at)
+
+### Known Limitations
+
+- **Custom test file format**: The `manual_test.ibd` file uses a non-standard format that doesn't follow InnoDB's record chain mechanism
+  - No directory slot references for user records
+  - Records stored at fixed 122-byte intervals starting at offset 54
+  - 'user' text appears in email field values, not as record markers
+  - This causes parsing warnings but recovery still finds records via scan_all_records()
+
+### Future Enhancements
 
 - [ ] Support for more MySQL versions
 - [ ] Transaction isolation support

@@ -350,7 +350,7 @@ bool BTreeChainReconstructor::reconstruct_from_page(uint32_t start_page) {
             break;
         }
 
-        current_page = read_le<uint32_t>(data, 28);  // FIL_PAGE_NEXT
+        current_page = read_be<uint32_t>(data, FIL_PAGE_NEXT_ABS);  // FIL_PAGE_NEXT at offset 12
     }
 
     stats_.valid_chain++;
@@ -387,7 +387,7 @@ bool BTreeChainReconstructor::detect_and_fix_broken_chain() {
             continue;
         }
 
-        uint32_t next_page = read_le<uint32_t>(data.data(), 28);  // FIL_PAGE_NEXT
+        uint32_t next_page = read_be<uint32_t>(data.data(), FIL_PAGE_NEXT_ABS);  // FIL_PAGE_NEXT at offset 12
         if (next_page != 0xFFFFFFFF && page_map_.find(next_page) == page_map_.end()) {
             broken_points_.push_back(page_no);
         }
@@ -408,7 +408,7 @@ bool BTreeChainReconstructor::detect_and_fix_broken_chain() {
             continue;
         }
 
-        uint32_t expected_next = read_le<uint32_t>(data, 28);
+        uint32_t expected_next = read_be<uint32_t>(data, FIL_PAGE_NEXT_ABS);
         
         // 尝试找到下一个页（通过页号顺序）
         for (const auto& [page_no, page_data] : page_map_) {
@@ -436,7 +436,7 @@ void BTreeChainReconstructor::graft_pages(uint32_t from_page, uint32_t to_page) 
         return;
     }
 
-    write_le<uint32_t>(data.data(), 28, to_page);  // FIL_PAGE_NEXT
+    write_be<uint32_t>(data.data(), FIL_PAGE_NEXT_ABS, to_page);  // FIL_PAGE_NEXT at offset 12
 }
 
 std::vector<uint32_t> BTreeChainReconstructor::get_reconstructed_chain() const {
@@ -483,7 +483,7 @@ std::vector<uint32_t> UndoLogFlashback::get_undo_log_pages() {
     size_t num_pages = size_ / 16384;
     for (size_t i = 0; i < num_pages; i++) {
         const uint8_t* page_data = data_ + i * 16384;
-        uint16_t page_type = read_le<uint16_t>(page_data, 16);
+        uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
         
         if (page_type == FIL_PAGE_UNDO_LOG) {
             pages.push_back(static_cast<uint32_t>(i));

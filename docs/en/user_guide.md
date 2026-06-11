@@ -107,7 +107,7 @@ cd build/gui
 | `--truncate-recovery` | Truncate recovery mode | false | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf recovery mode | false | `--rmrf-recovery` |
 | `--blob-recovery` | Enable BLOB recovery | false | `--blob-recovery` |
-| `--format=<csv\|sql\|ibd>` | Output format | csv | `--format=sql` |
+| `--format=<csv\|sql\|json\|xml\|yaml\|avro\|text\|ibd>` | Output format | csv | `--format=json` |
 
 ### 3.3 Examples
 
@@ -191,7 +191,22 @@ cd build/gui
 
 ## 5. Data Export
 
+mysql_recovery_pro supports **8 export formats** for different use cases:
+
+| Format | Extension | Description | Use Case |
+|--------|-----------|-------------|----------|
+| CSV | `.csv` | Comma-separated values | Excel, data analysis |
+| SQL | `.sql` | SQL INSERT statements | MySQL database recovery |
+| JSON | `.json` | JSON format | Web applications, API |
+| XML | `.xml` | XML format | System integration, config |
+| YAML | `.yaml` | YAML format | Configuration files, scripts |
+| Avro | `.avro` | Avro format | Hadoop, big data |
+| TEXT | `.txt` | Plain text format | Human-readable, logging |
+| IBD | `.ibd` | Repaired IBD file | File-level recovery |
+
 ### 5.1 CSV Export
+
+CSV (Comma-Separated Values) is the most commonly used export format, can be opened directly in Excel:
 
 ```bash
 # Command line
@@ -204,7 +219,17 @@ cd build/gui
 4. View export results in Log tab
 ```
 
+**Output Example**:
+```csv
+id,name,email,status,score
+1,Zhangsan,zhangsan@example.com,active,95
+2,Lisi,lisiji@example.com,inactive,88
+3,Wangwu,wangwu@example.com,active,92
+```
+
 ### 5.2 SQL Export
+
+SQL format includes complete CREATE TABLE and INSERT statements, can be directly imported into MySQL:
 
 ```bash
 # Command line
@@ -217,7 +242,161 @@ cd build/gui
 4. View export results in Log tab
 ```
 
-### 5.3 IBD Export
+**Output Example**:
+```sql
+-- Table: users
+
+INSERT INTO users VALUES (1,'Zhangsan','zhangsan@example.com','active',95);
+INSERT INTO users VALUES (2,'Lisi','lisiji@example.com','inactive',88);
+INSERT INTO users VALUES (3,'Wangwu','wangwu@example.com','active',92);
+```
+
+### 5.3 JSON Export
+
+JSON format is suitable for web applications and API data exchange:
+
+```bash
+# Command line
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=json
+
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
+```
+
+**Output Example**:
+```json
+[
+  {
+    "id": "1",
+    "name": "Zhangsan",
+    "email": "zhangsan@example.com",
+    "status": "active",
+    "score": "95"
+  },
+  {
+    "id": "2",
+    "name": "Lisi",
+    "email": "lisiji@example.com",
+    "status": "inactive",
+    "score": "88"
+  }
+]
+```
+
+### 5.4 XML Export
+
+XML format is suitable for system integration and configuration files:
+
+```bash
+# Command line
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=xml
+
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
+```
+
+**Output Example**:
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<records>
+  <record>
+    <id>1</id>
+    <name>Zhangsan</name>
+    <email>zhangsan@example.com</email>
+    <status>active</status>
+    <score>95</score>
+  </record>
+  <record>
+    <id>2</id>
+    <name>Lisi</name>
+    <email>lisiji@example.com</email>
+    <status>inactive</status>
+    <score>88</score>
+  </record>
+</records>
+```
+
+### 5.5 YAML Export
+
+YAML format is suitable for configuration files and scripts:
+
+```bash
+# Command line
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=yaml
+
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
+```
+
+**Output Example**:
+```yaml
+- id: "1"
+  name: "Zhangsan"
+  email: "zhangsan@example.com"
+  status: "active"
+  score: "95"
+- id: "2"
+  name: "Lisi"
+  email: "lisiji@example.com"
+  status: "inactive"
+  score: "88"
+```
+
+### 5.6 Avro Export
+
+Avro format is suitable for Hadoop and big data processing:
+
+```bash
+# Command line
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=avro
+
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
+```
+
+**Output Example** (binary format):
+```
+Obj
+{"type":"record","name":"users","fields":[{"name":"id","type":"long"},...]}
+...
+```
+
+### 5.7 TEXT Export
+
+TEXT (plain text) format is suitable for human reading and logging:
+
+```bash
+# Command line
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovered --format=text
+
+# GUI
+1. Open GUI
+2. Select Recovery tab
+3. Click "Start Recovery"
+4. View export results in Log tab
+```
+
+**Output Example**:
+```
+id=1 | name=Zhangsan | email=zhangsan@example.com | status=active | score=95
+id=2 | name=Lisi | email=lisiji@example.com | status=inactive | score=88
+```
+
+### 5.8 IBD Export
+
+IBD format is used to repair corrupted tablespace files:
 
 ```bash
 # Command line
@@ -229,6 +408,8 @@ cd build/gui
 3. Click "Start Recovery"
 4. View export results in Log tab
 ```
+
+**Note**: IBD export mode repairs corrupted page headers and checksums, generating a remountable IBD file.
 
 ---
 

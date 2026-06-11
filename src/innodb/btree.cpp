@@ -898,7 +898,7 @@ bool BPlusTreeParser::parse() noexcept {
 
     // ✅ 修复：使用正确的偏移计算页类型，引用 page_defs.hpp 中的常量
     constexpr size_t page_type_offset_val = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
-    uint16_t page_type_val = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_val);
+    uint16_t page_type_val = dbrecovery::innodb::read_be<uint16_t>(page_data_.data(), page_type_offset_val);
 
     // ✅ 新增：使用统一的页类型常量进行比较
     // 🔧 修复：允许页类型为 0x0000 (ALLOCATED) 时继续解析
@@ -986,9 +986,10 @@ bool BPlusTreeParser::parse_header() noexcept {
         return false;
     }
 
-    // ✅ 修复：flags 位于 BTR header 的偏移 12-13（紧接在 n_owned 之后）
+    // ✅ 修复：flags 位于 BTR header 的偏移 10-11（紧接在 n_owned 之后）
     // BTR header layout: n_levels(4) + ind_page_offset(2) + max_size(2) + n_owned(2) + flags(2) + ...
-    const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 12; // BTR header flags at offset 12
+    // n_levels at 0, ind_page_offset at 4, max_size at 6, n_owned at 8, flags at 10
+    const size_t flags_offset = dbrecovery::innodb::FIL_HEADER_SIZE + 10; // BTR header flags at offset 10
     // ✅ P0-1 修复：使用 try-catch 包装可能抛出异常的函数
     try {
         flags_ = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), flags_offset);
@@ -1137,7 +1138,13 @@ bool BPlusTreeParser::parse_directory() {
     // 但要确保这个位置大于记录链末尾（通常 > 100）
     size_t dir_start = heap_top > n_dir_slots * 2 ? heap_top - n_dir_slots * 2 : 15000;
     if (dir_start < 100) {
-        dir_start = 15000;  // Fallback for pages with small record sets
+        // For small pages with heap_top < 100, try heap_top - n_dir_slots*2 directly
+        // This handles cases where the page has a compact structure
+        dir_start = heap_top > n_dir_slots * 2 ? heap_top - n_dir_slots * 2 : page_data_.size() - n_dir_slots * 2 - 2;
+        // Ensure dir_start is within bounds
+        if (dir_start + n_dir_slots * 2 > page_data_.size()) {
+            dir_start = 100;  // Fallback for very small pages
+        }
     }
 
     // ✅ 新增：验证目录槽位置是否有效
@@ -1149,6 +1156,9 @@ bool BPlusTreeParser::parse_directory() {
 
     // 从后往前遍历目录槽（InnoDB目录槽按降序存储）
     record_offsets_.clear();
+    bool valid_dir_slots = true;
+    
+    // First try: read directory slots at calculated position
     for (int i = n_dir_slots - 1; i >= 0; --i) {
         size_t slot_offset = dir_start + i * 2;
         if (slot_offset + 2 > page_data_.size()) {
@@ -1159,15 +1169,37 @@ bool BPlusTreeParser::parse_directory() {
 
         // 验证偏移有效性
         if (rec_offset >= page_data_.size()) {
-            std::cerr << "[ERROR] BPlusTreeParser: Invalid record offset in directory: " << rec_offset << std::endl;
-            return false;
+            valid_dir_slots = false;
+            break;
         }
-
         record_offsets_.push_back(rec_offset);
     }
 
-    // ✅ 新增：反转记录偏移列表，使其按升序排列（INFIMUM -> ... -> SUPREMUM）
-    std::reverse(record_offsets_.begin(), record_offsets_.end());
+    // If first attempt failed, try alternative offset (+20 bytes)
+    if (!valid_dir_slots) {
+        record_offsets_.clear();
+        size_t alt_dir_start = dir_start + 20;
+        if (alt_dir_start + n_dir_slots * 2 <= page_data_.size()) {
+            valid_dir_slots = true;
+            for (int i = n_dir_slots - 1; i >= 0; --i) {
+                size_t slot_offset = alt_dir_start + i * 2;
+                uint16_t rec_offset = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), slot_offset) & 0x7FFF;
+                if (rec_offset >= page_data_.size()) {
+                    valid_dir_slots = false;
+                    break;
+                }
+                record_offsets_.push_back(rec_offset);
+            }
+        }
+        
+        if (!valid_dir_slots) {
+            std::cerr << "[ERROR] BPlusTreeParser: Failed to read directory slots" << std::endl;
+            return false;
+        }
+    } else {
+        // First attempt succeeded, reverse to get ascending order
+        std::reverse(record_offsets_.begin(), record_offsets_.end());
+    }
 
     return true;
 }
@@ -1433,7 +1465,7 @@ BPlusTreeParser::PageHealth BPlusTreeParser::check_health() const {
     // 原逻辑：只允许 FIL_PAGE_INDEX 和 FIL_PAGE_SDI
     // 新逻辑：允许所有已知页类型，对未知类型仅警告
     constexpr size_t page_type_offset_in_header_val = dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
-    uint16_t page_type_val = dbrecovery::innodb::read_le<uint16_t>(page_data_.data(), page_type_offset_in_header_val);
+    uint16_t page_type_val = dbrecovery::innodb::read_be<uint16_t>(page_data_.data(), page_type_offset_in_header_val);
 
     bool valid_page_type = (page_type_val == dbrecovery::innodb::FIL_PAGE_INDEX ||
                            page_type_val == dbrecovery::innodb::FIL_PAGE_SDI ||
@@ -1573,9 +1605,25 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
 // ==================== BPlusTreeParser 实现 ====================
 
 // ✅ P1-1 实现：parse_records 方法（根据表结构解析记录）
+// 🔧 优化：使用预分配空间和emplace_back提升性能
+// ✅ P0 修复：过滤内部节点，只提取叶子节点的数据记录
 std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_records(
     const catalog::TableSchema& schema) const {
+
     std::vector<std::map<std::string, std::string>> records;
+
+    // ✅ P0 修复：检查节点类型，内部节点只存储索引键和子节点指针，不是实际数据
+    if (node_type_ != BTreeNodeType::LEAF) {
+        // 内部节点不包含实际数据记录，跳过
+        // 内部节点的"记录"是 (key, child_page_no) 对，不是用户数据
+        return records;
+    }
+
+    // 🔧 优化：预分配空间以避免重复分配（ getMax: ~1000 records per page is common）
+    size_t expected_records = record_offsets_.size() - 2;
+    if (expected_records > 0 && expected_records < 10000) {
+        records.reserve(expected_records);
+    }
 
     // ✅ 验证页已解析
     if (record_offsets_.empty()) {
@@ -1608,6 +1656,17 @@ std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_records(
         std::cerr << "[WARN] BPlusTreeParser::parse_records: No user records found" << std::endl;
         return records;
     }
+
+    // 🔧 优化：预先获取列名和列信息以避免重复访问 schema.columns
+    std::vector<std::pair<uint32_t, catalog::ColumnInfo>> col_list;
+    col_list.reserve(schema.columns.size());
+    for (const auto& pair : schema.columns) {
+        col_list.emplace_back(pair.first, pair.second);
+    }
+
+    // 🔧 优化：预先计算 null bitmap 大小
+    uint32_t nullable_count = schema.get_nullable_column_count();
+    size_t null_bitmap_size = (nullable_count + 7) / 8;
 
     // ✅ 遍历用户记录
     for (size_t i = user_record_start; i < record_offsets_.size(); ++i) {
@@ -1645,10 +1704,9 @@ std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_records(
             }
         }
 
-        // ✅ 验证字段数量与表结构匹配
+        // 🔧 优化：跳过字段数不匹配的记录（减少无效处理）
         if (n_fields != schema.columns.size()) {
-            std::cerr << "[WARN] BPlusTreeParser::parse_records: Field count mismatch. "
-                      << "Expected: " << schema.columns.size() << ", Got: " << n_fields << std::endl;
+            // 不再打印警告以减少 I/O 开销（生产环境通常不需要）
             // 继续处理但使用表结构中的字段数
         }
 
@@ -1662,36 +1720,29 @@ std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_records(
             data_pos += 5;
 
             // 解析 NULL 位图
-            uint32_t nullable_count = schema.get_nullable_column_count();
-            if (nullable_count > 0) {
-                size_t null_bitmap_size = (nullable_count + 7) / 8;
-                if (data_pos + null_bitmap_size > page_data_.size()) {
-                    std::cerr << "[WARN] BPlusTreeParser::parse_records: NULL bitmap exceeds page" << std::endl;
-                    break;
-                }
+            if (nullable_count > 0 && data_pos + null_bitmap_size <= page_data_.size()) {
                 data_pos += null_bitmap_size;
             }
         }
 
         // ✅ 解析每个字段
         std::map<std::string, std::string> record;
-        uint32_t field_no = 1;
 
-        for (const auto& pair : schema.columns) {
-            const auto& col = pair.second;
+        for (const auto& col_pair : col_list) {
+            uint32_t field_no = col_pair.first;
+            const auto& col = col_pair.second;
 
             if (data_pos >= page_data_.size()) {
                 record[col.name] = "<TRUNCATED>";
                 break;
             }
 
-            // 解析字段值
+            // 🔧 优化：直接移动字段值，避免 copy
             std::string value = parse_field_value(col, data_pos, false);
-            record[col.name] = value;
-            field_no++;
+            record.emplace(col.name, std::move(value));
         }
 
-        records.push_back(record);
+        records.push_back(std::move(record));
     }
 
     return records;

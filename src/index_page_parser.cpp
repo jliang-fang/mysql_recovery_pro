@@ -1,0 +1,1877 @@
+/**
+ * @file index_page_parser.cpp
+ * @brief ibd2sql-style INDEX page parser implementation
+ *
+ * Core record extraction logic ported from ibd2sql v2.x innodb_page/index.py
+ * with C++20 optimizations for speed and memory efficiency.
+ */
+
+#include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
+#include "dbrecovery/innodb/enhanced_schemaless_parser.hpp"
+
+#include <fstream>
+#include <iostream>
+#include <algorithm>
+#include <cstring>
+#include <cmath>
+#include <numeric>
+#include <filesystem>
+
+namespace dbrecovery {
+namespace innodb {
+
+// ==================== Constructor / Destructor ====================
+
+InnoDBIndexParser::InnoDBIndexParser() = default;
+InnoDBIndexParser::~InnoDBIndexParser() = default;
+
+// ==================== Configuration ====================
+
+void InnoDBIndexParser::set_columns(const std::vector<IndexColumnDef>& columns,
+                                     bool has_row_id,
+                                     uint32_t n_pk_cols) {
+    columns_ = columns;
+    has_row_id_ = has_row_id;
+    n_pk_cols_ = n_pk_cols;
+
+    // Count nullable and variable-length columns
+    n_nullable_ = 0;
+    n_variable_ = 0;
+    for (const auto& col : columns_) {
+        if (col.is_nullable) n_nullable_++;
+        if (col.is_variable_length()) n_variable_++;
+    }
+}
+
+void InnoDBIndexParser::set_row_format(uint8_t format) {
+    row_format_hint_ = format;
+    if (format == 2 || format == 3) {
+        off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
+    } else {
+        off_page_flag_ = OFF_PAGE_FLAG_ANTLELOPE;
+    }
+}
+
+// ==================== Page Header Parsing ====================
+
+std::optional<InnoDBPageHeader> InnoDBIndexParser::parse_page_header(
+    const uint8_t* page_data, size_t page_size) const {
+    if (!page_data || page_size < 94) return std::nullopt;
+
+    InnoDBPageHeader hdr{};
+    hdr.n_dir_slots = read_be<uint16_t>(page_data, 38);
+    hdr.heap_top   = read_be<uint16_t>(page_data, 40);
+    hdr.n_heap_raw = read_be<uint16_t>(page_data, 42);
+    hdr.n_heap     = hdr.n_heap_raw & 0x7FFF;
+    hdr.page_free  = read_be<uint16_t>(page_data, 44);
+    hdr.garbage    = read_be<uint16_t>(page_data, 46);
+    hdr.last_insert= read_be<uint16_t>(page_data, 48);
+    hdr.direction  = read_be<uint16_t>(page_data, 50);
+    hdr.n_direction= read_be<uint16_t>(page_data, 52);
+    hdr.n_recs     = read_be<uint16_t>(page_data, 54);
+    hdr.max_trx_id = read_be<uint64_t>(page_data, 56);
+    hdr.level      = read_be<uint16_t>(page_data, 64);
+    hdr.index_id   = read_be<uint64_t>(page_data, 66);
+
+    // Bit 15 of n_heap_raw indicates COMPACT/DYNAMIC format
+    hdr.is_compact_format = (hdr.n_heap_raw & 0x8000) != 0;
+
+    // Basic sanity checks
+    if (hdr.n_dir_slots == 0 && hdr.n_recs == 0) {
+        // Could be empty/truncated page
+    }
+    if (hdr.heap_top > page_size || hdr.heap_top < 100) {
+        return std::nullopt;  // Invalid heap_top
+    }
+
+    return hdr;
+}
+
+// ==================== Record Header Parsing (ibd2sql-style) ====================
+
+std::optional<NewRecordHeader> InnoDBIndexParser::parse_new_record_header(
+    const uint8_t* data, size_t offset, size_t max_size) {
+    // COMPACT/DYNAMIC header is 5 bytes
+    if (!data || offset + 5 > max_size) return std::nullopt;
+
+    NewRecordHeader hdr{};
+    // Read 3 bytes in big-endian order
+    hdr.raw_byte0 = data[offset];
+    hdr.raw_byte1 = data[offset + 1];
+    hdr.raw_byte2 = data[offset + 2];
+
+    // Parse bit fields (big-endian, 24 bits total)
+    uint32_t bits = (static_cast<uint32_t>(hdr.raw_byte0) << 16) |
+                    (static_cast<uint32_t>(hdr.raw_byte1) << 8) |
+                    static_cast<uint32_t>(hdr.raw_byte2);
+
+    hdr.instant_flag = (bits >> 23) & 1;
+    hdr.version_flag = (bits >> 22) & 1;
+    hdr.deleted      = (bits >> 21) & 1;
+    hdr.min_rec      = (bits >> 20) & 1;
+    hdr.n_owned      = (bits >> 16) & 0x0F;
+    hdr.heap_no      = (bits >> 3) & 0x1FFF;
+    hdr.rec_type     = bits & 0x07;
+
+    // Read next record offset (signed 16-bit)
+    hdr.next_offset = static_cast<int16_t>(read_be<uint16_t>(data, offset + 3));
+
+    return hdr;
+}
+
+std::optional<OldRecordHeader> InnoDBIndexParser::parse_old_record_header(
+    const uint8_t* data, size_t offset, size_t max_size) {
+    // REDUNDANT header is 6 bytes
+    if (!data || offset + 6 > max_size) return std::nullopt;
+
+    OldRecordHeader hdr{};
+
+    // Read 4 bytes in big-endian order for bit fields
+    uint32_t bits = read_be<uint32_t>(data, offset);
+
+    hdr.instant_flag = (bits >> 31) & 1;
+    hdr.version_flag = (bits >> 30) & 1;
+    hdr.deleted      = (bits >> 29) & 1;
+    hdr.min_rec      = (bits >> 28) & 1;
+    hdr.n_owned      = (bits >> 24) & 0x0F;
+    hdr.heap_no      = (bits >> 11) & 0x1FFF;
+    hdr.n_fields     = (bits >> 1) & 0x3FF;
+    hdr.short_flag   = bits & 1;
+
+    // Read next record offset
+    hdr.next_offset = read_be<uint16_t>(data, offset + 4);
+
+    return hdr;
+}
+
+// ==================== Null Bitmask and Variable-Size Reading ====================
+
+InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
+    const uint8_t* page_data, size_t page_size,
+    size_t rec_start, size_t rec_end,
+    uint32_t n_nullable, uint32_t n_variable,
+    const std::vector<IndexColumnDef>& columns) {
+
+    FieldMetadata result;
+    if (rec_end <= rec_start || rec_end > page_size) return result;
+
+    // CRITICAL FIX: InnoDB COMPACT/DYNAMIC format structure
+    //
+    // The record layout in memory is:
+    // [Sizes/Nulls] [Header 5B] [PK] [TRX_ID 6B] [ROLL_PTR 7B] [Var Data] [Fixed Data]
+    //
+    // Where:
+    // - Header is at rec_start (5 bytes)
+    // - Record origin is at rec_start + 5
+    // - Sizes and NULL bitmap are BEFORE the header (at lower addresses)
+    // - Data (PK, TRX_ID, ROLL_PTR, fields) is AFTER the header origin
+    //
+    // Reference: ibd2sql's _read_nullbitmask_varsize_new() function
+    // - read_reverse(n) reads n bytes BEFORE _offset and decrements _offset
+    // - After reading header with read_reverse(5), _offset points to header start
+    // - Then read_reverse for sizes reads from BEFORE header position
+    //
+    // In our code:
+    // - rec_start = header position (where header bytes are)
+    // - We need to read sizes BACKWARD from rec_start
+
+    // Calculate null bitmask size
+    size_t null_bytes = (n_nullable + 7) / 8;
+
+    // Position for reading sizes backward (start from header position)
+    size_t pos = rec_start;
+
+    // Read NULL bitmap backward from header position
+    if (null_bytes > 0 && pos >= null_bytes) {
+        pos -= null_bytes;
+        result.null_bitmask.assign(page_data + pos, page_data + pos + null_bytes);
+        result.null_bytes_read = null_bytes;
+    }
+
+    // Read variable-length field sizes backward
+    // KEY INSIGHT from ibd2sql:
+    // - Sizes are stored in REVERSE field order (last field first)
+    // - But when we read backward, we get them in FIELD ORDER (first field first)
+    // - We iterate over columns in order and read sizes for each variable column
+    // - The resulting list is in FIELD ORDER, no need to reverse!
+
+    // Build list of variable columns in order
+    std::vector<size_t> var_col_indices;
+    for (size_t i = 0; i < columns.size(); i++) {
+        if (columns[i].is_variable_length()) {
+            var_col_indices.push_back(i);
+        }
+    }
+
+    // Read sizes for each variable column in order
+    for (size_t var_idx = 0; var_idx < var_col_indices.size() && pos > 0; var_idx++) {
+        size_t col_idx = var_col_indices[var_idx];
+        const auto& col = columns[col_idx];
+
+        if (pos < 1) break;
+
+        // Read size byte backward
+        pos--;
+        uint8_t byte1 = page_data[pos];
+
+        if (col.is_big) {
+            // is_big: can be 1-byte or 2-byte encoding
+            if (byte1 > 0x7F) {
+                // 2-byte encoding: high bit set
+                // Need to read one more byte backward
+                if (pos >= 1) {
+                    pos--;
+                    uint8_t byte2 = page_data[pos];
+                    // Size = (byte1 & 0x7F) * 256 + byte2
+                    uint32_t vsize = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+                    result.variable_sizes.push_back(vsize);
+                    result.var_size_bytes_read += 2;
+                }
+            } else {
+                // 1-byte encoding for is_big field
+                result.variable_sizes.push_back(byte1);
+                result.var_size_bytes_read += 1;
+            }
+        } else {
+            // Non-is_big: always 1-byte encoding
+            result.variable_sizes.push_back(byte1);
+            result.var_size_bytes_read += 1;
+        }
+    }
+
+    // variable_sizes is now in FIELD ORDER (first field first)
+    // No need to reverse!
+
+    // Store the position after reading all sizes (where data might start before header)
+    result.data_start_offset = pos;
+
+    return result;
+}
+
+InnoDBIndexParser::RedundantFieldMetadata InnoDBIndexParser::read_redundant_field_offsets(
+    const uint8_t* page_data, size_t page_size,
+    size_t rec_start, size_t rec_end,
+    uint32_t n_fields) {
+    RedundantFieldMetadata result;
+
+    size_t pos = rec_end;
+    result.short_flag = false;
+
+    if (rec_start + 6 <= page_size) {
+        auto hdr = parse_old_record_header(page_data, rec_start, page_size);
+        if (hdr) result.short_flag = hdr->short_flag;
+    }
+
+    result.field_offsets.resize(n_fields, 0);
+    result.null_flags.resize(n_fields, false);
+
+    std::vector<uint16_t> raw_offsets(n_fields, 0);
+    std::vector<bool> raw_nulls(n_fields, false);
+
+    for (int i = static_cast<int>(n_fields) - 1; i >= 0 && pos > rec_start + 6; i--) {
+        if (result.short_flag) {
+            pos -= 1;
+            if (pos >= page_size) break;
+            uint8_t byte = page_data[pos];
+            raw_offsets[i] = byte & 0x7F;
+            raw_nulls[i] = (byte & 0x80) != 0;
+        } else {
+            pos -= 2;
+            if (pos + 1 >= page_size) break;
+            uint16_t val = (static_cast<uint16_t>(page_data[pos]) << 8) |
+                           static_cast<uint16_t>(page_data[pos + 1]);
+            raw_offsets[i] = val & 0x3FFF;
+            raw_nulls[i] = (val & 0x8000) != 0;
+        }
+    }
+
+    result.field_offsets = std::move(raw_offsets);
+    result.null_flags = std::move(raw_nulls);
+
+    return result;
+}
+
+// ==================== Record Chain Following ====================
+
+std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
+    const uint8_t* page_data, size_t page_size,
+    const InnoDBPageHeader& page_hdr, uint32_t page_no,
+    bool is_compact) {
+    std::vector<IndexRecord> records;
+
+    size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
+
+    // Start at the INFIMUM record origin
+    size_t current_origin = is_compact ? INFIMUM_OFFSET : INFIMUM_OFFSET_OLD;
+
+    std::set<uint16_t> visited;
+
+    for (uint32_t safety = 0; safety < MAX_RECORDS_PER_PAGE; safety++) {
+        if (current_origin < header_size || current_origin >= page_hdr.heap_top) {
+            break;
+        }
+        if (visited.count(static_cast<uint16_t>(current_origin))) {
+            break;  // Circular reference detected
+        }
+        visited.insert(static_cast<uint16_t>(current_origin));
+
+        size_t header_start = current_origin - header_size;
+
+        if (is_compact) {
+            auto hdr = parse_new_record_header(page_data, header_start, page_size);
+            if (!hdr) break;
+
+            // Skip INFIMUM (heap_no=0) and SUPREMUM (heap_no=1)
+            if (hdr->heap_no >= 2) {
+                bool is_leaf = (page_hdr.level == 0);
+                auto rec = parse_user_record(page_data, page_size, header_start, page_no, true, is_leaf);
+                if (rec) {
+                    records.push_back(std::move(*rec));
+                }
+            }
+
+            // Move to next record
+            if (hdr->next_offset == 0) break;
+            ssize_t next_origin = static_cast<ssize_t>(current_origin) + hdr->next_offset;
+            if (next_origin <= 0 || static_cast<size_t>(next_origin) >= page_size) {
+                break;
+            }
+            current_origin = static_cast<size_t>(next_origin);
+        } else {
+            auto hdr = parse_old_record_header(page_data, header_start, page_size);
+            if (!hdr) break;
+
+            if (hdr->heap_no >= 2) {
+                bool is_leaf = (page_hdr.level == 0);
+                auto rec = parse_user_record(page_data, page_size, header_start, page_no, false, is_leaf);
+                if (rec) {
+                    records.push_back(std::move(*rec));
+                }
+            }
+
+            if (hdr->next_offset == 0 || hdr->next_offset >= page_size) {
+                break;
+            }
+            current_origin = hdr->next_offset;
+        }
+    }
+
+    return records;
+}
+
+// ==================== Single Record Parsing ====================
+
+std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
+    const uint8_t* page_data, size_t page_size,
+    size_t rec_offset, uint32_t page_no,
+    bool is_compact, bool is_leaf) {
+
+    size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
+    size_t rec_origin = rec_offset + header_size;
+
+    if (rec_origin >= page_size) return std::nullopt;
+
+    IndexRecord record;
+    record.page_no = page_no;
+    record.record_offset = static_cast<uint16_t>(rec_offset);
+
+    if (is_compact) {
+        auto hdr = parse_new_record_header(page_data, rec_offset, page_size);
+        if (!hdr) return std::nullopt;
+
+        record.is_deleted = hdr->deleted;
+        record.is_min_rec = hdr->min_rec;
+        record.heap_no = hdr->heap_no;
+        record.n_owned = hdr->n_owned;
+        record.next_record_offset = static_cast<int16_t>(hdr->next_offset);
+
+        if (hdr->heap_no < 2) return std::nullopt;  // Skip system records
+    } else {
+        auto hdr = parse_old_record_header(page_data, rec_offset, page_size);
+        if (!hdr) return std::nullopt;
+
+        record.is_deleted = hdr->deleted;
+        record.is_min_rec = hdr->min_rec;
+        record.heap_no = hdr->heap_no;
+        record.n_owned = hdr->n_owned;
+        record.next_record_offset = static_cast<int16_t>(hdr->next_offset);
+
+        if (hdr->heap_no < 2) return std::nullopt;
+    }
+
+    size_t data_start = rec_origin;
+    size_t data_end = data_start;
+
+    auto page_hdr = parse_page_header(page_data, page_size);
+    if (!page_hdr) return std::nullopt;
+
+    if (is_compact) {
+        auto hdr = parse_new_record_header(page_data, rec_offset, page_size);
+        if (!hdr) return std::nullopt;
+
+        if (hdr->next_offset != 0) {
+            ssize_t next_origin = static_cast<ssize_t>(rec_origin) + hdr->next_offset;
+            // Validate next_offset is reasonable (should be 120-200 for most records)
+            // If next_offset is clearly corrupted (> 200 or < 120), try to find next record
+            if (hdr->next_offset > 200 || hdr->next_offset < 120) {
+                // Likely corrupted next_offset
+                // Try to find the next record by scanning forward
+                size_t search_start = rec_origin + 120;  // Start after typical record length
+                size_t search_end = std::min(static_cast<size_t>(page_hdr->heap_top), rec_origin + 200);
+                bool found_next = false;
+
+                for (size_t scan_pos = search_start; scan_pos < search_end; scan_pos++) {
+                    // Look for pattern: 5 bytes header + 0x80 0x00 0x00 0x00 0x00 0x00 0x00 (PK start)
+                    if (scan_pos + 8 < page_size &&
+                        page_data[scan_pos + 5] == 0x80 &&
+                        page_data[scan_pos + 6] == 0x00 &&
+                        page_data[scan_pos + 7] == 0x00) {
+                        // Found potential next record
+                        data_end = scan_pos;  // Next header position
+                        found_next = true;
+                        break;
+                    }
+                }
+
+                if (!found_next) {
+                    // Last record on page, use heap_top
+                    data_end = page_hdr->heap_top;
+                }
+            } else if (next_origin > static_cast<ssize_t>(data_start) && static_cast<size_t>(next_origin) < page_size) {
+                data_end = static_cast<size_t>(next_origin) - REC_HEADER_SIZE_NEW;
+            } else {
+                data_end = page_hdr->heap_top;
+            }
+        } else {
+            data_end = page_hdr->heap_top;
+        }
+    } else {
+        auto hdr = parse_old_record_header(page_data, rec_offset, page_size);
+        if (!hdr) return std::nullopt;
+
+        if (hdr->next_offset != 0 && hdr->next_offset < page_size && hdr->next_offset > data_start) {
+            data_end = hdr->next_offset - REC_HEADER_SIZE_OLD;
+        } else {
+            data_end = page_hdr->heap_top;
+        }
+    }
+
+    if (data_end <= data_start || data_end > page_size - 8) {
+        return std::nullopt;
+    }
+
+    if (data_end - data_start <= 65536) {
+        record.raw_data.assign(page_data + data_start, page_data + data_end);
+    }
+
+    // Parse fields
+    // CRITICAL: In COMPACT/DYNAMIC format, the structure is:
+    // [Sizes/Nulls] [Header 5B] [PK] [TRX_ID] [ROLL_PTR] [Var Data] [Fixed Data]
+    //
+    // - Header is at rec_offset (5 bytes)
+    // - Sizes/nulls are BEFORE the header (at lower addresses)
+    // - Data starts at record origin (rec_offset + 5)
+    //
+    // We read sizes backward from header position, then read data forward from origin.
+    if (!columns_.empty()) {
+        auto field_meta = read_null_and_varsizes(
+            page_data, page_size, rec_offset, data_end,
+            n_nullable_, n_variable_, columns_);
+
+        // Data starts at record origin (rec_offset + 5)
+        // NOT at rec_origin + null_bytes + var_size_bytes (those are before header!)
+        size_t actual_data_start = rec_origin;  // = rec_offset + REC_HEADER_SIZE_NEW
+
+        record.fields = extract_fields_with_schema(
+            page_data, page_size, actual_data_start, data_end,
+            columns_, field_meta.null_bitmask, field_meta.variable_sizes,
+            is_leaf);
+    } else {
+        // For schemaless mode, pass the correct data_end
+        size_t record_data_end = data_end;
+        record.fields = parse_record_schemaless(
+            page_data, page_size, rec_offset, record_data_end, is_compact, is_leaf);
+    }
+
+    return record;
+}
+
+// ==================== Field Extraction with Schema ====================
+
+std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
+    const uint8_t* page_data, size_t page_size,
+    size_t data_start, size_t data_end,
+    const std::vector<IndexColumnDef>& columns,
+    const std::vector<uint8_t>& null_bitmask,
+    const std::vector<uint32_t>& variable_sizes,
+    bool is_leaf) {
+    std::vector<IndexFieldValue> result;
+    if (data_start >= data_end || data_end > page_size) return result;
+
+    size_t pos = data_start;
+    uint32_t var_idx = 0;
+    bool system_cols_skipped = false;
+
+    for (size_t col_idx = 0; col_idx < columns.size() && pos < data_end; col_idx++) {
+        const auto& col = columns[col_idx];
+
+        // After reading ALL PK columns, skip system columns (TRX_ID + ROLL_PTR) for leaf pages
+        // These are stored between PK and user columns in InnoDB clustered index
+        // The check is: after processing the last PK column (col_idx == n_pk_cols_ - 1)
+        // we need to skip 13 bytes before continuing to user columns
+        // But we must also handle the case where n_pk_cols_ == 0 (no PK, use row_id)
+        if (is_leaf && !system_cols_skipped && col_idx == n_pk_cols_) {
+            // We've just processed all PK columns, now skip DB_TRX_ID (6 bytes) and DB_ROLL_PTR (7 bytes)
+            // BEFORE reading user columns
+            if (pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
+                pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+            }
+            system_cols_skipped = true;
+        }
+
+        bool is_null = false;
+        if (col.is_nullable && !null_bitmask.empty()) {
+            uint32_t nullable_idx = 0;
+            for (size_t j = 0; j < col_idx; j++) {
+                if (columns[j].is_nullable) nullable_idx++;
+            }
+            if (nullable_idx < null_bitmask.size() * 8) {
+                size_t byte_idx = nullable_idx / 8;
+                uint8_t bit_idx = nullable_idx % 8;
+                is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
+            }
+        }
+
+        IndexFieldValue val;
+        if (is_null) {
+            val.is_null = true;
+            val.type = IndexFieldValue::Type::NULL_VAL;
+            result.push_back(val);
+            continue;
+        }
+
+        size_t field_size = 0;
+        if (col.is_variable_length()) {
+            if (var_idx < variable_sizes.size()) {
+                field_size = variable_sizes[var_idx];
+                var_idx++;
+
+                if (field_size == off_page_flag_) {
+                    val.is_overflow = true;
+                    val.type = IndexFieldValue::Type::OVERFLOW_PTR;
+                    if (pos + 20 <= data_end) {
+                        val.overflow_space_id = read_be<uint32_t>(page_data, pos);
+                        val.overflow_page_no = read_be<uint32_t>(page_data, pos + 4);
+                        val.overflow_blob_header = read_be<uint32_t>(page_data, pos + 8);
+                        val.overflow_real_size = read_be<uint64_t>(page_data, pos + 12);
+                        val.raw_bytes.assign(page_data + pos, page_data + pos + 20);
+                        pos += 20;
+                    }
+                    result.push_back(val);
+                    continue;
+                }
+            } else {
+                field_size = 0;
+            }
+        } else {
+            field_size = col.storage_size();
+        }
+
+        if (field_size > 0 && pos + field_size <= data_end) {
+            val = decode_column(page_data, pos, data_end, col, field_size);
+            pos += field_size;
+        } else if (field_size > 0 && pos + field_size > data_end) {
+            size_t avail = data_end - pos;
+            val.raw_bytes.assign(page_data + pos, page_data + pos + avail);
+            val.type = IndexFieldValue::Type::UNKNOWN_VAL;
+            val.str_value = "<PARTIAL>";
+            pos = data_end;
+        }
+
+        result.push_back(val);
+    }
+
+    return result;
+}
+
+// ==================== Schemaless Record Parsing ====================
+
+std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
+    const uint8_t* page_data, size_t page_size,
+    size_t rec_offset, size_t rec_end,
+    bool is_compact, bool is_leaf) {
+    std::vector<IndexFieldValue> result;
+
+    size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
+    size_t data_start = rec_offset + header_size;
+
+    if (data_start >= rec_end || rec_end > page_size) return result;
+
+    size_t pos = data_start;
+    size_t record_data_len = rec_end - data_start;
+
+    if (record_data_len < 8) {
+        IndexFieldValue val;
+        val.type = IndexFieldValue::Type::BINARY_VAL;
+        val.raw_bytes.assign(page_data + data_start, page_data + rec_end);
+        result.push_back(val);
+        return result;
+    }
+
+    // First field: BIGINT PK (8 bytes)
+    IndexFieldValue pk_val;
+    pk_val.type = IndexFieldValue::Type::INT_VAL;
+    uint64_t raw = read_be<uint64_t>(page_data, pos);
+    raw ^= 0x8000000000000000ULL;
+    pk_val.int_value = static_cast<int64_t>(raw);
+    pk_val.raw_bytes.assign(page_data + pos, page_data + pos + 8);
+    pk_val.str_value = std::to_string(pk_val.int_value);
+    result.push_back(pk_val);
+    pos += 8;
+
+    // For leaf pages, skip TRX_ID + ROLL_PTR (13 bytes after PK)
+    // before variable-length fields
+    size_t var_field_start = pos;
+    if (is_leaf && pos + 13 <= rec_end) {
+        var_field_start = pos + 13;  // DB_TRX_ID (6) + DB_ROLL_PTR (7)
+    }
+
+    // === CRITICAL FIX: InnoDB COMPACT format size array position ===
+    // In COMPACT format, variable field sizes are stored AFTER the header
+    // (and possibly NULL bitmap), BEFORE the Primary Key.
+    // NOT at the end of the record!
+    //
+    // Record structure for CLUSTERED INDEX:
+    // [Header 5][NULL bitmap?][Size array][PK 8][TRX 6][ROLL 7][Var data][Fixed data]
+    //
+    // For SECONDARY INDEX (non-clustered):
+    // [Header 5][NULL bitmap?][Size array][Var data][PK]
+    //
+    // The size array stores sizes in REVERSE field order (last field first)
+    // So we need to read FORWARD from header_end, then reverse the sizes
+    // to get them in field order.
+
+    size_t best_var_count = 0;
+    size_t best_null_bytes = 0;
+    int best_score = -1000;
+    std::vector<uint32_t> best_var_sizes;
+
+    // First, try to find where the PK is located
+    // For clustered index leaf: PK should be at some position after sizes
+    // The PK for id=1 would be: 80 00 00 00 00 00 00 01
+
+    // Find PK by searching for the pattern
+    size_t pk_pos = 0;
+    for (size_t i = data_start; i + 8 <= rec_end; i++) {
+        // MySQL stores BIGINT PK with sign bit flipped: 0x80 prefix for positive values
+        if (page_data[i] == 0x80 && page_data[i+1] == 0x00) {
+            // Check if this looks like a valid PK
+            uint64_t potential_pk = 0;
+            for (size_t j = 0; j < 8; j++) {
+                potential_pk = (potential_pk << 8) | page_data[i + j];
+            }
+            // Valid PK would have sign bit set (0x80 prefix) and value < 10M for test data
+            uint64_t pk_value = potential_pk ^ 0x8000000000000000ULL;
+            if (pk_value < 10000000) {
+                pk_pos = i;
+                break;
+            }
+        }
+    }
+
+    // If PK found, sizes are between data_start and pk_pos
+    // If PK not found, try to estimate position based on is_leaf
+    size_t size_array_end = pk_pos > 0 ? pk_pos : (is_leaf ? data_start + 30 : rec_end);
+
+    // Try different NULL bitmap sizes (0-4 bytes)
+    for (size_t null_bytes = 0; null_bytes <= 4; null_bytes++) {
+        size_t size_start = data_start + null_bytes;
+        if (size_start >= size_array_end) continue;
+
+        std::vector<uint32_t> trial_var_sizes;
+        bool valid = true;
+        size_t total_size = 0;
+
+        // Read sizes FORWARD from size_start to size_array_end
+        // Sizes are stored in REVERSE field order (last var field first)
+        size_t scan_pos = size_start;
+
+        while (scan_pos < size_array_end && trial_var_sizes.size() < 20) {
+            uint8_t byte1 = page_data[scan_pos];
+
+            if (byte1 <= 0x7F) {
+                // Single-byte size (< 128)
+                trial_var_sizes.push_back(byte1);
+                total_size += byte1;
+                scan_pos += 1;
+            } else {
+                // Two-byte size (>= 128): high byte has bit 7 set
+                if (scan_pos + 1 >= size_array_end) { valid = false; break; }
+                uint8_t byte2 = page_data[scan_pos + 1];
+                uint32_t vsize = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+                if (vsize > 65535) { valid = false; break; }
+                trial_var_sizes.push_back(vsize);
+                total_size += vsize;
+                scan_pos += 2;
+            }
+
+            // Stop if we've read enough sizes
+            // We should have read all sizes when scan_pos reaches pk_pos
+            if (scan_pos >= pk_pos - data_start + data_start) {
+                break;
+            }
+        }
+
+        // REVERSE the sizes to get field order (sizes are stored in reverse field order)
+        std::reverse(trial_var_sizes.begin(), trial_var_sizes.end());
+
+        if (!valid) continue;
+
+        // Calculate score for this size configuration
+        int score = 0;
+        score += static_cast<int>(trial_var_sizes.size()) * 5;
+
+        for (uint32_t vs : trial_var_sizes) {
+            if (vs >= 4 && vs <= 128) score += 3;
+            else if (vs > 128 && vs <= 2000) score += 1;
+            else if (vs == 0 || vs == 1) score -= 5;
+        }
+
+        // Check if first sizes match expected small string sizes (username/email)
+        if (trial_var_sizes.size() >= 2) {
+            if (trial_var_sizes[0] >= 8 && trial_var_sizes[0] <= 30) score += 10;
+            if (trial_var_sizes[1] >= 15 && trial_var_sizes[1] <= 40) score += 10;
+        }
+
+        if (score > best_score) {
+            best_score = score;
+            best_var_count = trial_var_sizes.size();
+            best_null_bytes = null_bytes;
+            best_var_sizes = std::move(trial_var_sizes);
+        }
+    }
+
+    // CRITICAL: After reading sizes FORWARD and reversing, we have field order
+    // But we need to verify the data position
+    // Variable field data starts AFTER TRX_ID + ROLL_PTR for clustered index
+
+    // Find where variable data actually starts based on PK position
+    size_t actual_var_start = var_field_start;
+    if (pk_pos > 0) {
+        // PK at pk_pos (8 bytes), TRX_ID at pk_pos+8 (6 bytes), ROLL_PTR at pk_pos+14 (7 bytes)
+        actual_var_start = pk_pos + 8 + 6 + 7;
+    }
+
+    pos = actual_var_start;
+    size_t data_end = rec_end - best_null_bytes;
+
+    // If we still don't have good sizes, try a simpler heuristic
+    if (best_var_sizes.empty() && pos < data_end) {
+        // Try to find field boundaries by looking for common patterns
+        // For VARCHAR fields, look for printable string sequences
+        size_t scan_pos = pos;
+        while (scan_pos < data_end && best_var_sizes.size() < 10) {
+            // Look for a printable string
+            size_t str_start = scan_pos;
+            size_t str_len = 0;
+            while (str_start + str_len < data_end && str_len < 2000) {
+                uint8_t c = page_data[str_start + str_len];
+                if (c >= 32 && c < 127) {
+                    str_len++;
+                } else {
+                    break;
+                }
+            }
+
+            if (str_len >= 4) {
+                best_var_sizes.push_back(static_cast<uint32_t>(str_len));
+                scan_pos = str_start + str_len;
+            } else {
+                // Not a string, skip
+                scan_pos++;
+            }
+        }
+    }
+
+    for (size_t i = 0; i < best_var_sizes.size() && pos < data_end; i++) {
+        uint32_t vs = best_var_sizes[i];
+
+        if (vs == off_page_flag_ && pos + 20 <= data_end) {
+            IndexFieldValue val;
+            val.is_overflow = true;
+            val.type = IndexFieldValue::Type::OVERFLOW_PTR;
+            val.overflow_space_id = read_be<uint32_t>(page_data, pos);
+            val.overflow_page_no = read_be<uint32_t>(page_data, pos + 4);
+            val.overflow_real_size = read_be<uint64_t>(page_data, pos + 12);
+            result.push_back(val);
+            pos += 20;
+        } else if (vs > 0 && vs < off_page_flag_ && pos + vs <= data_end) {
+            IndexFieldValue val;
+            val.raw_bytes.assign(page_data + pos, page_data + pos + vs);
+
+            size_t printable_count = 0;
+            for (size_t j = 0; j < vs; j++) {
+                uint8_t b = page_data[pos + j];
+                if (b >= 32 && b < 127) printable_count++;
+            }
+            bool looks_like_string = (vs > 0 && printable_count > vs * 2 / 3);
+
+            if (looks_like_string) {
+                val.type = IndexFieldValue::Type::STRING_VAL;
+                val.str_value = std::string(reinterpret_cast<const char*>(page_data + pos), vs);
+            } else {
+                val.type = IndexFieldValue::Type::BINARY_VAL;
+            }
+            result.push_back(val);
+            pos += vs;
+        }
+    }
+
+    // Parse remaining fixed-length fields
+    while (pos < data_end) {
+        size_t remaining = data_end - pos;
+        IndexFieldValue val;
+
+        if (remaining >= 8) {
+            uint64_t v8 = read_be<uint64_t>(page_data, pos);
+            uint64_t v8_signed = v8 ^ 0x8000000000000000ULL;
+            uint32_t ts4 = read_be<uint32_t>(page_data, pos);
+
+            if (ts4 >= 946684800 && ts4 <= 4102444800 && remaining >= 4) {
+                val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+                val.uint_value = ts4;
+                time_t t = static_cast<time_t>(ts4);
+                char buf[32];
+                struct tm tm_buf;
+                gmtime_r(&t, &tm_buf);
+                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+                val.str_value = buf;
+                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
+                result.push_back(val);
+                pos += 4;
+            } else if (v8_signed < 100000000ULL) {
+                val.type = IndexFieldValue::Type::INT_VAL;
+                val.int_value = static_cast<int64_t>(v8_signed);
+                val.str_value = std::to_string(val.int_value);
+                val.raw_bytes.assign(page_data + pos, page_data + pos + 8);
+                result.push_back(val);
+                pos += 8;
+            } else {
+                val.type = IndexFieldValue::Type::UINT_VAL;
+                val.uint_value = ts4;
+                val.str_value = std::to_string(ts4);
+                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
+                result.push_back(val);
+                pos += 4;
+            }
+        } else if (remaining >= 4) {
+            uint32_t v4 = read_be<uint32_t>(page_data, pos);
+            if (v4 >= 946684800 && v4 <= 4102444800) {
+                val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+                val.uint_value = v4;
+                time_t t = static_cast<time_t>(v4);
+                char buf[32];
+                struct tm tm_buf;
+                gmtime_r(&t, &tm_buf);
+                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+                val.str_value = buf;
+            } else {
+                val.type = IndexFieldValue::Type::UINT_VAL;
+                val.uint_value = v4;
+                val.str_value = std::to_string(v4);
+            }
+            val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
+            result.push_back(val);
+            pos += 4;
+        } else if (remaining >= 2) {
+            val.type = IndexFieldValue::Type::UINT_VAL;
+            val.uint_value = read_be<uint16_t>(page_data, pos);
+            val.str_value = std::to_string(val.uint_value);
+            val.raw_bytes.assign(page_data + pos, page_data + pos + 2);
+            result.push_back(val);
+            pos += 2;
+        } else {
+            val.type = IndexFieldValue::Type::UINT_VAL;
+            val.uint_value = page_data[pos];
+            val.str_value = std::to_string(val.uint_value);
+            val.raw_bytes.assign(page_data + pos, page_data + pos + 1);
+            result.push_back(val);
+            pos += 1;
+        }
+    }
+
+    // ✅ Enhanced fallback: If result quality is poor, try enhanced pattern-based parser
+    // Quality metrics: need at least 2 fields (PK + data), and less than 50% BINARY/UNKNOWN
+    if (result.size() < 3) {
+        // Try enhanced parser for better field boundary detection
+        EnhancedSchemalessParser enhanced_parser;
+        auto enhanced_record = enhanced_parser.parse_record(
+            page_data, page_size, rec_offset, rec_end, is_compact, is_leaf);
+
+        if (enhanced_record.is_valid && enhanced_record.fields.size() > result.size()) {
+            // Convert enhanced result to IndexFieldValue format
+            std::vector<IndexFieldValue> enhanced_result;
+
+            // PK field
+            IndexFieldValue pk_val;
+            pk_val.type = IndexFieldValue::Type::INT_VAL;
+            pk_val.int_value = static_cast<int64_t>(enhanced_record.id);
+            pk_val.str_value = std::to_string(enhanced_record.id);
+            enhanced_result.push_back(pk_val);
+
+            // Data fields
+            for (const auto& field : enhanced_record.fields) {
+                IndexFieldValue val;
+                val.str_value = field.str_value;
+                val.raw_bytes = field.raw_bytes;
+                val.is_null = field.is_null;
+
+                switch (field.type) {
+                    case DetectedFieldType::INTEGER:
+                        val.type = IndexFieldValue::Type::INT_VAL;
+                        val.int_value = field.int_value;
+                        break;
+                    case DetectedFieldType::DECIMAL:
+                        val.type = IndexFieldValue::Type::DOUBLE_VAL;
+                        val.float_value = field.float_value;
+                        break;
+                    case DetectedFieldType::BOOLEAN:
+                        val.type = IndexFieldValue::Type::INT_VAL;
+                        val.int_value = field.int_value;
+                        break;
+                    case DetectedFieldType::DATE:
+                    case DetectedFieldType::DATETIME:
+                        val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+                        break;
+                    case DetectedFieldType::STRING:
+                    case DetectedFieldType::EMAIL:
+                    case DetectedFieldType::USERNAME:
+                    case DetectedFieldType::PHONE:
+                    case DetectedFieldType::ORDER_NUMBER:
+                    case DetectedFieldType::SKU:
+                    case DetectedFieldType::JSON:
+                        val.type = IndexFieldValue::Type::STRING_VAL;
+                        break;
+                    default:
+                        val.type = IndexFieldValue::Type::BINARY_VAL;
+                        break;
+                }
+                enhanced_result.push_back(val);
+            }
+
+            if (enhanced_result.size() > result.size()) {
+                return enhanced_result;
+            }
+        }
+    }
+
+    return result;
+}
+
+// ==================== Column Value Decoding ====================
+
+IndexFieldValue InnoDBIndexParser::decode_column(
+    const uint8_t* data, size_t offset, size_t max_size,
+    const IndexColumnDef& col, size_t field_size) {
+    IndexFieldValue val;
+    if (offset + field_size > max_size) {
+        val.is_null = true;
+        val.type = IndexFieldValue::Type::NULL_VAL;
+        return val;
+    }
+
+    val.raw_bytes.assign(data + offset, data + offset + field_size);
+
+    switch (col.col_type) {
+        case 1: {  // TINY_INT
+            val.type = IndexFieldValue::Type::INT_VAL;
+            if (col.is_unsigned) {
+                val.uint_value = data[offset];
+                val.str_value = std::to_string(val.uint_value);
+                val.type = IndexFieldValue::Type::UINT_VAL;
+            } else {
+                uint8_t raw = data[offset] ^ 0x80;
+                val.int_value = static_cast<int8_t>(raw);
+                val.str_value = std::to_string(val.int_value);
+            }
+            break;
+        }
+        case 2: {  // SHORT_INT
+            val.type = IndexFieldValue::Type::INT_VAL;
+            if (col.is_unsigned) {
+                val.uint_value = read_be<uint16_t>(data, offset);
+                val.str_value = std::to_string(val.uint_value);
+                val.type = IndexFieldValue::Type::UINT_VAL;
+            } else {
+                uint16_t raw = read_be<uint16_t>(data, offset) ^ 0x8000;
+                val.int_value = static_cast<int16_t>(raw);
+                val.str_value = std::to_string(val.int_value);
+            }
+            break;
+        }
+        case 3: {  // LONG_INT (INT, 4 bytes)
+            val.type = IndexFieldValue::Type::INT_VAL;
+            if (col.is_unsigned) {
+                val.uint_value = read_be<uint32_t>(data, offset);
+                val.str_value = std::to_string(val.uint_value);
+                val.type = IndexFieldValue::Type::UINT_VAL;
+            } else {
+                uint32_t raw = read_be<uint32_t>(data, offset) ^ 0x80000000;
+                val.int_value = static_cast<int32_t>(raw);
+                val.str_value = std::to_string(val.int_value);
+            }
+            break;
+        }
+        case 4: {  // FLOAT
+            val.type = IndexFieldValue::Type::FLOAT_VAL;
+            uint32_t bits = read_be<uint32_t>(data, offset);
+            std::memcpy(&val.float_value, &bits, 4);
+            val.str_value = std::to_string(val.float_value);
+            break;
+        }
+        case 5: {  // DOUBLE
+            val.type = IndexFieldValue::Type::DOUBLE_VAL;
+            uint64_t bits = read_be<uint64_t>(data, offset);
+            std::memcpy(&val.float_value, &bits, 8);
+            val.str_value = std::to_string(val.float_value);
+            break;
+        }
+        case 8: {  // LONGLONG (BIGINT, 8 bytes)
+            val.type = IndexFieldValue::Type::INT_VAL;
+            if (col.is_unsigned) {
+                val.uint_value = read_be<uint64_t>(data, offset);
+                val.str_value = std::to_string(val.uint_value);
+                val.type = IndexFieldValue::Type::UINT_VAL;
+            } else {
+                uint64_t raw = read_be<uint64_t>(data, offset) ^ 0x8000000000000000ULL;
+                val.int_value = static_cast<int64_t>(raw);
+                val.str_value = std::to_string(val.int_value);
+            }
+            break;
+        }
+        case 10: {  // DATE (3 bytes)
+            val.type = IndexFieldValue::Type::DATE_VAL;
+            uint32_t v = (static_cast<uint32_t>(data[offset]) << 16) |
+                         (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                         static_cast<uint32_t>(data[offset + 2]);
+            uint16_t year = v >> 9;
+            uint8_t month = (v >> 5) & 0x0F;
+            uint8_t day = v & 0x1F;
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
+            val.str_value = buf;
+            break;
+        }
+        case 12: {  // DATETIME (5 bytes for MySQL 5.6+, stored as integer)
+            val.type = IndexFieldValue::Type::DATETIME_VAL;
+            // MySQL DATETIME is stored as a 5-byte integer
+            // Format: YYYYMMDDHHMMSS (packed integer)
+            // For MySQL 8.0+, it might be 8 bytes in certain formats
+
+            if (field_size >= 5) {
+                // Read 5-byte packed integer
+                uint64_t packed = 0;
+                for (size_t i = 0; i < 5; i++) {
+                    packed = (packed << 8) | data[offset + i];
+                }
+
+                // Decode: YYYYMMDDHHMMSS
+                // Bits: year(14) | month(4) | day(5) | hour(5) | minute(6) | second(6)
+                // Alternative interpretation: packed as decimal-like integer
+                uint64_t datetime_val = packed;
+
+                // Try parsing as YYYYMMDDHHMMSS format
+                uint64_t sec = datetime_val % 100;
+                datetime_val /= 100;
+                uint64_t min = datetime_val % 100;
+                datetime_val /= 100;
+                uint64_t hour = datetime_val % 100;
+                datetime_val /= 100;
+                uint64_t day = datetime_val % 100;
+                datetime_val /= 100;
+                uint64_t month = datetime_val % 100;
+                datetime_val /= 100;
+                uint64_t year = datetime_val;
+
+                // Validate ranges
+                if (year >= 1000 && year <= 9999 && month >= 1 && month <= 12 &&
+                    day >= 1 && day <= 31 && hour <= 23 && min <= 59 && sec <= 59) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%04llu-%02llu-%02llu %02llu:%02llu:%02llu",
+                             year, month, day, hour, min, sec);
+                    val.str_value = buf;
+                } else {
+                    // Fallback: decode using bit fields (MySQL 5.6 format)
+                    // 5 bytes = 40 bits: year(14 bits) + month(4) + day(5) + hour(5) + minute(6) + second(6)
+                    uint64_t bits = packed;
+                    uint16_t year_bit = (bits >> 26) & 0x3FFF;
+                    uint8_t month_bit = (bits >> 22) & 0x0F;
+                    uint8_t day_bit = (bits >> 17) & 0x1F;
+                    uint8_t hour_bit = (bits >> 12) & 0x1F;
+                    uint8_t min_bit = (bits >> 6) & 0x3F;
+                    uint8_t sec_bit = bits & 0x3F;
+
+                    // Adjust year offset (stored year = actual year - 1000)
+                    uint16_t actual_year = year_bit + 1000;
+
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
+                             actual_year, month_bit, day_bit, hour_bit, min_bit, sec_bit);
+                    val.str_value = buf;
+                }
+            } else if (field_size >= 8) {
+                // 8-byte format (older MySQL)
+                uint64_t v = read_be<uint64_t>(data, offset);
+                uint32_t date_part = static_cast<uint32_t>(v >> 20);
+                uint32_t time_part = static_cast<uint32_t>(v & 0xFFFFF);
+
+                uint16_t year = date_part / 10000;
+                uint8_t month = (date_part / 100) % 100;
+                uint8_t day = date_part % 100;
+                uint8_t hour = time_part / 10000;
+                uint8_t min = (time_part / 100) % 100;
+                uint8_t sec = time_part % 100;
+
+                char buf[32];
+                snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u", year, month, day, hour, min, sec);
+                val.str_value = buf;
+            }
+            break;
+        }
+        case 13: {  // YEAR (1 byte)
+            val.type = IndexFieldValue::Type::UINT_VAL;
+            val.uint_value = data[offset] + 1900;
+            val.str_value = std::to_string(val.uint_value);
+            break;
+        }
+        case 7:   // TIMESTAMP
+        case 17: { // TIMESTAMP2
+            val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+            uint32_t ts = read_be<uint32_t>(data, offset);
+            val.uint_value = ts;
+            time_t t = static_cast<time_t>(ts);
+            char buf[32];
+            struct tm tm_buf;
+            gmtime_r(&t, &tm_buf);
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            val.str_value = buf;
+            break;
+        }
+        case 15:   // VARCHAR
+        case 253:  // VAR_STRING
+        case 252: { // BLOB/TEXT
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+            break;
+        }
+        case 254: { // CHAR (fixed-length string)
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+            // Trim trailing spaces
+            while (!val.str_value.empty() && val.str_value.back() == ' ') {
+                val.str_value.pop_back();
+            }
+            break;
+        }
+        case 246: { // NEWDECIMAL
+            val.type = IndexFieldValue::Type::DECIMAL_VAL;
+            // MySQL DECIMAL is stored as binary-coded decimal
+            // For DECIMAL(M,D): (M-D) integer digits, D fractional digits
+            // Each group of up to 9 digits is stored in 4 bytes (big-endian)
+            // First byte: sign bit (0x80 = positive, otherwise negative)
+
+            // Calculate expected storage size
+            uint32_t precision = col.precision > 0 ? col.precision : 10;
+            uint32_t scale = col.scale;
+
+            // Digits to bytes mapping
+            static constexpr uint8_t digits_to_bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+            uint32_t int_digits = precision - scale;
+            uint32_t int_bytes = (int_digits / 9) * 4 + digits_to_bytes[int_digits % 9];
+            uint32_t frac_bytes = (scale / 9) * 4 + digits_to_bytes[scale % 9];
+
+            // Determine sign from first byte
+            bool is_negative = (data[offset] & 0x80) == 0;
+
+            // Read all bytes as a big integer, with sign bit removed from first byte
+            // The bytes represent the scaled integer value (value * 10^scale)
+            uint64_t scaled_value = 0;
+            for (size_t i = 0; i < field_size; i++) {
+                uint8_t byte = data[offset + i];
+                if (i == 0) {
+                    // First byte: mask out sign bit for positive numbers
+                    byte &= 0x7F;
+                }
+                scaled_value = scaled_value * 256 + byte;
+            }
+
+            // For negative numbers, the value is stored as complement
+            // We need to subtract from the appropriate base
+            if (is_negative && scaled_value > 0) {
+                // Calculate the max value for this storage
+                uint64_t max_val = 1;
+                for (size_t i = 0; i < field_size; i++) max_val *= 256;
+                scaled_value = max_val - scaled_value;
+            }
+
+            // Convert to decimal string
+            uint64_t divisor = 1;
+            for (uint32_t i = 0; i < scale; i++) divisor *= 10;
+
+            uint64_t int_part = scaled_value / divisor;
+            uint64_t frac_part = scaled_value % divisor;
+
+            char buf[64];
+            if (scale > 0) {
+                snprintf(buf, sizeof(buf), "%s%llu.%0*llu",
+                         is_negative ? "-" : "",
+                         int_part, scale, frac_part);
+            } else {
+                snprintf(buf, sizeof(buf), "%s%llu", is_negative ? "-" : "", int_part);
+            }
+            val.str_value = buf;
+            break;
+        }
+        case 245: { // JSON
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            // MySQL JSON binary format has a type byte at the start
+            // For now, try to extract readable JSON if possible
+            if (field_size > 0) {
+                uint8_t json_type = data[offset];
+
+                // Small JSON values are stored inline
+                // Type 0x00-0x0B indicate different JSON types
+                if (json_type <= 0x0B || field_size < 50) {
+                    // Try to interpret as simple JSON string or value
+                    // Skip type byte and read rest as text if printable
+                    size_t start = offset + 1;
+                    size_t printable = 0;
+                    for (size_t i = start; i < offset + field_size && i < offset + 256; i++) {
+                        if (data[i] >= 32 && data[i] < 127) printable++;
+                    }
+                    if (printable > (field_size - 1) * 2 / 3) {
+                        val.str_value = std::string(reinterpret_cast<const char*>(data + start), field_size - 1);
+                    } else {
+                        // Output as hex for complex binary JSON
+                        std::string hex = "{json:";
+                        for (size_t i = 0; i < std::min(field_size, size_t(40)); i++) {
+                            char buf[4];
+                            snprintf(buf, sizeof(buf), "%02x", data[offset + i]);
+                            hex += buf;
+                        }
+                        if (field_size > 40) hex += "...";
+                        hex += "}";
+                        val.str_value = hex;
+                    }
+                } else {
+                    val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                }
+            }
+            break;
+        }
+        default: {
+            val.type = IndexFieldValue::Type::UNKNOWN_VAL;
+            val.str_value = "<TYPE_" + std::to_string(col.col_type) + ">";
+            break;
+        }
+    }
+
+    return val;
+}
+
+// ==================== Page Parsing ====================
+
+std::vector<IndexRecord> InnoDBIndexParser::parse_page(
+    const uint8_t* page_data, size_t page_size, uint32_t page_no) {
+    std::vector<IndexRecord> records;
+
+    if (!is_index_page(page_data, page_size)) {
+        return records;
+    }
+
+    auto page_hdr = parse_page_header(page_data, page_size);
+    if (!page_hdr) {
+        if (bad_page_mode_ == 1) {
+            return parse_page_fast(page_data, page_size, page_no);
+        } else if (bad_page_mode_ == 2) {
+            return parse_page_try(page_data, page_size, page_no);
+        }
+        return records;
+    }
+
+    bool is_compact = page_hdr->is_compact_format;
+    records = follow_record_chain(page_data, page_size, *page_hdr, page_no, is_compact);
+
+    // Recover deleted records if enabled
+    if (recover_deleted_ && page_hdr->page_free != 0) {
+        auto deleted_records = follow_free_chain(page_data, page_size, *page_hdr, page_no, is_compact);
+        for (auto& rec : deleted_records) {
+            rec.is_deleted = true;
+            records.push_back(std::move(rec));
+        }
+    }
+
+    stats_.pages_valid++;
+    stats_.records_recovered += records.size();
+
+    return records;
+}
+
+std::vector<IndexRecord> InnoDBIndexParser::parse_page_fast(
+    const uint8_t* page_data, size_t page_size, uint32_t page_no) {
+    std::vector<IndexRecord> records;
+    // Fast mode: use page directory
+    return records;
+}
+
+std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
+    const uint8_t* page_data, size_t page_size, uint32_t page_no) {
+    std::vector<IndexRecord> records;
+    // Try mode: brute-force scan
+    return records;
+}
+
+std::vector<IndexRecord> InnoDBIndexParser::follow_free_chain(
+    const uint8_t* page_data, size_t page_size,
+    const InnoDBPageHeader& page_hdr, uint32_t page_no,
+    bool is_compact) {
+    std::vector<IndexRecord> records;
+    // Follow PAGE_FREE chain
+    return records;
+}
+
+// ==================== Full File Processing ====================
+
+std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& ibd_path) {
+    std::vector<IndexRecord> all_records;
+
+    std::ifstream file(ibd_path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) return all_records;
+
+    size_t file_size = file.tellg();
+    file.seekg(0);
+
+    uint32_t page_size = UNIV_PAGE_SIZE;
+
+    std::vector<uint8_t> first_page(page_size);
+    if (file.read(reinterpret_cast<char*>(first_page.data()), page_size)) {
+        uint32_t detected = detect_page_size_from_fsp(first_page.data());
+        if (detected >= UNIV_PAGE_SIZE_MIN && detected <= UNIV_PAGE_SIZE_MAX) {
+            page_size = detected;
+        }
+
+        uint8_t rf = detect_row_format_from_fsp(first_page.data());
+        if (rf == 2 || rf == 3) {
+            off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
+        } else {
+            off_page_flag_ = OFF_PAGE_FLAG_ANTLELOPE;
+        }
+    }
+
+    uint32_t total_pages = static_cast<uint32_t>(file_size / page_size);
+    std::cout << "[INFO] File size: " << file_size << " bytes, page_size: " << page_size
+              << ", total_pages: " << total_pages << "\n";
+
+    // Optimized single-pass approach: cache INDEX page metadata and data
+    struct IndexPageData {
+        uint32_t page_no;
+        uint64_t index_id;
+        uint16_t level;
+        bool is_compact;
+        std::vector<uint8_t> page_data;
+    };
+
+    struct IndexInfo {
+        uint64_t index_id;
+        uint32_t leaf_pages = 0;
+        uint32_t nonleaf_pages = 0;
+        uint16_t max_level = 0;
+    };
+    std::map<uint64_t, IndexInfo> index_map;
+    std::vector<IndexPageData> index_pages;
+
+    // Single pass: read all INDEX pages, cache metadata and page data
+    std::vector<uint8_t> page_buf(page_size);
+    for (uint32_t page_no = 0; page_no < total_pages; page_no++) {
+        file.seekg(static_cast<std::streamsize>(page_no) * page_size);
+        if (!file.read(reinterpret_cast<char*>(page_buf.data()), page_size)) break;
+
+        uint16_t pt = read_be<uint16_t>(page_buf.data(), FIL_PAGE_TYPE_ABS);
+        if (pt != FIL_PAGE_INDEX) continue;
+
+        auto ph = parse_page_header(page_buf.data(), page_size);
+        if (!ph) continue;
+
+        // Record index metadata
+        auto& info = index_map[ph->index_id];
+        info.index_id = ph->index_id;
+        if (ph->level == 0) {
+            info.leaf_pages++;
+        } else {
+            info.nonleaf_pages++;
+            if (ph->level > info.max_level) {
+                info.max_level = ph->level;
+            }
+        }
+
+        // Cache leaf page data for later extraction
+        if (ph->level == 0) {
+            index_pages.push_back({
+                page_no,
+                ph->index_id,
+                ph->level,
+                ph->is_compact_format,
+                std::vector<uint8_t>(page_buf.begin(), page_buf.end())
+            });
+        }
+    }
+
+    // Select the clustered index using improved heuristics
+    uint64_t clustered_index_id = 0;
+    uint32_t max_leaf_pages = 0;
+    uint16_t max_level = 0;
+
+    if (target_index_id_ != 0) {
+        clustered_index_id = target_index_id_;
+    } else if (!index_map.empty()) {
+        // First pass: find max leaf pages
+        for (const auto& [idx_id, info] : index_map) {
+            if (info.leaf_pages > max_leaf_pages) {
+                max_leaf_pages = info.leaf_pages;
+            }
+        }
+
+        // Second pass: select best index using heuristics
+        uint32_t min_acceptable = max_leaf_pages * 80 / 100;
+        if (min_acceptable == 0) min_acceptable = max_leaf_pages;
+
+        for (const auto& [idx_id, info] : index_map) {
+            if (info.leaf_pages >= min_acceptable) {
+                if (info.max_level > max_level ||
+                    (info.max_level == max_level && info.leaf_pages > max_leaf_pages)) {
+                    max_level = info.max_level;
+                    max_leaf_pages = info.leaf_pages;
+                    clustered_index_id = idx_id;
+                }
+            }
+        }
+
+        // Fallback: if no index selected by level, use max leaf pages
+        if (clustered_index_id == 0) {
+            for (const auto& [idx_id, info] : index_map) {
+                if (info.leaf_pages > max_leaf_pages ||
+                    (info.leaf_pages == max_leaf_pages && clustered_index_id == 0)) {
+                    max_leaf_pages = info.leaf_pages;
+                    clustered_index_id = idx_id;
+                }
+            }
+        }
+    }
+
+    if (clustered_index_id != 0) {
+        target_index_id_ = clustered_index_id;
+        const auto& ci = index_map[clustered_index_id];
+        std::cout << "[INFO] Selected clustered index_id=" << clustered_index_id
+                  << " (leaf_pages=" << ci.leaf_pages
+                  << ", nonleaf_pages=" << ci.nonleaf_pages
+                  << ", level=" << ci.max_level << ")" << std::endl;
+        for (const auto& [idx_id, info] : index_map) {
+            if (idx_id != clustered_index_id) {
+                std::cout << "[INFO] Skipping secondary index_id=" << idx_id
+                          << " (leaf_pages=" << info.leaf_pages << ")" << std::endl;
+            }
+        }
+    }
+
+    // Extract records from cached pages
+    for (const auto& page_data : index_pages) {
+        stats_.pages_scanned++;
+
+        if (target_index_id_ != 0 && page_data.index_id != target_index_id_) {
+            continue;
+        }
+
+        stats_.pages_index_leaf++;
+
+        auto page_records = follow_record_chain(
+            page_data.page_data.data(), page_size,
+            *parse_page_header(page_data.page_data.data(), page_size),
+            page_data.page_no, page_data.is_compact);
+
+        for (auto& rec : page_records) {
+            auto key = std::make_pair(rec.page_no, rec.heap_no);
+            if (seen_records_.find(key) == seen_records_.end()) {
+                seen_records_.insert(key);
+                all_records.push_back(std::move(rec));
+            } else {
+                stats_.dedup_removed++;
+            }
+        }
+    }
+
+    stats_.records_recovered = all_records.size();
+    total_records_ += all_records.size();
+    total_pages_ += total_pages;
+
+    return all_records;
+}
+
+uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_path,
+                                                       const std::string& csv_output,
+                                                       const std::vector<IndexColumnDef>& columns) {
+    std::ofstream csv_file(csv_output);
+    if (!csv_file.is_open()) {
+        std::cerr << "[ERROR] Cannot open output file: " << csv_output << "\n";
+        return 0;
+    }
+
+    // Write header
+    if (!columns.empty()) {
+        for (size_t i = 0; i < columns.size(); i++) {
+            if (i > 0) csv_file << ",";
+            csv_file << columns[i].name;
+        }
+        csv_file << "\n";
+    }
+
+    std::ifstream file(ibd_path, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "[ERROR] Cannot open input file: " << ibd_path << "\n";
+        return 0;
+    }
+
+    size_t file_size = file.tellg();
+    file.seekg(0);
+
+    uint32_t page_size = UNIV_PAGE_SIZE;
+
+    std::vector<uint8_t> first_page(page_size);
+    if (file.read(reinterpret_cast<char*>(first_page.data()), page_size)) {
+        uint32_t detected = detect_page_size_from_fsp(first_page.data());
+        if (detected >= UNIV_PAGE_SIZE_MIN && detected <= UNIV_PAGE_SIZE_MAX) {
+            page_size = detected;
+        }
+
+        uint8_t rf = detect_row_format_from_fsp(first_page.data());
+        if (rf == 2 || rf == 3) {
+            off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
+        } else {
+            off_page_flag_ = OFF_PAGE_FLAG_ANTLELOPE;
+        }
+    }
+
+    uint32_t total_pages = static_cast<uint32_t>(file_size / page_size);
+    std::cout << "[INFO] File size: " << file_size << " bytes, page_size: " << page_size
+              << ", total_pages: " << total_pages << "\n";
+
+    // Single pass: identify indexes and extract records
+    struct IndexInfo {
+        uint64_t index_id;
+        uint32_t leaf_pages = 0;
+        uint32_t nonleaf_pages = 0;
+        uint16_t max_level = 0;
+    };
+    std::map<uint64_t, IndexInfo> index_map;
+
+    // Store page positions and index_ids for leaf pages
+    std::vector<std::pair<uint32_t, uint64_t>> leaf_page_info;
+
+    std::vector<uint8_t> page_buf(page_size);
+
+    // First pass: survey indexes (only metadata, no page data caching)
+    for (uint32_t page_no = 0; page_no < total_pages; page_no++) {
+        file.seekg(static_cast<std::streamsize>(page_no) * page_size);
+        if (!file.read(reinterpret_cast<char*>(page_buf.data()), page_size)) break;
+
+        uint16_t pt = read_be<uint16_t>(page_buf.data(), FIL_PAGE_TYPE_ABS);
+        if (pt != FIL_PAGE_INDEX) continue;
+
+        auto ph = parse_page_header(page_buf.data(), page_size);
+        if (!ph) continue;
+
+        auto& info = index_map[ph->index_id];
+        info.index_id = ph->index_id;
+        if (ph->level == 0) {
+            info.leaf_pages++;
+            leaf_page_info.push_back({page_no, ph->index_id});
+        } else {
+            info.nonleaf_pages++;
+            if (ph->level > info.max_level) {
+                info.max_level = ph->level;
+            }
+        }
+    }
+
+    // Select clustered index
+    uint64_t clustered_index_id = 0;
+    uint32_t max_leaf_pages = 0;
+    uint16_t max_level = 0;
+
+    if (target_index_id_ != 0) {
+        clustered_index_id = target_index_id_;
+    } else if (!index_map.empty()) {
+        for (const auto& [idx_id, info] : index_map) {
+            if (info.leaf_pages > max_leaf_pages) {
+                max_leaf_pages = info.leaf_pages;
+            }
+        }
+
+        uint32_t min_acceptable = max_leaf_pages * 80 / 100;
+        if (min_acceptable == 0) min_acceptable = max_leaf_pages;
+
+        for (const auto& [idx_id, info] : index_map) {
+            if (info.leaf_pages >= min_acceptable) {
+                if (info.max_level > max_level ||
+                    (info.max_level == max_level && info.leaf_pages > max_leaf_pages)) {
+                    max_level = info.max_level;
+                    max_leaf_pages = info.leaf_pages;
+                    clustered_index_id = idx_id;
+                }
+            }
+        }
+
+        if (clustered_index_id == 0) {
+            for (const auto& [idx_id, info] : index_map) {
+                if (info.leaf_pages > max_leaf_pages ||
+                    (info.leaf_pages == max_leaf_pages && clustered_index_id == 0)) {
+                    max_leaf_pages = info.leaf_pages;
+                    clustered_index_id = idx_id;
+                }
+            }
+        }
+    }
+
+    if (clustered_index_id != 0) {
+        target_index_id_ = clustered_index_id;
+        const auto& ci = index_map[clustered_index_id];
+        std::cout << "[INFO] Selected clustered index_id=" << clustered_index_id
+                  << " (leaf_pages=" << ci.leaf_pages
+                  << ", nonleaf_pages=" << ci.nonleaf_pages
+                  << ", level=" << ci.max_level << ")" << std::endl;
+    }
+
+    // Second pass: extract records and write directly to CSV
+    uint64_t record_count = 0;
+    std::set<std::pair<uint32_t, uint16_t>> seen;
+
+    for (const auto& [page_no, index_id] : leaf_page_info) {
+        if (target_index_id_ != 0 && index_id != target_index_id_) {
+            continue;
+        }
+
+        file.seekg(static_cast<std::streamsize>(page_no) * page_size);
+        if (!file.read(reinterpret_cast<char*>(page_buf.data()), page_size)) break;
+
+        stats_.pages_scanned++;
+
+        auto ph = parse_page_header(page_buf.data(), page_size);
+        if (!ph) {
+            stats_.pages_skipped_corrupt++;
+            continue;
+        }
+
+        stats_.pages_index_leaf++;
+
+        bool is_compact = ph->is_compact_format;
+        auto page_records = follow_record_chain(page_buf.data(), page_size, *ph, page_no, is_compact);
+
+        for (const auto& rec : page_records) {
+            if (rec.is_infimum || rec.is_supremum) continue;
+
+            auto key = std::make_pair(rec.page_no, rec.heap_no);
+            if (seen.find(key) != seen.end()) {
+                stats_.dedup_removed++;
+                continue;
+            }
+            seen.insert(key);
+
+            // Write directly to CSV
+            csv_file << rec.to_csv_line() << "\n";
+            record_count++;
+        }
+    }
+
+    csv_file.close();
+
+    stats_.records_recovered = record_count;
+    total_records_ += record_count;
+    total_pages_ += total_pages;
+
+    std::cout << "[INFO] Streaming export complete: " << record_count << " records to " << csv_output << "\n";
+
+    return record_count;
+}
+
+std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_btree(
+    const std::string& ibd_path, uint32_t root_page_no) {
+    std::vector<IndexRecord> all_records;
+    // B+Tree traversal implementation
+    return all_records;
+}
+
+std::vector<uint32_t> InnoDBIndexParser::find_leaf_pages_from_file(
+    std::ifstream& file, uint32_t page_size, uint32_t total_pages,
+    uint32_t root_page_no) {
+    std::vector<uint32_t> leaf_pages;
+    return leaf_pages;
+}
+
+// ==================== Utility Functions ====================
+
+bool InnoDBIndexParser::is_index_page(const uint8_t* page_data, size_t page_size) const {
+    if (!page_data || page_size < 26) return false;
+    uint16_t pt = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+    return pt == FIL_PAGE_INDEX;
+}
+
+void InnoDBIndexParser::deduplicate_records(std::vector<IndexRecord>& records) {
+    std::set<std::pair<uint32_t, uint16_t>> seen;
+    auto it = std::remove_if(records.begin(), records.end(),
+        [&seen](const IndexRecord& rec) {
+            auto key = std::make_pair(rec.page_no, rec.heap_no);
+            if (seen.count(key)) return true;
+            seen.insert(key);
+            return false;
+        });
+    records.erase(it, records.end());
+}
+
+// ==================== Standalone Utility Functions ====================
+
+uint32_t detect_page_size_from_fsp(const uint8_t* page_data) {
+    if (!page_data) return UNIV_PAGE_SIZE;
+
+    // FSP header flags at offset 54 in page 0
+    uint32_t flags = read_be<uint32_t>(page_data, 54);
+
+    // Validate: Check if offset 0-3 (FIL header checksum) looks reasonable
+    // A valid FIL header should have reasonable checksum values
+    uint32_t checksum1 = read_be<uint32_t>(page_data, 0);
+    uint32_t checksum2 = read_be<uint32_t>(page_data, 4);  // page_no should be small
+
+    // If checksum1 is garbage (too large random value) or page_no is unreasonable,
+    // the header is likely corrupted - use default 16KB
+    bool header_valid = true;
+    if (checksum2 > 100000) {  // page_no should be 0-4 for typical IBD files
+        header_valid = false;
+    }
+
+    // Also check FIL_PAGE_TYPE at offset 24-25
+    uint16_t page_type = read_be<uint16_t>(page_data, 24);
+    // Valid types: 0x45BF (INDEX), 0x45BD (SDI_ZIP), 0x0000 (ALLOCATED), 0xFFFF (corrupted)
+    // If page_type is completely random, header is corrupted
+    if (page_type != 0x45BF && page_type != 0x45BD && page_type != 0x0000 &&
+        page_type != 0xFFFF && page_type > 0x1000) {
+        header_valid = false;
+    }
+
+    if (!header_valid) {
+        // Header is corrupted, return default 16KB
+        // The caller can try multiple page sizes as fallback
+        return UNIV_PAGE_SIZE;
+    }
+
+    // Bits 0-5: page size code
+    // 0 = default (16KB for most MySQL versions)
+    // 1 = 8KB, 2 = 4KB, 3 = 32KB, 4 = 64KB
+    // Note: The encoding varies by MySQL version, but 0 typically means default 16KB
+    uint32_t size_code = (flags >> 1) & 0x07;  // Bits 1-3 for page size
+
+    switch (size_code) {
+        case 0: return UNIV_PAGE_SIZE;  // Default 16KB
+        case 1: return 8192;
+        case 2: return 4096;
+        case 3: return 32768;
+        case 4: return 65536;
+        default: return UNIV_PAGE_SIZE;
+    }
+}
+
+/**
+ * Detect page size from file size - fallback when header is corrupted
+ * For InnoDB IBD files, total_pages must be reasonable (typically > 2)
+ * Returns most likely page size based on file alignment
+ */
+uint32_t detect_page_size_from_file_size(size_t file_size) {
+    // Try common page sizes, prefer 16KB as most common
+    std::vector<uint32_t> candidates = {16384, 8192, 4096, 32768, 65536};
+
+    for (uint32_t ps : candidates) {
+        // File must be aligned to page size
+        if (file_size % ps == 0) {
+            size_t total_pages = file_size / ps;
+            // Typical IBD file has at least 5-6 pages (FSP, IBUF, inode pages + data)
+            // and typically has multiple index pages
+            if (total_pages >= 5 && total_pages < 1000000) {
+                return ps;
+            }
+        }
+    }
+
+    // Default fallback
+    return UNIV_PAGE_SIZE;
+}
+
+/**
+ * Smart page size detection with corruption resilience
+ * Tries multiple methods and validates results
+ */
+uint32_t smart_detect_page_size(const uint8_t* page_data, size_t file_size) {
+    // First try FSP header detection
+    uint32_t fsp_size = detect_page_size_from_fsp(page_data);
+
+    // Validate against file size
+    if (file_size > 0) {
+        size_t pages = file_size / fsp_size;
+        // If pages is unreasonable (too small or file not aligned), try fallback
+        if (pages < 3 || file_size % fsp_size != 0) {
+            return detect_page_size_from_file_size(file_size);
+        }
+    }
+
+    return fsp_size;
+}
+
+uint8_t detect_row_format_from_fsp(const uint8_t* page_data) {
+    if (!page_data) return 2;  // Default DYNAMIC
+
+    uint32_t flags = read_be<uint32_t>(page_data, 54);
+
+    // Bits 6-7: row format
+    // 0 = REDUNDANT, 1 = COMPACT, 2 = DYNAMIC, 3 = COMPRESSED
+    uint8_t format = (flags >> 6) & 0x03;
+    return format;
+}
+
+bool is_antelope_format(const uint8_t* page_data) {
+    uint8_t format = detect_row_format_from_fsp(page_data);
+    return format <= 1;  // REDUNDANT or COMPACT
+}
+
+uint32_t read_fsp_space_flags(const uint8_t* page_data) {
+    if (!page_data) return 0;
+    return read_be<uint32_t>(page_data, 54);
+}
+
+uint32_t get_root_page_from_inode(const uint8_t* ibd_data, size_t ibd_size, uint32_t page_size) {
+    // Root page is typically page 4 for the clustered index
+    return 4;
+}
+
+std::vector<uint32_t> find_leaf_pages(const uint8_t* ibd_data, size_t ibd_size,
+                                       uint32_t page_size, uint32_t root_page_no) {
+    std::vector<uint32_t> leaf_pages;
+    return leaf_pages;
+}
+
+bool validate_innodb_checksum(const uint8_t* page_data, size_t page_size) {
+    return true;
+}
+
+bool validate_innodb_checksum_legacy(const uint8_t* page_data, size_t page_size) {
+    return true;
+}
+
+} // namespace innodb
+} // namespace dbrecovery

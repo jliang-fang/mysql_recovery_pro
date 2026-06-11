@@ -1,0 +1,30 @@
+# MySQL Recovery Pro - Production Build
+# Purpose: Build recovery engine for production use
+FROM ubuntu:22.04
+
+# Set environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y \
+    libmysqlclient21 \
+    zlib1g \
+    liburing1 \
+    valgrind \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directory
+WORKDIR /app
+
+# Copy pre-built binary (expecting build to be done externally)
+# This is a minimal runtime container
+RUN mkdir -p /usr/local/bin /chaos-test /recovery-output /golden-hashes
+
+# Copy scripts
+COPY scripts /app/scripts
+RUN chmod +x /app/scripts/*.py
+
+WORKDIR /app
+
+CMD ["/bin/bash"]

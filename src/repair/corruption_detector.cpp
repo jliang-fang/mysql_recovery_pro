@@ -37,7 +37,7 @@ PageHealth CorruptionDetector::analyze_page(const uint8_t* page_data,
     }
 
     // Read page type
-    health.page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    health.page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
     // Check page type validity
     if (!is_valid_page_type(health.page_type)) {
@@ -55,9 +55,9 @@ PageHealth CorruptionDetector::analyze_page(const uint8_t* page_data,
         health.status_message = "Checksum mismatch";
     }
 
-    // Read page chain info
-    health.next_page = dbrecovery::innodb::read_le<uint32_t>(page_data, 4);
-    health.prev_page = dbrecovery::innodb::read_le<uint32_t>(page_data, 8);
+    // Read page chain info (FIL header fields - big-endian)
+    health.next_page = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
+    health.prev_page = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_PREV_ABS);
 
     // Read page header
     const uint8_t* page_header = page_data + 38;
@@ -121,7 +121,7 @@ std::vector<CorruptionDetails> CorruptionDetector::detect_corruption(const uint8
     }
 
     // Check page type
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
     if (!is_valid_page_type(page_type)) {
         CorruptionDetails detail;
         detail.type = CorruptionType::PAGE_TYPE_INVALID;
@@ -148,9 +148,9 @@ std::vector<CorruptionDetails> CorruptionDetector::detect_corruption(const uint8
         corruption_stats_[CorruptionType::PAGE_CHECKSUM_MISMATCH]++;
     }
 
-    // Check page chain
-    uint32_t next_page = dbrecovery::innodb::read_le<uint32_t>(page_data, 4);
-    uint32_t prev_page = dbrecovery::innodb::read_le<uint32_t>(page_data, 8);
+    // Check page chain (FIL header fields - big-endian)
+    uint32_t next_page = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
+    uint32_t prev_page = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_PREV_ABS);
 
     if (next_page != 0xFFFFFFFF && next_page != page_no + 1) {
         CorruptionDetails detail;
@@ -237,13 +237,13 @@ bool CorruptionDetector::check_page_header(const uint8_t* page_data,
     }
 
     // Check page type
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 38 + 12);
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
     if (!is_valid_page_type(page_type)) {
         return false;
     }
 
-    // Check page number
-    uint32_t stored_page_no = dbrecovery::innodb::read_le<uint32_t>(page_data, 20);
+    // Check page number (FIL header field - big-endian)
+    uint32_t stored_page_no = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_OFFSET);
     if (stored_page_no != page_no) {
         return false;
     }
@@ -404,8 +404,8 @@ bool PageChainRepairer::repair_chains() {
 
     for (const auto& [page_no, page_data] : pages_) {
         if (page_data.size() >= 12) {
-            next_map[page_no] = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 4);
-            prev_map[page_no] = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 8);
+            next_map[page_no] = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
+            prev_map[page_no] = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_PREV_ABS);
         }
     }
 
@@ -478,16 +478,16 @@ bool PageChainRepairer::repair_chains() {
 
                 // Repair next_page
                 if (i < chain.size() - 1) {
-                    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), 4, chain[i + 1]);
+                    dbrecovery::innodb::write_be<uint32_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_NEXT_ABS, chain[i + 1]);
                 } else {
-                    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), 4, 0xFFFFFFFF);
+                    dbrecovery::innodb::write_be<uint32_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_NEXT_ABS, 0xFFFFFFFF);
                 }
 
                 // Repair prev_page
                 if (i > 0) {
-                    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), 8, chain[i - 1]);
+                    dbrecovery::innodb::write_be<uint32_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_PREV_ABS, chain[i - 1]);
                 } else {
-                    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), 8, 0xFFFFFFFF);
+                    dbrecovery::innodb::write_be<uint32_t>(page_data.data(), dbrecovery::innodb::FIL_PAGE_PREV_ABS, 0xFFFFFFFF);
                 }
 
                 repaired_pages_[chain[i]] = std::move(page_data);

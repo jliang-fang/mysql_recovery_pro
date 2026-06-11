@@ -229,6 +229,18 @@ private:
     QPushButton* pauseButton_;
     QPushButton* resumeButton_;
 
+    // TDE 加密设置
+    QLineEdit* encryptionKeyEdit_;
+    QLineEdit* tableKeyEdit_;
+    QLineEdit* tablespaceIdEdit_;
+    QCheckBox* detectEncryptionCheck_;
+    QCheckBox* tryNoKeyCheck_;
+
+    // MySQL 版本设置
+    QSpinBox* mysqlVersionSpin_;
+    QCheckBox* detectVersionCheck_;
+    QComboBox* rowFormatCombo_;
+
     // 设备扫描设置
     QLineEdit* devicePathEdit_;
     QPushButton* scanDeviceButton_;
@@ -410,13 +422,14 @@ inline void MainWindowEnhanced::initCentralWidget() {
     outputLayout->addLayout(outputPathLayout);
 
     outputFormatCombo_ = new QComboBox();
-    outputFormatCombo_->addItem("CSV");
-    outputFormatCombo_->addItem("SQL");
-    outputFormatCombo_->addItem("JSON");
-    outputFormatCombo_->addItem("Parquet");
-    outputFormatCombo_->addItem("XML");
-    outputFormatCombo_->addItem("YAML");
-    outputFormatCombo_->addItem("Avro");
+    outputFormatCombo_->addItem("CSV", "csv");
+    outputFormatCombo_->addItem("SQL", "sql");
+    outputFormatCombo_->addItem("JSON", "json");
+    outputFormatCombo_->addItem("XML", "xml");
+    outputFormatCombo_->addItem("YAML", "yaml");
+    outputFormatCombo_->addItem("Avro", "avro");
+    outputFormatCombo_->addItem("Text", "text");
+    outputFormatCombo_->addItem("IBD (Repaired)", "ibd");
     outputLayout->addWidget(new QLabel("Format:"));
     outputLayout->addWidget(outputFormatCombo_);
 
@@ -442,6 +455,40 @@ inline void MainWindowEnhanced::initCentralWidget() {
     pageLayout->addWidget(new QLabel("Table ID:"));
     pageLayout->addWidget(tableIdSpin_);
 
+    QGroupBox* encryptionSettingsGroup = new QGroupBox("TDE Encryption Settings");
+    QVBoxLayout* encryptionLayout = new QVBoxLayout(encryptionSettingsGroup);
+    QLineEdit* encryptionKeyEdit = new QLineEdit();
+    QLineEdit* tableKeyEdit = new QLineEdit();
+    QLineEdit* tablespaceIdEdit = new QLineEdit();
+    QCheckBox* detectEncryptionCheck = new QCheckBox("Auto-detect encryption");
+    QCheckBox* tryNoKeyCheck = new QCheckBox("Try recovery without key");
+    encryptionLayout->addWidget(new QLabel("Primary Key (hex):"));
+    encryptionLayout->addWidget(encryptionKeyEdit);
+    encryptionLayout->addWidget(new QLabel("Table Key (hex):"));
+    encryptionLayout->addWidget(tableKeyEdit);
+    encryptionLayout->addWidget(new QLabel("Tablespace ID:"));
+    encryptionLayout->addWidget(tablespaceIdEdit);
+    encryptionLayout->addWidget(detectEncryptionCheck);
+    encryptionLayout->addWidget(tryNoKeyCheck);
+
+    QGroupBox* versionSettingsGroup = new QGroupBox("MySQL Version Compatibility");
+    QVBoxLayout* versionLayout = new QVBoxLayout(versionSettingsGroup);
+    QSpinBox* mysqlVersionSpin = new QSpinBox();
+    mysqlVersionSpin->setRange(0, 90);
+    mysqlVersionSpin->setSingleStep(1);
+    mysqlVersionSpin->setValue(80);
+    QCheckBox* detectVersionCheck = new QCheckBox("Auto-detect version");
+    QComboBox* rowFormatCombo = new QComboBox();
+    rowFormatCombo->addItem("Dynamic (default)", "dynamic");
+    rowFormatCombo->addItem("Compact", "compact");
+    rowFormatCombo->addItem("Redundant", "redundant");
+    rowFormatCombo->addItem("Compressed", "compressed");
+    versionLayout->addWidget(new QLabel("MySQL Version:"));
+    versionLayout->addWidget(mysqlVersionSpin);
+    versionLayout->addWidget(detectVersionCheck);
+    versionLayout->addWidget(new QLabel("Row Format:"));
+    versionLayout->addWidget(rowFormatCombo);
+
     QHBoxLayout* buttonLayout = new QHBoxLayout();
     startButton_ = new QPushButton("Start Recovery");
     cancelButton_ = new QPushButton("Cancel");
@@ -458,6 +505,8 @@ inline void MainWindowEnhanced::initCentralWidget() {
     recoveryLayout->addWidget(outputGroup);
     recoveryLayout->addWidget(optionsGroup);
     recoveryLayout->addWidget(pageSettingsGroup);
+    recoveryLayout->addWidget(encryptionSettingsGroup);
+    recoveryLayout->addWidget(versionSettingsGroup);
     recoveryLayout->addLayout(buttonLayout);
     recoveryLayout->addStretch();
 

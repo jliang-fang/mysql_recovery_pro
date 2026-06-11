@@ -113,21 +113,39 @@ public:
     void setParameters(const QString& filePath,
                        const QString& outputDir,
                        const QString& mode,
+                       const QString& format,
                        bool blobRecovery,
                        bool headerRepair,
                        uint32_t pageSize,
                        const QString& tableName,
                        const QString& databaseName,
-                       const QString& userName) {
+                       const QString& userName,
+                       const QString& encryptionKey = "",
+                       const QString& tableKey = "",
+                       const QString& tablespaceId = "",
+                       bool detectEncryption = false,
+                       bool tryNoKey = true,
+                       int mysqlVersion = 0,
+                       bool detectVersion = false,
+                       const QString& rowFormat = "dynamic") {
         filePath_ = filePath.toStdString();
         outputDir_ = outputDir.toStdString();
         mode_ = mode.toStdString();
+        format_ = format.toStdString();
         blobRecovery_ = blobRecovery;
         headerRepair_ = headerRepair;
         pageSize_ = pageSize;
         tableName_ = tableName.toStdString();
         databaseName_ = databaseName.toStdString();
         userName_ = userName.toStdString();
+        encryptionKey_ = encryptionKey.toStdString();
+        tableKey_ = tableKey.toStdString();
+        tablespaceId_ = tablespaceId.toStdString();
+        detectEncryption_ = detectEncryption;
+        tryNoKey_ = tryNoKey;
+        mysqlVersion_ = mysqlVersion;
+        detectVersion_ = detectVersion;
+        rowFormat_ = rowFormat.toStdString();
     }
 
     void cancel() { shouldCancel_ = true; }
@@ -147,6 +165,36 @@ public slots:
             if (!engine.open(filePath_)) {
                 emit recoveryFailed(QString("Failed to open file: ") + filePath_.c_str());
                 return;
+            }
+
+            // ==================== TDE 加密检测 ====================
+            bool file_is_encrypted = false;
+            if (detectEncryption_ || !encryptionKey_.empty()) {
+                emit statusUpdated("Checking for TDE encryption...");
+                
+                innodb::InnoDBFileReader check_reader(filePath_);
+                if (check_reader.is_valid() && check_reader.get_total_pages() > 0) {
+                    auto first_page = check_reader.read_page_raw(0);
+                    if (first_page.size() >= 44) {
+                        if (innodb::TDEDecryptor::is_encrypted(first_page.data(), first_page.size())) {
+                            file_is_encrypted = true;
+                            emit statusUpdated("File is encrypted with TDE");
+                        } else {
+                            emit statusUpdated("File is not encrypted");
+                        }
+                    }
+                }
+            }
+
+            // ==================== MySQL 版本检测 ====================
+            if (detectVersion_ || mysqlVersion_ > 0) {
+                emit statusUpdated("Checking MySQL version compatibility...");
+                
+                if (mysqlVersion_ > 0) {
+                    emit statusUpdated("Using MySQL version: " + QString::number(mysqlVersion_));
+                }
+                
+                emit statusUpdated("Using row format: " + QString::fromStdString(rowFormat_));
             }
 
             emit statusUpdated("Analyzing file structure...");
@@ -222,17 +270,70 @@ public slots:
                     emit statusUpdated("BLOB recovery enabled.");
                 }
 
-                output_path = outputDir_ + "/recovered.csv";
-                if (engine.export_to_csv(recovered_records, output_path)) {
-                    emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
-                                       " records to CSV: " + QString::fromStdString(output_path));
-                }
+                // 根据用户选择的格式导出
+                std::string format_lower = format_;
+                std::transform(format_lower.begin(), format_lower.end(), format_lower.begin(), ::tolower);
 
-                // 同时导出为 SQL（使用用户指定的数据库名和用户）
-                std::string sql_path = outputDir_ + "/recovered.sql";
-                std::string user_for_sql = userName_.empty() ? "root" : userName_;
-                if (engine.export_to_sql_with_user(recovered_records, schema.table_name, sql_path, user_for_sql, databaseName_)) {
-                    emit statusUpdated("Exported SQL to: " + QString::fromStdString(sql_path));
+                if (format_lower == "csv") {
+                    output_path = outputDir_ + "/recovered.csv";
+                    if (engine.export_to_csv(recovered_records, output_path)) {
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to CSV: " + QString::fromStdString(output_path));
+                    }
+                } else if (format_lower == "sql") {
+                    output_path = outputDir_ + "/recovered.sql";
+                    std::string user_for_sql = userName_.empty() ? "root" : userName_;
+                    if (engine.export_to_sql_with_user(recovered_records, schema.table_name, output_path, user_for_sql, databaseName_)) {
+                        emit statusUpdated("Exported SQL to: " + QString::fromStdString(output_path));
+                    }
+                } else if (format_lower == "json") {
+                    output_path = outputDir_ + "/recovered.json";
+                    if (dbrecovery::innodb::JSONExporter::export_to_json(recovered_records, output_path)) {
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to JSON: " + QString::fromStdString(output_path));
+                    }
+                } else if (format_lower == "xml") {
+                    output_path = outputDir_ + "/recovered.xml";
+                    if (dbrecovery::innodb::XMLExporter::export_to_xml(recovered_records, output_path)) {
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to XML: " + QString::fromStdString(output_path));
+                    }
+                } else if (format_lower == "yaml") {
+                    output_path = outputDir_ + "/recovered.yaml";
+                    if (dbrecovery::innodb::YAMLExporter::export_to_yaml(recovered_records, output_path)) {
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to YAML: " + QString::fromStdString(output_path));
+                    }
+                } else if (format_lower == "avro") {
+                    output_path = outputDir_ + "/recovered.avro";
+                    if (dbrecovery::innodb::AvroExporter::export_to_avro(recovered_records, output_path, schema)) {
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to Avro: " + QString::fromStdString(output_path));
+                    }
+                } else if (format_lower == "text") {
+                    output_path = outputDir_ + "/recovered.txt";
+                    // 使用简单的文本格式导出
+                    std::ofstream txt_file(output_path);
+                    if (txt_file && !recovered_records.empty()) {
+                        for (const auto& record : recovered_records) {
+                            bool first = true;
+                            for (const auto& kv : record) {
+                                if (!first) txt_file << " | ";
+                                txt_file << kv.first << ": " << kv.second;
+                                first = false;
+                            }
+                            txt_file << "\n";
+                        }
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to Text: " + QString::fromStdString(output_path));
+                    }
+                } else {
+                    // 默认导出为 CSV
+                    output_path = outputDir_ + "/recovered.csv";
+                    if (engine.export_to_csv(recovered_records, output_path)) {
+                        emit statusUpdated("Exported " + QString::number(recovered_records.size()) +
+                                           " records to CSV: " + QString::fromStdString(output_path));
+                    }
                 }
             }
 
@@ -328,10 +429,23 @@ private:
     std::string filePath_;
     std::string outputDir_;
     std::string mode_;
+    std::string format_;
     bool blobRecovery_;
     bool headerRepair_;
     uint32_t pageSize_;
     std::atomic<bool> shouldCancel_;
+    
+    // TDE 加密参数
+    std::string encryptionKey_;
+    std::string tableKey_;
+    std::string tablespaceId_;
+    bool detectEncryption_;
+    bool tryNoKey_;
+    
+    // MySQL 版本参数
+    int mysqlVersion_;
+    bool detectVersion_;
+    std::string rowFormat_;
 };
 
 void MainWindow::initUI() {
@@ -435,9 +549,14 @@ void MainWindow::initCentralWidget() {
     outputLayout->addLayout(outputPathLayout);
 
     outputFormatCombo_ = new QComboBox();
-    outputFormatCombo_->addItem("CSV");
-    outputFormatCombo_->addItem("SQL");
-    outputFormatCombo_->addItem("JSON");
+    outputFormatCombo_->addItem("CSV", "csv");
+    outputFormatCombo_->addItem("SQL", "sql");
+    outputFormatCombo_->addItem("JSON", "json");
+    outputFormatCombo_->addItem("XML", "xml");
+    outputFormatCombo_->addItem("YAML", "yaml");
+    outputFormatCombo_->addItem("Avro", "avro");
+    outputFormatCombo_->addItem("Text", "text");
+    outputFormatCombo_->addItem("IBD (Repaired)", "ibd");
     outputLayout->addWidget(new QLabel("Format:"));
     outputLayout->addWidget(outputFormatCombo_);
 
@@ -866,6 +985,9 @@ void MainWindow::onStartRecovery() {
     progressBar_->setVisible(true);
     progressBar_->setValue(0);
 
+    // 获取用户选择的格式
+    QString format = outputFormatCombo_->currentData().toString();
+
     // 创建并启动恢复工作线程
     RecoveryWorker* worker = new RecoveryWorker();
     QThread* thread = new QThread(this);
@@ -874,6 +996,7 @@ void MainWindow::onStartRecovery() {
         QString::fromStdString(currentFilePath_),
         outputPathEdit_->text(),
         recoveryModeCombo_->currentData().toString(),
+        format,
         blobRecoveryCheck_->isChecked(),
         headerRepairCheck_->isChecked(),
         pageSizeSpin_->value(),

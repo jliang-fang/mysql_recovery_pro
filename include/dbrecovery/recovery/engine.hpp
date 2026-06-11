@@ -6,8 +6,11 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <set>
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -20,6 +23,7 @@ namespace recovery {
  * - 多场景灾难恢复（Truncate, rm -rf, header corrupt）
  * - 数据导出（CSV, SQL, ibd）
  * - 页健康状态检查与修复
+ * - TDE 加密数据解密支持
  */
 class RecoveryEngine {
 public:
@@ -45,6 +49,55 @@ public:
     void close();
 
     /**
+     * @brief 设置表空间ID（用于TDE密钥派生）
+     *
+     * @param space_id 表空间ID
+     */
+    void set_space_id(uint32_t space_id);
+
+    /**
+     * @brief 设置 TDE 主密钥
+     *
+     * @param key_hex 十六进制格式的密钥字符串
+     * @return true 成功设置
+     * @return false 失败
+     */
+    bool set_tde_primary_key(const std::string& key_hex);
+
+    /**
+     * @brief 添加 TDE 表密钥
+     *
+     * @param key_id 密钥ID
+     * @param key_hex 十六进制格式的密钥字符串
+     * @return true 成功添加
+     * @return false 失败
+     */
+    bool add_tde_table_key(uint32_t key_id, const std::string& key_hex);
+
+    /**
+     * @brief 从 Keyring 文件加载密钥
+     *
+     * @param keyring_path Keyring 文件路径
+     * @return true 成功加载
+     * @return false 失败
+     */
+    bool load_tde_keyring(const std::string& keyring_path);
+
+    /**
+     * @brief 设置是否检测加密
+     *
+     * @param detect 是否检测
+     */
+    void set_detect_encryption(bool detect);
+
+    /**
+     * @brief 设置页大小（用于覆盖自动检测）
+     *
+     * @param page_size 页大小（4096, 8192, 16384, 32768, 65536）
+     */
+    void set_page_size(uint32_t page_size);
+
+    /**
      * @brief 恢复被 Truncate 的表（基于页链和 Redo Log）
      *
      * @param schema 表结构定义（用于解析记录）
@@ -52,6 +105,15 @@ public:
      */
     std::vector<std::map<std::string, std::string>> recover_truncate(
         const catalog::TableSchema& schema);
+
+    /**
+     * @brief 设置进度回调函数
+     *
+     * @param callback 进度回调函数（参数：当前页号，总页数）
+     */
+    void set_progress_callback(std::function<void(uint32_t, uint32_t)> callback) {
+        progress_callback_ = std::move(callback);
+    }
 
     /**
      * @brief 从损坏的文件头中恢复元数据
@@ -66,12 +128,13 @@ public:
      * @brief 导出为 CSV 格式
      *
      * @param records 记录数据
+     * @param schema 表结构（用于确定列顺序）
      * @param csv_path 输出文件路径
      * @return true 成功导出
      * @return false 失败
      */
-    bool export_to_csv(const std::vector<std::map<std::string, std::string>>&
-records,
+    bool export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
+                       const catalog::TableSchema& schema,
                        const std::string& csv_path);
 
     /**
@@ -129,6 +192,81 @@ file_reader_->is_valid(); }
 private:
     std::unique_ptr<innodb::InnoDBFileReader> file_reader_;
     std::string current_file_path_;
+
+    // ✅ P2 新增：辅助函数
+    /**
+     * @brief 从 SDI 页提取表结构
+     */
+    std::optional<catalog::TableSchema> extract_schema_from_sdi() const;
+
+    /**
+     * @brief 启发式检测行格式
+     */
+    uint8_t detect_row_format() const;
+
+    /**
+     * @brief 检测页大小
+     */
+    uint32_t detect_page_size() const;
+
+    /**
+     * @brief 从页中提取记录（支持多种解析策略）
+     */
+    std::vector<std::map<std::string, std::string>> extract_records_from_page(
+        const std::vector<uint8_t>& page_data,
+        const catalog::TableSchema& schema,
+        uint32_t page_no) const;
+
+    /**
+     * @brief 顺序扫描页数据查找记录（当 B+Tree 解析失败时）
+     */
+    std::vector<std::map<std::string, std::string>> extract_records_sequentially(
+        const catalog::TableSchema& schema) const;
+
+    /**
+     * @brief 扫描测试文件格式的记录（基于 user_ 模式）
+     */
+    std::vector<std::map<std::string, std::string>> extract_records_test_format(
+        const catalog::TableSchema& schema,
+        const std::vector<uint8_t>& page_data,
+        uint32_t page_no) const;
+
+    /**
+     * @brief 去重记录
+     */
+    std::vector<std::map<std::string, std::string>> deduplicate_records(
+        const std::vector<std::map<std::string, std::string>>& records,
+        const catalog::TableSchema& schema) const;
+
+    /**
+     * @brief TDE 解密器
+     */
+    innodb::TDEDecryptor tde_decryptor_;
+
+    /**
+     * @brief 是否自动检测加密
+     */
+    bool detect_encryption_ = false;
+
+    /**
+     * @brief 页大小提示（如果非零，覆盖自动检测）
+     */
+    uint32_t page_size_hint_ = 0;
+    
+    /**
+     * @brief 获取页大小提示
+     */
+    uint32_t get_page_size_hint() const { return page_size_hint_; }
+
+    /**
+     * @brief 主密钥（用于密钥派生）
+     */
+    std::string primary_key_hex_;
+
+    /**
+     * @brief 进度回调函数
+     */
+    std::function<void(uint32_t, uint32_t)> progress_callback_;
 };
 
 } // namespace recovery

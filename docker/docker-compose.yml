@@ -1,0 +1,513 @@
+# MySQL Recovery Pro - Multi-Version MySQL Docker Compose Suite
+# Purpose: Fully functional environment for 100% recovery rate validation (5M+ records)
+# Author: jliang.fang (Global MySQL Kernel QA Expert)
+# Version: 3.1.0 - 5M Record Scale Testing Infrastructure
+
+version: '3.8'
+
+x-common-env: &common-env
+  MYSQL_ROOT_PASSWORD: "root123"
+  MYSQL_ROOT_HOST: "%"
+  MYSQL_DATABASE: "testdb"
+  MYSQL_CHARACTER_SET_SERVER: "utf8mb4"
+  MYSQL_COLLATION_SERVER: "utf8mb4_unicode_ci"
+  MYSQL_ENABLE_SLOW_QUERY: "1"
+  MYSQL_SLOW_QUERY_LOG_FILE: "/var/log/mysql/slow.log"
+  MYSQL_LONG_QUERY_TIME: "1"
+  TZ: "UTC"
+
+x-common-volumes: &common-volumes
+  - /var/lib/mysql
+  - /var/log/mysql
+  - /etc/mysql/conf.d
+
+services:
+  #############################################################################
+  # MySQL 5.6 (Barracuda default, REDUNDANT/COMPACT/COMPRESSED/DYNAMIC)
+  #############################################################################
+  mysql-5.6:
+    image: docker.m.daocloud.io/mysql:5.6
+    container_name: mysql_recovery_56
+    environment:
+      <<: *common-env
+    ports:
+      - "33056:3306"
+    volumes:
+      - mysql_56_data:/var/lib/mysql
+      - mysql_56_logs:/var/log/mysql
+      - ./docker/mysql.d/5.6:/etc/mysql/conf.d:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - ./test_scripts:/test_scripts:ro
+      - chaos_test_volume:/chaos-test:rw
+    command:
+      - --innodb_file_per_table=1
+      - --innodb_file_format=Barracuda
+      - --innodb_large_prefix=ON
+      - --sql-mode=""
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max_allowed_packet=512M
+      - --innodb_buffer_pool_size=1G
+      - --innodb_log_file_size=512M
+      - --innodb_log_buffer_size=64M
+      - --sync_binlog=0
+      - --innodb_flush_log_at_trx_commit=0
+      - --tmp_table_size=512M
+      - --max_heap_table_size=512M
+    healthcheck:
+      test: ["CMD", "mysql", "-h", "localhost", "-proot123", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+    networks:
+      - recovery-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.5'
+
+  #############################################################################
+  # MySQL 5.7 (JSON support, improved InnoDB, default BTREE)
+  #############################################################################
+  mysql-5.7:
+    image: docker.m.daocloud.io/mysql:5.7
+    container_name: mysql_recovery_57
+    environment:
+      <<: *common-env
+    ports:
+      - "33057:3306"
+    volumes:
+      - mysql_57_data:/var/lib/mysql
+      - mysql_57_logs:/var/log/mysql
+      - ./docker/mysql.d/5.7:/etc/mysql/conf.d:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - ./test_scripts:/test_scripts:ro
+      - chaos_test_volume:/chaos-test:rw
+    command:
+      - --innodb_file_per_table=1
+      - --sql-mode="NO_ENGINE_SUBSTITUTION"
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max_allowed_packet=512M
+      - --innodb_buffer_pool_size=1G
+      - --innodb_log_file_size=512M
+      - --innodb_log_buffer_size=64M
+      - --sync_binlog=0
+      - --innodb_flush_log_at_trx_commit=0
+      - --tmp_table_size=512M
+      - --max_heap_table_size=512M
+      - --explicit_defaults_for_timestamp=ON
+    healthcheck:
+      test: ["CMD", "mysql", "-h", "localhost", "-proot123", "-e", "SELECT 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 120
+      start_period: 30s
+    networks:
+      - recovery-net
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.5'
+
+  #############################################################################
+  # MySQL 8.0 (LTS - SDI, Data Dictionary, CBO)
+  #############################################################################
+  mysql-8.0:
+    image: docker.m.daocloud.io/mysql:8.0
+    container_name: mysql_recovery_80
+    environment:
+      <<: *common-env
+    ports:
+      - "33058:3306"
+    volumes:
+      - mysql_80_data:/var/lib/mysql
+      - mysql_80_logs:/var/log/mysql
+      - ./docker/mysql.d/8.0:/etc/mysql/conf.d:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - ./test_scripts:/test_scripts:ro
+      - chaos_test_volume:/chaos-test:rw
+    command:
+      - --innodb_file_per_table=1
+      - --sql-mode="NO_ENGINE_SUBSTITUTION"
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --max_allowed_packet=512M
+      - --innodb_buffer_pool_size=1G
+      - --innodb_log_file_size=1G
+      - --innodb_log_buffer_size=64M
+      - --sync_binlog=0
+      - --innodb_flush_log_at_trx_commit=0
+      - --tmp_table_size=512M
+      - --max_heap_table_size=512M
+      - --binlog_format=ROW
+      - --default_authentication_plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysql", "-h", "localhost", "-proot123", "-e", "SELECT 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 60s
+    networks:
+      - recovery-net
+    deploy:
+      resources:
+        limits:
+          memory: 3G
+          cpus: '2.0'
+
+  #############################################################################
+  # MySQL 8.4 (LTS - Improved Vector, JSON, Protocol Buffer DD)
+  #############################################################################
+  mysql-8.4:
+    image: docker.m.daocloud.io/mysql:8.4
+    container_name: mysql_recovery_84
+    environment:
+      <<: *common-env
+    ports:
+      - "33059:3306"
+    volumes:
+      - mysql_84_data:/var/lib/mysql
+      - mysql_84_logs:/var/log/mysql
+      - ./docker/mysql.d/8.4:/etc/mysql/conf.d:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - ./test_scripts:/test_scripts:ro
+      - chaos_test_volume:/chaos-test:rw
+    command:
+      - --innodb_file_per_table=1
+      - --sql-mode="NO_ENGINE_SUBSTITUTION"
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --max_allowed_packet=1G
+      - --innodb_buffer_pool_size=2G
+      - --innodb_log_file_size=2G
+      - --innodb_log_buffer_size=64M
+      - --sync_binlog=0
+      - --innodb_flush_log_at_trx_commit=0
+      - --tmp_table_size=1G
+      - --max_heap_table_size=1G
+      - --binlog_format=ROW
+      - --innodb_large_prefix=ON
+    healthcheck:
+      test: ["CMD", "mysql", "-h", "localhost", "-proot123", "-e", "SELECT 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 60s
+    networks:
+      - recovery-net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.5'
+
+  #############################################################################
+  # MySQL 9.0 (Preview - Vector Support, Enhanced JSON)
+  #############################################################################
+  mysql-9.0:
+    image: docker.m.daocloud.io/mysql:9.0
+    container_name: mysql_recovery_90
+    environment:
+      <<: *common-env
+    ports:
+      - "33060:3306"
+    volumes:
+      - mysql_90_data:/var/lib/mysql
+      - mysql_90_logs:/var/log/mysql
+      - ./docker/mysql.d/9.0:/etc/mysql/conf.d:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - ./test_scripts:/test_scripts:ro
+      - chaos_test_volume:/chaos-test:rw
+    command:
+      - --innodb_file_per_table=1
+      - --sql-mode="NO_ENGINE_SUBSTITUTION"
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --max_allowed_packet=1G
+      - --innodb_buffer_pool_size=3G
+      - --innodb_log_file_size=2G
+      - --innodb_log_buffer_size=128M
+      - --sync_binlog=0
+      - --innodb_flush_log_at_trx_commit=0
+      - --tmp_table_size=1G
+      - --max_heap_table_size=1G
+      - --binlog_format=ROW
+      - --default_authentication_plugin=mysql_caching_sha2_password
+    healthcheck:
+      test: ["CMD", "mysql", "-h", "localhost", "-proot123", "-e", "SELECT 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 80
+      start_period: 60s
+    networks:
+      - recovery-net
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+          cpus: '3.0'
+
+  #############################################################################
+  # Data Injectors - Generate 5M records per version
+  #############################################################################
+
+  injector-56:
+    image: docker.m.daocloud.io/mysql:5.6
+    container_name: injector_56
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+    volumes:
+      - ./test_scripts:/test_scripts:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - chaos_test_volume:/chaos-test:rw
+    depends_on:
+      mysql-5.6:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Waiting for MySQL 5.6...' &&
+        mysql -h mysql-56 -uroot -proot123 -e 'SELECT 1' &&
+        mysql -h mysql-56 -uroot -proot123 testdb < /test_scripts/schema_56.sql &&
+        python3 /test_scripts/chaos_injector.py --host mysql-56 --port 3306 --num-records 5000000 --page-size 16384 --output /golden-hashes/hashes_56.json &&
+        echo 'MySQL 5.6 injector completed (5M records)'
+      "
+
+  injector-57:
+    image: docker.m.daocloud.io/mysql:5.7
+    container_name: injector_57
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+    volumes:
+      - ./test_scripts:/test_scripts:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - chaos_test_volume:/chaos-test:rw
+    depends_on:
+      mysql-5.7:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Waiting for MySQL 5.7...' &&
+        mysql -h mysql-57 -uroot -proot123 -e 'SELECT 1' &&
+        mysql -h mysql-57 -uroot -proot123 testdb < /test_scripts/schema_57.sql &&
+        python3 /test_scripts/chaos_injector.py --host mysql-57 --port 3306 --num-records 5000000 --page-size 16384 --blob-size 32 --output /golden-hashes/hashes_57.json &&
+        echo 'MySQL 5.7 injector completed (5M records)'
+      "
+
+  injector-80:
+    image: docker.m.daocloud.io/mysql:8.0
+    container_name: injector_80
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+    volumes:
+      - ./test_scripts:/test_scripts:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - chaos_test_volume:/chaos-test:rw
+    depends_on:
+      mysql-8.0:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Waiting for MySQL 8.0...' &&
+        mysql -h mysql-80 -uroot -proot123 -e 'SELECT 1' &&
+        mysql -h mysql-80 -uroot -proot123 testdb < /test_scripts/schema_80.sql &&
+        python3 /test_scripts/chaos_injector.py --host mysql-80 --port 3306 --num-records 5000000 --page-size 16384 --blob-size 32 --output /golden-hashes/hashes_80.json &&
+        echo 'MySQL 8.0 injector completed (5M records)'
+      "
+
+  injector-84:
+    image: docker.m.daocloud.io/mysql:8.4
+    container_name: injector_84
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+    volumes:
+      - ./test_scripts:/test_scripts:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - chaos_test_volume:/chaos-test:rw
+    depends_on:
+      mysql-8.4:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Waiting for MySQL 8.4...' &&
+        mysql -h mysql-84 -uroot -proot123 -e 'SELECT 1' &&
+        mysql -h mysql-84 -uroot -proot123 testdb < /test_scripts/schema_84.sql &&
+        python3 /test_scripts/chaos_injector.py --host mysql-84 --port 3306 --num-records 5000000 --page-size 16384 --blob-size 64 --output /golden-hashes/hashes_84.json &&
+        echo 'MySQL 8.4 injector completed (5M records)'
+      "
+
+  injector-90:
+    image: docker.m.daocloud.io/mysql:9.0
+    container_name: injector_90
+    environment:
+      - MYSQL_ROOT_PASSWORD=root123
+    volumes:
+      - ./test_scripts:/test_scripts:ro
+      - ./golden-hashes:/golden-hashes:rw
+      - chaos_test_volume:/chaos-test:rw
+    depends_on:
+      mysql-9.0:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Waiting for MySQL 9.0...' &&
+        mysql -h mysql-90 -uroot -proot123 -e 'SELECT 1' &&
+        mysql -h mysql-90 -uroot -proot123 testdb < /test_scripts/schema_90.sql &&
+        python3 /test_scripts/chaos_injector.py --host mysql-90 --port 3306 --num-records 5000000 --page-size 16384 --blob-size 100 --output /golden-hashes/hashes_90.json &&
+        echo 'MySQL 9.0 injector completed (5M records)'
+      "
+
+  #############################################################################
+  # Chaos Monkey Container - Corrupt test data
+  ###############################################################################
+
+  chaos-monkey:
+    image: python:3.11-slim
+    container_name: chaos_monkey
+    volumes:
+      - ./scripts:/scripts:ro
+      - chaos_test_volume:/chaos-test:rw
+      - ./recovery-output:/recovery-output:rw
+    depends_on:
+      mysql-5.6:
+        condition: service_healthy
+      mysql-5.7:
+        condition: service_healthy
+      mysql-8.0:
+        condition: service_healthy
+      mysql-8.4:
+        condition: service_healthy
+      mysql-9.0:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo '============================================' &&
+        echo 'MySQL Recovery Pro - Chaos Testing Pipeline' &&
+        echo '============================================' &&
+        echo '' &&
+        echo 'Step 1: Corrupting 5M record files...' &&
+        python3 /scripts/chaos_injection_suite.py --seed 42 --full-suite --num-records 5000000 &&
+        echo '' &&
+        echo 'Step 2: Running chaos test scenarios...' &&
+        python3 /scripts/chaos_test_runner.py --input /chaos-test --output /recovery-output --expected-records 5000000 &&
+        echo '' &&
+        echo 'Chaos Pipeline Complete!'
+      "
+
+  #############################################################################
+  # Recovery Engine - C++ Application
+  ###############################################################################
+
+  recovery-engine:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.recovery
+    container_name: recovery_engine
+    volumes:
+      - chaos_test_volume:/chaos-test:ro
+      - ./recovery-output:/recovery-output:rw
+      - ./golden-hashes:/golden-hashes:ro
+      - ./build:/app/build:ro
+    command: >
+      bash -c "
+        /usr/local/bin/mysql_recovery_pro --help &&
+        echo 'Recovery engine operational - ready for 5M record recovery tests'
+      "
+    depends_on:
+      - chaos-monkey
+    networks:
+      - recovery-net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+
+  #############################################################################
+  # Verification Containers
+  ###############################################################################
+
+  verify-56:
+    image: docker.m.daocloud.io/mysql:5.6
+    container_name: verify_56
+    depends_on:
+      - mysql-5.6
+    command: >
+      bash -c "
+        mysqladmin ping -h mysql-56 -proot123 &&
+        mysql -h mysql-56 -uroot -proot123 testdb -e 'SELECT COUNT(*) as record_count FROM test_table'
+      "
+
+  verify-57:
+    image: docker.m.daocloud.io/mysql:5.7
+    container_name: verify_57
+    depends_on:
+      - mysql-5.7
+    command: >
+      bash -c "
+        mysqladmin ping -h mysql-57 -proot123 &&
+        mysql -h mysql-57 -uroot -proot123 testdb -e 'SELECT COUNT(*) as record_count FROM test_table'
+      "
+
+  verify-80:
+    image: docker.m.daocloud.io/mysql:8.0
+    container_name: verify_80
+    depends_on:
+      - mysql-8.0
+    command: >
+      bash -c "
+        mysqladmin ping -h mysql-80 -proot123 &&
+        mysql -h mysql-80 -uroot -proot123 testdb -e 'SELECT COUNT(*) as record_count FROM test_table'
+      "
+
+  verify-84:
+    image: docker.m.daocloud.io/mysql:8.4
+    container_name: verify_84
+    depends_on:
+      - mysql-8.4
+    command: >
+      bash -c "
+        mysqladmin ping -h mysql-84 -proot123 &&
+        mysql -h mysql-84 -uroot -proot123 testdb -e 'SELECT COUNT(*) as record_count FROM test_table'
+      "
+
+  verify-90:
+    image: docker.m.daocloud.io/mysql:9.0
+    container_name: verify_90
+    depends_on:
+      - mysql-9.0
+    command: >
+      bash -c "
+        mysqladmin ping -h mysql-90 -proot123 &&
+        mysql -h mysql-90 -uroot -proot123 testdb -e 'SELECT COUNT(*) as record_count FROM test_table'
+      "
+
+volumes:
+  mysql_56_data:
+  mysql_56_logs:
+  mysql_57_data:
+  mysql_57_logs:
+  mysql_80_data:
+  mysql_80_logs:
+  mysql_84_data:
+  mysql_84_logs:
+  mysql_90_data:
+  mysql_90_logs:
+  chaos_test_volume:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./chaos-test-volumes
+
+networks:
+  recovery-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1

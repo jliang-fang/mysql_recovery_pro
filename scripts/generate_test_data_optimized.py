@@ -144,33 +144,70 @@ class InnoDBPageBuilder:
         # Page Type
         write_le_uint16(page, 16, FIL_PAGE_TYPE_INDEX)
 
-        # Page Header
-        write_le_uint16(page, 38, 2)
-        heap_top = 54 + len(records) * 128 + 100
-        write_le_uint16(page, 40, heap_top)
-        write_le_uint16(page, 42, (len(records) + 2) | (level << 14))
-        write_le_uint16(page, 44, 54)
-        write_le_uint16(page, 46, 2)
-        write_le_uint16(page, 48, heap_top & 0xFFFF)
-        write_le_uint16(page, 50, level)
-        write_le_uint16(page, 52, 2)
+        # Page Header (16 bytes starting at offset 38)
+        # PAGE_N_DIR_SLOTS at offset 38
+        # PAGE_HEAP_TOP at offset 40
+        # PAGE_N_HEAP at offset 42
+        # PAGE_FREE at offset 44
+        # PAGE_GARBAGE_END at offset 46
+        # PAGE_LAST_INSERT at offset 48
+        # PAGE_DIRECTION at offset 50
+        # PAGE_N_DIRECT_PAGES at offset 52
+        
+        n_user_records = len(records)
+        n_dir_slots = 2 + n_user_records  # infimum + supremum + user records
+        
+        heap_top = 54 + n_dir_slots * 2 + n_user_records * 128 + 100
+        if heap_top >= self.page_size - 100:
+            heap_top = self.page_size - 100
+        
+        write_le_uint16(page, 38, n_dir_slots)  # PAGE_N_DIR_SLOTS = n_dir_slots
+        write_le_uint16(page, 40, heap_top)     # PAGE_HEAP_TOP
+        write_le_uint16(page, 42, n_dir_slots)  # PAGE_N_HEAP = n_dir_slots
+        write_le_uint16(page, 44, 54 + n_dir_slots * 2)  # PAGE_FREE
+        write_le_uint16(page, 46, 0)            # PAGE_GARBAGE_END
+        write_le_uint16(page, 48, 0)            # PAGE_LAST_INSERT
+        write_le_uint16(page, 50, 0)            # PAGE_DIRECTION
+        write_le_uint16(page, 52, 0)            # PAGE_N_DIRECT_PAGES
 
-        # INFIMUM record (fixed offset 54)
-        # info_bits = REC_STATUS_INFIMUM (0x02) - status bits only, NOT OR with REC_INFO_MIN_REC_FLAG
-        page[54] = REC_STATUS_INFIMUM
-        write_le_uint16(page, 55, 54 + 13)
-        write_le_uint16(page, 57, 0)
-        write_le_uint16(page, 59, 13)
-
-        # SUPREMUM record
-        page[54 + 13] = REC_STATUS_SUPREMUM
-        write_le_uint16(page, 54 + 14, 0x3FFF)  # next_record_offset = 0x3FFF (15-bit)
-        write_le_uint16(page, 54 + 16, 1)       # heap_no (at 64-65, not 63-64!)
-        write_le_uint16(page, 54 + 18, 7)       # record_length (at 66-67, not 65-66!)
-
-        # User records
-        current_offset = 54 + 13 + 7  # SUPREMUM record is 7 bytes
-        prev_offset = 54
+        # Directory slots start at offset 54
+        dir_slot_start = 54
+        
+        # Directory slot 0: INFIMUM record at offset 54 + n_dir_slots*2
+        # We need to calculate record offsets first
+        # Records start at offset 54 + n_dir_slots*2
+        record_start = 54 + n_dir_slots * 2
+        
+        # Directory slot 1: SUPREMUM record at record_start + 5 + 8 = record_start + 13
+        # INFIMUM header = 5 bytes, data = 8 bytes
+        supremum_offset = record_start + 13
+        
+        # Write directory slots (will be updated after records are created)
+        # Slot 0: INFIMUM
+        write_le_uint16(page, dir_slot_start, record_start)
+        # Slot 1: SUPREMUM (bit 15 set for leaf pages)
+        write_le_uint16(page, dir_slot_start + 2, supremum_offset | 0x8000)
+        
+        # Now populate records
+        
+        # INFIMUM record (at record_start)
+        # Record header (COMPACT format): 5 bytes
+        # info_bits(1) + next_record_offset(2) + heap_no(2)
+        page[record_start] = REC_STATUS_INFIMUM  # info_bits = INFIMUM (0x02)
+        write_le_uint16(page, record_start + 1, supremum_offset)  # next_offset -> SUPREMUM
+        write_le_uint16(page, record_start + 3, 0)  # heap_no = 0
+        
+        # SUPREMUM record (at supremum_offset)
+        page[supremum_offset] = REC_STATUS_SUPREMUM  # info_bits = SUPREMUM (0x03)
+        write_le_uint16(page, supremum_offset + 1, 0x3FFF)  # next_offset = end marker
+        write_le_uint16(page, supremum_offset + 3, 1)  # heap_no = 1
+        
+        # User records start after SUPREMUM
+        # SUPREMUM header = 5 bytes, data = 2 bytes
+        # So first user record starts at supremum_offset + 7
+        current_offset = supremum_offset + 7
+        prev_offset = record_start
+        num_columns = 4  # id, name, email, status, score, float_score, double_score, created_at = 8
 
         for i, record in enumerate(records):
             # Optimized record size: ~100 bytes
@@ -179,18 +216,26 @@ class InnoDBPageBuilder:
             if current_offset + record_space >= self.page_size - 100:
                 break
 
-            # Record header (7 bytes)
-            page[current_offset] = REC_STATUS_ORDINARY
-            write_le_uint16(page, current_offset + 1, 0x3FFF)
-            write_le_uint16(page, current_offset + 3, i + 2)
-            write_le_uint16(page, current_offset + 5, 0)
+            # Record header (COMPACT format): 5 bytes
+            # info_bits(1) + next_record_offset(2) + heap_no(2)
+            # n_fields is stored in info_bits (bits 5-7) and byte[1] (bits 4-7)
+            # For 4 columns: n_fields = 4
+            # info_bits = (n_fields_high << 3) | status = (0 << 3) | 0 = 0x00
+            # byte[1] = (n_fields_low << 4) | ??? = (4 << 4) | 0 = 0x40
+            page[current_offset] = REC_STATUS_ORDINARY  # info_bits = 0x00
+            write_le_uint16(page, current_offset + 1, (num_columns << 4) | 0x00)  # n_fields-low in high nibble
+            write_le_uint16(page, current_offset + 3, i + 2)   # heap_no = i + 2 (0,1 = infimum,supremum)
 
             # Set previous record's next_offset
-            write_le_uint16(page, prev_offset + 1, current_offset)
+            if prev_offset == 54:
+                # First user record, previous is INFIMUM
+                write_le_uint16(page, prev_offset + 1, current_offset)
+            else:
+                write_le_uint16(page, prev_offset + 1, current_offset)
             prev_offset = current_offset
 
             # Record data - compact format (~100 bytes)
-            data_offset = current_offset + 7
+            data_offset = current_offset + 5  # COMPACT header is 5 bytes
 
             # id (BIGINT - 8 bytes)
             write_le_uint64(page, data_offset, record["id"])
@@ -236,26 +281,38 @@ class InnoDBPageBuilder:
             created_at_start = double_start + 8
             write_le_uint64(page, created_at_start, dt_encoded)
 
-            # Calculate record length
+            # Calculate record end position
             record_end = created_at_start + 8
-            record_length = record_end - current_offset - 7
-            write_le_uint16(page, current_offset + 5, record_length)
 
-            # Update next_record_offset
+            # Update next_record_offset field (COMPACT: 2 bytes at offset +1)
             next_offset = record_end
             write_le_uint16(page, current_offset + 1, next_offset)
 
             current_offset = next_offset
 
         # Update next_record_offset for last record to point to SUPREMUM
-        write_le_uint16(page, prev_offset + 1, 54 + 13)
+        write_le_uint16(page, prev_offset + 1, supremum_offset)
 
-        # Set directory slots after all records are created
-        # Directory starts at offset 38 (FIL_HEADER) + 16 (PAGE_HEADER) = 54
-        # Slot 0 (infimum): offset 54
-        write_le_uint16(page, 54, 54)  # INFIMUM at offset 54
-        # Slot 1 (supremum): offset 54 + 13 = 67
-        write_le_uint16(page, 56, 54 + 13 | 0x8000)  # SUPREMUM at offset 67 with bit 15 set
+        # Now update directory slots with correct offsets
+        # Directory slots are at offset 54, 56, 58, etc.
+        dir_slot_offset = 54
+        slot_idx = 0
+        
+        # Slot 0: INFIMUM at record_start
+        write_le_uint16(page, dir_slot_offset + slot_idx * 2, record_start)
+        slot_idx += 1
+        
+        # Slot 1: SUPREMUM at supremum_offset (with bit 15 set)
+        write_le_uint16(page, dir_slot_offset + slot_idx * 2, supremum_offset | 0x8000)
+        slot_idx += 1
+        
+        # Slots 2+: User records
+        first_user_rec_offset = supremum_offset + 7
+        for i in range(len(records)):
+            user_rec_offset = first_user_rec_offset + i * 128
+            if user_rec_offset < current_offset:
+                write_le_uint16(page, dir_slot_offset + slot_idx * 2, user_rec_offset)
+                slot_idx += 1
 
         # Update heap_top
         write_le_uint16(page, 40, current_offset)

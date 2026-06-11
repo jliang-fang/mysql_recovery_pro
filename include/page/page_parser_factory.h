@@ -68,13 +68,6 @@ public:
 
         // Create appropriate PageHeader based on detected version
         switch (version) {
-            case MySQLVersion::MYSQL_50:
-                return std::make_unique<PageHeaderV50>(page_data, page_size, version);
-
-            case MySQLVersion::MYSQL_55:
-            case MySQLVersion::MYSQL_51:
-                return std::make_unique<PageHeaderV55>(page_data, page_size, version);
-
             case MySQLVersion::MYSQL_56:
                 return std::make_unique<PageHeaderV56>(page_data, page_size);
 
@@ -85,7 +78,6 @@ public:
                 return std::make_unique<PageHeaderV80Enhanced>(page_data, page_size);
 
             case MySQLVersion::MYSQL_84:
-            case MySQLVersion::MYSQL_90:
                 return std::make_unique<PageHeaderV84>(page_data, page_size, version);
 
             default:
@@ -111,13 +103,6 @@ public:
         }
 
         switch (version) {
-            case MySQLVersion::MYSQL_50:
-                return std::make_unique<PageHeaderV50>(page_data, page_size, version);
-
-            case MySQLVersion::MYSQL_55:
-            case MySQLVersion::MYSQL_51:
-                return std::make_unique<PageHeaderV55>(page_data, page_size, version);
-
             case MySQLVersion::MYSQL_56:
             case MySQLVersion::MYSQL_57:
                 return std::make_unique<PageHeaderV56>(page_data, page_size);
@@ -126,7 +111,6 @@ public:
                 return std::make_unique<PageHeaderV80Enhanced>(page_data, page_size);
 
             case MySQLVersion::MYSQL_84:
-            case MySQLVersion::MYSQL_90:
                 return std::make_unique<PageHeaderV84>(page_data, page_size, version);
 
             default:
@@ -148,18 +132,13 @@ public:
             return MySQLVersion::UNKNOWN;
         }
 
-        // Step 1: Check for very old format (5.0/4.x)
-        if (is_old_mysql_format(page_data, page_size)) {
-            return MySQLVersion::MYSQL_50;
-        }
-
-        // Step 2: Check for SDI page (MySQL 8.0+)
+        // Step 1: Check for SDI page (MySQL 8.0+)
         uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 16);
         if (page_type == static_cast<uint16_t>(PageType::SDI)) {
             return MySQLVersion::MYSQL_80;
         }
 
-        // Step 3: Check Page Header Version (MySQL 8.0+) - before SDI signature check
+        // Step 2: Check Page Header Version (MySQL 8.0+) - before SDI signature check
         // This allows us to distinguish 8.4+ (header_version >= 2) from 8.0 (header_version == 1)
         if (page_size >= 42) {
             uint16_t header_version = dbrecovery::innodb::read_le<uint16_t>(page_data, 40);
@@ -172,7 +151,7 @@ public:
             }
         }
 
-        // Step 4: Check SDI Signature (8 bytes at offset 64)
+        // Step 3: Check SDI Signature (8 bytes at offset 64)
         if (page_size >= 72) {
             if (std::memcmp(page_data + 64, SDI_SIG_80, 8) == 0) {
                 return MySQLVersion::MYSQL_80;
@@ -180,12 +159,9 @@ public:
             if (std::memcmp(page_data + 64, SDI_SIG_57, 8) == 0) {
                 return MySQLVersion::MYSQL_57;
             }
-            if (std::memcmp(page_data + 64, SDI_SIG_LEGACY, 8) == 0) {
-                return MySQLVersion::MYSQL_51;
-            }
         }
 
-        // Step 5: Check FIL_PAGE_FILE_FLUSH_LSN (8 bytes in 8.0+)
+        // Step 4: Check FIL_PAGE_FILE_FLUSH_LSN (8 bytes in 8.0+)
         if (page_size >= 32) {
             uint64_t flush_lsn = dbrecovery::innodb::read_le<uint64_t>(page_data, 24);
             if (flush_lsn > 0xFFFFFFFF) {
@@ -193,10 +169,9 @@ public:
             }
         }
 
-        // Step 6: Check PAGE_MAX_TRX_ID (5.6/5.7 specific)
+        // Step 5: Check PAGE_MAX_TRX_ID (5.6/5.7 specific)
         if (page_size >= 42) {
             uint32_t max_trx_id = dbrecovery::innodb::read_le<uint32_t>(page_data, 38);
-            // For 5.5/5.1, max_trx_id is 0 or 0xFFFFFFFF
             // For 5.6/5.7, max_trx_id is non-zero and not 0xFFFFFFFF
             if (max_trx_id != 0 && max_trx_id != 0xFFFFFFFF) {
                 // Could be 5.6 or 5.7, check for additional fields
@@ -210,17 +185,7 @@ public:
             }
         }
 
-        // Step 7: Check for 5.5/5.1 specific patterns
-        if (page_size >= 38) {
-            uint16_t data_start = dbrecovery::innodb::read_le<uint16_t>(page_data, 38);
-            // For 5.5/5.1, data_start can be 0, DATA_START_OFFSET (38), or 0xFFFF
-            // (when PAGE_MAX_TRX_ID overwrites it with 0xFFFFFFFF)
-            if (data_start == 0 || data_start == DATA_START_OFFSET || data_start == 0xFFFF) {
-                return MySQLVersion::MYSQL_55;
-            }
-        }
-
-        // Step 8: Check space ID
+        // Step 6: Check space ID
         if (page_size >= 22) {
             uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(page_data, 18);
             if (space_id > 0 && page_type == static_cast<uint16_t>(PageType::INDEX)) {
@@ -228,7 +193,7 @@ public:
             }
         }
 
-        // Step 9: Check page size field (compressed pages)
+        // Step 7: Check page size field (compressed pages)
         if (page_size >= 64) {
             uint16_t page_size_field = dbrecovery::innodb::read_le<uint16_t>(page_data, 60);
             if (page_size_field != 0 && (page_size_field & 0x0FFF) < DEFAULT_PAGE_SIZE) {
@@ -257,18 +222,12 @@ public:
         }
 
         switch (version) {
-            case MySQLVersion::MYSQL_50:
-            case MySQLVersion::MYSQL_55:
-            case MySQLVersion::MYSQL_51:
-                return detect_row_format_v5x(page_data, page_size);
-
             case MySQLVersion::MYSQL_56:
             case MySQLVersion::MYSQL_57:
                 return detect_row_format_v56_57(page_data, page_size);
 
             case MySQLVersion::MYSQL_80:
             case MySQLVersion::MYSQL_84:
-            case MySQLVersion::MYSQL_90:
                 return detect_row_format_v8x(page_data, page_size);
 
             default:
@@ -316,10 +275,6 @@ public:
      */
     static std::string version_to_string(MySQLVersion version) {
         switch (version) {
-            case MySQLVersion::MYSQL_50:
-                return "MySQL 5.0/4.x";
-            case MySQLVersion::MYSQL_55:
-                return "MySQL 5.5/5.1";
             case MySQLVersion::MYSQL_56:
                 return "MySQL 5.6";
             case MySQLVersion::MYSQL_57:
@@ -328,8 +283,6 @@ public:
                 return "MySQL 8.0";
             case MySQLVersion::MYSQL_84:
                 return "MySQL 8.4";
-            case MySQLVersion::MYSQL_90:
-                return "MySQL 9.0";
             default:
                 return "Unknown";
         }
@@ -506,18 +459,12 @@ private:
 
         // Fallback based on version
         switch (version) {
-            case MySQLVersion::MYSQL_50:
-            case MySQLVersion::MYSQL_51:
-            case MySQLVersion::MYSQL_55:
-                return RowFormat::REDUNDANT;
-
             case MySQLVersion::MYSQL_56:
             case MySQLVersion::MYSQL_57:
                 return RowFormat::COMPACT;
 
             case MySQLVersion::MYSQL_80:
             case MySQLVersion::MYSQL_84:
-            case MySQLVersion::MYSQL_90:
                 return RowFormat::DYNAMIC;
 
             default:

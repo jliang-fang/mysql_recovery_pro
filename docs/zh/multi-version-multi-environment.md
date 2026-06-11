@@ -114,7 +114,7 @@ mysql_recovery_pro --ibd=/path/to/table.ibd --truncate-recovery --output=/tmp/re
 # BLOB 恢复
 mysql_recovery_pro --ibd=/path/to/table.ibd --blob-recovery --output=/tmp/recovered
 
-# 导出为 SQL
+# 导出为 SQL (支持: csv|sql|json|xml|yaml|avro|text|ibd)
 mysql_recovery_pro --ibd=/path/to/table.ibd --format=sql --output=/tmp/recovered.sql
 ```
 

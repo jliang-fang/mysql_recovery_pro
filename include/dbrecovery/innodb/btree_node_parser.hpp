@@ -100,20 +100,9 @@ struct RecordInfo {
     }
 };
 
-// ✅ 新增：页类型验证函数（在类之前声明）
-inline bool is_valid_page_type(uint16_t type) {
-    switch (type) {
-        case FIL_PAGE_INDEX:
-        case FIL_PAGE_UNDO_LOG:
-        case FIL_PAGE_TYPE_ALLOCATED:
-        case FIL_PAGE_SDI:
-        case FIL_PAGE_TYPE_BLOB:
-        case FIL_PAGE_COMPRESSED:
-            return true;
-        default:
-            return false;
-    }
-}
+// ✅ 使用 page_defs.hpp 中的 is_valid_page_type 定义（避免重复定义）
+// 保留声明以确保向后兼容
+// inline bool is_valid_page_type(uint16_t type);  // 已在 page_defs.hpp 中定义
 
 /**
  * @brief B+Tree 节点解析器
@@ -418,7 +407,7 @@ inline std::optional<RecordInfo> BPlusTreeNodeParser::parse_record(size_t offset
     
     record.next_offset = header.get_next_record_offset();
     record.heap_no = header.get_heap_no();
-    record.info_bits = header.info_bits;
+    record.info_bits = header.get_info_bits();
     record.is_deleted = header.is_deleted();
     record.is_min_rec = header.is_min_rec();
     record.n_fields = 0;  // COMPACT 格式在第5字节

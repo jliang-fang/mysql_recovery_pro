@@ -20,6 +20,7 @@
 #include <string>
 #include <optional>
 #include <iostream>
+#include <functional>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
@@ -239,7 +240,7 @@ public:
      * @brief Check if value is NULL marker
      */
     static bool is_null_marker(uint8_t byte);
-    
+
     /**
      * @brief Get field count heuristic (based on record pattern analysis)
      */
@@ -248,8 +249,73 @@ public:
     /**
      * @brief Parse records in custom format (for extreme corruption)
      * @details This parser looks for "user<N>@test.com" patterns in the data
+     * @param data Page data buffer
+     * @param size Page data size
+     * @param page_no Page number for progress display
+     * @param show_progress Enable progress bar display
      */
-    static std::vector<HeuristicRecord> parse_custom_format(const uint8_t* data, size_t size);
+    static std::vector<HeuristicRecord> parse_custom_format(
+        const uint8_t* data, size_t size, uint32_t page_no = 0, bool show_progress = false);
+
+    /**
+     * @brief Parse plain text records (for simplified test files)
+     * @details This parser looks for "user<N>@domain.com" patterns where records
+     * are stored as plain text (test files, corrupted files)
+     * @param data Page data buffer
+     * @param size Page data size
+     */
+    static std::vector<HeuristicRecord> parse_plain_text_records(const uint8_t* data, size_t size);
+
+    /**
+     * @brief Alternative parser for custom format (v2)
+     * @details Searches for "user<N>@test.com" first, then extracts name backwards.
+     * More robust against prefix bytes that may be inserted by corrupted data.
+     */
+    static std::vector<HeuristicRecord> parse_custom_format_v2(const uint8_t* data, size_t size);
+
+    /**
+     * @brief Enhanced pattern detection - IP addresses
+     */
+    static std::vector<HeuristicRecord> parse_ip_addresses(const uint8_t* data, size_t size);
+
+    /**
+     * @brief Parse email-based custom records
+     * @details This parser handles custom format where records appear as:
+     *   user_XXXXXXXuser_XXXXXXX@gmail.comUser_XXXXXXX<timestamp>
+     *   - Field 1: ID (user_XXXXXXX)
+     *   - Field 2: Name/Email (user_XXXXXXX@gmail.com)
+     *   - Field 3: Full Name (User_XXXXXXX)
+     *   - Field 4: Created At (timestamp bytes)
+     * @param data Page data buffer
+     * @param size Page data size
+     * @param page_no Page number for progress display
+     * @param show_progress Enable progress bar display
+     */
+    static std::vector<HeuristicRecord> parse_email_records(
+        const uint8_t* data, size_t size, uint32_t page_no = 0, bool show_progress = false);
+
+    /**
+     * @brief Parse URL patterns in data
+     */
+    static std::vector<HeuristicRecord> parse_url_patterns(const uint8_t* data, size_t size);
+
+    /**
+     * @brief Parse MySQL 5.6 COMPACT format records
+     * @details This parser handles MySQL 5.6 COMPACT row format:
+     * - Record header: 5 bytes (info_bits + next_offset + heap_no)
+     * - Variable-length fields: 1 or 2 byte length prefix
+     * - Fixed-length fields: BIGINT (8), DATETIME (8), VARCHAR(n)
+     * - NULL bitmap: variable size based on nullable columns
+     *
+     * @param data Page data buffer
+     * @param size Page data size
+     * @param page_no Page number for progress display
+     * @param n_nullable Number of nullable columns (default 0)
+     * @param n_fixed Number of fixed-length fields (default 0)
+     */
+    static std::vector<HeuristicRecord> parse_mysql56_compact(
+        const uint8_t* data, size_t size, uint32_t page_no = 0,
+        uint8_t n_nullable = 0, uint8_t n_fixed = 0);
 
 private:
     /**
@@ -318,12 +384,34 @@ public:
      * @return Vector of all recovered records
      */
     std::vector<HeuristicRecord> scan_file(const std::string& file_path);
-    
+
+    /**
+     * @brief Scan entire IBD file with streaming callback (memory-efficient)
+     * @param file_path Path to .ibd file
+     * @param callback Function called for each batch of records (returns false to stop)
+     * @return Total number of records scanned
+     */
+    uint64_t scan_file_streaming(
+        const std::string& file_path,
+        std::function<bool(const std::vector<HeuristicRecord>&, uint32_t page_no)> callback);
+
     /**
      * @brief Scan a specific page
      */
     std::vector<HeuristicRecord> scan_page(const uint8_t* page_data, size_t page_size, uint32_t page_no);
-    
+
+    /**
+     * @brief Scan a specific page with full deduplication
+     */
+    std::vector<HeuristicRecord> scan_page_with_dedup(
+        const uint8_t* page_data, size_t page_size, uint32_t page_no);
+
+    /**
+     * @brief Deduplicate records using multiple strategies
+     */
+    std::vector<HeuristicRecord> deduplicate_records_v2(
+        const std::vector<HeuristicRecord>& records);
+
     /**
      * @brief Set page range to scan
      */
@@ -338,10 +426,16 @@ public:
         uint32_t total_records;
         uint32_t null_markers_found;
         uint32_t invalid_records;
+        uint32_t emails_found;
+        uint32_t numeric_ids_found;
+        uint32_t uuids_found;
+        uint32_t phone_numbers_found;
+        uint32_t ip_addresses_found;
+        uint32_t urls_found;
     };
-    
+
     ScanStats get_stats() const { return stats_; }
-    
+
 private:
     uint32_t page_size_;
     uint32_t start_page_;

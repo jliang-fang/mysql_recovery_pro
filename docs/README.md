@@ -34,7 +34,7 @@ A high-performance offline data recovery tool for MySQL InnoDB storage engine wi
 - **File Information Display**: View file details and page statistics
 - **Multiple Recovery Modes**: Default, Truncate, rm -rf, Header repair
 - **Device Scanning**: Scan raw devices and partitions
-- **Multi-format Export**: CSV, SQL, JSON formats
+- **Multi-format Export**: CSV, SQL, JSON, XML, YAML, Avro, TEXT, IBD formats
 - **Progress Tracking**: Real-time progress and status updates
 - **Batch Processing**: Process multiple files in sequence
 - **Real-time Logging**: Monitor recovery progress
@@ -48,6 +48,20 @@ A high-performance offline data recovery tool for MySQL InnoDB storage engine wi
 - **JSON Export**: Export scan/search results to JSON format
 - **Recursive Directory Scanning**: Scan directories with configurable depth
 
+### Advanced Features
+- **TDE Encryption Support**: Decrypt Tablespaces with TDE encryption
+  - Auto-detect encrypted files
+  - Support for primary table keys
+  - Support for table-specific keys
+  - Keyring file loading support
+- **MySQL Version Detection**: Auto-detect and specify MySQL versions
+  - Support for MySQL 5.6, 5.7, 8.0, 8.4
+  - Automatic version inference from page headers
+  - Row format selection for proper parsing
+- **Multi-Platform Support**: Linux x86_64, ARM64
+  - Hardware-optimized encryption (AES-NI on ARM64)
+  - io_uring support for high-throughput I/O
+
 ## Architecture
 
 ```
@@ -59,9 +73,9 @@ A high-performance offline data recovery tool for MySQL InnoDB storage engine wi
 │  └──────────────┘  └──────────────┘  └──────────────┘      │
 ├─────────────────────────────────────────────────────────────┤
 │                     Page Parser Layer (V2)                   │
-│  ┌──────────────┬──────────────┬──────────────┬───────────┐ │
-│  │ 5.6/5.7 Parser│ 8.0 Parser │ 8.4 Parser │ 9.0 Parser│ │
-│  └──────────────┴──────────────┴──────────────┴───────────┘ │
+│  ┌──────────────┬──────────────┬──────────────┐             │
+│  │ 5.6/5.7 Parser│ 8.0 Parser │ 8.4 Parser  │             │
+│  └──────────────┴──────────────┴──────────────┘             │
 ├─────────────────────────────────────────────────────────────┤
 │                     InnoDB Module                            │
 │  ┌──────────────┬──────────────┬──────────────┬───────────┐ │
@@ -223,14 +237,68 @@ mysql_recovery_pro/
 ## Supported MySQL Versions
 
 - MySQL 5.5/5.6/5.7
-- MySQL 8.0/8.4/9.0
+- MySQL 8.0/8.1/8.2/8.3/8.4/9.0
 
 ## Supported Row Formats
 
-- REDUNDANT
-- COMPACT
-- DYNAMIC
-- COMPRESSED
+- REDUNDANT (MySQL 5.0-5.6)
+- COMPACT (MySQL 5.6+)
+- DYNAMIC (MySQL 5.7+)
+- COMPRESSED (MySQL 5.1+)
+
+## TDE Encryption Support
+
+MySQL Recovery Pro supports TDE (Transparent Data Encryption) decryption for encrypted InnoDB tablespaces:
+
+```bash
+# Automatic encryption detection
+./mysql_recovery_pro --ibd=encrypted.ibd --detect-encryption --output=/tmp/recovered
+
+# Using primary key (hex format)
+./mysql_recovery_pro --ibd=encrypted.ibd --key=0x0102030405060708090a0b0c0d0e0f10 --output=/tmp/recovered
+
+# Using table-specific key with tablespace ID
+./mysql_recovery_pro --ibd=encrypted.ibd --table-key=0x1112131415161718191a1b1c1d1e1f20 --tablespace-id=abc123 --output=/tmp/recovered
+
+# Keyring file support (谨慎使用)
+./mysql_recovery_pro --ibd=encrypted.ibd --keyring=/path/to/keyring --output=/tmp/recovered
+```
+
+## MySQL Version Detection
+
+The tool can automatically detect MySQL version and allows manual version specification:
+
+```bash
+# Auto-detect MySQL version
+./mysql_recovery_pro --ibd=file.ibd --detect-version --output=/tmp/recovered
+
+# Specify MySQL version explicitly
+./mysql_recovery_pro --ibd=file.ibd --mysql-version=80 --output=/tmp/recovered
+
+# Specify row format for parsing
+./mysql_recovery_pro --ibd=file.ibd --row-format=dynamic --output=/tmp/recovered
+```
+
+### Supported MySQL Versions
+
+| Version | Codename | Key Features |
+|---------|----------|--------------|
+| 57 | N/A | Enhanced page header |
+| 80 | 8.0 GA | LSN extension, SDI pages |
+| 81 | 8.1 | Improved DDL |
+| 82 | 8.2 | Performance improvements |
+| 83 | 8.3 | Bug fixes |
+| 84 | 8.4 | Encryption, temporary pages |
+| 90 | 9.0 | Enhanced checksums |
+
+### Supported Row Formats
+
+| Format | Introduced | Description |
+|--------|------------|-------------|
+| REDUNDANT | 5.0 | Legacy row format |
+| COMPACT | 5.6 | Compact row format |
+| DYNAMIC | 5.7 | Dynamic external storage |
+| COMPRESSED | 5.1 | Compressed page format |
 
 ## Recovery Scenarios
 
@@ -263,7 +331,7 @@ mysql_recovery_pro/
 1. **Batch Processing**: Add multiple files to the Batch tab and start recovery
 2. **Real-time Monitoring**: Watch progress in the Log tab
 3. **Pause/Resume**: Control recovery operations with Pause/Resume buttons
-4. **Format Selection**: Choose output format (CSV, SQL, JSON) in the Recovery tab
+4. **Format Selection**: Choose output format (CSV, SQL, JSON, XML, YAML, Avro, TEXT, IBD) in the Recovery tab
 
 ## Performance
 
@@ -336,6 +404,16 @@ MIT License - See LICENSE file for details.
 - Improved rm -rf recovery with better page detection
 - Enhanced CLI with new modes: --scan, --search, --bulk
 - Enhanced GUI with Batch and Log tabs
+- **TDE Encryption Support**: Added command-line options for TDE decryption
+  - `--key=<hex>`: Specify primary encryption key
+  - `--table-key=<hex>`: Specify table-specific key
+  - `--tablespace-id=<id>`: Specify tablespace ID
+  - `--detect-encryption`: Auto-detect encrypted files
+  - `--try-no-key`: Try recovery without encryption key
+- **MySQL Version Detection**: Added automatic version detection and specification
+  - `--detect-version`: Auto-detect MySQL version from IBD header
+  - `--mysql-version=<v>`: Specify MySQL version explicitly (57/80/81/82/83/84/90)
+  - `--row-format=<fmt>`: Specify row format for parsing
 
 ### v2.0.0 - Enhanced Edition
 - Added GUI enhancements with device scanning

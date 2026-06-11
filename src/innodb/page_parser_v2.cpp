@@ -1,5 +1,7 @@
 #include "dbrecovery/innodb/page_parser_v2.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <iostream>
 #include <algorithm>
 #include <fstream>
@@ -36,16 +38,12 @@ std::unique_ptr<IPageParserStrategy> PageParserFactory::create_parser(
         case MySQLVersion::MYSQL_80:
             return std::make_unique<MySQL80PageParser>(format);
 
-        case MySQLVersion::MYSQL_81:
         case MySQLVersion::MYSQL_84:
             return std::make_unique<MySQL84PageParser>(format);
 
-        case MySQLVersion::MYSQL_90:
-            return std::make_unique<MySQL90PageParser>(format);
-
         default:
             // 未知版本，使用通用解析器
-            std::cerr << "[WARN] Unknown MySQL version (" << static_cast<int>(version) 
+            std::cerr << "[WARN] Unknown MySQL version (" << static_cast<int>(version)
                       << "), using generic parser" << std::endl;
             return std::make_unique<GenericPageParser>(version, format);
     }
@@ -436,45 +434,6 @@ bool MySQL80PageParser::parse_instant_ddl_metadata(const uint8_t* data, size_t s
     return true;
 }
 
-// ==================== MySQL84PageParser 实现 ====================
-
-MySQL84PageParser::MySQL84PageParser(RowFormat format)
-    : MySQL80PageParser(format) {
-}
-
-bool MySQL84PageParser::parse_header(const uint8_t* data, size_t size) {
-    // MySQL 8.4 特定的页头解析
-    if (!MySQL80PageParser::parse_header(data, size)) {
-        return false;
-    }
-
-    return true;
-}
-
-std::optional<catalog::TableSchema> MySQL84PageParser::parse_sdi_metadata(
-    const uint8_t* data, size_t size) {
-
-    // MySQL 8.4 特有：增强的 SDI 元数据解析
-    return MySQL80PageParser::parse_sdi_metadata(data, size);
-}
-
-// ==================== MySQL90PageParser 实现 ====================
-
-MySQL90PageParser::MySQL90PageParser(RowFormat format)
-    : MySQL84PageParser(format) {
-}
-
-bool MySQL90PageParser::parse_header(const uint8_t* data, size_t size) {
-    // MySQL 9.0 特定的页头解析
-    if (!MySQL84PageParser::parse_header(data, size)) {
-        return false;
-    }
-
-    return true;
-}
-
-// ==================== PageParserV2 实现 ====================
-
 PageParserV2::PageParserV2(const uint8_t* data, size_t size)
     : data_(data), size_(size) {
 
@@ -547,13 +506,8 @@ PageParseResult PageParserV2::parse_as(MySQLVersion version) {
             parser_ = std::make_unique<MySQL80PageParser>(format);
             break;
 
-        case MySQLVersion::MYSQL_81:
         case MySQLVersion::MYSQL_84:
             parser_ = std::make_unique<MySQL84PageParser>(format);
-            break;
-
-        case MySQLVersion::MYSQL_90:
-            parser_ = std::make_unique<MySQL90PageParser>(format);
             break;
 
         default:
@@ -639,16 +593,12 @@ bool PageScanner::is_innodb_page(const uint8_t* data, size_t size) {
         return false;
     }
 
-    // 检查页类型
+    // 检查页类型 - 支持 MySQL 5.6 和 8.0 的不同页类型值
     uint16_t page_type = get_page_type(data);
-
-    // InnoDB 页类型范围
-    return (page_type == FIL_PAGE_INDEX ||
-            page_type == FIL_PAGE_SDI ||
-            page_type == FIL_PAGE_UNDO_LOG ||
-            page_type == FIL_PAGE_TYPE_BLOB ||
-            page_type == FIL_PAGE_TYPE_ALLOCATED ||
-            page_type == FIL_PAGE_COMPRESSED);
+    
+    // 使用 page_defs.hpp 中的 is_valid_page_type 函数
+    // 它同时支持 MySQL 5.6 (0x45BC = 17852) 和 8.0 (0x26F1 = 9969) 的页类型
+    return is_valid_page_type(page_type);
 }
 
 // ==================== PageChainReconstructor 实现 ====================
@@ -950,6 +900,31 @@ std::map<std::string, std::string> PageTypeDetector::detect_all_features(const u
     features["row_format"] = std::to_string(static_cast<int>(format));
 
     return features;
+}
+
+// ==================== MySQL84PageParser 实现 ====================
+
+MySQL84PageParser::MySQL84PageParser(RowFormat format)
+    : MySQL80PageParser(format) {
+}
+
+bool MySQL84PageParser::parse_header(const uint8_t* data, size_t size) {
+    // MySQL 8.4 特定的页头解析
+    if (!MySQL80PageParser::parse_header(data, size)) {
+        return false;
+    }
+
+    // MySQL 8.4 特有：增强的加密和临时页支持
+    // Note: parse_instant_ddl_metadata is inherited from MySQL80PageParser
+
+    return true;
+}
+
+std::optional<catalog::TableSchema> MySQL84PageParser::parse_sdi_metadata(
+    const uint8_t* data, size_t size) {
+
+    // MySQL 8.4 特有：增强的 SDI 元数据解析
+    return MySQL80PageParser::parse_sdi_metadata(data, size);
 }
 
 } // namespace innodb

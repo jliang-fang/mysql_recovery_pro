@@ -1,0 +1,77 @@
+# MySQL Recovery Pro - Chaos Pipeline Dockerfile
+# Purpose: Build chaos testing runner with C++ compiler and all dependencies
+FROM ubuntu:22.04
+
+# Set environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    g++ \
+    make \
+    gcc \
+    python3 \
+    python3-pip \
+    python3-venv \
+    mysql-client \
+    libmysqlclient-dev \
+    zlib1g-dev \
+    liburing-dev \
+    libgtest-dev \
+    libgmock-dev \
+    gdb \
+    valgrind \
+    curl \
+    wget \
+    time \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python packages
+RUN pip3 install --no-cache-dir \
+    mysql-connector-python \
+    requests \
+    numpy \
+    scipy \
+    pandas \
+    psutil \
+    psutil \
+    nlohmann_json
+
+# Create working directory
+WORKDIR /app
+
+# Copy project files
+COPY . ./
+
+# Build the project
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Debug \
+    -DENABLE_ASAN=ON \
+    -DENABLE_UBSAN=ON \
+    -DENABLE_LSAN=ON && \
+    cmake --build build -j$(nproc) && \
+    cp build/mysql_recovery_pro /usr/local/bin/
+
+# Set up environment for sanitizers
+ENV ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer
+ENV ASAN_OPTIONS=detect_leaks=1,symbolize=1,abort_on_error=1
+ENV UBSAN_OPTIONS=print_stacktrace=1
+ENV LSAN_OPTIONS=suppressions=/app/.sanitizer_suppressions
+
+# Create output directories
+RUN mkdir -p /chaos-test /recovery-output /golden-hashes /chaos-scripts
+
+# Copy scripts
+COPY scripts/*.py /chaos-scripts/
+RUN chmod +x /chaos-scripts/*.py
+
+# Copy test scripts
+COPY docker/mysql.d /etc/mysql/conf.d
+
+# Set working directory
+WORKDIR /chaos-scripts
+
+# Default command - run chaos pipeline
+CMD ["python3", "/chaos-scripts/chaos_pipeline.py", "--seed", "42", "--full-suite"]

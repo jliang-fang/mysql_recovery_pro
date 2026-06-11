@@ -185,7 +185,7 @@ std::cout << "Time: " << stats.total_time_ms << " ms" << std::endl;
 # 扫描整个数据目录
 ./mysql_recovery_pro --data-dir=/var/lib/mysql --scan --output=/tmp/scanned
 
-# 批量恢复所有表
+# 批量恢复所有表 (支持: csv|sql|json|xml|yaml|avro|text|ibd)
 ./mysql_recovery_pro --data-dir=/var/lib/mysql --bulk --output=/tmp/recovered --format=csv
 ```
 

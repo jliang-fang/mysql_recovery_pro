@@ -117,7 +117,7 @@ mysql_recovery_pro --ibd=/path/to/table.ibd --truncate-recovery --output=/tmp/re
 # BLOB recovery
 mysql_recovery_pro --ibd=/path/to/table.ibd --blob-recovery --output=/tmp/recovered
 
-# Export to SQL
+# Export to SQL (supports: csv|sql|json|xml|yaml|avro|text|ibd)
 mysql_recovery_pro --ibd=/path/to/table.ibd --format=sql --output=/tmp/recovered.sql
 ```
 

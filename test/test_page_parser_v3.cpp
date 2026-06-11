@@ -33,7 +33,7 @@ TEST(RedundantRowParserTest, ParseRecordHeader) {
     
     EXPECT_EQ(header.get_next_record_offset(), 13);
     EXPECT_EQ(header.get_heap_no(), 1);
-    EXPECT_EQ(header.info_bits, 0x00);
+    EXPECT_EQ(header.get_info_bits(), 0x00);
 }
 
 TEST(RedundantRowParserTest, ParseRecordData) {
@@ -113,7 +113,7 @@ TEST(CompactRowParserTest, ParseRecordHeader) {
     
     EXPECT_EQ(header.get_next_record_offset(), 13);
     EXPECT_EQ(header.get_heap_no(), 1);
-    EXPECT_EQ(header.info_bits, 0x18);
+    EXPECT_EQ(header.get_info_bits(), 0x18);
 }
 
 TEST(CompactRowParserTest, ParseRecordData) {

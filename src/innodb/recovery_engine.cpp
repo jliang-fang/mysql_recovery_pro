@@ -5,6 +5,7 @@
 #include "dbrecovery/innodb/blob_pointer.hpp"
 #include "dbrecovery/innodb/redo_log.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/forensic_manager.hpp"
 #include "dbrecovery/recovery/blob_reconstructor.hpp"
 
 #include "dbrecovery/catalog/schema_defs.hpp"
@@ -118,8 +119,8 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
             continue;
         }
 
-        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 26-27，不是偏移 16
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 26);
+        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 24-25
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 24);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
 
@@ -234,11 +235,17 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
 
     // 保存恢复的记录到 CSV（使用当前类的 export_to_csv 方法）
     std::string csv_path = output_dir + "/recovered_records.csv";
-    if (!recovered_records_.empty()) {
-        export_to_csv(recovered_records_, csv_path);
+    if (!recovered_records_.empty() && !table_schema_.columns.empty()) {
+        export_to_csv(recovered_records_, table_schema_, csv_path);
     }
 
     return true;
+}
+
+bool RecoveryEngine::deep_recover(const std::string& target_path, const std::string& output_csv) {
+    std::cout << "[INFO] RecoveryEngine::deep_recover starting for " << target_path << "\n";
+    ForensicRecoveryManager manager;
+    return manager.perform_deep_recovery(target_path, output_csv);
 }
 
 bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_id) {
@@ -264,8 +271,8 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             continue;
         }
 
-        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 26-27，不是偏移 16
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 26);
+        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 24-25
+        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 24);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
 
@@ -516,8 +523,9 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
     return true;
 }
 
-// ✅ P0-4 实现：导出为 CSV 格式
+// ✅ P0-4 实现：导出为 CSV 格式（带表结构版本）
 bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
+                                   const catalog::TableSchema& schema,
                                    const std::string& csv_path) {
     if (records.empty()) {
         std::cerr << "[WARN] No records to export" << std::endl;
@@ -530,22 +538,21 @@ bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string, std::
         return false;
     }
 
-    // 写入表头（从第一条记录中提取列名）
-    bool first = true;
-    for (const auto& record : records) {
-        if (first) {
-            for (auto it = record.begin(); it != record.end(); ++it) {
-                if (it != record.begin()) out << ",";
-                out << it->first;
-            }
-            out << "\n";
-            first = false;
-        }
+    // 写入表头（从schema中提取列名顺序）
+    for (const auto& pair : schema.columns) {
+        if (pair.first > 1) out << ",";
+        out << pair.second.name;
+    }
+    out << "\n";
 
-        // 写入数据行
-        for (auto it = record.begin(); it != record.end(); ++it) {
-            if (it != record.begin()) out << ",";
-            out << it->second;
+    // 写入数据行（按schema顺序）
+    for (const auto& record : records) {
+        for (auto it = schema.columns.begin(); it != schema.columns.end(); ++it) {
+            if (it != schema.columns.begin()) out << ",";
+            auto it2 = record.find(it->second.name);
+            if (it2 != record.end()) {
+                out << it2->second;
+            }
         }
         out << "\n";
     }

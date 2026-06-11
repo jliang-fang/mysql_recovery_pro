@@ -420,20 +420,12 @@ std::unique_ptr<PageHeaderBase> PageFactoryExtended::create_page_header_extended
         case MySQLVersion::MYSQL_57:
             return std::make_unique<PageHeaderV56>(page_data, page_size);
 
-        case MySQLVersion::MYSQL_55:
-        case MySQLVersion::MYSQL_51:
-            return std::make_unique<PageHeaderV55>(page_data, page_size, version);
-
-        case MySQLVersion::MYSQL_50:
-            return std::make_unique<PageHeaderV50>(page_data, page_size, version);
-
         case MySQLVersion::MYSQL_80:
         case MySQLVersion::MYSQL_84:
-        case MySQLVersion::MYSQL_90:
             return std::make_unique<PageHeaderV80>(page_data, page_size, version);
 
         default:
-            // Fallback to 5.7 compatible mode
+            // Fallback to 5.6 compatible mode for unsupported versions
             return std::make_unique<PageHeaderV56>(page_data, page_size);
     }
 }
@@ -446,9 +438,9 @@ MySQLVersion PageFactoryExtended::detect_version_extended(
         return MySQLVersion::UNKNOWN;
     }
 
-    // Step 1: Check for very old format (5.0/4.x)
+    // Step 1: Check for very old format (5.0/4.x) - fallback to 5.6
     if (is_old_mysql_format(page_data, page_size)) {
-        return MySQLVersion::MYSQL_50;
+        return MySQLVersion::MYSQL_56;
     }
 
     // Step 2: Check for SDI page (MySQL 8.0+)
@@ -499,13 +491,13 @@ MySQLVersion PageFactoryExtended::detect_version_extended(
         }
     }
 
-    // Step 7: Check for 5.5/5.1 specific patterns
+    // Step 7: Check for 5.5/5.1 specific patterns - fallback to 5.6
     if (page_size >= 38) {
         // 5.5/5.1 typically has smaller page headers
         // Check if data_start is at offset 38
         uint16_t data_start = dbrecovery::innodb::read_le<uint16_t>(page_data, 38);
         if (data_start == 0 || data_start == DATA_START_OFFSET) {
-            return MySQLVersion::MYSQL_55;
+            return MySQLVersion::MYSQL_56;
         }
     }
 
@@ -560,10 +552,6 @@ bool PageFactoryExtended::is_old_mysql_format(const uint8_t* page_data, size_t p
 
 std::string PageFactoryExtended::version_to_string(MySQLVersion version) {
     switch (version) {
-        case MySQLVersion::MYSQL_50:
-            return "MySQL 5.0/4.x";
-        case MySQLVersion::MYSQL_55:
-            return "MySQL 5.5/5.1";
         case MySQLVersion::MYSQL_56:
             return "MySQL 5.6";
         case MySQLVersion::MYSQL_57:
@@ -572,8 +560,6 @@ std::string PageFactoryExtended::version_to_string(MySQLVersion version) {
             return "MySQL 8.0";
         case MySQLVersion::MYSQL_84:
             return "MySQL 8.4";
-        case MySQLVersion::MYSQL_90:
-            return "MySQL 9.0";
         default:
             return "Unknown";
     }

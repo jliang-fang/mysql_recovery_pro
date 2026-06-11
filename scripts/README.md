@@ -1,179 +1,174 @@
-# MySQL Recovery Pro - Build Scripts
+# MySQL Recovery Pro - Chaos Testing Pipeline
+# 
+# Overview
+# --------
+# This directory contains the complete chaos testing infrastructure for MySQL Recovery Pro.
+# The pipeline implements a "break-validate-self-heal" cycle to drive towards 100% recovery accuracy.
 
-This directory contains build scripts for different platforms.
+# File Structure
+# --------------
 
-## Available Scripts
+## docker/
+# - docker-compose.multiversions.yml    # Multi-version MySQL orchestration (5.0-9.0)
+# - build_mysql_images.sh               # Script to build MySQL Docker images
+# - dockerfiles/                        # MySQL version-specific Dockerfiles
+#   - Dockerfile.mysql-5.0
+#   - Dockerfile.mysql-5.5
+#   - Dockerfile.mysql-5.6
+#   - Dockerfile.mysql-5.7
+#   - Dockerfile.mysql-8.0
+#   - Dockerfile.mysql-8.4
+#   - Dockerfile.mysql-9.0
 
-### Linux
-- `build_linux.sh` - Build script for Linux
+## scripts/
+# - ultra_data_injector.py             # 1M+ concurrent data injection with version-specific types
+# - golden_hash_base.py                # SHA-256 hash baseline generation
+# - advanced_chaos_monkey.py           # 12 corruption scenarios simulation
+# - self_healing_loop.py              # GDB core analysis + AI patch generation
+# - generate_final_report.py          # Comprehensive metrics and reporting
+# - run_chaos_test_suite.sh           # Master scheduler script
+# - run_pipeline.py                   # Python pipeline runner
+# - verify_setup.sh                   # Setup verification and quick test
+# - chaos_scripts/                    # Additional chaos testing utilities
 
-### macOS
-- `build_macos.sh` - Build script for macOS
+## docs/
+# - CHAOS_TESTING.md                  # Complete documentation
+# - report_template.json              # Report JSON template
 
-### Windows
-- `build_windows.sh` - Build script for Windows
+## Directories (created at runtime)
+# - golden-hashes/                    # SHA-256 hash baselines
+# - chaos-test-volumes/               # Corrupted .ibd test files
+# - recovery-output/                  # Recovery results per version
+# - diagnosis/                        # Self-healing diagnosis reports
 
-## Usage
+## Configuration
+# The pipeline uses global configuration in the master scheduler:
+# - DEFAULT_VERSIONS: MySQL 5.0, 5.5, 5.6, 5.7, 8.0, 8.4, 9.0
+# - RECORD_COUNT: 100000 records per version (configurable)
+# - MAX_RETRIES: 5 (self-healing attempts)
 
-### Linux/macOS
+# QuickStart
+# ----------
 
-```bash
-# Basic build (Release mode)
-./build_linux.sh
+# 1. Verify setup
+cd scripts
+./verify_setup.sh
 
-# Build with debug symbols
-./build_linux.sh --debug
+# 2. Run full pipeline (quick mode - uses local MySQL)
+cd scripts
+python3 scripts/run_pipeline.py --quick
 
-# Build with GUI support
-./build_linux.sh --enable-gui
+# Or use the bash scheduler:
+cd scripts
+./run_chaos_test_suite.sh --quick
 
-# Build with AddressSanitizer
-./build_linux.sh --enable-sanitizer
+# 3. Run with Docker (production)
+cd scripts
+./run_chaos_test_suite.sh --all
 
-# Custom build directory
-./build_linux.sh --build-dir my_build
+# Usage Examples
+# --------------
 
-# Install to custom location
-./build_linux.sh --install-dir /opt/mysql_recovery
-```
+# Data injection for single version
+python3 scripts/ultra_data_injector.py \
+    --host localhost --port 3306 \
+    --num-records 100000 \
+    --version 8.0 \
+    --vector --gis --hash
 
-### Windows
+# Apply specific corruption
+python3 scripts/advanced_chaos_monkey.py \
+    --input test.ibd \
+    --output test_corrupted.ibd \
+    --scenario torn_page \
+    --corruption-percent 80
 
-```bash
-# Basic build (Release mode)
-./build_windows.sh
+# Self-healing loop
+python3 scripts/self_healing_loop.py \
+    --input test_corrupted.ibd \
+    --max-retries 5 \
+    --report healing_report.json
 
-# Build with debug symbols
-./build_windows.sh --debug
+# Generate report
+python3 scripts/generate_final_report.py \
+    --output-dir ./recovery-output \
+    --versions 5.0 5.5 5.6 5.7 8.0 8.4 9.0
 
-# Build with GUI support
-./build_windows.sh --enable-gui
+# Development Pipeline
+# --------------------
 
-# Build with AddressSanitizer
-./build_windows.sh --enable-sanitizer
-```
+# For iterative development, run stages separately:
+cd scripts
 
-## Build Options
+# 1. Inject test data
+python3 ultra_data_injector.py --num-records 10000 --version 8.0
 
-| Option | Description |
-|--------|-------------|
-| `--debug` | Build with debug symbols |
-| `--release` | Build in release mode (default) |
-| `--build-dir DIR` | Build directory |
-| `--install-dir DIR` | Installation prefix |
-| `--threads N` | Number of parallel jobs |
-| `--prefix DIR` | Installation prefix (alias for --install-dir) |
-| `--enable-gui` | Enable GUI support (Qt) |
-| `--enable-sanitizer` | Enable AddressSanitizer |
-| `--help` | Show help message |
+# 2. Build engine (with ASAN)
+cd ../build && cmake .. -DENABLE_ASAN=ON && make -j4
 
-## Prerequisites
+# 3. Apply corruption
+python3 ../scripts/advanced_chaos_monkey.py \
+    --input ../test.ibd \
+    --output ../corrupted.ibd \
+    --scenario crc_sabotage
 
-### All Platforms
-- CMake 3.20 or higher
-- C++20 compatible compiler:
-  - GCC 10+ (Linux/macOS)
-  - Clang 12+ (Linux/macOS)
-  - MSVC 2019+ (Windows)
+# 4. Recover and debug
+python3 ../scripts/self_healing_loop.py \
+    --input ../corrupted.ibd \
+    --max-retries 3
 
-### Linux
-- nlohmann/json library
-- zlib library
-- liburing (optional, for io_uring support)
-- GTest (optional, for tests)
+# 5. View diagnostic report
+cat ../diagnosis/diagnosis.json | jq
 
-### macOS
-- Xcode Command Line Tools
-- Homebrew (recommended)
-- nlohmann/json library
-- zlib library
-- Qt5/Qt6 (optional, for GUI)
+# Corruption Scenarios
+# --------------------
 
-### Windows
-- Visual Studio 2019 or later
-- nlohmann/json library
-- zlib library
-- Qt5/Qt6 (optional, for GUI)
+Scenario               | Description                              | Damage Pattern
+----------------------|------------------------------------------|------------------
+torn_page             | Write-thy断电, last 50% corrupted         | Single page, partial
+metadata_annihilation | Erase .frm (5.x) or SDI (8.x)            | Catalog pages
+purge_race            | DROP + kill -9, purge incomplete         | Record headers
+swiss_cheese          | 20% random pages corrupted               | Scattered, 0/1/random
+grid_corruption       | Every Nth page (default 10)              | Regular pattern
+crc_sabotage          | Invalid CRC32 checksums                  | Header corruption
+type_confusion        | Wrong page types                           | Misleading info
+lsn_corruption        | Invalid log sequence numbers             | Transaction log
+undo_destroy          | Corrupt undo segment headers             | Rollback segment
+blob_attack           | Break BLOB chain pointers                | Large object chains
+page_truncation       | Remove pages from file end               | Shortened file
+all_scenarios         | Combined extreme corruption              | Everything mixed
 
-## Platform-Specific Notes
+# Recovery Scoring
+# ----------------
 
-### Linux
-- The build script will automatically install missing dependencies via apt if possible
-- For ARM64 architecture, ARM-specific optimizations are enabled automatically
+Score Range | Level                  | Description
+-----------|------------------------|----------------------------------------
+100        | 100% EXACT RECOVERY    | All SHA-256 hashes match baseline
+90-99.9    | 90% HEURISTIC          | >90% records recovered with slight reconstruction
+50-89.9    | 50% PARTIAL RECOVERY   | 50-89% records recovered
+0-49.9     | CRITICAL FAILURE       | <50% recovered, crash during recovery
+0          | TOTAL FAILURE          | 0% recovered, engine crashed
 
-### macOS
-- Homebrew is recommended for dependency management
-- For Apple Silicon (M1/M2), ARM64 optimizations are enabled automatically
-- Qt can be installed via `brew install qt`
+# Metrics
+# -------
 
-### Windows
-- Visual Studio 2019 or later is required
-- For ARM64 Windows, ARM-specific optimizations are enabled automatically
-- Qt can be installed from https://www.qt.io/download
+Recovery Engine (per version):
+- Parse rate (MB/s)
+- Peak memory (RAM)
+- Records per second
+- Average recovery time
 
-## Cross-Compilation
+Corruption Success Rate:
+- Total scenarios run
+- Passed scenarios
+- Failed scenarios
+- Average success rate
 
-### Cross-compile for ARM64 Linux on x86_64
+# Author
+# ------
+jliang.fang (Global MySQL Kernel QA Expert)  
+Version: 2.1.0
 
-```bash
-# Create a toolchain file
-cat > arm64-toolchain.cmake << EOF
-set(CMAKE_SYSTEM_NAME Linux)
-set(CMAKE_SYSTEM_PROCESSOR aarch64)
-set(CMAKE_C_COMPILER aarch64-linux-gnu-gcc)
-set(CMAKE_CXX_COMPILER aarch64-linux-gnu-g++)
-EOF
-
-# Build
-./build_linux.sh \
-    --build-dir build_arm64 \
-    -DCMAKE_TOOLCHAIN_FILE=arm64-toolchain.cmake
-```
-
-### Cross-compile for Windows on Linux
-
-```bash
-# Install MinGW-w64
-sudo apt-get install gcc-mingw-w64 g++-mingw-w64
-
-# Create a toolchain file
-cat > windows-toolchain.cmake << EOF
-set(CMAKE_SYSTEM_NAME Windows)
-set(CMAKE_C_COMPILER x86_64-w64-mingw32-gcc)
-set(CMAKE_CXX_COMPILER x86_64-w64-mingw32-g++)
-EOF
-
-# Build
-./build_linux.sh \
-    --build-dir build_windows \
-    -DCMAKE_TOOLCHAIN_FILE=windows-toolchain.cmake
-```
-
-## Continuous Integration
-
-The project uses GitHub Actions for CI/CD. See `.github/workflows/ci.yml` for details.
-
-## Troubleshooting
-
-### Common Issues
-
-1. **CMake not found**
-   - Install CMake from https://cmake.org/download/
-
-2. **Compiler not found**
-   - Linux: `sudo apt-get install build-essential`
-   - macOS: `xcode-select --install`
-   - Windows: Install Visual Studio
-
-3. **Library not found**
-   - Install the missing library via package manager or download manually
-
-4. **Permission denied**
-   - Run with `sudo` for system-wide installation
-
-## Support
-
-For support, please:
-1. Check the documentation
-2. Run with verbose logging
-3. Submit an issue with detailed information
+# License
+# -------
+Proprietary - MySQL Recovery Pro Chaos Testing Infrastructure

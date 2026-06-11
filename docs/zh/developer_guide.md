@@ -132,9 +132,137 @@ mysql_recovery_proy/
 ├── tools/                 # 工具脚本
 │   ├── generate_test_data.py  # 测试数据生成
 │   └── ibd_generator.py       # IBD 文件生成
+├── scripts/               # 脚本文件
 ├── CMakeLists.txt         # CMake 配置
 └── README.md              # 项目说明
 ```
+
+## 数据导出
+
+mysql_recovery_pro 支持 **8 种导出格式**，每种格式都有专门的导出器实现：
+
+### 1. ExportFormat 枚举
+
+```cpp
+enum class ExportFormat {
+    SQL,        // SQL INSERT 语句
+    CSV,        // CSV 格式
+    JSON,       // JSON 格式
+    XML,        // XML 格式
+    TEXT,       // 纯文本格式
+};
+```
+
+### 2. 导出器分类
+
+#### 基础导出器 (DataExporter)
+- **位置**: `include/dbrecovery/innodb/data_exporter.hpp`
+- **实现**: `src/innodb/data_exporter.cpp`
+- **支持格式**: SQL, CSV, JSON, XML, TEXT
+- **功能**: 行级别数据导出
+
+#### 页导出器 (PageExporter)
+- **位置**: `include/dbrecovery/innodb/page_exporter.hpp`
+- **实现**: `src/innodb/page_exporter.cpp`
+- **支持格式**: JSON, CSV, SQL, Binary
+- **功能**: 页级别数据导出
+
+#### 格式导出器 (export_formats.hpp)
+- **位置**: `include/dbrecovery/innodb/export_formats.hpp`
+- **支持格式**: 
+  - **JSONExporter**: JSON 格式
+  - **ParquetExporter**: Parquet 格式 (简化实现)
+  - **XMLExporter**: XML 格式
+  - **YAMLExporter**: YAML 格式
+  - **AvroExporter**: Avro 格式 (简化实现)
+
+### 3. 导出流程
+
+```
+用户请求
+    ↓
+RecoveryEngine.recover_truncate()
+    ↓
+获得 records (vector<map<string, string>>)
+    ↓
+根据 format 参数选择导出器
+    ↓
+调用对应导出器
+    ↓
+写入输出文件
+```
+
+### 4. 导出器使用示例
+
+#### DataExporter 使用
+
+```cpp
+#include "dbrecovery/innodb/data_exporter.hpp"
+
+// 创建导出器
+dbrecovery::innodb::DataExporter exporter;
+
+// 设置配置
+dbrecovery::innodb::ExportConfig config;
+config.format = dbrecovery::innodb::ExportFormat::JSON;
+config.table_name = "users";
+config.include_header = true;
+config.include_transaction = false;
+exporter.set_config(config);
+
+// 导出行数据
+std::string output = exporter.export_row(row);
+```
+
+#### PageExporter 使用
+
+```cpp
+#include "dbrecovery/innodb/page_exporter.hpp"
+
+// 创建导出器
+dbrecovery::innodb::PageExportOptions options;
+options.output_format = "json";
+options.include_header = true;
+options.include_records = true;
+dbrecovery::innodb::PageExporter exporter(options);
+
+// 导出页数据
+auto result = exporter.export_page(page_data.data(), page_data.size());
+std::cout << result.output << std::endl;
+```
+
+### 5. CLI 参数处理
+
+命令行参数通过 `CliParser` 解析，支持的格式选项：
+
+```cpp
+std::string format = parser_.get_option("format", "csv");
+```
+
+支持的格式值：
+- `csv` - CSV 格式
+- `sql` - SQL 格式
+- `json` - JSON 格式
+- `xml` - XML 格式
+- `yaml` - YAML 格式
+- `avro` - Avro 格式
+- `text` - TEXT 格式
+- `ibd` - IBD 修复模式
+
+### 6. 导出格式对比
+
+| 格式 | 优点 | 缺点 | 适用场景 |
+|------|------|------|----------|
+| CSV | 简单、通用、Excel 支持 | 无类型信息 | 数据迁移、Excel 分析 |
+| SQL | 可直接导入 MySQL | 文件较大 | MySQL 数据恢复 |
+| JSON | Web 友好、层次结构 | 文件较大 | API 交换、Web 应用 |
+| XML | 标准化、Schema 支持 | 文件最大、解析慢 | 系统集成、配置 |
+| YAML | 人类可读、配置友好 | 需要 YAML 库 | 配置文件、脚本 |
+| Avro | 二进制、高效 | 需要 Avro 库、二进制 | Hadoop、大数据 |
+| TEXT | 人类可读 | 无结构 | 日志、调试 |
+| IBD | 文件级恢复 | 仅用于修复 | 表空间修复 |
+
+---
 
 ## 编码规范
 

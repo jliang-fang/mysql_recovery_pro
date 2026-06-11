@@ -152,7 +152,7 @@ output_dir/
 ./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/tmp/recovery --verbose
 ```
 
-### 批量恢复 (rm -rf 场景)
+### 批量恢复 (rm -rf 场景) (支持: csv|sql|json|xml|yaml|avro|text|ibd)
 ```bash
 ./mysql_recovery_pro --data-dir=/var/lib/mysql --bulk --output=/tmp/recovered --format=csv
 ```

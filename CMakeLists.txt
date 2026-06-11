@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(mysql_recovery_pro VERSION 2.1.0 LANGUAGES CXX)
+project(mysql_recovery_pro VERSION 2.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -60,6 +60,11 @@ set(SOURCES
     # ✅ 新增：坏块修复功能
     src/repair/corruption_detector.cpp
     src/repair/header_repairer.cpp
+    src/repair/physical_corruption.cpp
+    src/repair/page_content_repair.cpp
+    src/repair/index_corruption_repair.cpp
+    src/repair/log_corruption_repair.cpp
+    src/repair/metadata_corruption_repair.cpp
     src/repair/repair.cpp
     src/utils/cli_parser.cpp
     src/utils/file_mapper.cpp
@@ -75,14 +80,50 @@ set(SOURCES
     src/page/page_v84.cpp
     # ✅ 新增：页解析器 V3
     src/innodb/page_parser_v3.cpp
-    # ✅ 新增：MySQL 8.1/8.2/8.3 兼容支持
-    src/innodb/page_parser_v82.cpp
     # ✅ 新增：Schemaless heuristic recovery parser
     src/innodb/heuristic_parser.cpp
+    # ✅ 新增：Enhanced schemaless parser with pattern-based field detection
+    src/innodb/enhanced_schemaless_parser.cpp
+    # ✅ 新增：Schema-Agnostic scanner (Page Directory based)
+    src/innodb/schema_agnostic_scanner.cpp
+    # ✅ 新增：FRM file parser (extract schema from .frm files)
+    src/innodb/frm_parser.cpp
+    # ✅ 新增：Dynamic schema inference from corrupted IBD files
+    src/innodb/schema_inferrer.cpp
+    # ✅ 新增：Undo log parser for TRUNCATE recovery
+    src/innodb/undo_log_parser.cpp
+    # ✅ 新增：BLOB/TEXT scanner
+    src/innodb/blob_scanner.cpp
+    # ✅ 新增：Binary recovery for TRUNCATE/rm -rf scenarios
+    src/innodb/binary_recovery.cpp
+    # ✅ 新增：Page merger for corruption recovery
+    src/innodb/page_merger.cpp
+    # ✅ 新增：Forensic recovery for TRUNCATE/rm -rf scenarios
+    src/innodb/forensic_recovery.cpp
+    src/innodb/forensic_manager.cpp
+    # ✅ 新增：Enhanced binary recovery with PhotoRec-style scanning
+    src/innodb/binary_recovery_enhanced.cpp
+    # ✅ 新增：Canonical InnoDB page checksum implementation
+    src/innodb/innodb_checksum_impl.cpp
     # ✅ 新增：io_uring 高性能 I/O
     src/disk/io_uring_scanner.cpp
     # ✅ 新增：MySQL版本检测器
     src/common/mysql_version_detector.cpp
+    # ✅ 新增：统一校验和实现
+    src/innodb/innodb_checksum_impl.cpp
+    # ✅ 新增：引擎模块实现
+    src/engine/raw_disk_engine.cpp
+    src/engine/signature_scraper.cpp
+    src/engine/schema_aware_parser.cpp
+    # ✅ 新增：终极恢复引擎模块 (>=99.9% recovery)
+    src/engine/enhanced_raw_disk_engine.cpp
+    src/engine/advanced_signature_scraper.cpp
+    src/recovery/heuristic_reconstructor.cpp
+    src/innodb/schema_aware_parser.cpp
+    # ✅ 新增：版本感知恢复引擎 (MySQL 5.6-9.0)
+    src/recovery/version_aware_recovery.cpp
+    # ✅ 新增：ibd2sql-style INDEX page parser (core parser for >=99.9% recovery)
+    src/index_page_parser.cpp
     # ✅ 新增：平台特定实现
     src/platform/linux/file_system_linux.cpp
     src/platform/linux/memory_linux.cpp
@@ -140,6 +181,11 @@ target_link_libraries(dbrecovery_innodb PUBLIC nlohmann_json::nlohmann_json)
 
 # 链接 zlib（用于 SDI 解压缩）
 target_link_libraries(dbrecovery_innodb PUBLIC ZLIB::ZLIB)
+
+# 链接 OpenSSL（用于 TDE AES 解密）
+find_package(OpenSSL REQUIRED)
+target_link_libraries(dbrecovery_innodb PUBLIC OpenSSL::SSL OpenSSL::Crypto)
+target_include_directories(dbrecovery_innodb PUBLIC ${OPENSSL_INCLUDE_DIR})
 
 # 链接 liburing（用于 io_uring 高性能 I/O）
 if(HAVE_IO_URING)

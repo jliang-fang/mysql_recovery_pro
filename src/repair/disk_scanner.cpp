@@ -45,8 +45,8 @@ bool DiskScanner::is_innodb_page(const uint8_t* page, size_t page_size) {
         return false;
     }
 
-    // 检查页类型（使用正确的偏移量 FIL_PAGE_TYPE_ABS = 16）
-    uint16_t type = dbrecovery::innodb::read_le<uint16_t>(page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    // 检查页类型（使用正确的偏移量 FIL_PAGE_TYPE_ABS = 24，大端序）
+    uint16_t type = dbrecovery::innodb::read_be<uint16_t>(page, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
     // 检查页类型是否有效
     if (type != dbrecovery::innodb::FIL_PAGE_INDEX &&

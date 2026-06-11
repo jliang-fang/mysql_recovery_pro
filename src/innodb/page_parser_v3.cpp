@@ -79,13 +79,8 @@ PageParseResult PageParserV3::parse_as(MySQLVersion version) {
             parser_ = std::make_unique<MySQL80PageParser>(format);
             break;
 
-        case MySQLVersion::MYSQL_81:
         case MySQLVersion::MYSQL_84:
             parser_ = std::make_unique<MySQL84PageParser>(format);
-            break;
-
-        case MySQLVersion::MYSQL_90:
-            parser_ = std::make_unique<MySQL90PageParser>(format);
             break;
 
         default:
@@ -110,13 +105,8 @@ PageParseResult PageParserV3::parse_with_format(RowFormat format) {
             parser_ = std::make_unique<MySQL80PageParser>(format);
             break;
 
-        case MySQLVersion::MYSQL_81:
         case MySQLVersion::MYSQL_84:
             parser_ = std::make_unique<MySQL84PageParser>(format);
-            break;
-
-        case MySQLVersion::MYSQL_90:
-            parser_ = std::make_unique<MySQL90PageParser>(format);
             break;
 
         default:
@@ -168,7 +158,7 @@ std::vector<uint32_t> PageParserV3::get_page_chain() {
         }
         
         const uint8_t* next_page_data = data_ + current_page * 16384;
-        current_page = read_le<uint32_t>(next_page_data, 4); // FIL_PAGE_NEXT
+        current_page = read_be<uint32_t>(next_page_data, FIL_PAGE_NEXT_ABS); // FIL_PAGE_NEXT at offset 12
     }
     
     return chain;
@@ -189,11 +179,9 @@ RecordHeader RedundantRowParser::parse_record_header(const uint8_t* data) {
     // [3-4]: heap_no (15 bits)
     // [5]: n_fields (not stored in RecordHeader)
 
-    header.info_bits = data[0];
-    header.next_rec_off_0 = data[1];
-    header.next_rec_off_1 = data[2];
-    header.heap_no_0 = data[3];
-    header.heap_no_1 = data[4];
+    header.byte0 = data[0];
+    header.next_off_0 = data[1];
+    header.next_off_1 = data[2];
 
     return header;
 }
@@ -301,11 +289,9 @@ RecordHeader CompactRowParser::parse_record_header(const uint8_t* data) {
     // [1-2]: next_record_offset (15 bits)
     // [3-4]: heap_no (15 bits)
 
-    header.info_bits = data[0];
-    header.next_rec_off_0 = data[1];
-    header.next_rec_off_1 = data[2];
-    header.heap_no_0 = data[3];
-    header.heap_no_1 = data[4];
+    header.byte0 = data[0];
+    header.next_off_0 = data[1];
+    header.next_off_1 = data[2];
 
     return header;
 }
@@ -520,7 +506,7 @@ void BTreeTraverser::traverse_recursive(
     const uint8_t* page_data = data_ + page_no * 16384;
     
     // Parse page header
-    uint16_t page_type = read_le<uint16_t>(page_data, 16);
+    uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
     uint16_t page_level = read_le<uint16_t>(page_data, 42);
     uint16_t n_heap = read_le<uint16_t>(page_data, 44) & 0x7FFF;
     
@@ -549,7 +535,7 @@ void BTreeTraverser::traverse_recursive(
         record.next_offset = header.get_next_record_offset();
         record.is_deleted = header.is_deleted();
         record.heap_no = header.get_heap_no();
-        record.info_bits = header.info_bits;
+        record.info_bits = header.get_info_bits();
 
         result.records.push_back(record);
     }
@@ -617,7 +603,7 @@ std::vector<uint32_t> UndoLogChainParser::get_undo_log_pages() {
     size_t num_pages = size_ / 16384;
     for (size_t i = 0; i < num_pages; i++) {
         const uint8_t* page_data = data_ + i * 16384;
-        uint16_t page_type = read_le<uint16_t>(page_data, 16);
+        uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
         
         if (page_type == FIL_PAGE_UNDO_LOG) {
             pages.push_back(static_cast<uint32_t>(i));
@@ -671,14 +657,10 @@ std::unique_ptr<IPageParserStrategy> PageParserFactoryV3::create_parser(
             
         case MySQLVersion::MYSQL_80:
             return std::make_unique<MySQL80PageParser>(format);
-            
-        case MySQLVersion::MYSQL_81:
+
         case MySQLVersion::MYSQL_84:
             return std::make_unique<MySQL84PageParser>(format);
-            
-        case MySQLVersion::MYSQL_90:
-            return std::make_unique<MySQL90PageParser>(format);
-            
+
         default:
             return std::make_unique<GenericPageParser>(version, format);
     }

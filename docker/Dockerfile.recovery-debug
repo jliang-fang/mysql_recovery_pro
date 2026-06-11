@@ -1,0 +1,75 @@
+# MySQL Recovery Pro - Debug Build with Sanitizers
+# Purpose: Build recovery engine with ASAN/UBSAN for memory safety testing
+FROM ubuntu:22.04
+
+# Set environment
+ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=UTC
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    cmake \
+    g++ \
+    make \
+    gcc \
+    python3 \
+    python3-pip \
+    libmysqlclient-dev \
+    zlib1g-dev \
+    liburing-dev \
+    libgtest-dev \
+    libgmock-dev \
+    valgrind \
+    gdb \
+    llvm \
+    clang \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install nlohmann/json library
+RUN apt-get update && apt-get install -y \
+    nlohmann-json3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create working directories
+WORKDIR /build
+RUN mkdir -p /app /usr/local/bin
+
+# Copy project files
+COPY CMakeLists.txt /app/
+COPY cmake /app/cmake/
+COPY src /app/src/
+COPY include /app/include/
+
+# Build with sanitizers
+RUN cd /app && \
+    cmake -B /app/build \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DENABLE_ASAN=ON \
+        -DENABLE_UBSAN=ON \
+        -DENABLE_LSAN=ON && \
+    cmake --build /app/build -j$(nproc) && \
+    cp /app/build/mysql_recovery_pro /usr/local/bin/mysql_recovery_pro
+
+# Set up sanitizer environment
+ENV ASAN_SYMBOLIZER_PATH=/usr/bin/llvm-symbolizer
+ENV ASAN_OPTIONS=detect_leaks=1,symbolize=1,abort_on_error=1,print_stats=1,stack_trace_on_error=1
+ENV UBSAN_OPTIONS=print_stacktrace=1,print_summary=1
+ENV LSAN_OPTIONS=suppressions=/app/.sanitizer_suppressions,detect_leaks=1
+
+# Install Python dependencies
+RUN pip3 install --no-cache-dir mysql-connector-python requests
+
+# Create output directories
+RUN mkdir -p /chaos-test /recovery-output /golden-hashes
+
+# Copy scripts
+COPY scripts /app/scripts
+
+WORKDIR /app
+
+# Expose port (for MySQL testing if needed)
+EXPOSE 3306
+
+# Default command - show help
+CMD ["/usr/local/bin/mysql_recovery_pro", "--help"]

@@ -1,8 +1,8 @@
-# MySQL 8.0 Recovery Engine
+# MySQL 5.6-8.4 Recovery Engine
 
 [English](./README.md) | [中文](../zh/README.md)
 
-A high-performance C++ library for offline MySQL 8.0+ data recovery.
+A high-performance C++ library for offline MySQL 5.6-8.4 data recovery.
 
 ## 🚀 Features
 

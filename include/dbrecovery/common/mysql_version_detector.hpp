@@ -85,8 +85,8 @@ private:
         uint16_t sdi_page_type;        // SDI页类型值
     };
 
-    // 版本特征表
-    static const std::array<VersionFeature, 11> version_features_;
+    // 版本特征表（支持：5.6, 5.7, 8.0, 8.4）
+    static const std::array<VersionFeature, 4> version_features_;
 };
 
 // ==================== 版本检测辅助类 ====================

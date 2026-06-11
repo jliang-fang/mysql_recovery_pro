@@ -421,6 +421,9 @@ def main():
                        help='Corruption scenario')
     parser.add_argument('--seed', type=int, default=None,
                        help='Random seed for reproducibility')
+    parser.add_argument('--page-size', type=int, default=None,
+                       choices=[4096, 8192, 16384, 32768, 65536],
+                       help='Force page size (auto-detect if not specified)')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Verbose output')
     
@@ -433,18 +436,47 @@ def main():
     # Read input file
     with open(args.input, 'rb') as f:
         data = bytearray(f.read())
-    
-    # Analyze file
-    page_size = 16384
+
+    # Analyze file - use page_size if provided, otherwise detect
+    page_size = args.page_size if hasattr(args, 'page_size') and args.page_size else 16384
     if len(data) >= 16384:
-        page_type = read_le_uint16(data, 16)
-        if page_type in [FIL_PAGE_TYPE_INDEX, FIL_PAGE_TYPE_SDI]:
-            # Try to detect page size from file structure
-            for ps in [4096, 8192, 16384, 32768, 65536]:
-                if len(data) % ps == 0:
-                    page_size = ps
-                    break
+        # Detect page size by finding valid InnoDB page types at page boundaries
+        valid_page_types = [FIL_PAGE_TYPE_INDEX, FIL_PAGE_TYPE_SDI, 
+                           FIL_PAGE_TYPE_UNDO_LOG, FIL_PAGE_TYPE_BLOB]
+        
+        # Check page sizes from largest to smallest, prefer larger valid page sizes
+        for ps in [65536, 32768, 16384, 8192, 4096]:
+            if len(data) % ps != 0:
+                continue
+            
+            # Check multiple page headers for valid types
+            valid_count = 0
+            total_checks = min(10, len(data) // ps)
+            
+            for test_page in range(total_checks):
+                test_offset = test_page * ps
+                if test_offset + 52 <= len(data):
+                    test_type = read_le_uint16(data, test_offset + 16)
+                    if test_type in valid_page_types:
+                        valid_count += 1
+            
+            # If all checked pages have valid types, this is likely the correct page size
+            if valid_count == total_checks and total_checks > 0:
+                page_size = ps
+                break
+            
+            # If more than half the pages have valid types, this could be our page size
+            # But only accept if larger page size wasn't already found
+            if valid_count >= total_checks // 2 and valid_count > 0 and page_size == 16384:
+                page_size = ps
+
+    # Calculate input hash BEFORE any modifications
+    input_hash = generate_hash(data)
     
+    # Set random seed if provided
+    if args.seed:
+        random.seed(args.seed)
+
     # Apply corruption
     corrupted_data, scenario_info = create_corruption_scenario(
         args.scenario, data, page_size
@@ -467,14 +499,14 @@ def main():
         print(f"Corruption types: {scenario_info['corruption_types']}")
         print(f"Corrupted page numbers: {scenario_info['corrupted_pages']}")
         print()
-        print(f"Input hash: {generate_hash(data)}")
+        print(f"Input hash: {input_hash}")
         print(f"Output hash: {generate_hash(corrupted_data)}")
     else:
         # Simple output for automation
         print(f"SCENARIO:{scenario_info['scenario']}")
         print(f"PAGES_CORRUPTED:{len(scenario_info['corrupted_pages'])}")
         print(f"PAGE_NUMBERS:{','.join(map(str, scenario_info['corrupted_pages']))}")
-        print(f"HASH_INPUT:{generate_hash(data)}")
+        print(f"HASH_INPUT:{input_hash}")
         print(f"HASH_OUTPUT:{generate_hash(corrupted_data)}")
 
 

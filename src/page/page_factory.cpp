@@ -33,22 +33,14 @@ std::unique_ptr<PageHeaderBase> PageFactory::create_page_header(
         case MySQLVersion::MYSQL_57:
             return std::make_unique<PageHeaderV56>(page_data, page_size);
 
-        case MySQLVersion::MYSQL_55:
-        case MySQLVersion::MYSQL_51:
-            return std::make_unique<PageHeaderV55>(page_data, page_size, version);
-
-        case MySQLVersion::MYSQL_50:
-            return std::make_unique<PageHeaderV50>(page_data, page_size, version);
-
         case MySQLVersion::MYSQL_80:
             return std::make_unique<PageHeaderV80>(page_data, page_size, version);
 
         case MySQLVersion::MYSQL_84:
-        case MySQLVersion::MYSQL_90:
             return std::make_unique<PageHeaderV84>(page_data, page_size, version);
 
         default:
-            // Fallback to 5.7 compatible mode
+            // Fallback to 5.6 compatible mode for unsupported versions
             return std::make_unique<PageHeaderV56>(page_data, page_size);
     }
 }

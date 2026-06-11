@@ -115,10 +115,9 @@ BenchmarkResult PerformanceBenchmark::benchmark_blob_reconstruct(uint32_t blob_s
 BenchmarkResult PerformanceBenchmark::benchmark_undo_log_parse(uint32_t page_size, int iterations) {
     auto page = create_test_undo_page(page_size);
 
-    return run("Undo Log Parse (" + std::to_string(page_size) + " bytes)", iterations, [page, page_size]() mutable {
+    return run("Undo Log Parse (" + std::to_string(page_size) + " bytes)", iterations, [page]() mutable {
         dbrecovery::innodb::UndoLogParser parser;
-        parser.set_page_size(page_size);
-        parser.parse_page(page.data(), page.size(), 0);
+        parser.parse_undo_log_page(page.data(), page.size(), 0);
     });
 }
 
@@ -129,9 +128,8 @@ BenchmarkResult PerformanceBenchmark::benchmark_redo_log_replay(uint32_t page_si
     dbrecovery::innodb::RedoLogParser redo_parser;
     auto records = redo_parser.parse_file("/dev/null");  // Will return empty, but sets up parser
 
-    return run("Redo Log Replay (" + std::to_string(page_size) + " bytes)", iterations, [page, redo_parser, page_size]() mutable {
+    return run("Redo Log Replay (" + std::to_string(page_size) + " bytes)", iterations, [page]() mutable {
         dbrecovery::innodb::RedoLogReplayer replayer;
-        replayer.set_page_size(page_size);
         replayer.add_page(0, std::move(page));
         // Note: This is a simplified benchmark
     });

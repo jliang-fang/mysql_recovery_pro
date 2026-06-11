@@ -1,0 +1,206 @@
+# =============================================================================
+# MySQL Recovery Pro - Multi-Version Chaos Testing Infrastructure
+# Architect: jliang.fang (Global MySQL Kernel QA & Chaos Engineering)
+# Target: MySQL 5.0 - 9.x, InnoDB Page Format Evolution (Antelope/Barracuda)
+# =============================================================================
+
+version: '3.8'
+
+services:
+  # ==================== MySQL 5.0 (Antelope, Compact Redundant) ====================
+  mysql-5.0:
+    image: mysql:5.0.96
+    container_name: chaos_mysql50
+    environment:
+      MYSQL_ROOT_PASSWORD: Chaos2026!
+      MYSQL_DATABASE: recovery_test
+    volumes:
+      - ./volumes/mysql50/data:/var/lib/mysql
+      - ./scripts/chaos_injection:/chaos/injection
+      - ./volumes/shared_results:/chaos/results
+    ports:
+      - "3306:3306"
+    cap_add:
+      - SYS_PTRACE
+    mem_limit: 2g
+    memswap_limit: 4g
+    security_opt:
+      - seccomp:unconfined
+      - apparmor:unconfined
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ==================== MySQL 5.6 (Antelope + Barracuda, Large Prefix) ====================
+  mysql-5.6:
+    image: mysql:5.6.51
+    container_name: chaos_mysql56
+    environment:
+      MYSQL_ROOT_PASSWORD: Chaos2026!
+      MYSQL_DATABASE: recovery_test
+      MYSQL_ROOT_HOST: '%'
+    volumes:
+      - ./volumes/mysql56/data:/var/lib/mysql
+      - ./scripts/chaos_injection:/chaos/injection
+      - ./volumes/shared_results:/chaos/results
+    ports:
+      - "3307:3306"
+    cap_add:
+      - SYS_PTRACE
+    mem_limit: 2g
+    memswap_limit: 4g
+    command:
+      - --innodb_file_format=Barracuda
+      - --innodb_file_per_table=1
+      - --innodb_large_prefix=1
+      - --innodb_print_all_deadlocks=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ==================== MySQL 5.7 (Barracuda, Dynamic Row Format) ====================
+  mysql-5.7:
+    image: mysql:5.7.44
+    container_name: chaos_mysql57
+    environment:
+      MYSQL_ROOT_PASSWORD: Chaos2026!
+      MYSQL_DATABASE: recovery_test
+    volumes:
+      - ./volumes/mysql57/data:/var/lib/mysql
+      - ./scripts/chaos_injection:/chaos/injection
+      - ./volumes/shared_results:/chaos/results
+    ports:
+      - "3308:3306"
+    cap_add:
+      - SYS_PTRACE
+    mem_limit: 3g
+    memswap_limit: 6g
+    command:
+      - --innodb_file_format=Barracuda
+      - --innodb_file_per_table=1
+      - --innodb_large_prefix=1
+      - --sql_mode=STRICT_ALL_TABLES
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ==================== MySQL 8.0 (SDI Page 3, MySQL 8.0 Dictionary) ====================
+  mysql-8.0:
+    image: mysql:8.0.36
+    container_name: chaos_mysql80
+    environment:
+      MYSQL_ROOT_PASSWORD: Chaos2026!
+      MYSQL_DATABASE: recovery_test
+    volumes:
+      - ./volumes/mysql80/data:/var/lib/mysql
+      - ./scripts/chaos_injection:/chaos/injection
+      - ./volumes/shared_results:/chaos/results
+    ports:
+      - "3309:3306"
+    cap_add:
+      - SYS_PTRACE
+    mem_limit: 4g
+    memswap_limit: 8g
+    command:
+      - --innodb_file_per_table=1
+      - --innodb_print_all_deadlocks=1
+      - --binlog_format=ROW
+      - --default_authentication_plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ==================== MySQL 8.4 (Thomas/Puhui Page Format, 64KB Support) ====================
+  mysql-8.4:
+    image: mysql:8.4.0
+    container_name: chaos_mysql84
+    environment:
+      MYSQL_ROOT_PASSWORD: Chaos2026!
+      MYSQL_DATABASE: recovery_test
+    volumes:
+      - ./volumes/mysql84/data:/var/lib/mysql
+      - ./scripts/chaos_injection:/chaos/injection
+      - ./volumes/shared_results:/chaos/results
+    ports:
+      - "3310:3306"
+    cap_add:
+      - SYS_PTRACE
+    mem_limit: 4g
+    memswap_limit: 8g
+    command:
+      - --innodb_file_per_table=1
+      - --innodb_page_size=16K
+      - --innodb_checksum_algorithm=crc32
+      - --binlog_format=ROW
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ==================== MySQL 9.0 (Future-Proof, 64KB Pages Default) ====================
+  mysql-9.0:
+    image: mysql:9.0.0
+    container_name: chaos_mysql90
+    environment:
+      MYSQL_ROOT_PASSWORD: Chaos2026!
+      MYSQL_DATABASE: recovery_test
+    volumes:
+      - ./volumes/mysql90/data:/var/lib/mysql
+      - ./scripts/chaos_injection:/chaos/injection
+      - ./volumes/shared_results:/chaos/results
+    ports:
+      - "3311:3306"
+    cap_add:
+      - SYS_PTRACE
+    mem_limit: 4g
+    memswap_limit: 8g
+    command:
+      - --innodb_file_per_table=1
+      - --innodb_page_size=16K
+      - --innodb_checksum_algorithm=crc32
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # ==================== Chaos Orchestrator (Unified Control Plane) ====================
+  chaos-orchestrator:
+    image: python:3.11-slim
+    container_name: chaos_orchestrator
+    volumes:
+      - ../:/app/mysql_recovery_pro
+      - ./volumes:/chaos/volumes
+      - ./results:/chaos/results
+    working_dir: /app/mysql_recovery_pro
+    depends_on:
+      mysql-5.0:
+        condition: service_healthy
+      mysql-5.6:
+        condition: service_healthy
+      mysql-5.7:
+        condition: service_healthy
+      mysql-8.0:
+        condition: service_healthy
+      mysql-8.4:
+        condition: service_healthy
+      mysql-9.0:
+        condition: service_healthy
+    command: [
+      "/bin/bash", "-c",
+      ""
+    ]
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'
+          memory: 8g

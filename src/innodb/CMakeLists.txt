@@ -52,5 +52,8 @@ add_library(dbrecovery_innodb_sources STATIC
     performance_benchmark.cpp
     # ✅ 新增：数据验证器
     data_validator.cpp
+    # ✅ 新增：取证恢复模块 (用于 TRUNCATE/rm-rf 场景)
+    forensic_recovery.cpp
+    forensic_manager.cpp
 )
 target_include_directories(dbrecovery_innodb_sources PUBLIC ${CMAKE_SOURCE_DIR}/include)

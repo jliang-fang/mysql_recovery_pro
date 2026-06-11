@@ -191,7 +191,15 @@ std::string CliParser::get_full_help(const std::string& program_name) {
     oss << "  --redo-log=<path>          Path to redo log file\n";
     oss << "  --disaster-recovery        Full disaster recovery from deleted data directory\n";
     oss << "  --validate                 Validate data integrity\n";
-    oss << "  --schemaless               Schemaless recovery mode (heuristic parsing without SDI)\n\n";
+    oss << "  --schemaless               Schemaless recovery mode (heuristic parsing without SDI)\n";
+    oss << "  --raw-scan                 Raw disk/partition scanning for InnoDB pages\n";
+    oss << "  --extract-tuples           Schema-aware tuple extraction\n\n";
+
+    oss << "Real Scenario Recovery (no backups):\n";
+    oss << "  --disk=<path>              Scan raw disk/partition for deleted .ibd files\n";
+    oss << "  --frm=<path>               Parse table schema from .frm file\n";
+    oss << "  --scan-device              Enable PhotoRec-style device scanning\n";
+    oss << "  --drop-recovery            Enable DROP TABLE recovery from disk\n\n";
 
     oss << "Enhanced Modes:\n";
     oss << "  --scan                     Scan mode: scan data directory for tables\n";
@@ -251,6 +259,18 @@ std::string CliParser::get_full_help(const std::string& program_name) {
     oss << "  # 15. Multiple format export (CSV + SQL)\n";
     oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --format=csv --output=/tmp/recovery\n";
     oss << "  " << program_name << " --ibd=/var/lib/mysql/db/table.ibd --format=sql --output=/tmp/recovery\n\n";
+
+    oss << "Real Scenario Recovery Examples (no backups):\n\n";
+    oss << "  # 16. TRUNCATE recovery - scan disk for residual data\n";
+    oss << "  " << program_name << " --disk=/var/lib/mysql/db/table.ibd --output=/tmp/recovery\n\n";
+    oss << "  # 17. DROP TABLE recovery - PhotoRec-style carving\n";
+    oss << "  " << program_name << " --disk=/dev/sda1 --drop-recovery --output=/tmp/recovery\n\n";
+    oss << "  # 18. Parse schema from .frm file (MySQL 5.6)\n";
+    oss << "  " << program_name << " --frm=/var/lib/mysql/db/table.frm --ibd=/var/lib/mysql/db/table.ibd --output=/tmp/recovery\n\n";
+    oss << "  # 19. Device scan - find deleted .ibd files on raw disk\n";
+    oss << "  " << program_name << " --disk=/dev/sda1 --scan-device --output=/tmp/carved\n\n";
+    oss << "  # 20. Full disk scan with raw-scan mode\n";
+    oss << "  " << program_name << " --ibd=/dev/sda1 --raw-scan --output=/tmp/scan\n\n";
 
     oss << "=====================================================\n";
     oss << "For more information, visit: https://github.com/example/mysql-recovery\n";
