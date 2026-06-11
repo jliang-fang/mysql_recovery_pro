@@ -984,57 +984,44 @@ IndexFieldValue InnoDBIndexParser::decode_column(
     val.raw_bytes.assign(data + offset, data + offset + field_size);
 
     switch (col.col_type) {
-        case 1: {  // TINY_INT
+        // ==================== Integer Types (MySQL standard type codes) ====================
+        case 1: {  // TINY (TINYINT, 1 byte)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = data[offset];
                 val.str_value = std::to_string(val.uint_value);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
-                uint8_t raw = data[offset] ^ 0x80;
-                val.int_value = static_cast<int8_t>(raw);
+                // Signed TINYINT: B2INT1 = read_be - 128
+                val.int_value = static_cast<int32_t>(data[offset]) - 128;
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
-        case 2: {  // SHORT_INT
+        case 2: {  // SHORT (SMALLINT, 2 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = read_be<uint16_t>(data, offset);
                 val.str_value = std::to_string(val.uint_value);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
-                uint16_t raw = read_be<uint16_t>(data, offset) ^ 0x8000;
-                val.int_value = static_cast<int16_t>(raw);
+                // B2INT2: read_be - 32768
+                val.int_value = static_cast<int32_t>(read_be<uint16_t>(data, offset)) - 32768;
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
-        case 3: {  // LONG_INT (INT, 4 bytes)
+        case 3: {  // LONG (INT, 4 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = read_be<uint32_t>(data, offset);
                 val.str_value = std::to_string(val.uint_value);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
-                uint32_t raw = read_be<uint32_t>(data, offset) ^ 0x80000000;
-                val.int_value = static_cast<int32_t>(raw);
+                // B2INT4: read_be - 2147483648
+                val.int_value = static_cast<int64_t>(read_be<uint32_t>(data, offset)) - 2147483648LL;
                 val.str_value = std::to_string(val.int_value);
             }
-            break;
-        }
-        case 4: {  // FLOAT
-            val.type = IndexFieldValue::Type::FLOAT_VAL;
-            uint32_t bits = read_be<uint32_t>(data, offset);
-            std::memcpy(&val.float_value, &bits, 4);
-            val.str_value = std::to_string(val.float_value);
-            break;
-        }
-        case 5: {  // DOUBLE
-            val.type = IndexFieldValue::Type::DOUBLE_VAL;
-            uint64_t bits = read_be<uint64_t>(data, offset);
-            std::memcpy(&val.float_value, &bits, 8);
-            val.str_value = std::to_string(val.float_value);
             break;
         }
         case 8: {  // LONGLONG (BIGINT, 8 bytes)
@@ -1044,122 +1031,118 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 val.str_value = std::to_string(val.uint_value);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
-                uint64_t raw = read_be<uint64_t>(data, offset) ^ 0x8000000000000000ULL;
-                val.int_value = static_cast<int64_t>(raw);
+                // B2INT8: read_be - 9223372036854775808
+                val.int_value = static_cast<int64_t>(read_be<uint64_t>(data, offset) - 9223372036854775808ULL);
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
-        case 10: {  // DATE (3 bytes)
-            val.type = IndexFieldValue::Type::DATE_VAL;
+        case 9: {  // INT24 (MEDIUMINT, 3 bytes)
+            val.type = IndexFieldValue::Type::INT_VAL;
             uint32_t v = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
                          static_cast<uint32_t>(data[offset + 2]);
-            uint16_t year = v >> 9;
-            uint8_t month = (v >> 5) & 0x0F;
-            uint8_t day = v & 0x1F;
+            if (col.is_unsigned) {
+                val.uint_value = v;
+                val.str_value = std::to_string(val.uint_value);
+                val.type = IndexFieldValue::Type::UINT_VAL;
+            } else {
+                // B2INT3: (read_be >> 8) - 8388608
+                val.int_value = static_cast<int32_t>(v) - 8388608;
+                val.str_value = std::to_string(val.int_value);
+            }
+            break;
+        }
+        // ==================== Floating Point ====================
+        case 4: {  // FLOAT (4 bytes)
+            val.type = IndexFieldValue::Type::FLOAT_VAL;
+            uint32_t bits = read_be<uint32_t>(data, offset);
+            std::memcpy(&val.float_value, &bits, 4);
+            std::ostringstream oss;
+            oss << val.float_value;
+            val.str_value = oss.str();
+            break;
+        }
+        case 5: {  // DOUBLE (8 bytes)
+            val.type = IndexFieldValue::Type::DOUBLE_VAL;
+            uint64_t bits = read_be<uint64_t>(data, offset);
+            std::memcpy(&val.float_value, &bits, 8);
+            std::ostringstream oss;
+            oss << val.float_value;
+            val.str_value = oss.str();
+            break;
+        }
+        // ==================== Temporal Types ====================
+        case 10: {  // DATE (3 bytes) - B2DATE
+            val.type = IndexFieldValue::Type::DATE_VAL;
+            uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
+                         (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                         static_cast<uint32_t>(data[offset + 2]);
+            uint16_t year = (t & 0x7FFE00) >> 9;  // bits 9-22
+            uint8_t month = (t & 0x1E0) >> 5;     // bits 5-8
+            uint8_t day = t & 0x1F;               // bits 0-4
             char buf[16];
             snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
             val.str_value = buf;
             break;
         }
-        case 12: {  // DATETIME (5 bytes for MySQL 5.6+, stored as integer)
+        case 12: {  // DATETIME (old format, 8 bytes) - B2DATETIME_OLD
             val.type = IndexFieldValue::Type::DATETIME_VAL;
-            // MySQL DATETIME is stored as a 5-byte integer
-            // Format: YYYYMMDDHHMMSS (packed integer)
-            // For MySQL 8.0+, it might be 8 bytes in certain formats
-
-            if (field_size >= 5) {
-                // Read 5-byte packed integer
-                uint64_t packed = 0;
-                for (size_t i = 0; i < 5; i++) {
-                    packed = (packed << 8) | data[offset + i];
-                }
-
-                // Decode: YYYYMMDDHHMMSS
-                // Bits: year(14) | month(4) | day(5) | hour(5) | minute(6) | second(6)
-                // Alternative interpretation: packed as decimal-like integer
-                uint64_t datetime_val = packed;
-
-                // Try parsing as YYYYMMDDHHMMSS format
-                uint64_t sec = datetime_val % 100;
-                datetime_val /= 100;
-                uint64_t min = datetime_val % 100;
-                datetime_val /= 100;
-                uint64_t hour = datetime_val % 100;
-                datetime_val /= 100;
-                uint64_t day = datetime_val % 100;
-                datetime_val /= 100;
-                uint64_t month = datetime_val % 100;
-                datetime_val /= 100;
-                uint64_t year = datetime_val;
-
-                // Validate ranges
-                if (year >= 1000 && year <= 9999 && month >= 1 && month <= 12 &&
-                    day >= 1 && day <= 31 && hour <= 23 && min <= 59 && sec <= 59) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%04llu-%02llu-%02llu %02llu:%02llu:%02llu",
-                             year, month, day, hour, min, sec);
-                    val.str_value = buf;
-                } else {
-                    // Fallback: decode using bit fields (MySQL 5.6 format)
-                    // 5 bytes = 40 bits: year(14 bits) + month(4) + day(5) + hour(5) + minute(6) + second(6)
-                    uint64_t bits = packed;
-                    uint16_t year_bit = (bits >> 26) & 0x3FFF;
-                    uint8_t month_bit = (bits >> 22) & 0x0F;
-                    uint8_t day_bit = (bits >> 17) & 0x1F;
-                    uint8_t hour_bit = (bits >> 12) & 0x1F;
-                    uint8_t min_bit = (bits >> 6) & 0x3F;
-                    uint8_t sec_bit = bits & 0x3F;
-
-                    // Adjust year offset (stored year = actual year - 1000)
-                    uint16_t actual_year = year_bit + 1000;
-
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
-                             actual_year, month_bit, day_bit, hour_bit, min_bit, sec_bit);
-                    val.str_value = buf;
-                }
-            } else if (field_size >= 8) {
-                // 8-byte format (older MySQL)
-                uint64_t v = read_be<uint64_t>(data, offset);
-                uint32_t date_part = static_cast<uint32_t>(v >> 20);
-                uint32_t time_part = static_cast<uint32_t>(v & 0xFFFFF);
-
-                uint16_t year = date_part / 10000;
-                uint8_t month = (date_part / 100) % 100;
-                uint8_t day = date_part % 100;
-                uint8_t hour = time_part / 10000;
-                uint8_t min = (time_part / 100) % 100;
-                uint8_t sec = time_part % 100;
-
+            uint64_t dt = read_be<uint64_t>(data, offset);
+            if (dt > 9223372036854775808ULL) {
+                dt -= 9223372036854775808ULL;
+                std::string s = std::to_string(dt);
+                // Pad to 14 digits
+                while (s.length() < 14) s = "0" + s;
                 char buf[32];
-                snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u", year, month, day, hour, min, sec);
+                snprintf(buf, sizeof(buf), "%.4s-%.2s-%.2s %.2s:%.2s:%.2s",
+                         s.c_str(), s.c_str()+4, s.c_str()+6, s.c_str()+8, s.c_str()+10, s.c_str()+12);
                 val.str_value = buf;
+            } else {
+                val.str_value = "0000-00-00 00:00:00";
             }
             break;
         }
-        case 13: {  // YEAR (1 byte)
+        case 18: {  // DATETIME2 (new format, 5 bytes) - B2DATETIME
+            val.type = IndexFieldValue::Type::DATETIME_VAL;
+            // Read 5 bytes as 40-bit value
+            uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(data, offset)) << 8) |
+                         static_cast<uint64_t>(data[offset + 4]);
+            // Extract bit fields using ibd2sql's exact mask values
+            // months = (t & 549751619584) >> 22  where 549751619584 = 0x7FFFC00000
+            uint64_t months = (t & 0x7FFFC00000ULL) >> 22;  // 19 bits
+            uint16_t year = static_cast<uint16_t>(months / 13);
+            uint8_t month = static_cast<uint8_t>(months % 13);
+            uint8_t day = static_cast<uint8_t>((t & 0x3E0000ULL) >> 17);    // 5 bits
+            uint8_t hour = static_cast<uint8_t>((t & 0x1F000ULL) >> 12);    // 5 bits
+            uint8_t minute = static_cast<uint8_t>((t & 0xFC0ULL) >> 6);     // 6 bits
+            uint8_t second = static_cast<uint8_t>(t & 0x3FULL);             // 6 bits
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u", year, month, day, hour, minute, second);
+            val.str_value = buf;
+            break;
+        }
+        case 7:   // TIMESTAMP (4 bytes) - B2TIMESTAMP
+        case 17: { // TIMESTAMP2 (4 bytes + optional fractional)
+            val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+            uint32_t ts = read_be<uint32_t>(data, offset);
+            time_t t = static_cast<time_t>(ts);
+            struct tm tm_buf;
+            gmtime_r(&t, &tm_buf);
+            char buf[32];
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            val.str_value = buf;
+            break;
+        }
+        case 13: {  // YEAR (1 byte) - B2YEAR
             val.type = IndexFieldValue::Type::UINT_VAL;
             val.uint_value = data[offset] + 1900;
             val.str_value = std::to_string(val.uint_value);
             break;
         }
-        case 7:   // TIMESTAMP
-        case 17: { // TIMESTAMP2
-            val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
-            uint32_t ts = read_be<uint32_t>(data, offset);
-            val.uint_value = ts;
-            time_t t = static_cast<time_t>(ts);
-            char buf[32];
-            struct tm tm_buf;
-            gmtime_r(&t, &tm_buf);
-            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-            val.str_value = buf;
-            break;
-        }
+        // ==================== String Types ====================
         case 15:   // VARCHAR
-        case 253:  // VAR_STRING
+        case 253:   // VAR_STRING
         case 252: { // BLOB/TEXT
             val.type = IndexFieldValue::Type::STRING_VAL;
             val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
@@ -1174,99 +1157,94 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
+        // ==================== DECIMAL (NEWDECIMAL type 246) ====================
         case 246: { // NEWDECIMAL
             val.type = IndexFieldValue::Type::DECIMAL_VAL;
-            // MySQL DECIMAL is stored as binary-coded decimal
-            // For DECIMAL(M,D): (M-D) integer digits, D fractional digits
-            // Each group of up to 9 digits is stored in 4 bytes (big-endian)
-            // First byte: sign bit (0x80 = positive, otherwise negative)
 
-            // Calculate expected storage size
+            // Calculate digit groups using map_decimal
             uint32_t precision = col.precision > 0 ? col.precision : 10;
             uint32_t scale = col.scale;
-
-            // Digits to bytes mapping
-            static constexpr uint8_t digits_to_bytes[10] = {0, 1, 1, 2, 2, 3, 3, 4, 4, 4};
             uint32_t int_digits = precision - scale;
-            uint32_t int_bytes = (int_digits / 9) * 4 + digits_to_bytes[int_digits % 9];
-            uint32_t frac_bytes = (scale / 9) * 4 + digits_to_bytes[scale % 9];
 
-            // Determine sign from first byte
+            // Each group of up to 9 digits uses 4 bytes
+            auto calc_groups = [](uint32_t digits) -> std::vector<std::pair<int,int>> {
+                std::vector<std::pair<int,int>> result;
+                int full_groups = digits / 9;
+                int remainder = digits % 9;
+                for (int i = 0; i < full_groups; i++) {
+                    result.push_back({4, 9});
+                }
+                if (remainder > 0) {
+                    int bytes = (remainder + 1) / 2;
+                    if (remainder >= 7) bytes = 4;
+                    result.push_back({bytes, remainder});
+                }
+                return result;
+            };
+
+            auto p1 = calc_groups(int_digits);  // Integer part groups
+            auto p2 = calc_groups(scale);        // Fractional part groups
+
+            // Check sign: 0x80 bit set = positive, not set = negative
             bool is_negative = (data[offset] & 0x80) == 0;
 
-            // Read all bytes as a big integer, with sign bit removed from first byte
-            // The bytes represent the scaled integer value (value * 10^scale)
-            uint64_t scaled_value = 0;
-            for (size_t i = 0; i < field_size; i++) {
-                uint8_t byte = data[offset + i];
-                if (i == 0) {
-                    // First byte: mask out sign bit for positive numbers
-                    byte &= 0x7F;
+            // Copy data for processing
+            std::vector<uint8_t> proc_data(data + offset, data + offset + field_size);
+
+            if (is_negative) {
+                // Invert all bytes for negative numbers
+                for (auto& b : proc_data) {
+                    b = ~b;
                 }
-                scaled_value = scaled_value * 256 + byte;
+            }
+            // Subtract 128 from first byte (after inversion if negative)
+            proc_data[0] -= 128;
+
+            // Read integer part
+            std::string int_part_str;
+            size_t read_offset = 0;
+            for (const auto& [bytes, digits] : p1) {
+                if (read_offset + bytes > field_size) break;
+                uint64_t val = 0;
+                for (size_t i = 0; i < bytes && read_offset + i < field_size; i++) {
+                    val = (val << 8) | proc_data[read_offset + i];
+                }
+                std::string s = std::to_string(val);
+                while (s.length() < digits) s = "0" + s;
+                int_part_str += s;
+                read_offset += bytes;
+            }
+            // Remove leading zeros but keep at least one digit
+            int_part_str = int_part_str.empty() ? "0" : std::to_string(std::stoull(int_part_str));
+
+            // Read fractional part
+            std::string frac_part_str;
+            for (const auto& [bytes, digits] : p2) {
+                if (read_offset + bytes > field_size) break;
+                uint64_t val = 0;
+                for (size_t i = 0; i < bytes && read_offset + i < field_size; i++) {
+                    val = (val << 8) | proc_data[read_offset + i];
+                }
+                std::string s = std::to_string(val);
+                while (s.length() < digits) s = "0" + s;
+                frac_part_str += s;
+                read_offset += bytes;
             }
 
-            // For negative numbers, the value is stored as complement
-            // We need to subtract from the appropriate base
-            if (is_negative && scaled_value > 0) {
-                // Calculate the max value for this storage
-                uint64_t max_val = 1;
-                for (size_t i = 0; i < field_size; i++) max_val *= 256;
-                scaled_value = max_val - scaled_value;
-            }
-
-            // Convert to decimal string
-            uint64_t divisor = 1;
-            for (uint32_t i = 0; i < scale; i++) divisor *= 10;
-
-            uint64_t int_part = scaled_value / divisor;
-            uint64_t frac_part = scaled_value % divisor;
-
-            char buf[64];
-            if (scale > 0) {
-                snprintf(buf, sizeof(buf), "%s%llu.%0*llu",
-                         is_negative ? "-" : "",
-                         int_part, scale, frac_part);
+            // Format result
+            if (scale > 0 && !frac_part_str.empty()) {
+                val.str_value = (is_negative ? "-" : "") + int_part_str + "." + frac_part_str;
             } else {
-                snprintf(buf, sizeof(buf), "%s%llu", is_negative ? "-" : "", int_part);
+                val.str_value = (is_negative ? "-" : "") + int_part_str;
             }
-            val.str_value = buf;
             break;
         }
+        // ==================== JSON ====================
         case 245: { // JSON
             val.type = IndexFieldValue::Type::STRING_VAL;
-            // MySQL JSON binary format has a type byte at the start
-            // For now, try to extract readable JSON if possible
             if (field_size > 0) {
-                uint8_t json_type = data[offset];
-
-                // Small JSON values are stored inline
-                // Type 0x00-0x0B indicate different JSON types
-                if (json_type <= 0x0B || field_size < 50) {
-                    // Try to interpret as simple JSON string or value
-                    // Skip type byte and read rest as text if printable
-                    size_t start = offset + 1;
-                    size_t printable = 0;
-                    for (size_t i = start; i < offset + field_size && i < offset + 256; i++) {
-                        if (data[i] >= 32 && data[i] < 127) printable++;
-                    }
-                    if (printable > (field_size - 1) * 2 / 3) {
-                        val.str_value = std::string(reinterpret_cast<const char*>(data + start), field_size - 1);
-                    } else {
-                        // Output as hex for complex binary JSON
-                        std::string hex = "{json:";
-                        for (size_t i = 0; i < std::min(field_size, size_t(40)); i++) {
-                            char buf[4];
-                            snprintf(buf, sizeof(buf), "%02x", data[offset + i]);
-                            hex += buf;
-                        }
-                        if (field_size > 40) hex += "...";
-                        hex += "}";
-                        val.str_value = hex;
-                    }
-                } else {
-                    val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
-                }
+                // Simple output as string
+                val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
             }
             break;
         }

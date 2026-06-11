@@ -1810,6 +1810,12 @@ int main(int argc, char** argv) {
                 std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
                 icol.mb_maxlen = 4;  // utf8mb4
 
+                // MySQL type codes (from MySQL source, matching FRM file values):
+                // These are the standard MySQL type IDs stored in .frm files
+                // 1=TINYINT, 2=SMALLINT, 3=INT, 8=BIGINT, 9=MEDIUMINT
+                // 4=FLOAT, 5=DOUBLE, 246=NEWDECIMAL
+                // 7=TIMESTAMP, 12=DATETIME, 18=DATETIME2, 17=TIMESTAMP2
+                // 10=DATE, 13=YEAR, 15=VARCHAR, 252=BLOB/TEXT
                 if (type_upper == "TINYINT") { icol.col_type = 1; icol.col_length = 1; }
                 else if (type_upper == "SMALLINT") { icol.col_type = 2; icol.col_length = 2; }
                 else if (type_upper == "MEDIUMINT") { icol.col_type = 9; icol.col_length = 3; }
@@ -1818,14 +1824,17 @@ int main(int argc, char** argv) {
                 else if (type_upper == "FLOAT") { icol.col_type = 4; icol.col_length = 4; }
                 else if (type_upper == "DOUBLE") { icol.col_type = 5; icol.col_length = 8; }
                 else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 246; }
-                else if (type_upper == "TIMESTAMP" || type_upper == "TIMESTAMP2") { icol.col_type = 17; icol.col_length = 4; }
-                else if (type_upper == "DATETIME" || type_upper == "DATETIME2") { icol.col_type = 18; icol.col_length = 5; }
+                else if (type_upper == "TIMESTAMP") { icol.col_type = 7; icol.col_length = 4; }
+                else if (type_upper == "TIMESTAMP2") { icol.col_type = 17; icol.col_length = 4; }
+                else if (type_upper == "DATETIME") { icol.col_type = 12; icol.col_length = 8; }
+                else if (type_upper == "DATETIME2") { icol.col_type = 18; icol.col_length = 5; }
                 else if (type_upper == "DATE") { icol.col_type = 10; icol.col_length = 3; }
                 else if (type_upper == "YEAR") { icol.col_type = 13; icol.col_length = 1; }
                 else if (type_upper == "VARCHAR") {
                     icol.col_type = 15;
                     icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                 }
+                else if (type_upper == "CHAR") { icol.col_type = 254; }
                 else if (type_upper == "TEXT") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
                 else if (type_upper == "BLOB") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
                 else if (type_upper == "JSON") { icol.col_type = 245; icol.is_big = true; icol.col_length = 4294967295; }
@@ -2191,6 +2200,12 @@ int main(int argc, char** argv) {
                 std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
                 icol.mb_maxlen = 4;
 
+                // MySQL type codes (from MySQL source, matching FRM file values):
+                // These are the standard MySQL type IDs stored in .frm files
+                // 1=TINYINT, 2=SMALLINT, 3=INT, 8=BIGINT, 9=MEDIUMINT
+                // 4=FLOAT, 5=DOUBLE, 246=NEWDECIMAL
+                // 7=TIMESTAMP, 12=DATETIME, 18=DATETIME2, 17=TIMESTAMP2
+                // 10=DATE, 13=YEAR, 15=VARCHAR, 252=BLOB/TEXT
                 if (type_upper == "TINYINT") { icol.col_type = 1; icol.col_length = 1; }
                 else if (type_upper == "SMALLINT") { icol.col_type = 2; icol.col_length = 2; }
                 else if (type_upper == "MEDIUMINT") { icol.col_type = 9; icol.col_length = 3; }
@@ -2199,14 +2214,17 @@ int main(int argc, char** argv) {
                 else if (type_upper == "FLOAT") { icol.col_type = 4; icol.col_length = 4; }
                 else if (type_upper == "DOUBLE") { icol.col_type = 5; icol.col_length = 8; }
                 else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 246; }
-                else if (type_upper == "TIMESTAMP" || type_upper == "TIMESTAMP2") { icol.col_type = 17; icol.col_length = 4; }
-                else if (type_upper == "DATETIME" || type_upper == "DATETIME2") { icol.col_type = 18; icol.col_length = 5; }
+                else if (type_upper == "TIMESTAMP") { icol.col_type = 7; icol.col_length = 4; }
+                else if (type_upper == "TIMESTAMP2") { icol.col_type = 17; icol.col_length = 4; }
+                else if (type_upper == "DATETIME") { icol.col_type = 12; icol.col_length = 8; }
+                else if (type_upper == "DATETIME2") { icol.col_type = 18; icol.col_length = 5; }
                 else if (type_upper == "DATE") { icol.col_type = 10; icol.col_length = 3; }
                 else if (type_upper == "YEAR") { icol.col_type = 13; icol.col_length = 1; }
                 else if (type_upper == "VARCHAR") {
                     icol.col_type = 15;
                     icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                 }
+                else if (type_upper == "CHAR") { icol.col_type = 254; }
                 else if (type_upper == "TEXT") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
                 else if (type_upper == "BLOB") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
                 else if (type_upper == "JSON") { icol.col_type = 245; icol.is_big = true; icol.col_length = 4294967295; }
@@ -2236,6 +2254,17 @@ int main(int argc, char** argv) {
             if (frm_schema.has_value()) {
                 std::cout << "[INFO] Schema obtained from .frm file (" << frm_schema->columns.size() << " columns)\n";
                 uint32_t n_pk = 0;
+
+                // Find PK columns from indexes
+                std::set<std::string> pk_column_names;
+                for (const auto& idx : frm_schema->indexes) {
+                    if (idx.is_primary) {
+                        for (const auto& col_name : idx.columns) {
+                            pk_column_names.insert(col_name);
+                        }
+                    }
+                }
+
                 for (auto& [pos, col] : frm_schema->columns) {
                     dbrecovery::innodb::IndexColumnDef icol;
                     icol.name = col.name;
@@ -2244,6 +2273,12 @@ int main(int argc, char** argv) {
                     icol.is_nullable = col.is_nullable;
                     icol.is_unsigned = !col.is_signed;  // Use is_signed field
                     icol.mb_maxlen = 4;  // UTF8MB4
+
+                    // Set precision/scale for DECIMAL types
+                    if (col.mysql_type_id == 246 && col.numeric_precision > 0) {
+                        icol.precision = col.numeric_precision;
+                        icol.scale = col.numeric_scale;
+                    }
 
                     // Determine if variable length
                     switch (col.mysql_type_id) {
@@ -2259,8 +2294,10 @@ int main(int argc, char** argv) {
                             break;
                     }
 
-                    // Check if PK by flags (assuming first INT/BIGINT column is PK if no explicit PK)
-                    if ((col.flags & 1) != 0) n_pk++;  // PRI_KEY flag typically bit 0
+                    // Check if this column is part of PK
+                    if (pk_column_names.count(col.name) > 0) {
+                        n_pk++;
+                    }
                     index_columns.push_back(icol);
                 }
                 if (n_pk == 0 && !index_columns.empty()) n_pk = 1;  // Default first column as PK

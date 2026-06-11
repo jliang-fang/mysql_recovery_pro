@@ -125,6 +125,9 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
         col.collation_id = col_def.collation_id;
         // pack_flag bit 15 (0x8000) indicates nullable
         col.is_nullable = (col_def.pack_flag & 0x8000) != 0;
+        // pack_flag bit 0: 0 = UNSIGNED, 1 = SIGNED (inverse logic)
+        // is_signed = true means signed, is_signed = false means unsigned
+        col.is_signed = (col_def.pack_flag & 1) == 1;
         col.comment = col_def.comment;
 
         // Extract DECIMAL precision/scale from field_length and pack_flag
