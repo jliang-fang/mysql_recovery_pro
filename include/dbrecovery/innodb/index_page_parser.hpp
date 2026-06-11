@@ -127,9 +127,38 @@ struct IndexColumnDef {
             case 18: return 5;   // DATETIME2 (base size, + fractional)
             case 19: return 3;   // TIME2 (base size, + fractional)
             case 246: return decimal_storage_size(); // NEWDECIMAL
+            case 247: return enum_storage_size();    // ENUM
+            case 248: return set_storage_size();     // SET
             case 254: return col_length; // CHAR (fixed)
             default: return 0;   // Variable-length
         }
+    }
+
+    /**
+     * @brief Calculate storage size for ENUM type
+     * ENUM is stored as an integer index (1-based)
+     * Size depends on number of enum values
+     */
+    uint32_t enum_storage_size() const {
+        size_t num_values = enum_values.size();
+        if (num_values <= 255) return 1;
+        if (num_values <= 65535) return 2;
+        return 3;  // Very large ENUM
+    }
+
+    /**
+     * @brief Calculate storage size for SET type
+     * SET is stored as a bitmask
+     * Size depends on number of set members
+     */
+    uint32_t set_storage_size() const {
+        size_t num_values = set_values.size();
+        if (num_values <= 8) return 1;
+        if (num_values <= 16) return 2;
+        if (num_values <= 24) return 3;
+        if (num_values <= 32) return 4;
+        if (num_values <= 64) return 8;
+        return 8;  // Max 64 members in MySQL SET
     }
 
     /**
