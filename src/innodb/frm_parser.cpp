@@ -123,46 +123,17 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
         col.column_length = col_def.field_length;
         col.charset_id = col_def.collation_id;
         col.collation_id = col_def.collation_id;
-        col.is_nullable = false;  // 需要根据 pack_flag 判断
+        // pack_flag bit 15 (0x8000) indicates nullable
+        col.is_nullable = (col_def.pack_flag & 0x8000) != 0;
         col.comment = col_def.comment;
 
-        // 根据 field_type 设置长度
-        switch (static_cast<MySQLFieldType>(col_def.field_type)) {
-            case MySQLFieldType::TINY:
-                col.column_length = 1;
-                break;
-            case MySQLFieldType::SHORT:
-                col.column_length = 2;
-                break;
-            case MySQLFieldType::LONG:
-            case MySQLFieldType::TIMESTAMP:
-                col.column_length = 4;
-                break;
-            case MySQLFieldType::LONGLONG:
-            case MySQLFieldType::DOUBLE:
-                col.column_length = 8;
-                break;
-            case MySQLFieldType::FLOAT:
-                col.column_length = 4;
-                break;
-            case MySQLFieldType::DATETIME:
-            case MySQLFieldType::DATE:
-                col.column_length = 8;
-                break;
-            case MySQLFieldType::YEAR:
-                col.column_length = 1;
-                break;
-            case MySQLFieldType::BLOB:
-            case MySQLFieldType::TINY_BLOB:
-            case MySQLFieldType::MEDIUM_BLOB:
-            case MySQLFieldType::LONG_BLOB:
-                col.column_length = 65535;  // 最大长度
-                break;
-            default:
-                break;
+        // Extract DECIMAL precision/scale from field_length and pack_flag
+        if (col_def.field_type == 246) {  // NEWDECIMAL
+            col.numeric_precision = col_def.field_length - 2;
+            col.numeric_scale = (col_def.pack_flag >> 8) & 31;
         }
 
-        schema.columns[i] = col;
+        schema.columns[i + 1] = col;  // ordinal position is 1-based
     }
 
     // 添加主键信息
@@ -176,7 +147,12 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
             pk_index.algorithm = key.key_algorithm;
             pk_index.columns.reserve(key.parts.size());
             for (uint32_t col_idx : key.parts) {
-                pk_index.columns.push_back("col" + std::to_string(col_idx));
+                // Use actual column name if available
+                if (col_idx < columns.size()) {
+                    pk_index.columns.push_back(columns[col_idx].name);
+                } else {
+                    pk_index.columns.push_back("col" + std::to_string(col_idx));
+                }
                 pk_index.column_offsets.push_back(col_idx);
             }
             schema.indexes.push_back(pk_index);
@@ -204,7 +180,7 @@ bool FRMParser::read_header(const uint8_t* data, size_t size, FRMHeader& header)
         return false;
     }
 
-    // 读取 FRM 类型 (offset 0)
+    // 读取 FRM 类型 (offset 0-1)
     header.frm_type = read_uint16(data);
 
     // 检查是否为支持的类型
@@ -224,68 +200,69 @@ bool FRMParser::read_header(const uint8_t* data, size_t size, FRMHeader& header)
 
     // 读取 legacy_db_type (offset 3)
     header.legacy_db_type = data[3];
-    // 不再强制检查，因为 MySQL 5.6 可能不是 12
 
-    // 读取 io_size (offset 4-5)
-    header.io_size = read_uint16(data + 4);
+    // Skip _0 (offset 4-5)
+    // 读取 io_size (offset 6-7) - following ibd2sql's frm2sdi.py
+    header.io_size = read_uint16(data + 6);
     if (header.io_size == 0) {
         header.io_size = 1024;  // 默认值
     }
 
-    // 读取 frm_length (offset 8-11)
-    header.frm_length = read_uint32(data + 8);
+    // Skip _1 (offset 8-9)
+    // 读取 frm_length (offset 10-13)
+    header.frm_length = read_uint32(data + 10);
 
-    // 读取 tmp_key_length (offset 12-13)
-    header.tmp_key_length = read_uint16(data + 12);
+    // 读取 tmp_key_length (offset 14-15)
+    header.tmp_key_length = read_uint16(data + 14);
 
-    // 读取 rec_length (offset 14-15)
-    header.rec_length = read_uint16(data + 14);
+    // 读取 rec_length (offset 16-17)
+    header.rec_length = read_uint16(data + 16);
 
-    // 读取 create_info (offset 16-27)
-    header.create_info_max_rows = read_uint32(data + 16);
-    header.create_info_min_rows = read_uint32(data + 20);
+    // 读取 create_info (offset 18-25)
+    header.create_info_max_rows = read_uint32(data + 18);
+    header.create_info_min_rows = read_uint32(data + 22);
 
-    // 读取 key_info_length (offset 26-27)
-    header.key_info_length = read_uint16(data + 26);
+    // 读取 key_info_length (offset 28-29)
+    header.key_info_length = read_uint16(data + 28);
 
-    // 读取 create_info_table_option (offset 28-29)
-    header.create_info_table_option = read_uint16(data + 28);
+    // 读取 create_info_table_option (offset 30-31)
+    header.create_info_table_option = read_uint16(data + 30);
 
-    // 读取 avg_row_length (offset 32-35)
-    header.avg_row_length = read_uint32(data + 32);
+    // 读取 avg_row_length (offset 34-37)
+    header.avg_row_length = read_uint32(data + 34);
 
-    // 读取 default_table_charset (offset 36)
-    header.default_table_charset = data[36];
+    // 读取 default_table_charset (offset 38)
+    header.default_table_charset = data[38];
 
-    // 读取 row_type (offset 38)
-    header.row_type = data[38];
+    // 读取 row_type (offset 40)
+    header.row_type = data[40];
 
-    // 读取 charset_high (offset 39)
-    header.charset_high = data[39];
+    // 读取 charset_high (offset 41)
+    header.charset_high = data[41];
 
-    // 读取 stats_sample_pages (offset 40-41)
-    header.stats_sample_pages = read_uint16(data + 40);
+    // 读取 stats_sample_pages (offset 42-43)
+    header.stats_sample_pages = read_uint16(data + 42);
 
-    // 读取 stats_auto_recalc (offset 42)
-    header.stats_auto_recalc = data[42];
+    // 读取 stats_auto_recalc (offset 44)
+    header.stats_auto_recalc = data[44];
 
-    // 读取 key_length (offset 45-48)
-    header.key_length = read_uint32(data + 45);
+    // 读取 key_length (offset 47-50)
+    header.key_length = read_uint32(data + 47);
 
-    // 读取 mysql_version_id (offset 49-52)
-    header.mysql_version_id = read_uint32(data + 49);
+    // 读取 mysql_version_id (offset 51-54)
+    header.mysql_version_id = read_uint32(data + 51);
 
-    // 读取 extra_size (offset 53-56)
-    header.extra_size = read_uint32(data + 53);
+    // 读取 extra_size (offset 55-58)
+    header.extra_size = read_uint32(data + 55);
 
-    // 读取 extra_rec_buf_length (offset 57-58)
-    header.extra_rec_buf_length = read_uint16(data + 57);
+    // 读取 extra_rec_buf_length (offset 59-60)
+    header.extra_rec_buf_length = read_uint16(data + 59);
 
-    // 读取 default_part_db_type (offset 59)
-    header.default_part_db_type = data[59];
+    // 读取 default_part_db_type (offset 61)
+    header.default_part_db_type = data[61];
 
-    // 读取 key_block_size (offset 60-61)
-    header.key_block_size = read_uint16(data + 60);
+    // 读取 key_block_size (offset 62-63)
+    header.key_block_size = read_uint16(data + 62);
 
     return true;
 }
@@ -297,48 +274,148 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
         return false;
     }
 
-    // FRM 文件中列的存储格式是复杂的
-    // 这里使用简化的方法：扫描可打印字符序列作为列名
+    // FRM column section starts at record_offset + 258
+    // Reference: ibd2sql frm2sdi.py _read_columns()
+    size_t pos = offset;
 
-    size_t scan_start = offset;
-    size_t max_scan = header.frm_length - offset;
-
-    // 简单实现：查找以字母开头的标识符序列
-    while (scan_start < offset + max_scan - 10) {
-        // 跳过不可打印字符
-        while (scan_start < offset + max_scan &&
-               (data[scan_start] < 'a' || data[scan_start] > 'z') &&
-               (data[scan_start] < 'A' || data[scan_start] > 'Z') &&
-               data[scan_start] != '_') {
-            scan_start++;
-        }
-
-        if (scan_start >= offset + max_scan - 10) break;
-
-        // 读取标识符
-        size_t name_start = scan_start;
-        while (scan_start < offset + max_scan &&
-               (isalnum(data[scan_start]) || data[scan_start] == '_')) {
-            scan_start++;
-        }
-
-        if (scan_start > name_start + 1 && scan_start - name_start <= 64) {
-            ColumnDef col;
-            col.name = std::string(reinterpret_cast<const char*>(data + name_start),
-                                   scan_start - name_start);
-
-            // 简化：假设每列有固定大小的元数据
-            // 实际实现需要更复杂的解析
-            col.field_type = data[scan_start] & 0xFF;
-            col.field_length = 255;
-            col.collation_id = header.default_table_charset;
-
-            columns.push_back(col);
-
-            if (columns.size() >= 256) break;  // 限制最大列数
-        }
+    // Read column section header
+    if (pos + 30 > header.frm_length) {
+        return false;
     }
 
+    uint16_t fields = read_uint16(data + pos);      // Number of fields
+    pos += 2;
+    uint16_t field_pos = read_uint16(data + pos);   // Position
+    pos += 2;
+    // Skip 6 bytes (_0)
+    pos += 6;
+    uint16_t n_length = read_uint16(data + pos);
+    pos += 2;
+    uint16_t interval_count = read_uint16(data + pos);
+    pos += 2;
+    uint16_t interval_parts = read_uint16(data + pos);
+    pos += 2;
+    uint16_t int_length = read_uint16(data + pos);
+    pos += 2;
+    // Skip 6 bytes (_1)
+    pos += 6;
+    uint16_t null_fields = read_uint16(data + pos);
+    pos += 2;
+    uint16_t comment_length = read_uint16(data + pos);
+    pos += 2;
+    uint16_t gcol_screen_length = read_uint16(data + pos);
+    pos += 2;
+    // Skip 5 bytes (_2)
+    pos += 5;
+    uint8_t fields_per_screen = data[pos];
+    pos += 1;
+
+    if (fields == 0 || fields > 1024) {
+        std::cerr << "[WARN] FRMParser: Invalid field count: " << fields << std::endl;
+        return false;
+    }
+
+    // Skip 42 bytes to reach field names section
+    pos += 42;
+
+    // Read field names
+    std::vector<std::string> field_names;
+    int screens_read = 1;
+    int col_in_screen = 1;
+    int fields_per_screen_n = 0;
+
+    for (uint16_t i = 0; i < fields && pos < header.frm_length; i++) {
+        // Handle screen transitions
+        if (col_in_screen == fields_per_screen) {
+            screens_read++;
+            col_in_screen = 2;
+            // Skip 8 bytes and terminator for screen transition
+            pos += 8;
+            // Skip spaces as terminators
+            while (pos < header.frm_length && data[pos] == ' ') {
+                pos++;
+            }
+            fields_per_screen_n++;
+        } else {
+            col_in_screen++;
+        }
+
+        if (pos + 3 > header.frm_length) break;
+
+        // Read ordinal position (2 bytes)
+        uint16_t ordinal_position = read_uint16(data + pos);
+        pos += 2;
+
+        // Read name size (1 byte)
+        uint8_t name_size = data[pos];
+        pos += 1;
+
+        if (pos + name_size > header.frm_length) break;
+
+        // Read column name (name_size bytes, last byte is usually null/space)
+        std::string name(reinterpret_cast<const char*>(data + pos), name_size - 1);
+        pos += name_size;
+
+        field_names.push_back(name);
+    }
+
+    // Read field metadata
+    for (uint16_t i = 0; i < fields && pos + 17 <= header.frm_length; i++) {
+        ColumnDef col;
+        col.name = field_names[i];
+
+        // Skip 3 bytes (_0)
+        pos += 3;
+
+        // field_length (2 bytes)
+        col.field_length = read_uint16(data + pos);
+        pos += 2;
+
+        // recpos (3 bytes)
+        col.recpos = 0;
+        for (int j = 0; j < 3; j++) {
+            col.recpos |= (data[pos + j] << (j * 8));
+        }
+        pos += 3;
+
+        // pack_flag (2 bytes)
+        col.pack_flag = read_uint16(data + pos);
+        pos += 2;
+
+        // unireg_type (1 byte)
+        col.unireg_type = data[pos];
+        pos += 1;
+
+        // charset_low (1 byte)
+        col.charset_low = data[pos];
+        pos += 1;
+
+        // interval_nr (1 byte)
+        col.interval_nr = data[pos];
+        pos += 1;
+
+        // field_type (1 byte)
+        col.field_type = data[pos];
+        pos += 1;
+
+        // collation_id (1 byte)
+        col.collation_id = data[pos];
+        pos += 1;
+
+        // comment_length (2 bytes)
+        col.comment_length = read_uint16(data + pos);
+        pos += 2;
+
+        col.comment = "";
+        columns.push_back(col);
+    }
+
+    // Read column comments
+    // First skip name section (NAMESIZE bytes) + 2 bytes
+    // Then read each column's comment based on comment_length
+    // Simplified: we've already read metadata, comments are optional
+
+    std::cout << "[INFO] FRMParser: Found " << columns.size() << " columns" << std::endl;
     return !columns.empty();
 }
 
