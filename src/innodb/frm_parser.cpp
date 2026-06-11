@@ -136,6 +136,13 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
             col.numeric_scale = (col_def.pack_flag >> 8) & 31;
         }
 
+        // Transfer ENUM/SET values
+        if (col_def.field_type == 247) {  // ENUM
+            col.enum_values = col_def.elements;
+        } else if (col_def.field_type == 248) {  // SET
+            col.set_values = col_def.elements;
+        }
+
         schema.columns[i + 1] = col;  // ordinal position is 1-based
     }
 
@@ -413,10 +420,46 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
         columns.push_back(col);
     }
 
+    // Skip name section (NAMESIZE bytes) + 2 bytes (based on ibd2sql)
     // Read column comments
-    // First skip name section (NAMESIZE bytes) + 2 bytes
-    // Then read each column's comment based on comment_length
-    // Simplified: we've already read metadata, comments are optional
+    size_t total_name_size = 0;
+    for (const auto& fn : field_names) {
+        total_name_size += fn.size() + 1;  // name + null terminator
+    }
+    pos += total_name_size + 2;
+
+    // Read column comments
+    for (uint16_t i = 0; i < fields && pos < header.frm_length; i++) {
+        if (columns[i].comment_length > 0 && pos + columns[i].comment_length <= header.frm_length) {
+            columns[i].comment = std::string(reinterpret_cast<const char*>(data + pos), columns[i].comment_length);
+            pos += columns[i].comment_length;
+        }
+    }
+
+    // Read ENUM/SET values (interval section)
+    // Reference: ibd2sql frm2sdi.py lines 344-358
+    for (uint16_t i = 0; i < columns.size() && pos < header.frm_length; i++) {
+        if (columns[i].field_type == 247 || columns[i].field_type == 248) {  // ENUM or SET
+            std::string element;
+            std::vector<std::string> elements;
+            uint8_t terminator = data[pos++];
+
+            while (pos < header.frm_length) {
+                uint8_t byte = data[pos++];
+                if (byte == 0x00) {
+                    break;  // End of interval list
+                } else if (byte == terminator) {
+                    if (!element.empty()) {
+                        elements.push_back(element);
+                        element.clear();
+                    }
+                } else {
+                    element += static_cast<char>(byte);
+                }
+            }
+            columns[i].elements = elements;
+        }
+    }
 
     std::cout << "[INFO] FRMParser: Found " << columns.size() << " columns" << std::endl;
     return !columns.empty();

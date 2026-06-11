@@ -48,6 +48,10 @@ struct ColumnInfo {
     
     // ✅ 新增：修复 btree.cpp 中的字段解析逻辑
     bool is_signed = true;         // 数值类型是否有符号（默认true，兼容INT等）
+
+    // ✅ 新增：ENUM/SET 类型值列表
+    std::vector<std::string> enum_values;  // ENUM 类型的可选值列表
+    std::vector<std::string> set_values;   // SET 类型的可选值列表
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）

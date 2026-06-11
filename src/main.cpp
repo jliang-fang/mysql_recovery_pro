@@ -2280,6 +2280,10 @@ int main(int argc, char** argv) {
                         icol.scale = col.numeric_scale;
                     }
 
+                    // Transfer ENUM/SET values
+                    icol.enum_values = col.enum_values;
+                    icol.set_values = col.set_values;
+
                     // Determine if variable length
                     switch (col.mysql_type_id) {
                         case 15:  // VARCHAR
@@ -2298,6 +2302,7 @@ int main(int argc, char** argv) {
                     if (pk_column_names.count(col.name) > 0) {
                         n_pk++;
                     }
+
                     index_columns.push_back(icol);
                 }
                 if (n_pk == 0 && !index_columns.empty()) n_pk = 1;  // Default first column as PK

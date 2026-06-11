@@ -90,6 +90,7 @@ private:
         uint16_t comment_length;
         std::string name;
         std::string comment;
+        std::vector<std::string> elements;  // ENUM/SET values
     };
 
     /**

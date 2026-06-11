@@ -93,9 +93,12 @@ struct IndexColumnDef {
 
     /**
      * @brief Determine if this column uses variable-length storage in InnoDB
+     * NOTE: CHAR (type 254) is variable-length for multi-byte charsets (utf8/utf8mb4)
+     * Only CHAR with latin1/binary charset is fixed-length
      */
     bool is_variable_length() const {
         // VARCHAR, VAR_STRING, BLOB, TEXT, JSON, GEOMETRY use variable-length encoding
+        // CHAR (254) is also variable-length for multi-byte charsets!
         return col_type == 15 ||   // VARCHAR
                col_type == 253 ||  // VAR_STRING
                col_type == 245 ||  // JSON
@@ -103,12 +106,13 @@ struct IndexColumnDef {
                col_type == 250 ||  // MEDIUM_BLOB
                col_type == 251 ||  // LONG_BLOB
                col_type == 252 ||  // BLOB/TEXT
-               col_type == 16;     // BIT (sometimes variable)
+               col_type == 16 ||   // BIT (sometimes variable)
+               col_type == 254;    // CHAR - variable-length for multi-byte charsets!
     }
 
     /**
      * @brief Get the fixed storage size for this column type
-     * Returns 0 for variable-length columns
+     * Returns 0 for variable-length columns (including CHAR for multi-byte charsets)
      */
     uint32_t fixed_size() const {
         switch (col_type) {
@@ -129,7 +133,9 @@ struct IndexColumnDef {
             case 246: return decimal_storage_size(); // NEWDECIMAL
             case 247: return enum_storage_size();    // ENUM
             case 248: return set_storage_size();     // SET
-            case 254: return col_length; // CHAR (fixed)
+            // CHAR (254) is variable-length for multi-byte charsets (utf8/utf8mb4)
+            // Only fixed-length for latin1/binary (mb_maxlen=1)
+            case 254: return (mb_maxlen == 1) ? col_length : 0;
             default: return 0;   // Variable-length
         }
     }
