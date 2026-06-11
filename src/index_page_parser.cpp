@@ -1248,6 +1248,45 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
+        // ==================== ENUM (type 247) ====================
+        case 247: {
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            if (field_size > 0 && !col.enum_values.empty()) {
+                uint64_t idx = 0;
+                for (size_t i = 0; i < field_size; i++) {
+                    idx = (idx << 8) | data[offset + i];
+                }
+                if (idx > 0 && idx <= col.enum_values.size()) {
+                    val.str_value = col.enum_values[idx - 1];  // ENUM index is 1-based
+                } else {
+                    val.str_value = "<ENUM_" + std::to_string(idx) + ">";
+                }
+            } else {
+                val.str_value = "<ENUM>";
+            }
+            break;
+        }
+        // ==================== SET (type 248) ====================
+        case 248: {
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            if (field_size > 0 && !col.set_values.empty()) {
+                uint64_t bits = 0;
+                for (size_t i = 0; i < field_size; i++) {
+                    bits = (bits << 8) | data[offset + i];
+                }
+                std::string result;
+                for (size_t n = 0; n < col.set_values.size(); n++) {
+                    if ((bits & (1ULL << n)) != 0) {
+                        if (!result.empty()) result += ",";
+                        result += col.set_values[n];
+                    }
+                }
+                val.str_value = result.empty() ? "" : result;
+            } else {
+                val.str_value = "<SET>";
+            }
+            break;
+        }
         default: {
             val.type = IndexFieldValue::Type::UNKNOWN_VAL;
             val.str_value = "<TYPE_" + std::to_string(col.col_type) + ">";
