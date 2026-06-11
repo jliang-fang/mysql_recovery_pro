@@ -1214,8 +1214,30 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 int_part_str += s;
                 read_offset += bytes;
             }
-            // Remove leading zeros but keep at least one digit
-            int_part_str = int_part_str.empty() ? "0" : std::to_string(std::stoull(int_part_str));
+            // Remove leading zeros but keep at least one digit (with exception handling for large numbers)
+            if (!int_part_str.empty()) {
+                try {
+                    // Only process if not too large
+                    if (int_part_str.length() <= 20) {
+                        int_part_str = std::to_string(std::stoull(int_part_str));
+                    }
+                    // If longer, just trim leading zeros
+                    size_t first_nonzero = int_part_str.find_first_not_of('0');
+                    if (first_nonzero != std::string::npos && first_nonzero > 0) {
+                        int_part_str = int_part_str.substr(first_nonzero);
+                    } else if (first_nonzero == std::string::npos) {
+                        int_part_str = "0";
+                    }
+                } catch (...) {
+                    // If stoull fails, just trim leading zeros
+                    size_t first_nonzero = int_part_str.find_first_not_of('0');
+                    if (first_nonzero != std::string::npos && first_nonzero > 0) {
+                        int_part_str = int_part_str.substr(first_nonzero);
+                    }
+                }
+            } else {
+                int_part_str = "0";
+            }
 
             // Read fractional part
             std::string frac_part_str;
