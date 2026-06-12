@@ -360,10 +360,10 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
         uint8_t name_size = data[pos];
         pos += 1;
 
-        if (pos + name_size > header.frm_length) break;
+        if (name_size == 0 || pos + name_size > header.frm_length) break;
 
         // Read column name (name_size bytes, last byte is usually null/space)
-        std::string name(reinterpret_cast<const char*>(data + pos), name_size - 1);
+        std::string name(reinterpret_cast<const char*>(data + pos), name_size > 1 ? name_size - 1 : name_size);
         pos += name_size;
 
         field_names.push_back(name);
@@ -426,11 +426,18 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
     for (const auto& fn : field_names) {
         total_name_size += fn.size() + 1;  // name + null terminator
     }
+
+    // Safety check: don't skip past file end
+    if (pos + total_name_size + 2 > header.frm_length) {
+        std::cout << "[INFO] FRMParser: Found " << columns.size() << " columns (skip comments)" << std::endl;
+        return !columns.empty();
+    }
     pos += total_name_size + 2;
 
     // Read column comments
     for (uint16_t i = 0; i < fields && pos < header.frm_length; i++) {
-        if (columns[i].comment_length > 0 && pos + columns[i].comment_length <= header.frm_length) {
+        if (columns[i].comment_length > 0 && columns[i].comment_length < 65536 &&
+            pos + columns[i].comment_length <= header.frm_length) {
             columns[i].comment = std::string(reinterpret_cast<const char*>(data + pos), columns[i].comment_length);
             pos += columns[i].comment_length;
         }
