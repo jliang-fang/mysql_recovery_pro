@@ -339,15 +339,17 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
         if (col_in_screen == fields_per_screen) {
             screens_read++;
             col_in_screen = 2;
-            // Skip 8 bytes and terminator for screen transition
+            // Skip 8 bytes padding for screen transition
             pos += 8;
-            // Read terminator byte (ibd2sql: _terminator = self.data.read(1))
-            // Then skip any space terminators
+            // Read terminator bytes until non-space (ibd2sql-style)
+            // ibd2sql: _terminator = self.data.read(1)
+            //          while _terminator == b' ': _terminator = self.data.read(1)
+            // Each read consumes a byte, including the final non-space terminator
+            while (pos < header.frm_length && data[pos] == ' ') {
+                pos++;  // Skip space terminators
+            }
             if (pos < header.frm_length) {
-                uint8_t terminator = data[pos++];
-                while (pos < header.frm_length && data[pos] == ' ') {
-                    pos++;
-                }
+                pos++;  // Skip the final non-space terminator
             }
             fields_per_screen_n++;
         } else {
