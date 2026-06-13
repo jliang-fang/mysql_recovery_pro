@@ -2312,6 +2312,18 @@ int main(int argc, char** argv) {
                 }
                 if (n_pk == 0 && !index_columns.empty()) n_pk = 1;  // Default first column as PK
                 n_pk_cols = n_pk;
+
+                // Debug: Print column types
+                if (verbose) {
+                    std::cout << "[DEBUG] Column types from FRM (after conversion):\n";
+                    for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
+                        std::cout << "  " << i+1 << ". " << index_columns[i].name
+                                  << " type=" << static_cast<int>(index_columns[i].col_type)
+                                  << " len=" << index_columns[i].col_length
+                                  << " nullable=" << index_columns[i].is_nullable << "\n";
+                    }
+                }
+
                 index_parser.set_columns(index_columns, false, n_pk);
                 std::cout << "[INFO] Schema set from .frm file (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
             } else {

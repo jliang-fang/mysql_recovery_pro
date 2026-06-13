@@ -61,13 +61,16 @@ static uint8_t mysql_to_innodb_type(uint8_t mysql_type) {
         case 7:   return 18;  // TIMESTAMP (old) -> InnoDB TIMESTAMP2 (type 18)
         case 8:   return 9;   // BIGINT -> InnoDB LONGLONG (type 9)
         case 9:   return 10;  // MEDIUMINT -> InnoDB INT24 (type 10)
-        case 10:  return 11;  // DATE -> InnoDB DATE (type 11)
-        case 11:  return 12;  // TIME (old) -> InnoDB TIME (type 12)
-        case 12:  return 13;  // DATETIME (old) -> InnoDB DATETIME (type 13)
+        case 10:  return 15;  // DATE -> InnoDB NEWDATE (type 15) - 3 bytes
+        case 11:  return 20;  // TIME (old) -> InnoDB TIME2 (type 20)
+        case 12:  return 19;  // DATETIME (old) -> InnoDB DATETIME2 (type 19)
         case 13:  return 14;  // YEAR -> InnoDB YEAR (type 14)
-        case 14:  return 11;  // NEWDATE -> InnoDB DATE (type 11)
+        case 14:  return 15;  // NEWDATE -> InnoDB NEWDATE (type 15)
         case 15:  return 16;  // VARCHAR -> InnoDB VARCHAR (type 16)
         case 16:  return 17;  // BIT -> InnoDB BIT (type 17)
+        case 17:  return 18;  // TIMESTAMP2 -> InnoDB TIMESTAMP2 (type 18)
+        case 18:  return 19;  // DATETIME2 -> InnoDB DATETIME2 (type 19)
+        case 19:  return 20;  // TIME2 -> InnoDB TIME2 (type 20)
         case 245: return 31;  // JSON -> InnoDB JSON (type 31)
         case 246: return 21;  // NEWDECIMAL -> InnoDB NEWDECIMAL (type 21)
         case 247: return 22;  // ENUM -> InnoDB ENUM (type 22)
@@ -205,7 +208,18 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
         // 关键修复: 将 MySQL 服务器类型转换为 InnoDB 存储类型
         // FRM 文件存储的是 MySQL 服务器类型 ID (1-255)
         // InnoDB 存储引擎使用不同的类型 ID (1-32)
-        col.mysql_type_id = mysql_to_innodb_type(col_def.field_type);
+        uint8_t mysql_type = col_def.field_type;
+        uint8_t innodb_type = mysql_to_innodb_type(mysql_type);
+        col.mysql_type_id = innodb_type;
+
+        // Debug: Print type conversion for first 15 columns
+        if (i < 15) {
+            std::cout << "[DEBUG FRM] Column " << i+1 << ": " << col.name
+                      << " MySQL_type=0x" << std::hex << static_cast<int>(mysql_type)
+                      << " -> InnoDB_type=0x" << std::hex << static_cast<int>(innodb_type) << std::dec
+                      << " len=" << col_def.field_length
+                      << " nullable=" << col.is_nullable << "\n";
+        }
 
         col.column_length = col_def.field_length;
         col.charset_id = col_def.collation_id;

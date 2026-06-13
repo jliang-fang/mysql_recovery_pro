@@ -240,8 +240,10 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         }
     }
 
-    // variable_sizes is now in FIELD ORDER (first field first)
-    // No need to reverse!
+    // variable_sizes is now in REVERSE FIELD ORDER (last field first)
+    // We read backward from header, which means we encounter sizes for later columns first
+    // We need to reverse to get them in field order
+    std::reverse(result.variable_sizes.begin(), result.variable_sizes.end());
 
     // Store the position after reading all sizes (where data might start before header)
     result.data_start_offset = pos;
@@ -1072,15 +1074,16 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = buf;
             break;
         }
-        // InnoDB type 11 = DATE (3 bytes)
-        case 11: {  // DATE (3 bytes) - InnoDB type 11
+        // InnoDB type 15 = NEWDATE/DATE (3 bytes)
+        case 15: {  // NEWDATE/DATE (3 bytes) - InnoDB type 15
             val.type = IndexFieldValue::Type::DATE_VAL;
+            // DATE is stored as: bit 0-4: day, bit 5-8: month, bit 9-22: year, bit 23: sign
             uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
                          static_cast<uint32_t>(data[offset + 2]);
-            uint16_t year = (t & 0x7FFE00) >> 9;  // bits 9-22
-            uint8_t month = (t & 0x1E0) >> 5;     // bits 5-8
-            uint8_t day = t & 0x1F;               // bits 0-4
+            uint16_t year = (t >> 9) & 0x7FFF;  // bits 9-22 (14 bits)
+            uint8_t month = (t >> 5) & 0x0F;    // bits 5-8 (4 bits)
+            uint8_t day = t & 0x1F;             // bits 0-4 (5 bits)
             char buf[16];
             snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
             val.str_value = buf;
@@ -1579,6 +1582,18 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
 uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_path,
                                                        const std::string& csv_output,
                                                        const std::vector<IndexColumnDef>& columns) {
+    // Set columns for schema-aware parsing
+    if (!columns.empty()) {
+        columns_ = columns;
+        // Count nullable and variable-length columns
+        n_nullable_ = 0;
+        n_variable_ = 0;
+        for (const auto& col : columns_) {
+            if (col.is_nullable) n_nullable_++;
+            if (col.is_variable_length()) n_variable_++;
+        }
+    }
+
     std::ofstream csv_file(csv_output);
     if (!csv_file.is_open()) {
         std::cerr << "[ERROR] Cannot open output file: " << csv_output << "\n";

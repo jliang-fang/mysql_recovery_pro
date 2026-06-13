@@ -123,10 +123,8 @@ struct IndexColumnDef {
             case 6:  return 8;   // DOUBLE (InnoDB type 6)
             case 9:  return 8;   // LONGLONG (InnoDB type 9)
             case 10: return 3;   // INT24 (InnoDB type 10)
-            case 11: return 3;   // DATE (InnoDB type 11)
-            case 12: return 3;   // TIME (InnoDB type 12)
-            case 13: return 8;   // DATETIME (InnoDB type 13)
             case 14: return 1;   // YEAR (InnoDB type 14)
+            case 15: return 3;   // NEWDATE/DATE (InnoDB type 15) - 3 bytes for DATE
             case 18: return 4;   // TIMESTAMP2 (InnoDB type 18)
             case 19: return 5;   // DATETIME2 (InnoDB type 19)
             case 20: return 3;   // TIME2 (InnoDB type 20)
