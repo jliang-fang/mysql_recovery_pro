@@ -166,22 +166,45 @@ std::vector<uint32_t> PageParserV3::get_page_chain() {
 
 // ==================== RedundantRowParser 实现 ====================
 
-RecordHeader RedundantRowParser::parse_record_header(const uint8_t* data) {
-    RecordHeader header{};
-    
+RedundantHeader RedundantRowParser::parse_redundant_header(const uint8_t* data) {
+    RedundantHeader header{};
+
     if (!data) {
         return header;
     }
 
-    // Redundant format: 6-byte header
-    // [0]: info_bits
-    // [1-2]: next_record_offset (15 bits)
-    // [3-4]: heap_no (15 bits)
-    // [5]: n_fields (not stored in RecordHeader)
+    // Redundant format: 6-byte header (big-endian)
+    auto opt = RedundantHeader::parse(data, 6);
+    return opt.has_value() ? opt.value() : header;
+}
 
-    header.byte0 = data[0];
-    header.next_off_0 = data[1];
-    header.next_off_1 = data[2];
+RecordHeader RedundantRowParser::parse_record_header(const uint8_t* data) {
+    RecordHeader header{};
+
+    if (!data) {
+        return header;
+    }
+
+    // For backward compatibility, parse as RedundantHeader first
+    RedundantHeader redundant = parse_redundant_header(data);
+
+    // Map REDUNDANT fields to COMPACT-style RecordHeader (5 bytes)
+    // Note: This mapping is lossy - heap_no encoding is different
+    // COMPACT: bits 15-3 = heap_no (in byte1/byte2)
+    // REDUNDANT: bits 23-11 = heap_no (in byte1/byte2)
+    // For compatibility, encode heap_no for COMPACT format
+    uint16_t heap_no = redundant.get_heap_no();
+    // COMPACT format: heap_no is stored as (heap_no << 3) in bits 15-3
+    uint16_t compact_heap = heap_no << 3;  // Shift to COMPACT position
+    header.byte1 = (compact_heap >> 8) & 0xFF;
+    header.byte2 = compact_heap & 0xFF;
+
+    // Next offset - REDUNDANT is big-endian, COMPACT is big-endian too
+    header.next_off_0 = redundant.next_off_0;
+    header.next_off_1 = redundant.next_off_1;
+
+    // Info bits (n_owned bits 19-16 vs 27-24)
+    header.byte0 = redundant.get_n_owned();  // Just store n_owned
 
     return header;
 }
@@ -279,21 +302,16 @@ bool RedundantRowParser::is_max_record(const uint8_t* data) {
 
 RecordHeader CompactRowParser::parse_record_header(const uint8_t* data) {
     RecordHeader header{};
-    
+
     if (!data) {
         return header;
     }
 
-    // Compact format: 5-byte header
-    // [0]: info_bits (high 5 bits = n_fields)
-    // [1-2]: next_record_offset (15 bits)
-    // [3-4]: heap_no (15 bits)
-
-    header.byte0 = data[0];
-    header.next_off_0 = data[1];
-    header.next_off_1 = data[2];
-
-    return header;
+    // Compact format: 5-byte header (big-endian)
+    // Byte 0-2: 24-bit info bits (bits 15-3 = heap_no)
+    // Byte 3-4: 16-bit next_offset (signed)
+    auto opt = RecordHeader::parse(data, 5);
+    return opt.has_value() ? opt.value() : header;
 }
 
 std::vector<RowValue> CompactRowParser::parse_record_data(

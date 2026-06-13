@@ -110,17 +110,26 @@ public:
 // ==================== Redundant 行格式解析器 ====================
 /**
  * @brief RedundantRowParser: Redundant 行格式解析器
- * 
+ *
  * 记录格式（6字节头 + 可变长度字段）：
- * - 1 byte: info_bits
- * - 2 bytes: next_record_offset
- * - 2 bytes: heap_no
- * - 1 byte: n_fields
- * - n bytes: column_lengths (2 bytes each)
- * - n bytes: column_data
+ * InnoDB REDUNDANT/REDUNDANT row format header layout (6 bytes, big-endian):
+ * Byte 0-3: info bits (32-bit field)
+ *   bit 31: instant_flag
+ *   bit 30: version_flag
+ *   bit 29: deleted_flag
+ *   bit 28: min_rec_flag
+ *   bits 27-24: n_owned (4 bits)
+ *   bits 23-11: heap_no (13 bits)
+ *   bits 10-1: n_fields (10 bits)
+ *   bit 0: short_flag
+ * Byte 4-5: next_record_offset (unsigned 16-bit, relative to record start)
  */
 class RedundantRowParser : public IRowParser {
 public:
+    // Parse as RedundantHeader (preferred for REDUNDANT format)
+    RedundantHeader parse_redundant_header(const uint8_t* data);
+
+    // Legacy interface - maps to RecordHeader (COMPACT format)
     RecordHeader parse_record_header(const uint8_t* data) override;
     std::vector<RowValue> parse_record_data(
         const uint8_t* data,

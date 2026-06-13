@@ -68,18 +68,26 @@ TEST(Record, ToStringFormatting) {
 // ==================== RecordHeader 解析测试（新增）====================
 TEST(RecordHeader, ParseCompactFormat) {
     std::vector<uint8_t> data(5, 0);
-    // RecordHeader layout:
-    // byte0-2: info_and_heap (24 bits) - contains deleted, min_rec, n_owned, heap_no, rec_type
-    // byte3-4: next_record_offset (little-endian 16-bit signed)
+    // RecordHeader layout (ibd2sql big-endian format):
+    // byte0-2: info_and_heap (24 bits big-endian)
+    //   bit 23: instant_flag
+    //   bit 22: version_flag
+    //   bit 21: deleted_flag
+    //   bit 20: min_rec_flag
+    //   bits 19-16: n_owned
+    //   bits 15-3: heap_no (13 bits)
+    //   bits 2-0: rec_type
+    // byte3-4: next_record_offset (big-endian 16-bit signed)
 
-    // get_heap_no() = ((byte1 & 0x7F) << 3) | (byte2 >> 5)
-    // For heap_no = 1: byte1 = 0, byte2 = 0x20 (1 << 5)
+    // get_heap_no() = ((byte1 << 8) | byte2) >> 3
+    // For heap_no = 1: (byte1 << 8) | byte2 = 1 << 3 = 8
+    // So byte1 = 0, byte2 = 8
     data[0] = 0x00;  // info_bits
     data[1] = 0x00;  // heap_no high bits
-    data[2] = 0x20;  // heap_no = 1 (bits 7-5 of byte2 = 001)
-    // Set next_record_offset = 70 (little-endian)
-    data[3] = 70;    // low byte
-    data[4] = 0;     // high byte
+    data[2] = 0x08;  // heap_no = 1 (bits 15-3 = 8, so heap_no = 8 >> 3 = 1)
+    // Set next_record_offset = 70 (big-endian)
+    data[3] = 0x00;  // high byte
+    data[4] = 70;    // low byte (70 = 0x46)
 
     auto header = RecordHeader::parse(data.data(), data.size());
     EXPECT_TRUE(header.has_value());

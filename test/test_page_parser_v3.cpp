@@ -25,12 +25,15 @@ namespace innodb {
 // ==================== RedundantRowParser 测试 ====================
 
 TEST(RedundantRowParserTest, ParseRecordHeader) {
-    // 创建 Redundant 格式的记录头 (6 字节)
-    uint8_t data[6] = {0x00, 0x0D, 0x00, 0x01, 0x00, 0x03};
-    
+    // 创建 Redundant 格式的记录头 (6 字节) - InnoDB big-endian format
+    // 32-bit info bits (bits 23-11 = heap_no) + 16-bit next_offset
+    // For heap_no=1: bits 23-11 = 1 << 11 = 0x0800 (stored as 0x00000800 in 32-bit field)
+    // For next_offset=13: 0x000D
+    uint8_t data[6] = {0x00, 0x00, 0x08, 0x00, 0x00, 0x0D};
+
     RedundantRowParser parser;
-    RecordHeader header = parser.parse_record_header(data);
-    
+    RedundantHeader header = parser.parse_redundant_header(data);
+
     EXPECT_EQ(header.get_next_record_offset(), 13);
     EXPECT_EQ(header.get_heap_no(), 1);
     EXPECT_EQ(header.get_info_bits(), 0x00);
@@ -105,15 +108,18 @@ TEST(RedundantRowParserTest, IsMaxRecord) {
 // ==================== CompactRowParser 测试 ====================
 
 TEST(CompactRowParserTest, ParseRecordHeader) {
-    // 创建 Compact 格式的记录头 (5 字节)
-    uint8_t data[5] = {0x18, 0x0D, 0x00, 0x01, 0x00};
-    
+    // 创建 Compact 格式的记录头 (5 字节) - InnoDB big-endian format
+    // 24-bit info bits (bits 15-3 = heap_no) + 16-bit next_offset
+    // For heap_no=1: bits 15-3 = 1 << 3 = 8 = stored as 0x000008 in 24-bit field
+    // For next_offset=13: 0x000D
+    uint8_t data[5] = {0x00, 0x00, 0x08, 0x00, 0x0D};
+
     CompactRowParser parser;
     RecordHeader header = parser.parse_record_header(data);
-    
+
     EXPECT_EQ(header.get_next_record_offset(), 13);
     EXPECT_EQ(header.get_heap_no(), 1);
-    EXPECT_EQ(header.get_info_bits(), 0x18);
+    EXPECT_EQ(header.get_info_bits(), 0x00);  // byte0 = 0x00
 }
 
 TEST(CompactRowParserTest, ParseRecordData) {

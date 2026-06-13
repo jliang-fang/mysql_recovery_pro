@@ -259,11 +259,10 @@ struct alignas(1) RecordHeader {
 
     // REC_NEXT is a signed 16-bit value, relative to current record start
     int16_t get_next_record_offset() const {
-        // Byte 3-4: signed 16-bit in little-endian order within InnoDB
-        // InnoDB stores this as a machine-independent 2-byte value
+        // Byte 3-4: signed 16-bit BIG-ENDIAN (matching ibd2sql struct.unpack('>h'))
         return static_cast<int16_t>(
-            static_cast<uint16_t>(next_off_0) |
-            (static_cast<uint16_t>(next_off_1) << 8)
+            (static_cast<uint16_t>(next_off_0) << 8) |
+            static_cast<uint16_t>(next_off_1)
         );
     }
 
@@ -276,9 +275,9 @@ struct alignas(1) RecordHeader {
     }
 
     uint16_t get_heap_no() const {
-        // bits 15-3 of 24-bit field
-        return ((static_cast<uint16_t>(byte1) & 0x7F) << 3) |
-               (static_cast<uint16_t>(byte2) >> 5);
+        // bits 15-3 of 24-bit field = ((byte1 << 8) | byte2) >> 3
+        return (static_cast<uint16_t>(byte1) << 5) |
+               (static_cast<uint16_t>(byte2) >> 3);
     }
 
     uint8_t get_n_owned() const {
@@ -304,6 +303,94 @@ struct alignas(1) RecordHeader {
             << ", heap_no=" << get_heap_no()
             << ", n_owned=" << (int)get_n_owned()
             << ", rec_type=" << (int)get_rec_type()
+            << "}";
+        return oss.str();
+    }
+};
+
+// ==================== Redundant Record Header (6 bytes) ====================
+// REDUNDANT/REDUNDANT row format header layout (6 bytes, big-endian):
+// Byte 0-3: info bits (32-bit field)
+//   bit 31: instant_flag
+//   bit 30: version_flag
+//   bit 29: deleted_flag
+//   bit 28: min_rec_flag
+//   bits 27-24: n_owned (4 bits)
+//   bits 23-11: heap_no (13 bits)
+//   bits 10-1: n_fields (10 bits)
+//   bit 0: short_flag
+// Byte 4-5: next_record_offset (unsigned 16-bit, relative to record start)
+struct alignas(1) RedundantHeader {
+    uint8_t byte0;
+    uint8_t byte1;
+    uint8_t byte2;
+    uint8_t byte3;
+    uint8_t next_off_0;  // high byte of next_record offset (big-endian)
+    uint8_t next_off_1;  // low byte of next_record offset (big-endian)
+
+    static std::optional<RedundantHeader> parse(const uint8_t* ptr, size_t max_size = 6) {
+        if (!ptr || max_size < 6) {
+            return std::nullopt;
+        }
+
+        RedundantHeader header{};
+        header.byte0 = ptr[0];
+        header.byte1 = ptr[1];
+        header.byte2 = ptr[2];
+        header.byte3 = ptr[3];
+        header.next_off_0 = ptr[4];
+        header.next_off_1 = ptr[5];
+
+        return header;
+    }
+
+    // REC_NEXT is unsigned 16-bit for REDUNDANT, relative to current record start
+    uint16_t get_next_record_offset() const {
+        return (static_cast<uint16_t>(next_off_0) << 8) |
+               static_cast<uint16_t>(next_off_1);
+    }
+
+    bool is_deleted() const {
+        return (byte0 & 0x10) != 0;  // bit 29 of 32-bit field = deleted
+    }
+
+    bool is_min_rec() const {
+        return (byte0 & 0x08) != 0;  // bit 28 of 32-bit field = min_rec
+    }
+
+    uint16_t get_heap_no() const {
+        // bits 23-11 of 32-bit field = ((byte1 << 8) | byte2) >> 3
+        return (static_cast<uint16_t>(byte1) << 5) |
+               (static_cast<uint16_t>(byte2) >> 3);
+    }
+
+    uint8_t get_n_owned() const {
+        // bits 27-24 of 32-bit field = byte0 & 0x0F
+        return byte0 & 0x0F;
+    }
+
+    uint16_t get_n_fields() const {
+        // bits 10-1 of 32-bit field
+        return (static_cast<uint16_t>(byte3) >> 1);
+    }
+
+    bool is_short() const {
+        return (byte3 & 0x01) != 0;  // bit 0 = short_flag
+    }
+
+    uint8_t get_info_bits() const {
+        return byte0;
+    }
+
+    std::string to_string() const {
+        std::ostringstream oss;
+        oss << "RedundantHeader{next=" << get_next_record_offset()
+            << ", deleted=" << is_deleted()
+            << ", min_rec=" << is_min_rec()
+            << ", heap_no=" << get_heap_no()
+            << ", n_owned=" << (int)get_n_owned()
+            << ", n_fields=" << get_n_fields()
+            << ", short=" << is_short()
             << "}";
         return oss.str();
     }
