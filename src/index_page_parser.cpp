@@ -1259,12 +1259,19 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 21: { // NEWDECIMAL - InnoDB type 21
             val.type = IndexFieldValue::Type::DECIMAL_VAL;
 
-            // Calculate digit groups using map_decimal
+            // Calculate digit groups using MySQL's decimal encoding
+            // Reference: ibd2sql/utils/b2data.py B2DECIMAL()
+            //
+            // CRITICAL FIX: The encoding uses base-256 multiplication, NOT string concatenation!
+            // For groups [[4,9], [1,1]]:
+            // - The value is: first_group_value * 256^(second_group_bytes) + second_group_value
+            // - NOT str(first).zfill(9) + str(second).zfill(1) (which was wrong!)
+
             uint32_t precision = col.precision > 0 ? col.precision : 10;
             uint32_t scale = col.scale;
             uint32_t int_digits = precision - scale;
 
-            // Each group of up to 9 digits uses 4 bytes
+            // Calculate group structure using map_decimal logic
             auto calc_groups = [](uint32_t digits) -> std::vector<std::pair<int,int>> {
                 std::vector<std::pair<int,int>> result;
                 int full_groups = digits / 9;
@@ -1298,65 +1305,77 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             // Subtract 128 from first byte (after inversion if negative)
             proc_data[0] -= 128;
 
-            // Read integer part
-            std::string int_part_str;
+            // CORRECTED: Read groups and compute value using base-256 multiplication
+            // The value = sum of (group_value * 256^total_bytes_of_following_groups)
+
+            // First compute the integer part using mathematical approach
+            uint64_t int_value = 0;
             size_t read_offset = 0;
-            for (const auto& [bytes, digits] : p1) {
-                if (read_offset + bytes > field_size) break;
-                uint64_t val = 0;
-                for (size_t i = 0; i < bytes && read_offset + i < field_size; i++) {
-                    val = (val << 8) | proc_data[read_offset + i];
-                }
-                std::string s = std::to_string(val);
-                while (s.length() < digits) s = "0" + s;
-                int_part_str += s;
-                read_offset += bytes;
-            }
-            // Remove leading zeros but keep at least one digit (with exception handling for large numbers)
-            if (!int_part_str.empty()) {
-                try {
-                    // Only process if not too large
-                    if (int_part_str.length() <= 20) {
-                        int_part_str = std::to_string(std::stoull(int_part_str));
-                    }
-                    // If longer, just trim leading zeros
-                    size_t first_nonzero = int_part_str.find_first_not_of('0');
-                    if (first_nonzero != std::string::npos && first_nonzero > 0) {
-                        int_part_str = int_part_str.substr(first_nonzero);
-                    } else if (first_nonzero == std::string::npos) {
-                        int_part_str = "0";
-                    }
-                } catch (...) {
-                    // If stoull fails, just trim leading zeros
-                    size_t first_nonzero = int_part_str.find_first_not_of('0');
-                    if (first_nonzero != std::string::npos && first_nonzero > 0) {
-                        int_part_str = int_part_str.substr(first_nonzero);
-                    }
-                }
-            } else {
-                int_part_str = "0";
+
+            // Calculate total bytes for remaining groups to determine multiplier
+            size_t total_remaining_bytes = 0;
+            for (size_t i = 0; i < p1.size(); i++) {
+                total_remaining_bytes += p1[i].first;
             }
 
-            // Read fractional part
-            std::string frac_part_str;
-            for (const auto& [bytes, digits] : p2) {
+            for (size_t i = 0; i < p1.size(); i++) {
+                int bytes = p1[i].first;
                 if (read_offset + bytes > field_size) break;
-                uint64_t val = 0;
-                for (size_t i = 0; i < bytes && read_offset + i < field_size; i++) {
-                    val = (val << 8) | proc_data[read_offset + i];
+
+                // Subtract bytes of this group from remaining
+                total_remaining_bytes -= bytes;
+
+                // Read this group's value
+                uint64_t group_val = 0;
+                for (int j = 0; j < bytes && read_offset + j < field_size; j++) {
+                    group_val = (group_val << 8) | proc_data[read_offset + j];
                 }
-                std::string s = std::to_string(val);
-                while (s.length() < digits) s = "0" + s;
-                frac_part_str += s;
+
+                // Multiply by 256^total_remaining_bytes and add
+                uint64_t multiplier = 1;
+                for (size_t k = 0; k < total_remaining_bytes; k++) {
+                    multiplier *= 256;
+                }
+                int_value += group_val * multiplier;
+
                 read_offset += bytes;
             }
 
-            // Format result
-            if (scale > 0 && !frac_part_str.empty()) {
-                val.str_value = (is_negative ? "-" : "") + int_part_str + "." + frac_part_str;
-            } else {
-                val.str_value = (is_negative ? "-" : "") + int_part_str;
+            // For fractional part, similarly compute
+            uint64_t frac_value = 0;
+            total_remaining_bytes = 0;
+            for (size_t i = 0; i < p2.size(); i++) {
+                total_remaining_bytes += p2[i].first;
             }
+
+            for (size_t i = 0; i < p2.size(); i++) {
+                int bytes = p2[i].first;
+                if (read_offset + bytes > field_size) break;
+
+                total_remaining_bytes -= bytes;
+
+                uint64_t group_val = 0;
+                for (int j = 0; j < bytes && read_offset + j < field_size; j++) {
+                    group_val = (group_val << 8) | proc_data[read_offset + j];
+                }
+
+                uint64_t multiplier = 1;
+                for (size_t k = 0; k < total_remaining_bytes; k++) {
+                    multiplier *= 256;
+                }
+                frac_value += group_val * multiplier;
+
+                read_offset += bytes;
+            }
+
+            // Format result: int_value.frac_value (pad frac to scale digits)
+            std::string frac_str = std::to_string(frac_value);
+            while (frac_str.length() < scale) {
+                frac_str = "0" + frac_str;
+            }
+
+            // Build result string
+            val.str_value = (is_negative ? "-" : "") + std::to_string(int_value) + "." + frac_str;
             break;
         }
         // ==================== JSON ====================
