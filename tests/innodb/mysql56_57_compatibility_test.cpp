@@ -17,10 +17,10 @@ namespace innodb {
 TEST(MySQL5657CompatibilityTest, RedundantFormatCompatibility) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // 设置页类型为 INDEX
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_INDEX);
+    // BPlusTreeParser uses read_be at FIL_PAGE_TYPE_ABS (24)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
 
-    // 设置页级别为 0（叶子页）
+    // 设置页级别为 0
     write_le<uint16_t>(page_data.data(), 42, 0);
 
     // 设置 flags 为 REDUNDANT 格式（bit 0-2 = 0）
@@ -55,8 +55,8 @@ TEST(MySQL5657CompatibilityTest, RedundantFormatCompatibility) {
 TEST(MySQL5657CompatibilityTest, CompactFormatCompatibility) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // 设置页类型为 INDEX
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_INDEX);
+    // BPlusTreeParser uses read_be at FIL_PAGE_TYPE_ABS (24)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
 
     // 设置页级别为 0
     write_le<uint16_t>(page_data.data(), 42, 0);
@@ -94,8 +94,8 @@ TEST(MySQL5657CompatibilityTest, CompactFormatCompatibility) {
 TEST(MySQL5657CompatibilityTest, ChecksumCompatibility) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // 设置页类型为 INDEX
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_INDEX);
+    // BPlusTreeParser uses read_be at FIL_PAGE_TYPE_ABS (24)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
 
     // 设置页级别为 0
     write_le<uint16_t>(page_data.data(), 42, 0);
@@ -291,9 +291,10 @@ TEST(MySQL5657CompatibilityTest, PageSizeCompatibility) {
 // Test Case 9: 页类型兼容性（MySQL 5.6/5.7 页类型值）
 TEST(MySQL5657CompatibilityTest, PageTypeCompatibility) {
     // MySQL 5.6/5.7 页类型值与 MySQL 8.0 相同
-    EXPECT_EQ(FIL_PAGE_INDEX, 9969);      // B+Tree index page
-    EXPECT_EQ(FIL_PAGE_SDI, 9971);        // SDI metadata page
-    EXPECT_EQ(FIL_PAGE_UNDO_LOG, 9970);   // Undo log page
+    // FIL_PAGE_INDEX = 17855 (0x45BF in big-endian)
+    EXPECT_EQ(FIL_PAGE_INDEX, 17855);      // B+Tree index page
+    EXPECT_EQ(FIL_PAGE_SDI, 17854);        // SDI metadata page
+    EXPECT_EQ(FIL_PAGE_UNDO_LOG, 17842);   // Undo log page
     EXPECT_EQ(FIL_PAGE_TYPE_ALLOCATED, 0); // Fresh allocated page
 }
 

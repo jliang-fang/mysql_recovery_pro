@@ -2268,14 +2268,15 @@ int main(int argc, char** argv) {
                 for (auto& [pos, col] : frm_schema->columns) {
                     dbrecovery::innodb::IndexColumnDef icol;
                     icol.name = col.name;
+                    // mysql_type_id 已经在 FRMParser 中转换为 InnoDB 类型
                     icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
                     icol.col_length = col.column_length;
                     icol.is_nullable = col.is_nullable;
                     icol.is_unsigned = !col.is_signed;  // Use is_signed field
                     icol.mb_maxlen = 4;  // UTF8MB4
 
-                    // Set precision/scale for DECIMAL types
-                    if (col.mysql_type_id == 246 && col.numeric_precision > 0) {
+                    // Set precision/scale for DECIMAL types (InnoDB type 21)
+                    if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
                         icol.precision = col.numeric_precision;
                         icol.scale = col.numeric_scale;
                     }
@@ -2284,13 +2285,17 @@ int main(int argc, char** argv) {
                     icol.enum_values = col.enum_values;
                     icol.set_values = col.set_values;
 
-                    // Determine if variable length
+                    // Determine if variable length based on InnoDB type
+                    // InnoDB types: 16=VARCHAR, 24-27=BLOB variants, 31=JSON
                     switch (col.mysql_type_id) {
-                        case 15:  // VARCHAR
+                        case 16:  // VARCHAR (InnoDB type)
                             icol.is_big = (col.column_length * 4 > 255);
                             break;
-                        case 252:  // BLOB/TEXT
-                        case 245:  // JSON
+                        case 24:  // TINY_BLOB
+                        case 25:  // MEDIUM_BLOB
+                        case 26:  // LONG_BLOB
+                        case 27:  // BLOB
+                        case 31:  // JSON
                             icol.is_big = true;
                             break;
                         default:

@@ -1004,7 +1004,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 8: {  // LONGLONG (BIGINT, 8 bytes)
+        // InnoDB type 9 = LONGLONG (BIGINT, 8 bytes)
+        case 9: {  // LONGLONG (BIGINT, 8 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = read_be<uint64_t>(data, offset);
@@ -1017,7 +1018,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 9: {  // INT24 (MEDIUMINT, 3 bytes)
+        // InnoDB type 10 = INT24 (MEDIUMINT, 3 bytes)
+        case 10: {  // INT24 (MEDIUMINT, 3 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             uint32_t v = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
@@ -1057,7 +1059,21 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             break;
         }
         // ==================== Temporal Types ====================
-        case 10: {  // DATE (3 bytes) - B2DATE
+        // 使用 InnoDB 类型 ID (参考 ibd2sql column_type.py)
+        // InnoDB type 8 = TIMESTAMP (4 bytes)
+        case 8: {  // TIMESTAMP (4 bytes) - InnoDB type 8
+            val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+            uint32_t ts = read_be<uint32_t>(data, offset);
+            time_t t = static_cast<time_t>(ts);
+            struct tm tm_buf;
+            gmtime_r(&t, &tm_buf);
+            char buf[32];
+            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+            val.str_value = buf;
+            break;
+        }
+        // InnoDB type 11 = DATE (3 bytes)
+        case 11: {  // DATE (3 bytes) - InnoDB type 11
             val.type = IndexFieldValue::Type::DATE_VAL;
             uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
@@ -1070,7 +1086,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = buf;
             break;
         }
-        case 12: {  // DATETIME (old format, 8 bytes) - B2DATETIME_OLD
+        case 13: {  // DATETIME (old format, 8 bytes) - InnoDB type 13
             val.type = IndexFieldValue::Type::DATETIME_VAL;
             uint64_t dt = read_be<uint64_t>(data, offset);
             if (dt > 9223372036854775808ULL) {
@@ -1087,7 +1103,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 18: {  // DATETIME2 (new format, 5 bytes) - B2DATETIME
+        case 19: {  // DATETIME2 (new format, 5 bytes) - InnoDB type 19
             val.type = IndexFieldValue::Type::DATETIME_VAL;
             // Read 5 bytes as 40-bit value
             uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(data, offset)) << 8) |
@@ -1106,8 +1122,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = buf;
             break;
         }
-        case 7:   // TIMESTAMP (4 bytes) - B2TIMESTAMP
-        case 17: { // TIMESTAMP2 (4 bytes + optional fractional)
+        // InnoDB type 18 = TIMESTAMP2 (4 bytes, same as TIMESTAMP)
+        case 18: { // TIMESTAMP2 (4 bytes) - InnoDB type 18
             val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
             uint32_t ts = read_be<uint32_t>(data, offset);
             time_t t = static_cast<time_t>(ts);
@@ -1118,21 +1134,41 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = buf;
             break;
         }
-        case 13: {  // YEAR (1 byte) - B2YEAR
+        case 14: {  // YEAR (1 byte) - InnoDB type 14
             val.type = IndexFieldValue::Type::UINT_VAL;
             val.uint_value = data[offset] + 1900;
             val.str_value = std::to_string(val.uint_value);
             break;
         }
+        case 12: {  // TIME (3 bytes) - InnoDB type 12
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            // TIME format: 3 bytes, similar to DATE
+            uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
+                         (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                         static_cast<uint32_t>(data[offset + 2]);
+            bool negative = (t & 0x800000) != 0;
+            uint32_t time_val = t & 0x7FFFFF;
+            uint8_t hour = (time_val >> 12) & 0x3FF;
+            uint8_t minute = (time_val >> 6) & 0x3F;
+            uint8_t second = time_val & 0x3F;
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%s%02u:%02u:%02u", negative ? "-" : "", hour, minute, second);
+            val.str_value = buf;
+            break;
+        }
         // ==================== String Types ====================
-        case 15:   // VARCHAR
-        case 253:   // VAR_STRING
-        case 252: { // BLOB/TEXT
+        // 使用 InnoDB 类型 ID
+        case 16:   // VARCHAR - InnoDB type 16
+        case 28:   // VAR_STRING - InnoDB type 28
+        case 27:   // BLOB/TEXT - InnoDB type 27
+        case 24:   // TINY_BLOB
+        case 25:   // MEDIUM_BLOB
+        case 26: { // LONG_BLOB
             val.type = IndexFieldValue::Type::STRING_VAL;
             val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
             break;
         }
-        case 254: { // CHAR (fixed-length string)
+        case 29: { // STRING/CHAR - InnoDB type 29
             val.type = IndexFieldValue::Type::STRING_VAL;
             val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
             // Trim trailing spaces
@@ -1141,8 +1177,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        // ==================== DECIMAL (NEWDECIMAL type 246) ====================
-        case 246: { // NEWDECIMAL
+        // ==================== DECIMAL (NEWDECIMAL type 21) ====================
+        case 21: { // NEWDECIMAL - InnoDB type 21
             val.type = IndexFieldValue::Type::DECIMAL_VAL;
 
             // Calculate digit groups using map_decimal

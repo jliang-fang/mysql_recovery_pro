@@ -15,7 +15,8 @@ constexpr uint16_t FRM_TYPE_VIEW = 0x5954;
 // MySQL 数据库类型
 constexpr uint8_t DB_TYPE_INNODB = 12;
 
-// MySQL 类型定义
+// MySQL 服务器类型定义 (FRM 文件中存储的类型)
+// 这些是 MySQL 服务器使用的类型 ID (范围 1-255)
 enum class MySQLFieldType : uint8_t {
     DECIMAL = 0,
     TINY = 1,
@@ -45,6 +46,76 @@ enum class MySQLFieldType : uint8_t {
     VAR_STRING = 253,
     STRING = 254,
     GEOMETRY = 255
+};
+
+// MySQL 服务器类型到 InnoDB 存储类型的映射
+// 参考 ibd2sql frm2sdi.py COL_TYPE 映射表
+// 格式: MySQL server type -> InnoDB type
+static uint8_t mysql_to_innodb_type(uint8_t mysql_type) {
+    switch (mysql_type) {
+        case 1:   return 2;   // TINYINT -> InnoDB TINY (type 2)
+        case 2:   return 3;   // SMALLINT -> InnoDB SHORT (type 3)
+        case 3:   return 4;   // INT -> InnoDB LONG (type 4)
+        case 4:   return 5;   // FLOAT -> InnoDB FLOAT (type 5)
+        case 5:   return 6;   // DOUBLE -> InnoDB DOUBLE (type 6)
+        case 7:   return 18;  // TIMESTAMP (old) -> InnoDB TIMESTAMP2 (type 18)
+        case 8:   return 9;   // BIGINT -> InnoDB LONGLONG (type 9)
+        case 9:   return 10;  // MEDIUMINT -> InnoDB INT24 (type 10)
+        case 10:  return 11;  // DATE -> InnoDB DATE (type 11)
+        case 11:  return 12;  // TIME (old) -> InnoDB TIME (type 12)
+        case 12:  return 13;  // DATETIME (old) -> InnoDB DATETIME (type 13)
+        case 13:  return 14;  // YEAR -> InnoDB YEAR (type 14)
+        case 14:  return 11;  // NEWDATE -> InnoDB DATE (type 11)
+        case 15:  return 16;  // VARCHAR -> InnoDB VARCHAR (type 16)
+        case 16:  return 17;  // BIT -> InnoDB BIT (type 17)
+        case 245: return 31;  // JSON -> InnoDB JSON (type 31)
+        case 246: return 21;  // NEWDECIMAL -> InnoDB NEWDECIMAL (type 21)
+        case 247: return 22;  // ENUM -> InnoDB ENUM (type 22)
+        case 248: return 23;  // SET -> InnoDB SET (type 23)
+        case 249: return 24;  // TINY_BLOB -> InnoDB TINY_BLOB (type 24)
+        case 250: return 25;  // MEDIUM_BLOB -> InnoDB MEDIUM_BLOB (type 25)
+        case 251: return 26;  // LONG_BLOB -> InnoDB LONG_BLOB (type 26)
+        case 252: return 27;  // BLOB -> InnoDB BLOB (type 27)
+        case 253: return 16;  // VAR_STRING -> InnoDB VARCHAR (type 16)
+        case 254: return 16;  // CHAR/STRING -> InnoDB VARCHAR (type 16, 变长存储)
+        case 255: return 30;  // GEOMETRY -> InnoDB GEOMETRY (type 30)
+        default:  return mysql_type; // 对于未识别的类型，保持原值
+    }
+}
+
+// InnoDB 类型定义 (参考 ibd2sql column_type.py)
+enum class InnoDBType : uint8_t {
+    DECIMAL = 1,
+    TINY = 2,
+    SHORT = 3,
+    LONG = 4,
+    FLOAT = 5,
+    DOUBLE = 6,
+    TYPE_NULL = 7,
+    TIMESTAMP = 8,
+    LONGLONG = 9,
+    INT24 = 10,
+    DATE = 11,
+    TIME = 12,
+    DATETIME = 13,
+    YEAR = 14,
+    NEWDATE = 15,
+    VARCHAR = 16,
+    BIT = 17,
+    TIMESTAMP2 = 18,
+    DATETIME2 = 19,
+    TIME2 = 20,
+    NEWDECIMAL = 21,
+    ENUM = 22,
+    SET = 23,
+    TINY_BLOB = 24,
+    MEDIUM_BLOB = 25,
+    LONG_BLOB = 26,
+    BLOB = 27,
+    VAR_STRING = 28,
+    STRING = 29,
+    GEOMETRY = 30,
+    JSON = 31
 };
 
 // 字符集 ID 到名称映射 (部分)
@@ -130,7 +201,12 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
         const auto& col_def = columns[sorted_indices[i]];
         catalog::ColumnInfo col;
         col.name = col_def.name;
-        col.mysql_type_id = col_def.field_type;
+
+        // 关键修复: 将 MySQL 服务器类型转换为 InnoDB 存储类型
+        // FRM 文件存储的是 MySQL 服务器类型 ID (1-255)
+        // InnoDB 存储引擎使用不同的类型 ID (1-32)
+        col.mysql_type_id = mysql_to_innodb_type(col_def.field_type);
+
         col.column_length = col_def.field_length;
         col.charset_id = col_def.collation_id;
         col.collation_id = col_def.collation_id;
@@ -142,15 +218,15 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
         col.comment = col_def.comment;
 
         // Extract DECIMAL precision/scale from field_length and pack_flag
-        if (col_def.field_type == 246) {  // NEWDECIMAL
+        if (col_def.field_type == 246) {  // NEWDECIMAL (MySQL server type)
             col.numeric_precision = col_def.field_length - 2;
             col.numeric_scale = (col_def.pack_flag >> 8) & 31;
         }
 
         // Transfer ENUM/SET values
-        if (col_def.field_type == 247) {  // ENUM
+        if (col_def.field_type == 247) {  // ENUM (MySQL server type)
             col.enum_values = col_def.elements;
-        } else if (col_def.field_type == 248) {  // SET
+        } else if (col_def.field_type == 248) {  // SET (MySQL server type)
             col.set_values = col_def.elements;
         }
 

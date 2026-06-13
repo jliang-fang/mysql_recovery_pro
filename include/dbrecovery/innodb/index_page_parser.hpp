@@ -93,49 +93,47 @@ struct IndexColumnDef {
 
     /**
      * @brief Determine if this column uses variable-length storage in InnoDB
-     * NOTE: CHAR (type 254) is variable-length for multi-byte charsets (utf8/utf8mb4)
-     * Only CHAR with latin1/binary charset is fixed-length
+     * Uses InnoDB type IDs (参考 ibd2sql column_type.py)
      */
     bool is_variable_length() const {
-        // VARCHAR, VAR_STRING, BLOB, TEXT, JSON, GEOMETRY use variable-length encoding
-        // CHAR (254) is also variable-length for multi-byte charsets!
-        return col_type == 15 ||   // VARCHAR
-               col_type == 253 ||  // VAR_STRING
-               col_type == 245 ||  // JSON
-               col_type == 249 ||  // TINY_BLOB
-               col_type == 250 ||  // MEDIUM_BLOB
-               col_type == 251 ||  // LONG_BLOB
-               col_type == 252 ||  // BLOB/TEXT
-               col_type == 16 ||   // BIT (sometimes variable)
-               col_type == 254;    // CHAR - variable-length for multi-byte charsets!
+        // Variable-length InnoDB types:
+        // 16 = VARCHAR, 24-27 = BLOB variants, 28 = VAR_STRING, 29 = STRING, 31 = JSON
+        return col_type == 16 ||   // VARCHAR (InnoDB type 16)
+               col_type == 24 ||   // TINY_BLOB (InnoDB type 24)
+               col_type == 25 ||   // MEDIUM_BLOB (InnoDB type 25)
+               col_type == 26 ||   // LONG_BLOB (InnoDB type 26)
+               col_type == 27 ||   // BLOB/TEXT (InnoDB type 27)
+               col_type == 28 ||   // VAR_STRING (InnoDB type 28)
+               col_type == 29 ||   // STRING/CHAR (InnoDB type 29) - variable for utf8mb4
+               col_type == 30 ||   // GEOMETRY (InnoDB type 30)
+               col_type == 31;     // JSON (InnoDB type 31)
     }
 
     /**
      * @brief Get the fixed storage size for this column type
      * Returns 0 for variable-length columns (including CHAR for multi-byte charsets)
+     * Uses InnoDB type IDs (参考 ibd2sql column_type.py)
      */
     uint32_t fixed_size() const {
         switch (col_type) {
-            case 1:  return 1;   // TINY_INT
-            case 2:  return 2;   // SHORT_INT
-            case 3:  return 4;   // LONG_INT
-            case 4:  return 4;   // FLOAT
-            case 5:  return 8;   // DOUBLE
-            case 8:  return 8;   // LONGLONG
-            case 9:  return 3;   // INT24 (MEDIUMINT)
-            case 10: return 3;   // DATE
-            case 11: return 3;   // TIME (old format)
-            case 12: return 8;   // DATETIME (old format)
-            case 13: return 1;   // YEAR
-            case 17: return 4;   // TIMESTAMP2
-            case 18: return 5;   // DATETIME2 (base size, + fractional)
-            case 19: return 3;   // TIME2 (base size, + fractional)
-            case 246: return decimal_storage_size(); // NEWDECIMAL
-            case 247: return enum_storage_size();    // ENUM
-            case 248: return set_storage_size();     // SET
-            // CHAR (254) is variable-length for multi-byte charsets (utf8/utf8mb4)
-            // Only fixed-length for latin1/binary (mb_maxlen=1)
-            case 254: return (mb_maxlen == 1) ? col_length : 0;
+            case 2:  return 1;   // TINY (InnoDB type 2)
+            case 3:  return 2;   // SHORT (InnoDB type 3)
+            case 4:  return 4;   // LONG (InnoDB type 4)
+            case 5:  return 4;   // FLOAT (InnoDB type 5)
+            case 6:  return 8;   // DOUBLE (InnoDB type 6)
+            case 9:  return 8;   // LONGLONG (InnoDB type 9)
+            case 10: return 3;   // INT24 (InnoDB type 10)
+            case 11: return 3;   // DATE (InnoDB type 11)
+            case 12: return 3;   // TIME (InnoDB type 12)
+            case 13: return 8;   // DATETIME (InnoDB type 13)
+            case 14: return 1;   // YEAR (InnoDB type 14)
+            case 18: return 4;   // TIMESTAMP2 (InnoDB type 18)
+            case 19: return 5;   // DATETIME2 (InnoDB type 19)
+            case 20: return 3;   // TIME2 (InnoDB type 20)
+            case 21: return decimal_storage_size(); // NEWDECIMAL (InnoDB type 21)
+            case 22: return enum_storage_size();    // ENUM (InnoDB type 22)
+            case 23: return set_storage_size();     // SET (InnoDB type 23)
+            // VARCHAR (16) and STRING (29) are variable-length
             default: return 0;   // Variable-length
         }
     }
