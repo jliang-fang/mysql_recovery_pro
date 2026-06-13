@@ -19,19 +19,20 @@ TEST(PageHeader, ParseTruncatedData) {
 
 TEST(PageHeader, ParseFullHeader) {
     // 创建一个完整的页头数据 (38 字节)
+    // InnoDB stores Page Header fields in BIG-ENDIAN format
     std::vector<uint8_t> data(38, 0);
-    
-    write_le<uint16_t>(data.data(), 0, 5);   // n_dir_slots
-    write_le<uint16_t>(data.data(), 2, 100); // heap_top
-    write_le<uint16_t>(data.data(), 4, 10);  // n_heap
-    write_le<uint16_t>(data.data(), 6, 50);  // free_offset
-    write_le<uint16_t>(data.data(), 8, 60);  // garbage_end
-    write_le<uint16_t>(data.data(), 10, 70); // last_insert
-    write_le<uint16_t>(data.data(), 12, 8);  // direction
-    write_le<uint16_t>(data.data(), 14, 0);  // n_direct_pages
+
+    write_be<uint16_t>(data.data(), 0, 5);   // n_dir_slots
+    write_be<uint16_t>(data.data(), 2, 100); // heap_top
+    write_be<uint16_t>(data.data(), 4, 10);  // n_heap
+    write_be<uint16_t>(data.data(), 6, 50);  // free_offset
+    write_be<uint16_t>(data.data(), 8, 60);  // garbage_end
+    write_be<uint16_t>(data.data(), 10, 70); // last_insert
+    write_be<uint16_t>(data.data(), 12, 8);  // direction
+    write_be<uint16_t>(data.data(), 14, 0);  // n_direct_pages
 
     auto header = PageHeader::parse(data.data(), data.size());
-    
+
     EXPECT_TRUE(header.has_value()) << "Full page header should be parsed";
     EXPECT_EQ(header->n_dir_slots, 5);
     EXPECT_EQ(header->heap_top, 100);
@@ -41,7 +42,7 @@ TEST(PageHeader, ParseFullHeader) {
 
 TEST(PageHeader, ToString) {
     std::vector<uint8_t> data(38, 0);
-    write_le<uint16_t>(data.data(), 0, 10); // n_dir_slots
+    write_be<uint16_t>(data.data(), 0, 10); // n_dir_slots
 
     auto header = PageHeader::parse(data.data(), data.size());
     EXPECT_TRUE(header.has_value());

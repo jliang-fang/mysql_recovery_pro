@@ -52,9 +52,11 @@ std::vector<uint8_t> create_valid_page(uint32_t page_no = 0,
 
 TEST(ExtremeScenarioTest, PageHeaderCorrupted) {
     std::vector<uint8_t> page(16384, 0);
-    write_le<uint16_t>(page.data(), 16, 0xFFFF);
+    // FIL_PAGE_TYPE is at offset 24 (FIL_PAGE_TYPE_ABS), big-endian
+    write_be<uint16_t>(page.data(), 24, 0xFFFF);
     PageHeader header;
     header.parse(page.data(), page.size());
+    // get_fil_page_type reads from offset 24 using big-endian
     EXPECT_EQ(get_fil_page_type(page.data(), page.size()), 0xFFFF);
 }
 
