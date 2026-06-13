@@ -68,10 +68,18 @@ TEST(Record, ToStringFormatting) {
 // ==================== RecordHeader 解析测试（新增）====================
 TEST(RecordHeader, ParseCompactFormat) {
     std::vector<uint8_t> data(5, 0);
-    data[0] = 0x00; // info_bits (no flags set)
-    write_le<uint16_t>(data.data(), 1, 70); // next_record_offset (bits 0-14)
-    data[3] = 0x01; // heap_no low byte
-    data[4] = 0x00; // heap_no high byte
+    // RecordHeader layout:
+    // byte0-2: info_and_heap (24 bits) - contains deleted, min_rec, n_owned, heap_no, rec_type
+    // byte3-4: next_record_offset (little-endian 16-bit signed)
+
+    // get_heap_no() = ((byte1 & 0x7F) << 3) | (byte2 >> 5)
+    // For heap_no = 1: byte1 = 0, byte2 = 0x20 (1 << 5)
+    data[0] = 0x00;  // info_bits
+    data[1] = 0x00;  // heap_no high bits
+    data[2] = 0x20;  // heap_no = 1 (bits 7-5 of byte2 = 001)
+    // Set next_record_offset = 70 (little-endian)
+    data[3] = 70;    // low byte
+    data[4] = 0;     // high byte
 
     auto header = RecordHeader::parse(data.data(), data.size());
     EXPECT_TRUE(header.has_value());
