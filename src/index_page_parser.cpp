@@ -1038,8 +1038,10 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         // NOT big-endian like integers! This is different from the integer storage.
         case 4: {  // FLOAT (4 bytes)
             val.type = IndexFieldValue::Type::FLOAT_VAL;
-            // Read as little-endian (memcpy the raw bytes directly)
-            std::memcpy(&val.float_value, data + offset, 4);
+            // Read as little-endian float, then convert to double for storage
+            float f;
+            std::memcpy(&f, data + offset, 4);
+            val.float_value = static_cast<double>(f);
             std::ostringstream oss;
             oss << val.float_value;
             val.str_value = oss.str();
