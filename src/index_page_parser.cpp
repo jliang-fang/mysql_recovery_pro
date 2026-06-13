@@ -1054,10 +1054,12 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             break;
         }
         // ==================== Floating Point ====================
+        // CRITICAL: InnoDB stores FLOAT/DOUBLE in LITTLE-ENDIAN (native IEEE 754),
+        // NOT big-endian like integers! This is different from the integer storage.
         case 4: {  // FLOAT (4 bytes)
             val.type = IndexFieldValue::Type::FLOAT_VAL;
-            uint32_t bits = read_be<uint32_t>(data, offset);
-            std::memcpy(&val.float_value, &bits, 4);
+            // Read as little-endian (memcpy the raw bytes directly)
+            std::memcpy(&val.float_value, data + offset, 4);
             std::ostringstream oss;
             oss << val.float_value;
             val.str_value = oss.str();
@@ -1065,8 +1067,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         case 5: {  // DOUBLE (8 bytes)
             val.type = IndexFieldValue::Type::DOUBLE_VAL;
-            uint64_t bits = read_be<uint64_t>(data, offset);
-            std::memcpy(&val.float_value, &bits, 8);
+            // Read as little-endian (memcpy the raw bytes directly)
+            std::memcpy(&val.float_value, data + offset, 8);
             std::ostringstream oss;
             oss << val.float_value;
             val.str_value = oss.str();

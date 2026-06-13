@@ -111,12 +111,12 @@ static std::string decode_bigint(const uint8_t* data, uint32_t& offset, bool is_
 
 /**
  * @brief Decode a FLOAT field (4 bytes, IEEE 754)
+ * NOTE: InnoDB stores FLOAT in LITTLE-ENDIAN (native IEEE 754), NOT big-endian!
  */
 static std::string decode_float(const uint8_t* data, uint32_t& offset) {
-    // InnoDB stores FLOAT as big-endian IEEE 754
-    uint32_t raw = innodb::read_be<uint32_t>(data, offset);
+    // InnoDB stores FLOAT as little-endian IEEE 754 (native byte order)
     float val;
-    std::memcpy(&val, &raw, sizeof(float));
+    std::memcpy(&val, data + offset, sizeof(float));
     offset += 4;
 
     std::ostringstream oss;
@@ -126,12 +126,12 @@ static std::string decode_float(const uint8_t* data, uint32_t& offset) {
 
 /**
  * @brief Decode a DOUBLE field (8 bytes, IEEE 754)
+ * NOTE: InnoDB stores DOUBLE in LITTLE-ENDIAN (native IEEE 754), NOT big-endian!
  */
 static std::string decode_double(const uint8_t* data, uint32_t& offset) {
-    // InnoDB stores DOUBLE as big-endian IEEE 754
-    uint64_t raw = innodb::read_be<uint64_t>(data, offset);
+    // InnoDB stores DOUBLE as little-endian IEEE 754 (native byte order)
     double val;
-    std::memcpy(&val, &raw, sizeof(double));
+    std::memcpy(&val, data + offset, sizeof(double));
     offset += 8;
 
     std::ostringstream oss;

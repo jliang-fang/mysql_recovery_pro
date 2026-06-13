@@ -2,6 +2,8 @@
 #include <fstream>
 #include <iostream>
 #include <cstring>
+#include <numeric>
+#include <algorithm>
 
 namespace dbrecovery {
 namespace innodb {
@@ -109,14 +111,23 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
         std::cerr << "[WARN] FRMParser: Failed to read keys" << std::endl;
     }
 
+    // Sort columns by recpos (physical position in record)
+    // InnoDB stores columns in physical order, not definition order
+    std::vector<size_t> sorted_indices(columns.size());
+    std::iota(sorted_indices.begin(), sorted_indices.end(), 0);
+    std::sort(sorted_indices.begin(), sorted_indices.end(),
+        [&columns](size_t a, size_t b) {
+            return columns[a].recpos < columns[b].recpos;
+        });
+
     // 填充 TableSchema
     schema.table_name = "unknown_table";
     schema.row_format = header.row_type;
     schema.page_size = header.io_size > 0 ? header.io_size : 16384;
 
-    // 添加列
-    for (size_t i = 0; i < columns.size(); ++i) {
-        const auto& col_def = columns[i];
+    // 添加列 (in physical order)
+    for (size_t i = 0; i < sorted_indices.size(); ++i) {
+        const auto& col_def = columns[sorted_indices[i]];
         catalog::ColumnInfo col;
         col.name = col_def.name;
         col.mysql_type_id = col_def.field_type;
