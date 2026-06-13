@@ -245,7 +245,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     static bool debug_printed = false;
     if (!debug_printed && !result.variable_sizes.empty()) {
         std::cout << "[DEBUG VAR_SIZES] Read " << result.variable_sizes.size() << " sizes: ";
-        for (size_t i = 0; i < result.variable_sizes.size() && i < 15; i++) {
+        for (size_t i = 0; i < result.variable_sizes.size(); i++) {
             std::cout << result.variable_sizes[i] << " ";
         }
         std::cout << "\n";
@@ -520,7 +520,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                   << " len=" << (data_end - data_start) << " n_pk_cols=" << n_pk_cols_
                   << " n_cols=" << columns.size() << "\n";
         std::cout << "[DEBUG EXTRACT] size_list (" << variable_sizes.size() << "): ";
-        for (size_t i = 0; i < variable_sizes.size() && i < 15; i++) {
+        for (size_t i = 0; i < variable_sizes.size(); i++) {
             std::cout << variable_sizes[i] << " ";
         }
         std::cout << "\n";
@@ -609,13 +609,13 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
             result.push_back(val);
-            if (do_debug && col_idx < 15) {
+            if (do_debug) {
                 std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name << "' is NULL\n";
             }
             continue;
         }
 
-        if (do_debug && col_idx < 15) {
+        if (do_debug) {
             std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name
                       << "' at pos " << pos << " size " << field_size
                       << " type=" << static_cast<int>(col.col_type) << "\n";
