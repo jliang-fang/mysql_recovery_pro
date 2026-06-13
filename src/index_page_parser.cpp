@@ -1212,6 +1212,35 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = buf;
             break;
         }
+        case 20: {  // TIME2 (MySQL 5.6+ time format, 3-6 bytes) - InnoDB type 20
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            // TIME2 format: biased 24-bit integer + optional fractional seconds
+            // stored_value = 0x800000 + (hour * 10000 + minute * 100 + second)
+            if (field_size >= 3) {
+                uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
+                             (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                             static_cast<uint32_t>(data[offset + 2]);
+
+                int32_t biased = static_cast<int32_t>(t) - 0x800000;
+                bool negative = biased < 0;
+                int32_t packed = negative ? -biased : biased;
+
+                uint32_t hour = packed / 10000;
+                uint32_t minute = (packed % 10000) / 100;
+                uint32_t second = packed % 100;
+
+                if (hour > 838 || minute > 59 || second > 59) {
+                    val.str_value = "<INVALID_TIME>";
+                } else {
+                    char buf[24];
+                    snprintf(buf, sizeof(buf), "%s%02u:%02u:%02u", negative ? "-" : "", hour, minute, second);
+                    val.str_value = buf;
+                }
+            } else {
+                val.str_value = "<TIME_SIZE_ERR>";
+            }
+            break;
+        }
         case 14: {  // YEAR (1 byte) - InnoDB type 14
             val.type = IndexFieldValue::Type::UINT_VAL;
             val.uint_value = data[offset] + 1900;
