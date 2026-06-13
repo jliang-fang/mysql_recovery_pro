@@ -156,25 +156,16 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     FieldMetadata result;
     if (rec_end <= rec_start || rec_end > page_size) return result;
 
-    // CRITICAL FIX: InnoDB COMPACT/DYNAMIC format structure
+    // CRITICAL FIX: Match ibd2sql's _read_nullbitmask_varsize_new() exactly!
     //
-    // The record layout in memory is:
-    // [Sizes/Nulls] [Header 5B] [PK] [TRX_ID 6B] [ROLL_PTR 7B] [Var Data] [Fixed Data]
-    //
-    // Where:
-    // - Header is at rec_start (5 bytes)
-    // - Record origin is at rec_start + 5
-    // - Sizes and NULL bitmap are BEFORE the header (at lower addresses)
-    // - Data (PK, TRX_ID, ROLL_PTR, fields) is AFTER the header origin
-    //
-    // Reference: ibd2sql's _read_nullbitmask_varsize_new() function
-    // - read_reverse(n) reads n bytes BEFORE _offset and decrements _offset
-    // - After reading header with read_reverse(5), _offset points to header start
-    // - Then read_reverse for sizes reads from BEFORE header position
-    //
-    // In our code:
-    // - rec_start = header position (where header bytes are)
-    // - We need to read sizes BACKWARD from rec_start
+    // InnoDB COMPACT/DYNAMIC format:
+    // 1. NULL bitmap and variable sizes are BEFORE the record header
+    // 2. Sizes are read BACKWARD from header position
+    // 3. For EACH column (in physical order):
+    //    - If NULL: vsize = 0, no size bytes read
+    //    - If fixed: vsize = col.storage_size()
+    //    - If variable: vsize = read from size bytes
+    // 4. Result size_list has entry for EVERY column
 
     // Calculate null bitmask size
     size_t null_bytes = (n_nullable + 7) / 8;
@@ -189,63 +180,79 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         result.null_bytes_read = null_bytes;
     }
 
-    // Read variable-length field sizes backward
-    // KEY INSIGHT from ibd2sql:
-    // - Sizes are stored in REVERSE field order (last field first)
-    // - But when we read backward, we get them in FIELD ORDER (first field first)
-    // - We iterate over columns in order and read sizes for each variable column
-    // - The resulting list is in FIELD ORDER, no need to reverse!
-
-    // Build list of variable columns in order
-    std::vector<size_t> var_col_indices;
-    for (size_t i = 0; i < columns.size(); i++) {
-        if (columns[i].is_variable_length()) {
-            var_col_indices.push_back(i);
+    // Read null bitmask as integer for bit testing
+    uint32_t null_bit_value = 0;
+    if (null_bytes > 0) {
+        for (size_t i = 0; i < null_bytes; i++) {
+            null_bit_value |= (static_cast<uint32_t>(result.null_bitmask[i]) << (i * 8));
         }
     }
 
-    // Read sizes for each variable column in order
-    for (size_t var_idx = 0; var_idx < var_col_indices.size() && pos > 0; var_idx++) {
-        size_t col_idx = var_col_indices[var_idx];
+    // CRITICAL: Build size_list for ALL columns (matching ibd2sql)
+    // For each column in physical order:
+    // - Determine NULL status
+    // - If NULL: vsize = 0
+    // - If fixed: vsize = col.storage_size()
+    // - If variable: vsize = read size bytes from record
+
+    uint32_t nullable_bit_pos = 0;  // Bit position in null bitmap
+
+    for (size_t col_idx = 0; col_idx < columns.size() && pos > 0; col_idx++) {
         const auto& col = columns[col_idx];
 
-        if (pos < 1) break;
+        // Check NULL status for this column
+        bool is_null = false;
+        if (col.is_nullable) {
+            is_null = (null_bit_value & (1 << nullable_bit_pos)) != 0;
+            nullable_bit_pos++;
+        }
 
-        // Read size byte backward
-        pos--;
-        uint8_t byte1 = page_data[pos];
+        uint32_t vsize = 0;
 
-        if (col.is_big) {
-            // is_big: can be 1-byte or 2-byte encoding
-            if (byte1 > 0x7F) {
-                // 2-byte encoding: high bit set
-                // Need to read one more byte backward
-                if (pos >= 1) {
-                    pos--;
-                    uint8_t byte2 = page_data[pos];
-                    // Size = (byte1 & 0x7F) * 256 + byte2
-                    uint32_t vsize = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
-                    result.variable_sizes.push_back(vsize);
-                    result.var_size_bytes_read += 2;
+        if (is_null) {
+            // NULL column: size = 0, no bytes to read
+            vsize = 0;
+        } else if (col.is_variable_length()) {
+            // Variable column: read size bytes from record
+            if (pos >= 1) {
+                pos--;
+                uint8_t byte1 = page_data[pos];
+
+                if (col.is_big && byte1 > 0x7F) {
+                    // 2-byte encoding for is_big field with large size
+                    if (pos >= 1) {
+                        pos--;
+                        uint8_t byte2 = page_data[pos];
+                        vsize = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+                        result.var_size_bytes_read += 2;
+                    }
+                } else {
+                    // 1-byte encoding
+                    vsize = byte1;
+                    result.var_size_bytes_read += 1;
                 }
-            } else {
-                // 1-byte encoding for is_big field
-                result.variable_sizes.push_back(byte1);
-                result.var_size_bytes_read += 1;
             }
         } else {
-            // Non-is_big: always 1-byte encoding
-            result.variable_sizes.push_back(byte1);
-            result.var_size_bytes_read += 1;
+            // Fixed column: use pre-computed storage size
+            vsize = col.storage_size();
         }
+
+        // Store size for this column (ALL columns have a size entry)
+        result.variable_sizes.push_back(vsize);
     }
 
-    // variable_sizes is now in REVERSE FIELD ORDER (last field first)
-    // We read backward from header, which means we encounter sizes for later columns first
-    // We need to reverse to get them in field order
-    std::reverse(result.variable_sizes.begin(), result.variable_sizes.end());
+    // DEBUG: Print sizes for first record
+    static bool debug_printed = false;
+    if (!debug_printed && !result.variable_sizes.empty()) {
+        std::cout << "[DEBUG VAR_SIZES] Read " << result.variable_sizes.size() << " sizes: ";
+        for (size_t i = 0; i < result.variable_sizes.size() && i < 15; i++) {
+            std::cout << result.variable_sizes[i] << " ";
+        }
+        std::cout << "\n";
+        debug_printed = true;
+    }
 
-    // Store the position after reading all sizes (where data might start before header)
+    // Store the position after reading all sizes
     result.data_start_offset = pos;
 
     return result;
@@ -491,27 +498,47 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     std::vector<IndexFieldValue> result;
     if (data_start >= data_end || data_end > page_size) return result;
 
-    size_t pos = data_start;
-    uint32_t var_idx = 0;
-    bool system_cols_skipped = false;
+    // CRITICAL FIX: Match ibd2sql's _read_field() exactly!
+    //
+    // After read_null_and_varsizes(), variable_sizes[] contains size for EVERY column:
+    // - NULL columns: size = 0
+    // - Fixed columns: size = storage_size()
+    // - Variable columns: size = read from record
+    //
+    // Now we just read each column's data in physical order:
+    // 1. PK columns first
+    // 2. TRX_ID + ROLL_PTR (for clustered index leaf)
+    // 3. Remaining user columns
+    //
+    // Each column reads 'size' bytes from the data stream.
 
-    for (size_t col_idx = 0; col_idx < columns.size() && pos < data_end; col_idx++) {
+    // DEBUG: Print initial state for first record
+    static bool debug_extract = false;
+    bool do_debug = !debug_extract;
+    if (do_debug) {
+        std::cout << "[DEBUG EXTRACT] data_start=" << data_start << " data_end=" << data_end
+                  << " len=" << (data_end - data_start) << " n_pk_cols=" << n_pk_cols_
+                  << " n_cols=" << columns.size() << "\n";
+        std::cout << "[DEBUG EXTRACT] size_list (" << variable_sizes.size() << "): ";
+        for (size_t i = 0; i < variable_sizes.size() && i < 15; i++) {
+            std::cout << variable_sizes[i] << " ";
+        }
+        std::cout << "\n";
+    }
+
+    size_t pos = data_start;
+    size_t size_idx = 0;  // Index into variable_sizes
+
+    // Step 1: Read PK columns first
+    for (size_t col_idx = 0; col_idx < n_pk_cols_ && col_idx < columns.size() && pos < data_end; col_idx++) {
         const auto& col = columns[col_idx];
 
-        // After reading ALL PK columns, skip system columns (TRX_ID + ROLL_PTR) for leaf pages
-        // These are stored between PK and user columns in InnoDB clustered index
-        // The check is: after processing the last PK column (col_idx == n_pk_cols_ - 1)
-        // we need to skip 13 bytes before continuing to user columns
-        // But we must also handle the case where n_pk_cols_ == 0 (no PK, use row_id)
-        if (is_leaf && !system_cols_skipped && col_idx == n_pk_cols_) {
-            // We've just processed all PK columns, now skip DB_TRX_ID (6 bytes) and DB_ROLL_PTR (7 bytes)
-            // BEFORE reading user columns
-            if (pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
-                pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
-            }
-            system_cols_skipped = true;
-        }
+        if (size_idx >= variable_sizes.size()) break;
+        uint32_t field_size = variable_sizes[size_idx++];
 
+        IndexFieldValue val;
+
+        // Check NULL status
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
             uint32_t nullable_idx = 0;
@@ -525,53 +552,99 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             }
         }
 
-        IndexFieldValue val;
-        if (is_null) {
+        if (is_null || field_size == 0) {
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
+            result.push_back(val);
+            if (do_debug) {
+                std::cout << "[DEBUG EXTRACT] PK col " << col_idx << " '" << col.name << "' is NULL\n";
+            }
+            continue;
+        }
+
+        if (do_debug) {
+            std::cout << "[DEBUG EXTRACT] PK col " << col_idx << " '" << col.name
+                      << "' at pos " << pos << " size " << field_size << "\n";
+        }
+
+        if (pos + field_size <= data_end) {
+            val = decode_column(page_data, pos, data_end, col, field_size);
+            pos += field_size;
+        }
+        result.push_back(val);
+    }
+
+    // Step 2: Skip TRX_ID + ROLL_PTR for leaf pages (clustered index)
+    if (is_leaf && pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
+        if (do_debug) {
+            std::cout << "[DEBUG EXTRACT] Skipping TRX_ID+ROLL_PTR at pos " << pos << "\n";
+        }
+        pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+    }
+
+    // Step 3: Read remaining user columns (in physical order)
+    for (size_t col_idx = n_pk_cols_; col_idx < columns.size() && pos < data_end; col_idx++) {
+        const auto& col = columns[col_idx];
+
+        if (size_idx >= variable_sizes.size()) break;
+        uint32_t field_size = variable_sizes[size_idx++];
+
+        IndexFieldValue val;
+
+        // Check NULL status
+        bool is_null = false;
+        if (col.is_nullable && !null_bitmask.empty()) {
+            uint32_t nullable_idx = 0;
+            for (size_t j = 0; j < col_idx; j++) {
+                if (columns[j].is_nullable) nullable_idx++;
+            }
+            if (nullable_idx < null_bitmask.size() * 8) {
+                size_t byte_idx = nullable_idx / 8;
+                uint8_t bit_idx = nullable_idx % 8;
+                is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
+            }
+        }
+
+        if (is_null || field_size == 0) {
+            val.is_null = true;
+            val.type = IndexFieldValue::Type::NULL_VAL;
+            result.push_back(val);
+            if (do_debug && col_idx < 15) {
+                std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name << "' is NULL\n";
+            }
+            continue;
+        }
+
+        if (do_debug && col_idx < 15) {
+            std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name
+                      << "' at pos " << pos << " size " << field_size
+                      << " type=" << static_cast<int>(col.col_type) << "\n";
+        }
+
+        // Handle overflow pointer
+        if (field_size == off_page_flag_ && pos + 20 <= data_end) {
+            val.is_overflow = true;
+            val.type = IndexFieldValue::Type::OVERFLOW_PTR;
+            val.overflow_space_id = read_be<uint32_t>(page_data, pos);
+            val.overflow_page_no = read_be<uint32_t>(page_data, pos + 4);
+            val.overflow_blob_header = read_be<uint32_t>(page_data, pos + 8);
+            val.overflow_real_size = read_be<uint64_t>(page_data, pos + 12);
+            val.raw_bytes.assign(page_data + pos, page_data + pos + 20);
+            pos += 20;
             result.push_back(val);
             continue;
         }
 
-        size_t field_size = 0;
-        if (col.is_variable_length()) {
-            if (var_idx < variable_sizes.size()) {
-                field_size = variable_sizes[var_idx];
-                var_idx++;
-
-                if (field_size == off_page_flag_) {
-                    val.is_overflow = true;
-                    val.type = IndexFieldValue::Type::OVERFLOW_PTR;
-                    if (pos + 20 <= data_end) {
-                        val.overflow_space_id = read_be<uint32_t>(page_data, pos);
-                        val.overflow_page_no = read_be<uint32_t>(page_data, pos + 4);
-                        val.overflow_blob_header = read_be<uint32_t>(page_data, pos + 8);
-                        val.overflow_real_size = read_be<uint64_t>(page_data, pos + 12);
-                        val.raw_bytes.assign(page_data + pos, page_data + pos + 20);
-                        pos += 20;
-                    }
-                    result.push_back(val);
-                    continue;
-                }
-            } else {
-                field_size = 0;
-            }
-        } else {
-            field_size = col.storage_size();
-        }
-
-        if (field_size > 0 && pos + field_size <= data_end) {
+        if (pos + field_size <= data_end) {
             val = decode_column(page_data, pos, data_end, col, field_size);
             pos += field_size;
-        } else if (field_size > 0 && pos + field_size > data_end) {
-            size_t avail = data_end - pos;
-            val.raw_bytes.assign(page_data + pos, page_data + pos + avail);
-            val.type = IndexFieldValue::Type::UNKNOWN_VAL;
-            val.str_value = "<PARTIAL>";
-            pos = data_end;
         }
-
         result.push_back(val);
+    }
+
+    // Disable debug after first record
+    if (do_debug) {
+        debug_extract = true;
     }
 
     return result;
@@ -966,8 +1039,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
     val.raw_bytes.assign(data + offset, data + offset + field_size);
 
     switch (col.col_type) {
-        // ==================== Integer Types (MySQL standard type codes) ====================
-        case 1: {  // TINY (TINYINT, 1 byte)
+        // ==================== Integer Types (InnoDB storage type IDs) ====================
+        // Reference: ibd2sql/innodb_page/column_type.py
+        case 2: {  // InnoDB TINY (TINYINT, 1 byte)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = data[offset];
@@ -980,7 +1054,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 2: {  // SHORT (SMALLINT, 2 bytes)
+        case 3: {  // InnoDB SHORT (SMALLINT, 2 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = read_be<uint16_t>(data, offset);
@@ -993,7 +1067,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 3: {  // LONG (INT, 4 bytes)
+        case 4: {  // InnoDB LONG (INT, 4 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = read_be<uint32_t>(data, offset);
@@ -1007,7 +1081,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             break;
         }
         // InnoDB type 9 = LONGLONG (BIGINT, 8 bytes)
-        case 9: {  // LONGLONG (BIGINT, 8 bytes)
+        case 9: {  // InnoDB LONGLONG (BIGINT, 8 bytes)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 val.uint_value = read_be<uint64_t>(data, offset);
@@ -1040,7 +1114,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         // ==================== Floating Point ====================
         // CRITICAL: InnoDB stores FLOAT/DOUBLE in LITTLE-ENDIAN (native IEEE 754),
         // NOT big-endian like integers! This is different from the integer storage.
-        case 4: {  // FLOAT (4 bytes)
+        case 5: {  // InnoDB FLOAT (4 bytes)
             val.type = IndexFieldValue::Type::FLOAT_VAL;
             // Read as little-endian float, then convert to double for storage
             float f;
@@ -1051,7 +1125,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = oss.str();
             break;
         }
-        case 5: {  // DOUBLE (8 bytes)
+        case 6: {  // InnoDB DOUBLE (8 bytes)
             val.type = IndexFieldValue::Type::DOUBLE_VAL;
             // Read as little-endian (memcpy the raw bytes directly)
             std::memcpy(&val.float_value, data + offset, 8);
@@ -1078,12 +1152,13 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 15: {  // NEWDATE/DATE (3 bytes) - InnoDB type 15
             val.type = IndexFieldValue::Type::DATE_VAL;
             // DATE is stored as: bit 0-4: day, bit 5-8: month, bit 9-22: year, bit 23: sign
+            // Reference: ibd2sql/utils/b2data.py B2DATE()
             uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
                          static_cast<uint32_t>(data[offset + 2]);
-            uint16_t year = (t >> 9) & 0x7FFF;  // bits 9-22 (14 bits)
-            uint8_t month = (t >> 5) & 0x0F;    // bits 5-8 (4 bits)
-            uint8_t day = t & 0x1F;             // bits 0-4 (5 bits)
+            uint32_t year = (t & 0x7FFE00) >> 9;  // bits 9-22 (14 bits)
+            uint32_t month = (t & 0x1E0) >> 5;    // bits 5-8 (4 bits)
+            uint32_t day = t & 0x1F;              // bits 0-4 (5 bits)
             char buf[16];
             snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
             val.str_value = buf;
