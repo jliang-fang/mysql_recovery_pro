@@ -412,35 +412,15 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
 
         if (hdr->next_offset != 0) {
             ssize_t next_origin = static_cast<ssize_t>(rec_origin) + hdr->next_offset;
-            // Validate next_offset is reasonable (should be 120-200 for most records)
-            // If next_offset is clearly corrupted (> 200 or < 120), try to find next record
-            if (hdr->next_offset > 200 || hdr->next_offset < 120) {
-                // Likely corrupted next_offset
-                // Try to find the next record by scanning forward
-                size_t search_start = rec_origin + 120;  // Start after typical record length
-                size_t search_end = std::min(static_cast<size_t>(page_hdr->heap_top), rec_origin + 200);
-                bool found_next = false;
-
-                for (size_t scan_pos = search_start; scan_pos < search_end; scan_pos++) {
-                    // Look for pattern: 5 bytes header + 0x80 0x00 0x00 0x00 0x00 0x00 0x00 (PK start)
-                    if (scan_pos + 8 < page_size &&
-                        page_data[scan_pos + 5] == 0x80 &&
-                        page_data[scan_pos + 6] == 0x00 &&
-                        page_data[scan_pos + 7] == 0x00) {
-                        // Found potential next record
-                        data_end = scan_pos;  // Next header position
-                        found_next = true;
-                        break;
-                    }
-                }
-
-                if (!found_next) {
-                    // Last record on page, use heap_top
-                    data_end = page_hdr->heap_top;
-                }
-            } else if (next_origin > static_cast<ssize_t>(data_start) && static_cast<size_t>(next_origin) < page_size) {
+            // Validate next_offset is reasonable
+            // For COMPACT format, next_offset can be ANY positive value representing
+            // the delta from current origin to next origin.
+            // We trust the next_offset unless it's clearly out of bounds.
+            if (next_origin > static_cast<ssize_t>(data_start) && static_cast<size_t>(next_origin) < page_size) {
+                // Valid next_offset - next record header is at next_origin - REC_HEADER_SIZE_NEW
                 data_end = static_cast<size_t>(next_origin) - REC_HEADER_SIZE_NEW;
             } else {
+                // Out of bounds - likely last record on page
                 data_end = page_hdr->heap_top;
             }
         } else {
