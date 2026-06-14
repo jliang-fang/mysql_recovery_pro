@@ -182,6 +182,24 @@ target_link_libraries(dbrecovery_innodb PUBLIC nlohmann_json::nlohmann_json)
 # 链接 zlib（用于 SDI 解压缩）
 target_link_libraries(dbrecovery_innodb PUBLIC ZLIB::ZLIB)
 
+# 链接 LZ4（用于压缩页解压）
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LZ4 liblz4)
+if(LZ4_FOUND)
+    target_include_directories(dbrecovery_innodb PUBLIC ${LZ4_INCLUDE_DIRS})
+    target_link_libraries(dbrecovery_innodb PUBLIC ${LZ4_LIBRARIES})
+    target_compile_definitions(dbrecovery_innodb PUBLIC HAVE_LZ4=1)
+else()
+    # Fallback: try to find lz4 directly
+    find_path(LZ4_INCLUDE_DIR NAMES lz4.h)
+    find_library(LZ4_LIBRARY NAMES lz4)
+    if(LZ4_INCLUDE_DIR AND LZ4_LIBRARY)
+        target_include_directories(dbrecovery_innodb PUBLIC ${LZ4_INCLUDE_DIR})
+        target_link_libraries(dbrecovery_innodb PUBLIC ${LZ4_LIBRARY})
+        target_compile_definitions(dbrecovery_innodb PUBLIC HAVE_LZ4=1)
+    endif()
+endif()
+
 # 链接 OpenSSL（用于 TDE AES 解密）
 find_package(OpenSSL REQUIRED)
 target_link_libraries(dbrecovery_innodb PUBLIC OpenSSL::SSL OpenSSL::Crypto)
