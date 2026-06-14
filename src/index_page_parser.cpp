@@ -693,22 +693,22 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         return result;
     }
 
-    // === Step 1: Read sizes backward from rec_offset (header start) ===
+    // === Step 1: Read sizes backward from header position ===
     //
-    // IMPORTANT: Sizes are stored BEFORE the header, AFTER NULL bitmap:
-    // [...sizes (reverse order)...][NULL bitmap 1+ bytes][Header 5B][Origin -- data starts]
-    //                                   ↑___rec_offset___↑
+    // CRITICAL FIX: In COMPACT/DYNAMIC format, sizes are stored at specific positions:
+    // [Sizes (backward)][NULL bitmap][Header 5B][Origin -- data starts]
     //
-    // Example from MySQL 5.7 users table:
-    //   Position 120: 0x0e = 14 (email size, LAST var field)
-    //   Position 121: 0x05 = 5 (name size, FIRST var field)
-    //   Position 122: 0x00 (NULL bitmap)
-    //   Position 123-127: header
-    //   Position 128+: data (PK, TRX_ID, ROLL_PTR, var fields)
+    // For a record with N nullable columns and M variable-length columns:
+    // - NULL bitmap: ceil(N/8) bytes
+    // - Size array: M bytes (or M*2 for large fields)
+    // - Header: 5 bytes
     //
-    // Sizes are stored in REVERSE field order (last field first at lower address)
-    // We read from rec_offset-2 downward (toward lower addresses)
-    // Reading gives us: [14, 5] which we reverse to [5, 14] (name, email)
+    // We need to read sizes starting from header position (rec_offset) backward.
+    // The first size byte is at: rec_offset - null_bytes - 1
+    //
+    // For schemaless mode, we estimate:
+    // - Assume 1-2 bytes for NULL bitmap (typical for small tables)
+    // - Stop reading sizes when we hit invalid data or too many sizes
 
     std::vector<uint32_t> var_sizes;
 
@@ -716,22 +716,35 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     constexpr uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;  // 127
     constexpr uint32_t OFF_PAGE_FLAG = 16404;  // 0x4000 for DYNAMIC format
 
-    // Assume NULL bitmap is 1 byte
-    // First size is at rec_offset - 2, we read backward (to rec_offset - 3, etc.)
-    size_t null_bitmap_pos = rec_offset - 1;  // NULL bitmap position
-    size_t read_pos = rec_offset - 2;  // First size position
+    // Estimate NULL bitmap size (usually 1 byte for simple tables)
+    // We'll try to find it by looking for 0x00 byte near header
+    size_t null_bytes = 1;  // Default assumption
 
-    // Read sizes from higher address toward lower address
-    // Each size can be 1 or 2 bytes
-    // STOP conditions:
-    // 1. byte == 0 (NULL bitmap or zero terminator)
-    // 2. byte > 127 and doesn't form valid 2-byte encoding
-    // 3. read too many sizes - but allow up to 64 fields for complex tables
+    // Try to find NULL bitmap by scanning backward for 0x00
+    // NULL bitmap is at rec_offset - null_bytes
+    for (size_t scan = 1; scan <= 3 && rec_offset >= scan; scan++) {
+        if (page_data[rec_offset - scan] == 0) {
+            null_bytes = scan;
+            break;
+        }
+    }
 
-    // P0 FIX: Increased from 8 to 64 to support complex tables with many fields
-    int max_var_fields = 64;
+    // First size byte position (after NULL bitmap, before header)
+    size_t read_pos = rec_offset - null_bytes - 1;
 
-    for (int field_idx = 0; field_idx < max_var_fields && read_pos > 0; field_idx++) {
+    // Limit how far back we can read based on available space before header
+    // Don't read before the minimum record structure
+    size_t min_read_pos = rec_offset - null_bytes - 16;  // Max 16 size bytes
+
+    if (read_pos < min_read_pos || read_pos >= page_size) {
+        read_pos = rec_offset - null_bytes - 1;  // Keep default position
+    }
+
+    // Read sizes backward (from header toward lower addresses)
+    // Stop when: byte == 0, invalid encoding, or too many sizes
+    int max_var_fields = 16;  // Reduced limit for schemaless mode
+
+    for (int field_idx = 0; field_idx < max_var_fields && read_pos > min_read_pos; field_idx++) {
         uint8_t byte = page_data[read_pos];
 
         // NULL bitmap marker (0x00) - stop
@@ -740,20 +753,22 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         }
 
         // Single-byte size encoding (1-127)
-        // P0 FIX: Removed the arbitrary "byte > 50" break condition
-        // InnoDB stores actual field sizes - VARCHAR(255) can have size up to 255 bytes
-        // Breaking on size > 50 was incorrect and caused field boundary detection failure
         if (byte >= 1 && byte <= REC_N_FIELDS_ONE_BYTE_MAX) {
+            // Validate: size should not exceed remaining record data length
+            // Total data after PK + TRX + ROLL is roughly record_len - 21
+            size_t max_reasonable_size = record_len - 21;
+            if (byte > max_reasonable_size && max_reasonable_size > 0) {
+                break;  // Size too large, likely not a real size
+            }
             var_sizes.push_back(byte);
             read_pos -= 1;
         }
         // Two-byte size encoding (high bit set, byte > 127)
-        else if (byte > REC_N_FIELDS_ONE_BYTE_MAX && read_pos >= 2) {
-            // For two-byte encoding, the low byte is at lower address
+        else if (byte > REC_N_FIELDS_ONE_BYTE_MAX && read_pos >= min_read_pos + 1) {
             uint8_t low_byte = page_data[read_pos - 1];
             uint32_t vsize = (static_cast<uint32_t>(byte & 0x7F) << 8) | low_byte;
 
-            if (vsize == OFF_PAGE_FLAG || (vsize >= 128 && vsize <= 8000)) {
+            if (vsize == OFF_PAGE_FLAG || (vsize >= 128 && vsize <= record_len)) {
                 var_sizes.push_back(vsize);
                 read_pos -= 2;
             } else {
@@ -882,27 +897,103 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     }
 
     // === Step 5: Parse remaining fixed-length fields ===
-    // In schemaless mode, we should NOT guess types blindly - that produces wrong data.
-    // Instead, we output raw hex for remaining bytes, letting users interpret with proper schema.
-    // If users have FRM/SDI schema, they should use schema-aware parsing instead.
+    // In schemaless mode, we need to heuristically separate fixed-length fields.
+    // Common patterns:
+    // - INT/UINT: 4 bytes (with sign bit 0x80...)
+    // - BIGINT: 8 bytes
+    // - TIMESTAMP: 4 bytes (Unix timestamp ~1.7B for 2024)
+    // - DATETIME: 5 bytes (packed format)
+    // - FLOAT: 4 bytes, DOUBLE: 8 bytes
     //
-    // For reference, MySQL 5.6+ types use variable sizes:
-    // - DATETIME2: 5-8 bytes (5 base + 0-3 for fractional precision)
-    // - TIMESTAMP: 4-7 bytes (4 base + 0-3 for fractional)
-    // - DATE: 3 bytes
-    // - TIME2: 3-6 bytes (3 base + 0-3 for fractional)
-    // Without knowing the exact precision, guessing is unreliable.
+    // Strategy: Try to identify field boundaries by:
+    // 1. Looking for INT sign bit pattern (0x80...)
+    // 2. Detecting valid timestamp ranges
+    // 3. Detecting printable strings
 
     while (pos < data_end) {
         size_t remaining = data_end - pos;
         IndexFieldValue val;
 
-        // In schemaless mode, output remaining bytes as raw hex
-        // This is safer than guessing types which leads to wrong interpretations
+        // Try to detect 4-byte INT with sign bit (most common for INT columns)
+        if (remaining >= 4 && pos + 4 <= data_end) {
+            uint32_t raw4 = read_be<uint32_t>(page_data, pos);
+
+            // Check for INT with sign bit (0x80...)
+            // INT values are stored as: actual_value + 0x80000000
+            if ((raw4 & 0xFF000000) == 0x80000000 || (raw4 & 0xFF000000) == 0x00000000) {
+                // Looks like an INT field
+                uint32_t int_val = raw4 ^ 0x80000000;
+
+                // Validate: reasonable range for data values
+                if (int_val < 10000000) {  // Likely a data value, not garbage
+                    val.type = IndexFieldValue::Type::INT_VAL;
+                    val.int_value = static_cast<int64_t>(int_val);
+                    val.str_value = std::to_string(int_val);
+                    val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
+                    result.push_back(val);
+                    pos += 4;
+                    continue;
+                }
+            }
+
+            // Check for TIMESTAMP (Unix timestamp range: 2000-2100)
+            // Values around 1.7B are timestamps for 2024
+            if (raw4 >= 1577836800 && raw4 <= 4102444800) {  // 2020-01-01 to 2100-01-01
+                time_t t = static_cast<time_t>(raw4);
+                struct tm tm_buf;
+                gmtime_r(&t, &tm_buf);
+                char buf[32];
+                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+
+                val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+                val.str_value = buf;
+                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
+                result.push_back(val);
+                pos += 4;
+                continue;
+            }
+        }
+
+        // Try 5-byte DATETIME (MySQL 5.6+ format)
+        if (remaining >= 5 && pos + 5 <= data_end) {
+            uint64_t packed = (static_cast<uint64_t>(read_be<uint32_t>(page_data, pos)) << 8) |
+                              static_cast<uint64_t>(page_data[pos + 4]);
+
+            // Extract year from packed DATETIME
+            // Format: YYYYMMDDHHMMSS packed into 5 bytes
+            uint64_t months = (packed & 0x7FFFC00000ULL) >> 22;
+            uint16_t year = static_cast<uint16_t>(months / 13);
+
+            // Valid year range check
+            if (year >= 2000 && year <= 2100) {
+                uint8_t month = static_cast<uint8_t>(months % 13);
+                uint8_t day = static_cast<uint8_t>((packed & 0x3E0000ULL) >> 17);
+                uint8_t hour = static_cast<uint8_t>((packed & 0x1F000ULL) >> 12);
+                uint8_t minute = static_cast<uint8_t>((packed & 0xFC0ULL) >> 6);
+                uint8_t second = static_cast<uint8_t>(packed & 0x3FULL);
+
+                // Validate date components
+                if (month >= 1 && month <= 12 && day >= 1 && day <= 31 &&
+                    hour <= 23 && minute <= 59 && second <= 59) {
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
+                             year, month, day, hour, minute, second);
+
+                    val.type = IndexFieldValue::Type::DATETIME_VAL;
+                    val.str_value = buf;
+                    val.raw_bytes.assign(page_data + pos, page_data + pos + 5);
+                    result.push_back(val);
+                    pos += 5;
+                    continue;
+                }
+            }
+        }
+
+        // Fallback: output remaining bytes as raw hex for a single field
+        // This handles cases where we can't reliably detect field boundaries
         val.type = IndexFieldValue::Type::BINARY_VAL;
         val.raw_bytes.assign(page_data + pos, page_data + data_end);
 
-        // Convert to hex string for display
         std::ostringstream hex_ss;
         hex_ss << std::hex << std::setfill('0');
         for (size_t i = pos; i < data_end; i++) {
