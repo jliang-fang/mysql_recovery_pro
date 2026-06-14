@@ -119,18 +119,18 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
             continue;
         }
 
-        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 24-25
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 24);
+        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 24-25, 使用大端序读取
+        uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data.data() + 24);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
 
-    // ✅ Step 6: 处理 SDI 页获取表结构
+    // ✅ Step 6: 处理 SDI 页获取表结构 (FIL_PAGE_SDI = 17854 = 0x45BE)
     catalog::TableSchema table_schema;
-    if (pages_by_type.count(9971)) { // FIL_PAGE_SDI
-        std::cout << "[INFO] Found " << pages_by_type[9971].size() << " SDI pages\n";
+    if (pages_by_type.count(FIL_PAGE_SDI)) {
+        std::cout << "[INFO] Found " << pages_by_type[FIL_PAGE_SDI].size() << " SDI pages\n";
 
         // 解析第一个 SDI 页获取表结构
-        const auto& sdi_page = pages_by_type[9971].front();
+        const auto& sdi_page = pages_by_type[FIL_PAGE_SDI].front();
         const uint8_t* sdi_payload = sdi_page.second.data() + 38;
 
         if (sdi_page.second.size() >= 38 + 20) {
@@ -188,11 +188,11 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
         }
     }
 
-    // ✅ Step 7: 处理 B+Tree 索引页
-    if (pages_by_type.count(9969)) { // FIL_PAGE_INDEX
-        std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
+    // ✅ Step 7: 处理 B+Tree 索引页 (FIL_PAGE_INDEX = 17855 = 0x45BF)
+    if (pages_by_type.count(FIL_PAGE_INDEX)) {
+        std::cout << "[INFO] Found " << pages_by_type[FIL_PAGE_INDEX].size() << " index pages\n";
 
-        for (const auto& [page_no, page_data] : pages_by_type[9969]) {
+        for (const auto& [page_no, page_data] : pages_by_type[FIL_PAGE_INDEX]) {
             dbrecovery::innodb::BPlusTreeParser parser(page_data);
 
             if (!parser.parse()) {
@@ -208,14 +208,15 @@ bool RecoveryEngine::recover_from_checkpoint(const std::string& ibdata_path, con
         }
     }
 
-    // ✅ Step 8: 处理 BLOB 页
-    if (pages_by_type.count(9972)) { // FIL_PAGE_TYPE_BLOB
-        std::cout << "[INFO] Found " << pages_by_type[9972].size() << " BLOB pages\n";
+    // ✅ Step 8: 处理 BLOB 页 (FIL_PAGE_TYPE_BLOB = 17853 = 0x45BD)
+    if (pages_by_type.count(FIL_PAGE_TYPE_BLOB)) {
+        std::cout << "[INFO] Found " << pages_by_type[FIL_PAGE_TYPE_BLOB].size() << " BLOB pages\n";
 
-        for (const auto& [page_no, page_data] : pages_by_type[9972]) {
+        for (const auto& [page_no, page_data] : pages_by_type[FIL_PAGE_TYPE_BLOB]) {
             if (page_data.size() >= 54) {
-                uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 38 + 0);
-                uint32_t data_len = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 38 + 8);
+                // BLOB page header at offset 38, using big-endian
+                uint32_t next_bpage = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), 38 + 0);
+                uint32_t data_len = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), 38 + 8);
 
                 if (data_len > 0 && page_data.size() > 54) {
                     blob_reconstructor_->AddChunk(0, page_data.data() + 54, data_len);
@@ -271,18 +272,18 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             continue;
         }
 
-        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 24-25
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data() + 24);
+        // ✅ 修复：InnoDB 页的 FIL_PAGE_TYPE 在偏移 24-25, 使用大端序读取
+        uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data.data() + 24);
         pages_by_type[page_type].emplace_back(page_no, std::move(page_data));
     }
 
-    // ✅ Step 2: 处理 SDI 页（FIL_PAGE_SDI = 9971）- 必须先解析SDI获取表结构
+    // ✅ Step 2: 处理 SDI 页（FIL_PAGE_SDI = 17854 = 0x45BE）- 必须先解析SDI获取表结构
     catalog::TableSchema table_schema;
-    if (pages_by_type.count(9971)) {
-        std::cout << "[INFO] Found " << pages_by_type[9971].size() << " SDI pages\n";
-        
+    if (pages_by_type.count(FIL_PAGE_SDI)) {
+        std::cout << "[INFO] Found " << pages_by_type[FIL_PAGE_SDI].size() << " SDI pages\n";
+
         // 解析 SDI 元数据（使用 nlohmann/json 库）
-        for (const auto& [page_no, page_data] : pages_by_type[9971]) {
+        for (const auto& [page_no, page_data] : pages_by_type[FIL_PAGE_SDI]) {
             std::cout << "[INFO] SDI Page " << page_no << ": size=" << page_data.size() << "\n";
 
             // 从 SDI 页中提取 JSON 负载
@@ -388,25 +389,26 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
     // ✅ Step 3: 实现 B+树重建逻辑
     // 🔧 修复：支持通过 PAGE_N_RECS 识别的页（即使页类型是 0x0000）
     // 构建 additional_index_pages 映射：使用 PAGE_N_RECS 识别有效的索引页
+    // PAGE_N_RECS is in the page header, stored in big-endian
     std::map<uint32_t, std::vector<uint8_t>> additional_index_pages;
-    constexpr size_t PAGE_N_RECS_OFFSET = 36;
+    constexpr size_t PAGE_N_RECS_OFFSET = 36;  // In PAGE HEADER (after FIL header at offset 38)
     for (const auto& [page_type, pages_vec] : pages_by_type) {
         for (const auto& [pno, page_data] : pages_vec) {
             if (page_data.size() > PAGE_N_RECS_OFFSET + 2) {
-                uint16_t n_recs = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), PAGE_N_RECS_OFFSET);
+                uint16_t n_recs = dbrecovery::innodb::read_be<uint16_t>(page_data.data(), PAGE_N_RECS_OFFSET);
                 if (n_recs > 0 && n_recs < 10000) {
                     additional_index_pages[pno] = page_data;
                 }
             }
         }
     }
-    
-    // 如果没有找到类型为 9969 的页，尝试使用 additional_index_pages
-    if (pages_by_type.count(9969)) {
-        std::cout << "[INFO] Found " << pages_by_type[9969].size() << " index pages\n";
+
+    // 如果没有找到类型为 FIL_PAGE_INDEX 的页，尝试使用 additional_index_pages
+    if (pages_by_type.count(FIL_PAGE_INDEX)) {
+        std::cout << "[INFO] Found " << pages_by_type[FIL_PAGE_INDEX].size() << " index pages\n";
 
         // 使用 BPlusTreeParser 解析所有索引页
-        for (const auto& [page_no, page_data] : pages_by_type[9969]) {
+        for (const auto& [page_no, page_data] : pages_by_type[FIL_PAGE_INDEX]) {
             dbrecovery::innodb::BPlusTreeParser parser(page_data);
 
             if (!parser.parse()) {
@@ -489,11 +491,11 @@ bool RecoveryEngine::recover_table(const std::string& ibd_path, uint64_t table_i
             for (const auto& [page_no, page_data] : blob_pages) {
                 std::cout << "[INFO] BLOB Page " << page_no << ": size=" << page_data.size() << "\n";
 
-                // 解析BLOB页头（BLOB 页头位于偏移 38）
+                // 解析BLOB页头（BLOB 页头位于偏移 38, 使用大端序）
                 if (page_data.size() >= 54) {
-                    uint32_t next_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 38 + 0);
-                    uint32_t prev_bpage = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 38 + 4);
-                    uint32_t data_len = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), 38 + 8);
+                    uint32_t next_bpage = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), 38 + 0);
+                    uint32_t prev_bpage = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), 38 + 4);
+                    uint32_t data_len = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), 38 + 8);
 
                     std::cout << "[INFO] BLOB Page " << page_no
                               << ": next=" << next_bpage

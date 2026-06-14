@@ -48,8 +48,9 @@ std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
         auto page_data = reader.read_page_raw(page_no);
         if (page_data.empty()) continue;
 
-        // 检查页类型是否为 SDI (9971)
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(
+        // 检查页类型是否为 SDI (17854 = 0x45BE)
+        // InnoDB FIL header fields are stored in BIG-ENDIAN format
+        uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
             page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
         if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {

@@ -297,15 +297,16 @@ inline std::vector<UndoLogPage> UndoLogRecovery::scan_undo_pages() {
         file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
         // 检查页类型 - 使用 FIL_PAGE_TYPE_ABS (24) 而不是偏移 16
-        uint16_t page_type = read_le<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+        // InnoDB FIL header fields are stored in BIG-ENDIAN format
+        uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
         if (page_type != FIL_PAGE_UNDO_LOG) {
             continue;
         }
 
         UndoLogPage page;
         page.page_no = page_no;
-        page.space_id = read_le<uint32_t>(page_data.data(), 0);  // FIL_PAGE_SPACE_ID = 0
-        page.lsn = read_le<uint64_t>(page_data.data(), 16);       // FIL_PAGE_LSN = 16
+        page.space_id = read_be<uint32_t>(page_data.data(), 0);  // FIL_PAGE_SPACE_ID = 0
+        page.lsn = read_be<uint64_t>(page_data.data(), 16);       // FIL_PAGE_LSN = 16
         page.first_record = read_le<uint32_t>(page_data.data(), 38 + 8);
         page.last_record = read_le<uint32_t>(page_data.data(), 38 + 12);
         page.next_page = read_le<uint32_t>(page_data.data(), 38 + 16);

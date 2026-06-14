@@ -242,8 +242,18 @@ inline bool BPlusTreeNodeParser::parse() {
 }
 
 inline bool BPlusTreeNodeParser::parse_page_header() {
-    // 读取页类型
-    node_info_.page_type = read_le<uint16_t>(page_data_.data(), 16);
+    // FIL Header structure (38 bytes, big-endian):
+    // 0-3:   FIL_PAGE_SPACE_ID
+    // 4-7:   FIL_PAGE_OFFSET (page number)
+    // 8-11:  FIL_PAGE_PREV
+    // 12-15: FIL_PAGE_NEXT
+    // 16-23: FIL_PAGE_LSN
+    // 24-25: FIL_PAGE_TYPE
+    // 26-27: FIL_PAGE_LEVEL (B-tree level, only valid for INDEX pages)
+    // 28-37: other fields
+
+    // 读取页类型 - at offset 24, big-endian
+    node_info_.page_type = read_be<uint16_t>(page_data_.data(), FIL_PAGE_TYPE_ABS);
 
     // 验证页类型
     if (!is_valid_page_type(node_info_.page_type)) {
@@ -251,15 +261,15 @@ inline bool BPlusTreeNodeParser::parse_page_header() {
         return false;
     }
 
-    // 读取页号
-    node_info_.page_no = read_le<uint32_t>(page_data_.data(), 20);
+    // 读取页号 - at offset 4, big-endian
+    node_info_.page_no = read_be<uint32_t>(page_data_.data(), FIL_PAGE_OFFSET);
 
-    // 读取页链指针
-    node_info_.prev_page = read_le<uint32_t>(page_data_.data(), 0);
-    node_info_.next_page = read_le<uint32_t>(page_data_.data(), 4);
+    // 读取页链指针 - at offsets 8 and 12, big-endian
+    node_info_.prev_page = read_be<uint32_t>(page_data_.data(), FIL_PAGE_PREV_ABS);
+    node_info_.next_page = read_be<uint32_t>(page_data_.data(), FIL_PAGE_NEXT_ABS);
 
-    // 读取页级别
-    node_info_.level = read_le<uint16_t>(page_data_.data(), 38 + 4);
+    // 读取页级别 - at offset 26, big-endian
+    node_info_.level = read_be<uint16_t>(page_data_.data(), 26);
     
     // 解析 Page Header
     auto header_opt = PageHeader::parse(page_data_.data() + FIL_HEADER_SIZE, page_size_ - FIL_HEADER_SIZE);

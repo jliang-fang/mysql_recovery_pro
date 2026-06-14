@@ -335,10 +335,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool blob_recovery = parser_.get_bool_option("blob-recovery", false);
     bool rmrf_recovery = parser_.get_bool_option("rmrf-recovery", false);
     bool drop_table_recovery = parser_.get_bool_option("drop-table-recovery", false);
+    bool default_recovery = parser_.get_bool_option("default-recovery", false);
     bool scan_only = parser_.get_bool_option("scan", false);
     bool rebuild_chain = parser_.get_bool_option("rebuild-chain", false);
     bool extract_sdi = parser_.get_bool_option("extract-sdi", false);
     bool verbose = parser_.get_bool_option("verbose", false);
+
+    // Default recovery mode if no specific mode is specified
+    if (!truncate_recovery && !rmrf_recovery && !drop_table_recovery && !default_recovery) {
+        default_recovery = true;  // Enable default recovery by default
+    }
     std::string format = parser_.get_option("format", "csv");
     auto page_size_opt = parser_.get_int_option("page-size", 16384);
     uint32_t page_size = static_cast<uint32_t>(page_size_opt.value_or(16384));
@@ -539,7 +545,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             auto page_data = reader.read_page_raw(page_no);
             if (page_data.empty()) continue;
 
-            uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(
+            // InnoDB FIL header fields are stored in BIG-ENDIAN format
+            uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
                 page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
             if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
@@ -605,6 +612,26 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         return schema;
     };
+
+    // Default recovery mode - use heuristic scanning for general recovery
+    if (default_recovery && !truncate_recovery && !rmrf_recovery) {
+        std::cout << "[INFO] Starting default recovery (heuristic scan)...\\n";
+
+        auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+        dbrecovery::catalog::TableSchema schema;
+
+        if (schema_opt.has_value()) {
+            schema = schema_opt.value();
+        } else {
+            std::cout << "[WARN] Failed to parse schema from SDI, using default schema\\n";
+            schema = create_default_schema();
+        }
+
+        // Use truncate recovery which does heuristic scanning
+        recovered_records = engine.recover_truncate(schema);
+        std::cout << "[INFO] Default recovery completed. Found "
+                  << recovered_records.size() << " records.\\n";
+    }
 
     // Truncate 恢复
     if (truncate_recovery) {

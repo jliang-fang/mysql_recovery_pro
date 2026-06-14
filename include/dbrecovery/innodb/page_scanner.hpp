@@ -141,7 +141,8 @@ inline bool PageScanner::is_innodb_page(const uint8_t* data, size_t page_size) {
     }
 
     // 读取页类型 - 根据 page_defs.hpp，FIL_PAGE_TYPE 在偏移 24
-    uint16_t type = read_le<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    // InnoDB FIL header fields are stored in BIG-ENDIAN format
+    uint16_t type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
     return is_valid_page_type(type);
 }
 
@@ -155,19 +156,20 @@ inline std::optional<ScannedPage> PageScanner::scan_single_page(const uint8_t* d
     page.is_valid = false;
 
     // 读取 FIL Header - 偏移量参考 page_defs.hpp
+    // InnoDB FIL header fields are stored in BIG-ENDIAN format
     // 0-3:   space_id (FIL_PAGE_SPACE_ID = 0)
     // 4-7:   page_no (FIL_PAGE_OFFSET = 4)
     // 8-15:  prev_page (4 bytes) + next_page (4 bytes) (FIL_PAGE_PREV = 8, FIL_PAGE_NEXT = 12)
     // 16-23: lsn (FIL_PAGE_LSN = 16, 8 bytes)
     // 24-25: type (FIL_PAGE_TYPE = 24)
     // 26-27: level (FIL_PAGE_LEVEL = 26)
-    page.space_id = read_le<uint32_t>(data, 0);
-    page.page_no = read_le<uint32_t>(data, 4);
-    page.prev_page = read_le<uint32_t>(data, 8);
-    page.next_page = read_le<uint32_t>(data, 12);
-    page.lsn = read_le<uint64_t>(data, 16);
-    page.type = read_le<uint16_t>(data, 24);
-    page.level = read_le<uint16_t>(data, 26);  // 页级别
+    page.space_id = read_be<uint32_t>(data, 0);
+    page.page_no = read_be<uint32_t>(data, 4);
+    page.prev_page = read_be<uint32_t>(data, 8);
+    page.next_page = read_be<uint32_t>(data, 12);
+    page.lsn = read_be<uint64_t>(data, 16);
+    page.type = read_be<uint16_t>(data, 24);
+    page.level = read_be<uint16_t>(data, 26);  // 页级别
 
     // 验证页类型
     if (!is_valid_page_type(page.type)) {
