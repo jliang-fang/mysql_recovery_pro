@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <zlib.h>
 
 namespace dbrecovery {
 namespace innodb {
@@ -463,6 +464,191 @@ std::vector<RecoveredBLOB> BlobScanner::scan_for_blobs_by_pattern(
     }
     
     return recovered;
+}
+
+// ==================== ZBLOB Streaming Decompression ====================
+
+/**
+ * ZBLOB Page Header Layout (based on ibd2sql lob.py):
+ * Offset 0-3: FIL header space_id (should be 0 for BLOB)
+ * Offset 4-7: FIL header page_no
+ * Offset 8-11: Next page number (4294967295 = 0xFFFFFFFF if last)
+ * Offset 12-15: Previous page number
+ * Offset 16-37: Additional BLOB metadata
+ * Offset 38+: Compressed data (zlib stream)
+ */
+
+constexpr uint16_t ZBLOB_NEXT_PAGE = 8;     // Next page offset in ZBLOB
+constexpr uint16_t ZBLOB_DATA_START = 38;   // Compressed data starts here
+constexpr uint32_t ZBLOB_END_MARKER = 0xFFFFFFFF;  // End of chain marker
+
+std::vector<uint8_t> BlobScanner::read_zblob_chain(
+    const std::string& file_path,
+    uint32_t first_page) {
+
+    std::vector<uint8_t> result;
+    std::set<uint32_t> visited_pages;
+
+    // Initialize zlib decompressor for streaming
+    z_stream strm;
+    memset(&strm, 0, sizeof(strm));
+
+    if (inflateInit(&strm) != Z_OK) {
+        std::cerr << "[ERROR] Failed to initialize zlib decompressor\n";
+        return result;
+    }
+
+    uint32_t current_page = first_page;
+    uint8_t out_buffer[64 * 1024];  // 64KB output buffer
+
+    while (current_page != ZBLOB_END_MARKER && visited_pages.size() < 10000) {
+        if (visited_pages.count(current_page)) {
+            std::cerr << "[ERROR] ZBLOB page loop detected at page " << current_page << "\n";
+            break;
+        }
+        visited_pages.insert(current_page);
+
+        std::ifstream file(file_path, std::ios::binary);
+        if (!file) {
+            std::cerr << "[ERROR] Cannot read ZBLOB page " << current_page << "\n";
+            break;
+        }
+
+        file.seekg(static_cast<std::streamoff>(current_page) * page_size_, std::ios::beg);
+        std::vector<uint8_t> page_buffer(page_size_);
+        file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
+
+        if (file.gcount() < static_cast<std::streamsize>(ZBLOB_DATA_START)) {
+            break;
+        }
+
+        // Read next page pointer (big-endian in ZBLOB, unlike regular BLOB)
+        uint32_t next_page = read_be<uint32_t>(page_buffer.data(), ZBLOB_NEXT_PAGE);
+
+        // Extract compressed data from offset 38
+        size_t compressed_size = page_size_ - ZBLOB_DATA_START;
+        if (page_buffer.size() >= ZBLOB_DATA_START) {
+            strm.avail_in = static_cast<uInt>(compressed_size);
+            strm.next_in = page_buffer.data() + ZBLOB_DATA_START;
+
+            // Decompress this chunk
+            do {
+                strm.avail_out = sizeof(out_buffer);
+                strm.next_out = out_buffer;
+
+                int ret = inflate(&strm, Z_NO_FLUSH);
+
+                if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR) {
+                    std::cerr << "[WARN] ZBLOB decompression error on page " << current_page << "\n";
+                    break;
+                }
+
+                if (strm.avail_out < sizeof(out_buffer)) {
+                    size_t have = sizeof(out_buffer) - strm.avail_out;
+                    result.insert(result.end(), out_buffer, out_buffer + have);
+                }
+
+                if (ret == Z_STREAM_END) {
+                    // Decompression complete
+                    inflateEnd(&strm);
+                    stats_.total_blob_bytes += static_cast<uint32_t>(result.size());
+                    return result;
+                }
+            } while (strm.avail_out == 0);
+        }
+
+        current_page = next_page;
+    }
+
+    inflateEnd(&strm);
+    stats_.total_blob_bytes += static_cast<uint32_t>(result.size());
+    return result;
+}
+
+std::vector<uint8_t> BlobScanner::decompress_zblob_page(
+    const std::vector<uint8_t>& compressed_data,
+    void* decompressor_state) {
+
+    std::vector<uint8_t> result;
+
+    if (compressed_data.empty()) {
+        return result;
+    }
+
+    z_stream* strm = nullptr;
+    bool own_strm = false;
+
+    if (decompressor_state) {
+        strm = static_cast<z_stream*>(decompressor_state);
+    } else {
+        strm = new z_stream;
+        memset(strm, 0, sizeof(z_stream));
+        if (inflateInit(strm) != Z_OK) {
+            delete strm;
+            return result;
+        }
+        own_strm = true;
+    }
+
+    strm->avail_in = static_cast<uInt>(compressed_data.size());
+    strm->next_in = const_cast<uint8_t*>(compressed_data.data());
+
+    uint8_t out_buffer[16 * 1024];
+
+    do {
+        strm->avail_out = sizeof(out_buffer);
+        strm->next_out = out_buffer;
+
+        int ret = inflate(strm, Z_NO_FLUSH);
+
+        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR) {
+            break;
+        }
+
+        if (strm->avail_out < sizeof(out_buffer)) {
+            size_t have = sizeof(out_buffer) - strm->avail_out;
+            result.insert(result.end(), out_buffer, out_buffer + have);
+        }
+
+        if (ret == Z_STREAM_END) {
+            break;
+        }
+    } while (strm->avail_out == 0);
+
+    if (own_strm) {
+        inflateEnd(strm);
+        delete strm;
+    }
+
+    return result;
+}
+
+std::vector<uint8_t> BlobScanner::read_blob_auto(
+    const std::string& file_path,
+    uint32_t first_page,
+    uint32_t total_length,
+    uint16_t page_type) {
+
+    // Auto-detect page type if not specified
+    if (page_type == 0) {
+        std::ifstream file(file_path, std::ios::binary);
+        if (file) {
+            file.seekg(static_cast<std::streamoff>(first_page) * page_size_ + 24, std::ios::beg);
+            uint16_t detected_type = 0;
+            file.read(reinterpret_cast<char*>(&detected_type), 2);
+            // Convert from big-endian
+            page_type = (detected_type >> 8) | (detected_type << 8);
+        }
+    }
+
+    // Check page type
+    if (page_type == static_cast<uint16_t>(BlobPageType::ZBLOB) ||
+        page_type == static_cast<uint16_t>(BlobPageType::ZBLOB2)) {
+        return read_zblob_chain(file_path, first_page);
+    } else {
+        // Regular BLOB
+        return read_blob_chain(file_path, first_page, total_length);
+    }
 }
 
 } // namespace innodb

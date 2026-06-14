@@ -199,6 +199,7 @@ inline std::string get_charset_from_collation(uint16_t collation_id) {
  * @brief MySQL column type definitions
  *
  * Reference: ibd2sql/innodb_page/column_type.py
+ * MySQL 9.0 adds VECTOR type (type code varies by version)
  */
 enum class MySQLColumnType : uint8_t {
     DECIMAL = 0,
@@ -230,8 +231,8 @@ enum class MySQLColumnType : uint8_t {
     VAR_STRING = 253,
     STRING = 254,
     GEOMETRY = 255,
-    // MySQL 8.0+
-    VECTOR = 252,  // Note: same as BLOB in some versions
+    // MySQL 9.0+
+    VECTOR = 241,  // MySQL 9.0 VECTOR type for AI/ML embeddings
 };
 
 /**
@@ -266,6 +267,7 @@ inline std::string get_column_type_name(MySQLColumnType type) {
         case MySQLColumnType::VAR_STRING:  return "VARCHAR";
         case MySQLColumnType::STRING:      return "CHAR";
         case MySQLColumnType::GEOMETRY:    return "GEOMETRY";
+        case MySQLColumnType::VECTOR:      return "VECTOR";
         default:                           return "UNKNOWN";
     }
 }
@@ -284,6 +286,7 @@ inline bool is_variable_length_type(MySQLColumnType type) {
         case MySQLColumnType::LONG_BLOB:
         case MySQLColumnType::JSON:
         case MySQLColumnType::GEOMETRY:
+        case MySQLColumnType::VECTOR:  // VECTOR is variable-length embedding
             return true;
         default:
             return false;

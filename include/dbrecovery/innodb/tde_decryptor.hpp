@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <fstream>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 
@@ -251,15 +252,101 @@ inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
 
 // ==================== KeyringFile ====================
 
+/**
+ * @brief MySQL Keyring file format
+ *
+ * Reference: ibd2sql/utils/keyring_file.py
+ * MySQL Keyring stores encryption keys with XOR obfuscation
+ */
 inline bool KeyringFile::load(const std::string& path) {
-    // TODO: 实现 Keyring 文件解析
-    // Keyring 文件格式:
-    // - 4 bytes: magic number
-    // - 4 bytes: version
-    // - 4 bytes: entry count
-    // - entries...
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
 
-    return false;
+    // Read entire file
+    file.seekg(0, std::ios::end);
+    size_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    if (file_size < 27) {  // Minimum: header + "EOF"
+        return false;
+    }
+
+    std::vector<uint8_t> data(file_size);
+    file.read(reinterpret_cast<char*>(data.data()), file_size);
+
+    // XOR decryption key (from MySQL source)
+    const char* xor_key = "*305=Ljt0*!@$Hnm(*-9-w;:";
+    const size_t xor_key_len = 24;
+
+    // Start parsing after header (offset 24)
+    size_t offset = 24;
+
+    entries.clear();
+
+    while (offset + 3 < file_size) {
+        // Check for EOF marker
+        if (data[offset] == 'E' && data[offset+1] == 'O' && data[offset+2] == 'F') {
+            break;
+        }
+
+        // Entry header: 5 x uint64 (total_length, key_id_length, key_type_length, user_id_length, key_length)
+        if (offset + 40 > file_size) {
+            break;
+        }
+
+        uint64_t total_length = read_le<uint64_t>(data.data(), offset);
+        uint64_t key_id_length = read_le<uint64_t>(data.data(), offset + 8);
+        uint64_t key_type_length = read_le<uint64_t>(data.data(), offset + 16);
+        uint64_t user_id_length = read_le<uint64_t>(data.data(), offset + 24);
+        uint64_t key_length = read_le<uint64_t>(data.data(), offset + 32);
+
+        offset += 40;
+
+        // Sanity check
+        if (key_id_length > 256 || key_type_length > 64 ||
+            key_length > 256 || offset + key_id_length + key_type_length + user_id_length + key_length > file_size) {
+            break;
+        }
+
+        // Read key_id (string)
+        std::string key_id(data.data() + offset, data.data() + offset + key_id_length);
+        offset += key_id_length;
+
+        // Read key_type (string)
+        std::string key_type(data.data() + offset, data.data() + offset + key_type_length);
+        offset += key_type_length;
+
+        // Skip user_id
+        offset += user_id_length;
+
+        // Read key (XOR encrypted)
+        std::vector<uint8_t> encrypted_key(data.data() + offset, data.data() + offset + key_length);
+        offset += key_length;
+
+        // XOR decrypt
+        std::vector<uint8_t> decrypted_key(encrypted_key.size());
+        for (size_t i = 0; i < encrypted_key.size(); i++) {
+            decrypted_key[i] = encrypted_key[i] ^ static_cast<uint8_t>(xor_key[i % xor_key_len]);
+        }
+
+        // Create entry
+        Entry entry;
+        entry.key_id = static_cast<uint32_t>(std::stoul(key_id));
+        entry.type = TDEKeyType::KEYRING_KEY;
+        entry.algorithm = TDEAlgorithm::AES_256_CBC;  // Default assumption
+        entry.key_data = decrypted_key;
+
+        entries.push_back(entry);
+
+        // Align to 8 bytes
+        if (offset % 8 != 0) {
+            offset += 8 - (offset % 8);
+        }
+    }
+
+    return !entries.empty();
 }
 
 inline std::optional<KeyringFile::Entry> KeyringFile::find_key(uint32_t key_id) const {

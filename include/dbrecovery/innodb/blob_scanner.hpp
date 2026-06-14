@@ -9,10 +9,22 @@
 #include <cstdint>
 #include <vector>
 #include <string>
+#include <functional>
 #include "dbrecovery/innodb/heuristic_parser.hpp"
 
 namespace dbrecovery {
 namespace innodb {
+
+// ==================== BLOB Structures ====================
+
+/**
+ * @brief BLOB page type enumeration
+ */
+enum class BlobPageType : uint16_t {
+    BLOB = 0x0003,       // Uncompressed BLOB
+    ZBLOB = 0x0005,      // Compressed BLOB (zlib)
+    ZBLOB2 = 0x0006,     // Compressed BLOB v2
+};
 
 // ==================== BLOB Structures ====================
 
@@ -30,6 +42,10 @@ struct BLOBPage {
 
     bool is_first_page() const { return (flag & 0x01) != 0; }
     bool is_last_page() const { return next_page == 0; }
+    bool is_compressed() const {
+        return page_type == static_cast<uint16_t>(BlobPageType::ZBLOB) ||
+               page_type == static_cast<uint16_t>(BlobPageType::ZBLOB2);
+    }
 };
 
 /**
@@ -138,6 +154,43 @@ public:
         const std::string& file_path,
         uint32_t first_page,
         uint32_t total_length);
+
+    /**
+     * @brief Read ZBLOB (compressed) chain with streaming decompression
+     * @param file_path Path to .ibd file
+     * @param first_page First page number
+     * @return Decompressed BLOB data
+     *
+     * Reference: ibd2sql/innodb_page/lob.py FIRST_ZBLOB
+     * ZBLOB uses zlib streaming decompression across page chains
+     */
+    std::vector<uint8_t> read_zblob_chain(
+        const std::string& file_path,
+        uint32_t first_page);
+
+    /**
+     * @brief Decompress ZBLOB page data using zlib
+     * @param compressed_data Compressed data (starts at offset 38)
+     * @param decompressor_state Optional: continue streaming decompression
+     * @return Decompressed data chunk
+     */
+    std::vector<uint8_t> decompress_zblob_page(
+        const std::vector<uint8_t>& compressed_data,
+        void* decompressor_state = nullptr);
+
+    /**
+     * @brief Read BLOB with automatic compression detection
+     * @param file_path Path to .ibd file
+     * @param first_page First page number
+     * @param total_length Expected total length (0 for ZBLOB)
+     * @param page_type Page type (auto-detected if 0)
+     * @return BLOB data (decompressed if needed)
+     */
+    std::vector<uint8_t> read_blob_auto(
+        const std::string& file_path,
+        uint32_t first_page,
+        uint32_t total_length = 0,
+        uint16_t page_type = 0);
 
     /**
      * @brief Recover all BLOBs from file

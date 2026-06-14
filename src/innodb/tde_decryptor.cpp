@@ -2,6 +2,9 @@
 #include <sstream>
 #include <iomanip>
 #include <fstream>
+#include <openssl/evp.h>
+#include <openssl/aes.h>
+#include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
@@ -132,17 +135,69 @@ std::vector<uint8_t> TDEDecryptor::derive_table_key(const TDEKey& primary_key,
 std::vector<uint8_t> TDEDecryptor::aes_decrypt(const std::vector<uint8_t>& key,
                                                 const std::vector<uint8_t>& iv,
                                                 const std::vector<uint8_t>& ciphertext) {
-    // Simplified AES decryption
-    // In production, would use OpenSSL or similar crypto library
-
-    if (ciphertext.empty()) {
+    if (ciphertext.empty() || key.empty()) {
         return {};
     }
 
-    // For now, return ciphertext as-is (placeholder)
-    // Proper implementation would use AES decryption
+    // Ensure IV is 16 bytes (AES block size)
+    std::vector<uint8_t> padded_iv(16, 0);
+    size_t iv_copy_size = std::min(iv.size(), static_cast<size_t>(16));
+    std::copy(iv.begin(), iv.begin() + iv_copy_size, padded_iv.begin());
 
-    return ciphertext;
+    // Determine key size and cipher type
+    const EVP_CIPHER* cipher = nullptr;
+    switch (key.size()) {
+        case 16:
+            cipher = EVP_aes_128_cbc();
+            break;
+        case 24:
+            cipher = EVP_aes_192_cbc();
+            break;
+        case 32:
+            cipher = EVP_aes_256_cbc();
+            break;
+        default:
+            // Invalid key size
+            return {};
+    }
+
+    // Create decryption context
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx) {
+        return {};
+    }
+
+    std::vector<uint8_t> plaintext(ciphertext.size() + AES_BLOCK_SIZE);
+    int len = 0;
+    int plaintext_len = 0;
+
+    // Initialize decryption
+    if (EVP_DecryptInit_ex(ctx, cipher, nullptr, key.data(), padded_iv.data()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
+
+    // Disable padding check for partial blocks
+    EVP_CIPHER_CTX_set_padding(ctx, 0);
+
+    // Decrypt
+    if (EVP_DecryptUpdate(ctx, plaintext.data(), &len, ciphertext.data(), ciphertext.size()) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
+    plaintext_len = len;
+
+    // Finalize
+    if (EVP_DecryptFinal_ex(ctx, plaintext.data() + len, &len) != 1) {
+        EVP_CIPHER_CTX_free(ctx);
+        return {};
+    }
+    plaintext_len += len;
+
+    EVP_CIPHER_CTX_free(ctx);
+
+    plaintext.resize(plaintext_len);
+    return plaintext;
 }
 
 uint32_t TDEDecryptor::calculate_checksum(const uint8_t* data, size_t size) {
