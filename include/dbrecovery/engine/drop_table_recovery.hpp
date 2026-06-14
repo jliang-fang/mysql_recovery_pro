@@ -175,6 +175,21 @@ private:
     static constexpr uint64_t DD_TABLES_INDEX_ID = 1;
 
     /**
+     * @brief Parse SYS_TABLES index page (MySQL 5.7)
+     */
+    void parse_sys_tables_page(const uint8_t* data);
+
+    /**
+     * @brief Parse SYS_COLUMNS index page (MySQL 5.7)
+     */
+    void parse_sys_columns_page(const uint8_t* data);
+
+    /**
+     * @brief Parse SYS_INDEXES index page (MySQL 5.7)
+     */
+    void parse_sys_indexes_page(const uint8_t* data);
+
+    /**
      * @brief Parse INDEX page for records
      */
     bool parse_index_page(const uint8_t* data, uint64_t index_id,
