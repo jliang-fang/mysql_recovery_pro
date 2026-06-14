@@ -726,9 +726,10 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     // STOP conditions:
     // 1. byte == 0 (NULL bitmap or zero terminator)
     // 2. byte > 127 and doesn't form valid 2-byte encoding
-    // 3. read too many sizes (> 8 is unreasonable for most tables)
+    // 3. read too many sizes - but allow up to 64 fields for complex tables
 
-    int max_var_fields = 8;
+    // P0 FIX: Increased from 8 to 64 to support complex tables with many fields
+    int max_var_fields = 64;
 
     for (int field_idx = 0; field_idx < max_var_fields && read_pos > 0; field_idx++) {
         uint8_t byte = page_data[read_pos];
@@ -739,12 +740,10 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         }
 
         // Single-byte size encoding (1-127)
-        // BUT: values > 50 are suspicious - could be ASCII from previous record
+        // P0 FIX: Removed the arbitrary "byte > 50" break condition
+        // InnoDB stores actual field sizes - VARCHAR(255) can have size up to 255 bytes
+        // Breaking on size > 50 was incorrect and caused field boundary detection failure
         if (byte >= 1 && byte <= REC_N_FIELDS_ONE_BYTE_MAX) {
-            // If size > 50, it might be ASCII text from previous record, stop
-            if (byte > 50) {
-                break;
-            }
             var_sizes.push_back(byte);
             read_pos -= 1;
         }
@@ -883,125 +882,36 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     }
 
     // === Step 5: Parse remaining fixed-length fields ===
-    // Try to identify common patterns: DATETIME2, TIMESTAMP, INT, DECIMAL, etc.
-    // Reference: ibd2sql utils/b2data.py
+    // In schemaless mode, we should NOT guess types blindly - that produces wrong data.
+    // Instead, we output raw hex for remaining bytes, letting users interpret with proper schema.
+    // If users have FRM/SDI schema, they should use schema-aware parsing instead.
     //
-    // MySQL 5.6+ uses:
-    // - DATETIME2: 5 bytes (40-bit packed format)
-    // - TIMESTAMP: 4 bytes (Unix timestamp)
-    // - DATE: 3 bytes (24-bit packed)
-    // - TIME2: 3-6 bytes (biased integer)
+    // For reference, MySQL 5.6+ types use variable sizes:
+    // - DATETIME2: 5-8 bytes (5 base + 0-3 for fractional precision)
+    // - TIMESTAMP: 4-7 bytes (4 base + 0-3 for fractional)
+    // - DATE: 3 bytes
+    // - TIME2: 3-6 bytes (3 base + 0-3 for fractional)
+    // Without knowing the exact precision, guessing is unreliable.
 
     while (pos < data_end) {
         size_t remaining = data_end - pos;
         IndexFieldValue val;
 
-        // Check for DATETIME2 (5 bytes, MySQL 5.6+)
-        // ibd2sql B2DATETIME: (B2UINT4(data[:4])<<8) + B2UINT1(data[4:5])
-        // months = (t&549751619584)>>22 = (t&0x7FFFC00000)>>22
-        if (remaining >= 5) {
-            uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(page_data, pos)) << 8) |
-                         static_cast<uint64_t>(page_data[pos + 4]);
+        // In schemaless mode, output remaining bytes as raw hex
+        // This is safer than guessing types which leads to wrong interpretations
+        val.type = IndexFieldValue::Type::BINARY_VAL;
+        val.raw_bytes.assign(page_data + pos, page_data + data_end);
 
-            // Extract year/month/day
-            uint64_t months = (t & 0x7FFFC00000ULL) >> 22;  // 19 bits for months
-            uint16_t year = static_cast<uint16_t>(months / 13);
-            uint8_t month = static_cast<uint8_t>(months % 13);
-            uint8_t day = static_cast<uint8_t>((t & 0x3E0000ULL) >> 17);   // 5 bits
-
-            // Validate date range (year 1000-9999 is valid for MySQL)
-            if (year >= 1000 && year <= 9999 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-                uint8_t hour = static_cast<uint8_t>((t & 0x1F000ULL) >> 12);
-                uint8_t minute = static_cast<uint8_t>((t & 0xFC0ULL) >> 6);
-                uint8_t second = static_cast<uint8_t>(t & 0x3FULL);
-
-                if (hour <= 23 && minute <= 59 && second <= 59) {
-                    val.type = IndexFieldValue::Type::DATETIME_VAL;
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
-                             year, month, day, hour, minute, second);
-                    val.str_value = buf;
-                    val.raw_bytes.assign(page_data + pos, page_data + pos + 5);
-                    result.push_back(val);
-                    pos += 5;
-                    continue;
-                }
-            }
+        // Convert to hex string for display
+        std::ostringstream hex_ss;
+        hex_ss << std::hex << std::setfill('0');
+        for (size_t i = pos; i < data_end; i++) {
+            hex_ss << std::setw(2) << static_cast<int>(page_data[i]);
         }
-
-        // Check for TIMESTAMP (4 bytes, Unix timestamp)
-        // Valid range: 1970-01-01 to 2038-01-19 (Unix 0 to 2147483647)
-        // Extended range for MySQL 5.6+: up to 2100
-        if (remaining >= 4) {
-            uint32_t v4 = read_be<uint32_t>(page_data, pos);
-
-            // TIMESTAMP range: 1970-2038 (classic) or extended to 2100
-            if (v4 >= 946684800 && v4 <= 4102444800) {  // 2000-01-01 to 2100-01-01
-                val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
-                val.uint_value = v4;
-                time_t t = static_cast<time_t>(v4);
-                struct tm tm_buf;
-                gmtime_r(&t, &tm_buf);
-                char buf[32];
-                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-                val.str_value = buf;
-                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
-                result.push_back(val);
-                pos += 4;
-                continue;
-            }
-
-            // DATE (3 bytes) - ibd2sql B2DATE
-            if (remaining >= 3) {
-                uint32_t date_val = (static_cast<uint32_t>(page_data[pos]) << 16) |
-                                    (static_cast<uint32_t>(page_data[pos+1]) << 8) |
-                                    static_cast<uint32_t>(page_data[pos+2]);
-
-                // DATE format: year in bits 9-22, month in bits 5-8, day in bits 0-4
-                // Actually: year = (t&8388096)>>9, month = (t&480)>>5, day = t&31
-                // 8388096 = 0x7FFE00, 480 = 0x1E0, 31 = 0x1F
-                uint16_t year = (date_val & 0x7FFE00) >> 9;
-                uint8_t month = (date_val & 0x1E0) >> 5;
-                uint8_t day = date_val & 0x1F;
-
-                // Validate: year can be 0-9999 in MySQL's biased format
-                // The biased format adds sign bit at bit 23
-                if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-                    val.type = IndexFieldValue::Type::STRING_VAL;
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
-                    val.str_value = buf;
-                    val.raw_bytes.assign(page_data + pos, page_data + pos + 3);
-                    result.push_back(val);
-                    pos += 3;
-                    continue;
-                }
-            }
-
-            // Not a recognized date/time type, treat as integer
-            val.type = IndexFieldValue::Type::UINT_VAL;
-            val.uint_value = v4;
-            val.str_value = std::to_string(v4);
-            val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
-            result.push_back(val);
-            pos += 4;
-        }
-        else if (remaining >= 2) {
-            val.type = IndexFieldValue::Type::UINT_VAL;
-            val.uint_value = read_be<uint16_t>(page_data, pos);
-            val.str_value = std::to_string(val.uint_value);
-            val.raw_bytes.assign(page_data + pos, page_data + pos + 2);
-            result.push_back(val);
-            pos += 2;
-        }
-        else {
-            val.type = IndexFieldValue::Type::UINT_VAL;
-            val.uint_value = page_data[pos];
-            val.str_value = std::to_string(val.uint_value);
-            val.raw_bytes.assign(page_data + pos, page_data + pos + 1);
-            result.push_back(val);
-            pos += 1;
-        }
+        val.str_value = hex_ss.str();
+        result.push_back(val);
+        pos = data_end;  // Consumed all remaining bytes
+        break;
     }
 
     // === Step 6: Enhanced fallback for poor results ===
