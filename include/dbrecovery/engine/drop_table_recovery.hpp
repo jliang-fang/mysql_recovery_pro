@@ -443,12 +443,27 @@ struct ParsedPrType {
     bool is_virtual;
     uint32_t base_type;
 };
-ParsedPrType parse_prtype(uint32_t prtype);
+
+inline ParsedPrType parse_prtype(uint32_t prtype) {
+    ParsedPrType result;
+    result.charset_id = (prtype >> 16) & 0x7FFF;
+    result.is_nullable = !(prtype & 256);  // DATA_NOT_NULL
+    result.is_unsigned = (prtype & 512) != 0;  // DATA_UNSIGNED
+    result.is_binary = (prtype & 1024) != 0;  // DATA_BINARY_TYPE
+    result.is_virtual = (prtype & 8192) != 0;  // DATA_VIRTUAL
+    result.base_type = prtype & 255;  // DATA_MYSQL_TYPE_MASK
+    return result;
+}
 
 /**
  * @brief Get row format name from flags
  */
-std::string row_format_name(uint32_t flags);
+inline std::string row_format_name(uint32_t flags) {
+    if (!(flags & 1)) return "REDUNDANT";
+    else if (!(flags & 32)) return "COMPACT";
+    else if ((flags & 30) >> 1) return "COMPRESSED";
+    else return "DYNAMIC";
+}
 
 } // namespace engine
 } // namespace dbrecovery

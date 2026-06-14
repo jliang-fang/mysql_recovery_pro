@@ -23,6 +23,7 @@
 #include "dbrecovery/recovery/engine.hpp"
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/engine/drop_table_recovery.hpp"
 
 namespace fs = std::filesystem;
 
@@ -160,6 +161,9 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "\033[1mRecovery Modes:\033[0m\n";
     std::cout << "  \033[1m--truncate-recovery\033[0m        Recover from truncated table\n";
     std::cout << "  \033[1m--rmrf-recovery\033[0m            Recover from rm -rf scenario\n";
+    std::cout << "  \033[1m--drop-table-recovery\033[0m      Recover from DROP TABLE (scan system tablespace)\n";
+    std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1 or mysql.ibd)\n";
+    std::cout << "  \033[1m--data-dir=<path>\033[0m           MySQL data directory for DROP TABLE recovery\n";
     std::cout << "  \033[1m--header-repair\033[0m            Repair corrupted page headers\n";
     std::cout << "  \033[1m--blob-recovery\033[0m            Enable BLOB recovery\n";
     std::cout << "  \033[1m--default-recovery\033[0m         Default recovery mode\n\n";
@@ -330,6 +334,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool truncate_recovery = parser_.get_bool_option("truncate-recovery", false);
     bool blob_recovery = parser_.get_bool_option("blob-recovery", false);
     bool rmrf_recovery = parser_.get_bool_option("rmrf-recovery", false);
+    bool drop_table_recovery = parser_.get_bool_option("drop-table-recovery", false);
     bool scan_only = parser_.get_bool_option("scan", false);
     bool rebuild_chain = parser_.get_bool_option("rebuild-chain", false);
     bool extract_sdi = parser_.get_bool_option("extract-sdi", false);
@@ -339,6 +344,67 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     uint32_t page_size = static_cast<uint32_t>(page_size_opt.value_or(16384));
     auto parse_page_opt = parser_.get_int_option("parse-page", -1);
     int parse_page_no = parse_page_opt.value_or(-1);
+
+    // DROP TABLE recovery specific options
+    std::string system_tablespace = parser_.get_option("system-tablespace", "");
+    std::string data_dir = parser_.get_option("data-dir", "");
+
+    // DROP TABLE recovery mode
+    if (drop_table_recovery) {
+        if (system_tablespace.empty() && data_dir.empty()) {
+            std::cerr << "[ERROR] DROP TABLE recovery requires --system-tablespace or --data-dir\n";
+            show_help(argv[0]);
+            return 1;
+        }
+
+        std::cout << "[INFO] Starting DROP TABLE recovery...\n";
+
+        dbrecovery::engine::DropTableRecovery recovery;
+        dbrecovery::engine::DropTableRecovery::Config config;
+        config.system_tablespace = system_tablespace;
+        config.data_directory = data_dir;
+        config.output_directory = output_dir;
+        config.page_size = page_size;
+        config.export_csv = (format == "csv");
+        config.export_sql = (format == "sql");
+        recovery.set_config(config);
+
+        auto result = recovery.recover([&](double progress, const std::string& msg) {
+            if (verbose) {
+                std::cout << "[" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
+            }
+        });
+
+        if (result.success) {
+            std::cout << "[INFO] DROP TABLE recovery completed.\n";
+            std::cout << "  Tables found: " << result.tables_found << "\n";
+            std::cout << "  Tables recovered: " << result.tables_recovered << "\n";
+            std::cout << "  Total records: " << result.total_records << "\n";
+            std::cout << "  Recovery time: " << result.recovery_time_seconds << "s\n";
+
+            for (const auto& table : result.recovered_tables) {
+                std::cout << "\n  Table: " << table.schema_name << "." << table.table_name
+                          << " (table_id=" << table.table_id
+                          << ", index_id=" << table.primary_index_id << ")\n";
+            }
+
+            if (!result.errors.empty()) {
+                std::cout << "\n  Errors:\n";
+                for (const auto& err : result.errors) {
+                    std::cout << "    - " << err << "\n";
+                }
+            }
+
+            std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
+            return 0;
+        } else {
+            std::cerr << "[ERROR] DROP TABLE recovery failed.\n";
+            for (const auto& err : result.errors) {
+                std::cerr << "  - " << err << "\n";
+            }
+            return 1;
+        }
+    }
 
     if (ibd_path.empty()) {
         show_help(argv[0]);

@@ -219,23 +219,6 @@ inline std::string mysql_type_name(uint32_t mysql_type) {
     return (it != type_names.end()) ? it->second : "UNKNOWN";
 }
 
-// Get row format from table flags
-inline std::string row_format_name(uint32_t flags) {
-    if (!(flags & 1)) return "REDUNDANT";
-    else if (!(flags & 32)) return "COMPACT";
-    else if ((flags & 30) >> 1) return "COMPRESSED";
-    else return "DYNAMIC";
-}
-
-// Index type conversion for MySQL 5.7
-inline uint32_t index57_type_to_int(uint32_t type) {
-    if (type & 1) return 1;  // PRIMARY
-    else if (type & 2) return 2;  // UNIQUE
-    else if (type & 32) return 4;  // FULLTEXT
-    else if (type & 64) return 5;  // SPATIAL
-    else return 3;  // MULTIPLE
-}
-
 } // namespace engine
 } // namespace dbrecovery
 
