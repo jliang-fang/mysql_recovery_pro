@@ -828,13 +828,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         }
     }
 
-    // DEBUG: print sizes (already in field order - we read from first size to last)
-    static bool debug_sizes = false;
-    if (!debug_sizes) {
-        for (auto s : var_sizes) std::cout << s << " ";
-        std::cout << "\n";
-    }
-
     // NOTE: We do NOT reverse the sizes!
     // InnoDB stores sizes in reverse field order (last field first) at lower addresses
     // We read backward (from higher to lower address), so we read in field order
