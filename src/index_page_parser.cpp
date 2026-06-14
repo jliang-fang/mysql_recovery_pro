@@ -651,6 +651,23 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 }
 
 // ==================== Schemaless Record Parsing ====================
+//
+// Key insight from ibd2sql and hex dump analysis:
+//
+// Record structure for CLUSTERED INDEX leaf page (COMPACT/DYNAMIC format):
+// [...sizes...][NULL bitmap][Header 5B][Origin -- data starts here]
+//     ↑_______low_addr______↑  ↑rec_offset↑  ↑rec_offset + 5
+//
+// rec_offset = header start position (from page directory slot - 5)
+// origin = rec_offset + 5 (data start position)
+// sizes = stored BEFORE header, reading BACKWARD from rec_offset
+// NULL bitmap = 1-4 bytes immediately before header start
+//
+// Example from MySQL 5.7 users table:
+//   Position 291-292: 0x12 0x09 (sizes: 18 and 9 for email/name)
+//   Position 293: 0x00 (NULL bitmap)
+//   Position 294-298: 0x04 0x00 0x28 0x00 0x40 (header)
+//   Position 299+: data (PK, TRX_ID, ROLL_PTR, var fields, fixed fields)
 
 std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     const uint8_t* page_data, size_t page_size,
@@ -658,62 +675,138 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     bool is_compact, bool is_leaf) {
     std::vector<IndexFieldValue> result;
 
+    // COMPACT/DYNAMIC format: header is 5 bytes
     size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
-    size_t data_start = rec_offset + header_size;
 
-    if (data_start >= rec_end || rec_end > page_size) return result;
+    // Origin: where actual data starts (after header)
+    size_t origin = rec_offset + header_size;
 
-    size_t pos = data_start;
-    size_t record_data_len = rec_end - data_start;
+    if (origin >= rec_end || rec_end > page_size) return result;
 
-    if (record_data_len < 8) {
+    size_t record_len = rec_end - origin;
+    if (record_len < 10) {
+        // Very short record, return as binary
         IndexFieldValue val;
         val.type = IndexFieldValue::Type::BINARY_VAL;
-        val.raw_bytes.assign(page_data + data_start, page_data + rec_end);
+        val.raw_bytes.assign(page_data + origin, page_data + rec_end);
         result.push_back(val);
         return result;
     }
 
-    // === CRITICAL FIX: Detect PK size (INT=4 bytes or BIGINT=8 bytes) ===
-    // MySQL tables can use INT or BIGINT as primary key
-    // INT pattern: 0x80 0x00 0x00 XX (4 bytes with sign bit)
-    // BIGINT pattern: 0x80 0x00 0x00 0x00 0x00 0x00 0x00 XX (8 bytes)
+    // === Step 1: Read sizes backward from rec_offset (header start) ===
     //
-    // We need to detect which one is used to correctly parse the record.
+    // IMPORTANT: Sizes are stored BEFORE the header, AFTER NULL bitmap:
+    // [...sizes (reverse order)...][NULL bitmap 1+ bytes][Header 5B][Origin -- data starts]
+    //                                   ↑___rec_offset___↑
+    //
+    // Example from MySQL 5.7 users table:
+    //   Position 120: 0x0e = 14 (email size, LAST var field)
+    //   Position 121: 0x05 = 5 (name size, FIRST var field)
+    //   Position 122: 0x00 (NULL bitmap)
+    //   Position 123-127: header
+    //   Position 128+: data (PK, TRX_ID, ROLL_PTR, var fields)
+    //
+    // Sizes are stored in REVERSE field order (last field first at lower address)
+    // We read from rec_offset-2 downward (toward lower addresses)
+    // Reading gives us: [14, 5] which we reverse to [5, 14] (name, email)
 
-    size_t pk_pos = 0;
-    size_t pk_size = 4;  // Default: assume INT (4 bytes)
+    std::vector<uint32_t> var_sizes;
+
+    // Constants from ibd2sql
+    constexpr uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;  // 127
+    constexpr uint32_t OFF_PAGE_FLAG = 16404;  // 0x4000 for DYNAMIC format
+
+    // Assume NULL bitmap is 1 byte
+    // First size is at rec_offset - 2, we read backward (to rec_offset - 3, etc.)
+    size_t null_bitmap_pos = rec_offset - 1;  // NULL bitmap position
+    size_t read_pos = rec_offset - 2;  // First size position
+
+    // Read sizes from higher address toward lower address
+    // Each size can be 1 or 2 bytes
+    // STOP conditions:
+    // 1. byte == 0 (NULL bitmap or zero terminator)
+    // 2. byte > 127 and doesn't form valid 2-byte encoding
+    // 3. read too many sizes (> 8 is unreasonable for most tables)
+
+    int max_var_fields = 8;
+
+    for (int field_idx = 0; field_idx < max_var_fields && read_pos > 0; field_idx++) {
+        uint8_t byte = page_data[read_pos];
+
+        // NULL bitmap marker (0x00) - stop
+        if (byte == 0) {
+            break;
+        }
+
+        // Single-byte size encoding (1-127)
+        // BUT: values > 50 are suspicious - could be ASCII from previous record
+        if (byte >= 1 && byte <= REC_N_FIELDS_ONE_BYTE_MAX) {
+            // If size > 50, it might be ASCII text from previous record, stop
+            if (byte > 50) {
+                break;
+            }
+            var_sizes.push_back(byte);
+            read_pos -= 1;
+        }
+        // Two-byte size encoding (high bit set, byte > 127)
+        else if (byte > REC_N_FIELDS_ONE_BYTE_MAX && read_pos >= 2) {
+            // For two-byte encoding, the low byte is at lower address
+            uint8_t low_byte = page_data[read_pos - 1];
+            uint32_t vsize = (static_cast<uint32_t>(byte & 0x7F) << 8) | low_byte;
+
+            if (vsize == OFF_PAGE_FLAG || (vsize >= 128 && vsize <= 8000)) {
+                var_sizes.push_back(vsize);
+                read_pos -= 2;
+            } else {
+                break;
+            }
+        }
+        else {
+            break;
+        }
+    }
+
+    // IMPORTANT: Do NOT reverse sizes!
+    // InnoDB stores sizes in reverse field order (last field at lowest address).
+    // We read from higher address toward lower address, so we read in reverse storage order.
+    // This gives us: [name_size, email_size] which is correct field order.
+    //
+    // Example:
+    //   Address 120: email_size = 14 (last var field)
+    //   Address 121: name_size = 5 (first var field)
+    //   We read from 121 first, then 120: [5, 14]
+    //   This is correct: name=5, email=14
+
+    // === Step 2: Find Primary Key position ===
+    // PK data starts at origin
+
+    size_t pk_pos = origin;
+    size_t pk_size = 4;  // Default: assume INT
     uint64_t pk_value = 0;
 
-    // Search for INT pattern first (4 bytes: 0x80 0x00 0x00 XX)
-    for (size_t i = data_start; i + 4 <= rec_end; i++) {
+    // Search for INT pattern: 0x80 0x00 0x00 XX (4 bytes with sign bit)
+    for (size_t i = origin; i + 4 <= rec_end; i++) {
         if (page_data[i] == 0x80 && page_data[i+1] == 0x00 && page_data[i+2] == 0x00) {
-            uint32_t potential_pk = (static_cast<uint32_t>(page_data[i]) << 24) |
-                                    (static_cast<uint32_t>(page_data[i+1]) << 16) |
-                                    (static_cast<uint32_t>(page_data[i+2]) << 8) |
-                                    static_cast<uint32_t>(page_data[i+3]);
-            potential_pk ^= 0x80000000;  // Remove sign bit for INT
+            uint32_t raw = read_be<uint32_t>(page_data, i);
+            uint32_t potential_pk = raw ^ 0x80000000;  // Remove sign bit
             if (potential_pk < 10000000) {
                 pk_pos = i;
-                pk_size = 4;  // INT
+                pk_size = 4;
                 pk_value = potential_pk;
                 break;
             }
         }
     }
 
-    // If not found, search for BIGINT pattern (8 bytes)
-    if (pk_pos == 0) {
-        for (size_t i = data_start; i + 8 <= rec_end; i++) {
+    // If not found, try BIGINT pattern: 0x80 0x00 ... (8 bytes)
+    if (pk_value == 0 && origin + 8 <= rec_end) {
+        for (size_t i = origin; i + 8 <= rec_end; i++) {
             if (page_data[i] == 0x80 && page_data[i+1] == 0x00) {
-                uint64_t potential_pk = 0;
-                for (size_t j = 0; j < 8; j++) {
-                    potential_pk = (potential_pk << 8) | page_data[i + j];
-                }
-                potential_pk ^= 0x8000000000000000ULL;  // Remove sign bit for BIGINT
+                uint64_t raw = read_be<uint64_t>(page_data, i);
+                uint64_t potential_pk = raw ^ 0x8000000000000000ULL;
                 if (potential_pk < 10000000000ULL) {
                     pk_pos = i;
-                    pk_size = 8;  // BIGINT
+                    pk_size = 8;
                     pk_value = potential_pk;
                     break;
                 }
@@ -721,15 +814,15 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         }
     }
 
-    // If still not found, assume INT starting at data_start
-    if (pk_pos == 0) {
-        pk_pos = data_start;
+    // If still not found, assume INT at origin
+    if (pk_value == 0) {
+        pk_pos = origin;
         pk_size = 4;
         uint32_t raw = read_be<uint32_t>(page_data, pk_pos);
         pk_value = raw ^ 0x80000000;
     }
 
-    // First field: PK (4 or 8 bytes depending on detection)
+    // Add PK as first field
     IndexFieldValue pk_val;
     pk_val.type = IndexFieldValue::Type::INT_VAL;
     pk_val.int_value = static_cast<int64_t>(pk_value);
@@ -739,162 +832,44 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     }
     result.push_back(pk_val);
 
-    // For leaf pages, skip TRX_ID + ROLL_PTR (13 bytes after PK)
-    // before variable-length fields
-    // Use detected PK size (4 for INT, 8 for BIGINT)
-    size_t var_field_start = pk_pos + pk_size;
-    if (is_leaf && var_field_start + 13 <= rec_end) {
-        var_field_start = var_field_start + 13;  // DB_TRX_ID (6) + DB_ROLL_PTR (7)
+    // === Step 3: Calculate variable data start position ===
+    // For clustered index leaf: PK + TRX_ID (6) + ROLL_PTR (7)
+    size_t var_data_start = pk_pos + pk_size;
+    if (is_leaf) {
+        var_data_start += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;  // +13 bytes
     }
 
-    // === CRITICAL FIX: InnoDB COMPACT/DYNAMIC format size array position ===
-    //
-    // CORRECT structure (verified from hex dump analysis):
-    // [Sizes] [NULL bitmap] [Header 5B] [PK] [TRX_ID] [ROLL_PTR] [Var data] [Fixed data]
-    //    ↑_________↓________↑
-    //    向低地址         origin = header + 5
-    //
-    // - Header is at origin - 5 (NOT at data_start)
-    // - NULL bitmap is at header - null_bytes
-    // - Sizes are at NULL bitmap - size_bytes, reading BACKWARD (toward lower address)
-    // - Sizes are stored in REVERSE field order (last var field first)
-    //
-    // For our test data with name=5, email=14:
-    // Bytes at 0x78: 0e 05 00 00 00 10 00 38 ...
-    //                ↑__↑ ↑__↑ ↑___________↑
-    //                sizes null header
-    // 0e=14(email), 05=5(name), 00=null_bitmap, header=00 00 10 00 38
-
-    // Sizes are BEFORE the header (at lower address)
-    // Structure: [sizes] [null bitmap] [header 5B] [PK] ...
-    // We need to read sizes BEFORE null bitmap
-
-    // Estimate null bitmap size (usually 1 byte)
-    size_t null_bytes = 1;
-
-    // Size bytes start BEFORE null bitmap
-    // rec_offset is header position, so:
-    // rec_offset - null_bytes = null bitmap position
-    // rec_offset - null_bytes - 1 = first size byte (reading backward)
-    size_t size_read_pos = rec_offset - null_bytes - 1;
-
-    std::vector<uint32_t> var_sizes;
-
-    // Read sizes backward (each size is 1 or 2 bytes, toward lower address)
-    // Sizes are in REVERSE field order (last var field size first)
-    //
-    // CRITICAL: The correct sizes are immediately before the null bitmap
-    // Looking at hex: 0x78-0x79 = sizes, 0x7a = null bitmap, 0x7b-0x7f = header
-    // We need to find where sizes end and garbage begins
-
-    // Strategy: Read sizes until we hit a "record start" pattern
-    // or until we have enough reasonable sizes
-
-    // For the test data, sizes should be around 5-20 for VARCHAR fields
-    // Values > 100 are likely garbage (from previous record's text)
-
-    int sizes_to_read = 2;  // Start with 2 (name + email for this table)
-
-    for (int i = 0; i < sizes_to_read && size_read_pos >= 0 && size_read_pos < rec_offset; i++) {
-        uint8_t byte = page_data[size_read_pos];
-
-        // Skip zero bytes (null bitmap)
-        if (byte == 0) {
-            size_read_pos -= 1;
-            i--;  // Don't count this as a size
-            continue;
-        }
-
-        // Reasonable VARCHAR size: 1-100
-        // Values > 100 are likely ASCII text from previous record
-        if (byte > 100) {
-            // This looks like garbage, stop reading
-            break;
-        }
-
-        if (byte <= 0x7F && byte >= 1) {
-            // Single-byte size (1-127) - valid VARCHAR size
-            var_sizes.push_back(byte);
-            size_read_pos -= 1;
-        } else if (byte >= 0x80 && size_read_pos >= 1) {
-            // Two-byte size
-            uint8_t low_byte = page_data[size_read_pos - 1];
-            uint32_t vsize = (static_cast<uint32_t>(byte & 0x7F) << 8) | low_byte;
-            if (vsize > 65535 || vsize == 0 || vsize > 8000) break;
-            var_sizes.push_back(vsize);
-            size_read_pos -= 2;
-        } else {
-            break;
-        }
-    }
-
-    // NOTE: We do NOT reverse the sizes!
-    // InnoDB stores sizes in reverse field order (last field first) at lower addresses
-    // We read backward (from higher to lower address), so we read in field order
-
-    // CRITICAL: After reading sizes, we have the variable field sizes in field order
-    // Variable field data starts AFTER TRX_ID + ROLL_PTR for clustered index
-
-    size_t actual_var_start = var_field_start;
-    if (pk_pos > 0) {
-        // PK at pk_pos, TRX_ID at pk_pos+pk_size (6 bytes), ROLL_PTR at pk_pos+pk_size+6 (7 bytes)
-        actual_var_start = pk_pos + pk_size + 6 + 7;  // PK + TRX_ID + ROLL_PTR
-    }
-
-    pos = actual_var_start;
+    size_t pos = var_data_start;
     size_t data_end = rec_end;
 
-    // If we still don't have good sizes, try a simpler heuristic
-    if (var_sizes.empty() && pos < data_end) {
-        // Try to find field boundaries by looking for common patterns
-        // For VARCHAR fields, look for printable string sequences
-        size_t scan_pos = pos;
-        while (scan_pos < data_end && var_sizes.size() < 10) {
-            // Look for a printable string
-            size_t str_start = scan_pos;
-            size_t str_len = 0;
-            while (str_start + str_len < data_end && str_len < 2000) {
-                uint8_t c = page_data[str_start + str_len];
-                if (c >= 32 && c < 127) {
-                    str_len++;
-                } else {
-                    break;
-                }
-            }
-
-            if (str_len >= 4) {
-                var_sizes.push_back(static_cast<uint32_t>(str_len));
-                scan_pos = str_start + str_len;
-            } else {
-                // Not a string, skip
-                scan_pos++;
-            }
-        }
-    }
-
-    // Parse variable-length fields using detected sizes
+    // === Step 4: Parse variable-length fields ===
     for (size_t i = 0; i < var_sizes.size() && pos < data_end; i++) {
         uint32_t vs = var_sizes[i];
 
-        if (vs == off_page_flag_ && pos + 20 <= data_end) {
+        // Check for overflow/off-page storage
+        if ((vs == OFF_PAGE_FLAG || vs == off_page_flag_) && pos + 20 <= data_end) {
             IndexFieldValue val;
             val.is_overflow = true;
             val.type = IndexFieldValue::Type::OVERFLOW_PTR;
             val.overflow_space_id = read_be<uint32_t>(page_data, pos);
             val.overflow_page_no = read_be<uint32_t>(page_data, pos + 4);
+            val.overflow_blob_header = read_be<uint32_t>(page_data, pos + 8);
             val.overflow_real_size = read_be<uint64_t>(page_data, pos + 12);
+            val.raw_bytes.assign(page_data + pos, page_data + pos + 20);
             result.push_back(val);
             pos += 20;
-        } else if (vs > 0 && vs < off_page_flag_ && pos + vs <= data_end) {
+        }
+        else if (vs > 0 && vs < OFF_PAGE_FLAG && pos + vs <= data_end) {
             IndexFieldValue val;
             val.raw_bytes.assign(page_data + pos, page_data + pos + vs);
 
+            // Detect if it's a string
             size_t printable_count = 0;
             for (size_t j = 0; j < vs; j++) {
                 uint8_t b = page_data[pos + j];
                 if (b >= 32 && b < 127) printable_count++;
             }
-            bool looks_like_string = (vs > 0 && printable_count > vs * 2 / 3);
+            bool looks_like_string = (printable_count > vs * 2 / 3);
 
             if (looks_like_string) {
                 val.type = IndexFieldValue::Type::STRING_VAL;
@@ -907,7 +882,8 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         }
     }
 
-    // Parse remaining fixed-length fields
+    // === Step 5: Parse remaining fixed-length fields ===
+    // Try to identify common patterns: DATETIME, TIMESTAMP, INT, etc.
     while (pos < data_end) {
         size_t remaining = data_end - pos;
         IndexFieldValue val;
@@ -915,12 +891,13 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         if (remaining >= 8) {
             uint64_t v8 = read_be<uint64_t>(page_data, pos);
             uint64_t v8_signed = v8 ^ 0x8000000000000000ULL;
-            uint32_t ts4 = read_be<uint32_t>(page_data, pos);
+            uint32_t v4_first = read_be<uint32_t>(page_data, pos);
 
-            if (ts4 >= 946684800 && ts4 <= 4102444800 && remaining >= 4) {
+            // Check for TIMESTAMP (4 bytes, 2000-2100 range)
+            if (v4_first >= 946684800 && v4_first <= 4102444800) {
                 val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
-                val.uint_value = ts4;
-                time_t t = static_cast<time_t>(ts4);
+                val.uint_value = v4_first;
+                time_t t = static_cast<time_t>(v4_first);
                 char buf[32];
                 struct tm tm_buf;
                 gmtime_r(&t, &tm_buf);
@@ -929,22 +906,27 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
                 val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
                 result.push_back(val);
                 pos += 4;
-            } else if (v8_signed < 100000000ULL) {
+            }
+            // Check for BIGINT
+            else if (v8_signed < 10000000000ULL) {
                 val.type = IndexFieldValue::Type::INT_VAL;
                 val.int_value = static_cast<int64_t>(v8_signed);
                 val.str_value = std::to_string(val.int_value);
                 val.raw_bytes.assign(page_data + pos, page_data + pos + 8);
                 result.push_back(val);
                 pos += 8;
-            } else {
+            }
+            // Default to 4-byte unsigned
+            else {
                 val.type = IndexFieldValue::Type::UINT_VAL;
-                val.uint_value = ts4;
-                val.str_value = std::to_string(ts4);
+                val.uint_value = v4_first;
+                val.str_value = std::to_string(v4_first);
                 val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
                 result.push_back(val);
                 pos += 4;
             }
-        } else if (remaining >= 4) {
+        }
+        else if (remaining >= 4) {
             uint32_t v4 = read_be<uint32_t>(page_data, pos);
             if (v4 >= 946684800 && v4 <= 4102444800) {
                 val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
@@ -963,14 +945,16 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
             val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
             result.push_back(val);
             pos += 4;
-        } else if (remaining >= 2) {
+        }
+        else if (remaining >= 2) {
             val.type = IndexFieldValue::Type::UINT_VAL;
             val.uint_value = read_be<uint16_t>(page_data, pos);
             val.str_value = std::to_string(val.uint_value);
             val.raw_bytes.assign(page_data + pos, page_data + pos + 2);
             result.push_back(val);
             pos += 2;
-        } else {
+        }
+        else {
             val.type = IndexFieldValue::Type::UINT_VAL;
             val.uint_value = page_data[pos];
             val.str_value = std::to_string(val.uint_value);
@@ -980,7 +964,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         }
     }
 
-    // ✅ Enhanced fallback: If result quality is poor, try enhanced pattern-based parser
+    // === Step 6: Enhanced fallback for poor results ===
     // Quality metrics: need at least 2 fields (PK + data), and less than 50% BINARY/UNKNOWN
     if (result.size() < 3) {
         // Try enhanced parser for better field boundary detection
