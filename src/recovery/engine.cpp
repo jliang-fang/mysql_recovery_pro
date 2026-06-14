@@ -307,33 +307,85 @@ bool RecoveryEngine::export_to_sql(const std::vector<std::map<std::string, std::
         return true;
     }
 
+    // ✅ 修复：使用第一条记录的字段列表作为所有记录的字段模板
+    // 确保 SQL 导出的字段数量一致
+    std::vector<std::string> field_order;
+    if (!records.empty()) {
+        for (const auto& pair : records[0]) {
+            field_order.push_back(pair.first);
+        }
+    }
+
+    // ✅ 修复：添加 CREATE TABLE 语句（基于字段列表）
+    out << "CREATE TABLE IF NOT EXISTS `" << table_name << "` (\n";
+    for (size_t i = 0; i < field_order.size(); i++) {
+        out << "    `" << field_order[i] << "` TEXT";
+        if (i < field_order.size() - 1) out << ",";
+        out << "\n";
+    }
+    out << ") ENGINE=InnoDB;\n\n";
+
+    // ✅ 修复：正确转义 SQL 特殊字符（包括二进制字符）
+    auto escape_sql_value = [](const std::string& value) -> std::string {
+        std::string result;
+        for (unsigned char c : value) {
+            switch (c) {
+                case '\0': result += "\\0"; break;        // NULL
+                case '\n': result += "\\n"; break;        // newline
+                case '\r': result += "\\r"; break;        // carriage return
+                case '\t': result += "\\t"; break;        // tab
+                case '\\': result += "\\\\"; break;       // backslash
+                case '\'': result += "''"; break;         // single quote (MySQL style)
+                case '"': result += "\\\""; break;        // double quote
+                case '\x1a': result += "\\Z"; break;      // Ctrl+Z
+                default:
+                    // ✅ 修复：过滤不可打印的二进制字符（ASCII < 32 或 > 127）
+                    // 避免 SQL 文件包含二进制数据导致导入失败
+                    if (c >= 32 && c < 127) {
+                        // 可打印 ASCII 字符
+                        result += static_cast<char>(c);
+                    } else if (c >= 127) {
+                        // 高位字符（可能是 UTF-8 多字节的一部分）
+                        result += static_cast<char>(c);
+                    } else {
+                        // 控制字符：转义为十六进制表示
+                        char buf[8];
+                        snprintf(buf, sizeof(buf), "\\x%02X", c);
+                        result += buf;
+                    }
+                    break;
+            }
+        }
+        return result;
+    };
+
     for (const auto& record : records) {
         std::ostringstream oss;
         oss << "INSERT INTO `" << table_name << "` (";
 
-        // 列名
+        // 列名（使用固定的字段列表）
         bool first = true;
-        for (const auto& pair : record) {
+        for (const auto& field : field_order) {
             if (!first) oss << ", ";
-            oss << "`" << pair.first << "`";
+            oss << "`" << field << "`";
             first = false;
         }
         oss << ") VALUES (";
 
-        // 值
+        // 值（使用固定的字段列表，缺失字段用 NULL）
         first = true;
-        for (const auto& pair : record) {
+        for (const auto& field : field_order) {
             if (!first) oss << ", ";
 
-            // 简单转义处理
-            std::string value = pair.second;
-            if (value == "NULL") {
+            auto it = record.find(field);
+            if (it == record.end() || it->second.empty()) {
+                // 字段缺失或空值，使用 NULL
+                oss << "NULL";
+            } else if (it->second == "NULL") {
                 oss << "NULL";
             } else {
-                // 基本的 SQL 转义（实际应使用更完善的转义函数）
-                value.erase(0, value.find_first_not_of("'"));
-                value.erase(value.find_last_not_of("'") + 1);
-                oss << "'" << value << "'";
+                // ✅ 修复：使用完善的转义函数
+                oss << "'" << escape_sql_value(it->second) << "'";
             }
             first = false;
         }
@@ -378,33 +430,77 @@ bool RecoveryEngine::export_to_sql_with_user(const std::vector<std::map<std::str
         return true;
     }
 
+    // ✅ 修复：使用第一条记录的字段列表作为所有记录的字段模板
+    std::vector<std::string> field_order;
+    if (!records.empty()) {
+        for (const auto& pair : records[0]) {
+            field_order.push_back(pair.first);
+        }
+    }
+
+    // ✅ 修复：添加 CREATE TABLE 语句
+    out << "CREATE TABLE IF NOT EXISTS `" << table_name << "` (\n";
+    for (size_t i = 0; i < field_order.size(); i++) {
+        out << "    `" << field_order[i] << "` TEXT";
+        if (i < field_order.size() - 1) out << ",";
+        out << "\n";
+    }
+    out << ") ENGINE=InnoDB;\n\n";
+
+    // ✅ 修复：正确转义 SQL 特殊字符
+    auto escape_sql_value = [](const std::string& value) -> std::string {
+        std::string result;
+        for (unsigned char c : value) {
+            switch (c) {
+                case '\0': result += "\\0"; break;
+                case '\n': result += "\\n"; break;
+                case '\r': result += "\\r"; break;
+                case '\t': result += "\\t"; break;
+                case '\\': result += "\\\\"; break;
+                case '\'': result += "''"; break;
+                case '"': result += "\\\""; break;
+                case '\x1a': result += "\\Z"; break;
+                default:
+                    if (c >= 32 && c < 127) {
+                        result += static_cast<char>(c);
+                    } else if (c >= 127) {
+                        result += static_cast<char>(c);
+                    } else {
+                        char buf[8];
+                        snprintf(buf, sizeof(buf), "\\x%02X", c);
+                        result += buf;
+                    }
+                    break;
+            }
+        }
+        return result;
+    };
+
     for (const auto& record : records) {
         std::ostringstream oss;
         oss << "INSERT INTO `" << table_name << "` (";
 
-        // 列名
+        // 列名（使用固定的字段列表）
         bool first = true;
-        for (const auto& pair : record) {
+        for (const auto& field : field_order) {
             if (!first) oss << ", ";
-            oss << "`" << pair.first << "`";
+            oss << "`" << field << "`";
             first = false;
         }
         oss << ") VALUES (";
 
-        // 值
+        // 值（使用固定的字段列表）
         first = true;
-        for (const auto& pair : record) {
+        for (const auto& field : field_order) {
             if (!first) oss << ", ";
 
-            // 简单转义处理
-            std::string value = pair.second;
-            if (value == "NULL") {
+            auto it = record.find(field);
+            if (it == record.end() || it->second.empty()) {
+                oss << "NULL";
+            } else if (it->second == "NULL") {
                 oss << "NULL";
             } else {
-                // 基本的 SQL 转义（实际应使用更完善的转义函数）
-                value.erase(0, value.find_first_not_of("'"));
-                value.erase(value.find_last_not_of("'") + 1);
-                oss << "'" << value << "'";
+                oss << "'" << escape_sql_value(it->second) << "'";
             }
             first = false;
         }

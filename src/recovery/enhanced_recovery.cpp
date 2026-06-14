@@ -879,22 +879,80 @@ bool BulkRecovery::recover_single_table(const ScannedTable& table) {
             out << "-- Source: " << table.ibd_path << "\n";
             out << "-- Records: " << records.size() << "\n";
             out << "-- Timestamp: " << timestamp << "\n\n";
-            out << "INSERT INTO `" << table.table_name << "` VALUES\n";
 
-            bool first = true;
+            // ✅ 修复：使用第一条记录的字段列表作为模板
+            std::vector<std::string> field_order;
+            if (!records.empty()) {
+                for (const auto& [key, value] : records[0]) {
+                    field_order.push_back(key);
+                }
+            }
+
+            // ✅ 修复：添加 CREATE TABLE 语句
+            out << "CREATE TABLE IF NOT EXISTS `" << table.table_name << "` (\n";
+            for (size_t i = 0; i < field_order.size(); i++) {
+                out << "    `" << field_order[i] << "` TEXT";
+                if (i < field_order.size() - 1) out << ",";
+                out << "\n";
+            }
+            out << ") ENGINE=InnoDB;\n\n";
+
+            // ✅ 修复：正确转义 SQL 特殊字符
+            auto escape_sql_value = [](const std::string& value) -> std::string {
+                std::string result;
+                for (unsigned char c : value) {
+                    switch (c) {
+                        case '\0': result += "\\0"; break;
+                        case '\n': result += "\\n"; break;
+                        case '\r': result += "\\r"; break;
+                        case '\t': result += "\\t"; break;
+                        case '\\': result += "\\\\"; break;
+                        case '\'': result += "''"; break;
+                        case '"': result += "\\\""; break;
+                        case '\x1a': result += "\\Z"; break;
+                        default:
+                            if (c >= 32 && c < 127) {
+                                result += static_cast<char>(c);
+                            } else if (c >= 127) {
+                                result += static_cast<char>(c);
+                            } else {
+                                char buf[8];
+                                snprintf(buf, sizeof(buf), "\\x%02X", c);
+                                result += buf;
+                            }
+                            break;
+                    }
+                }
+                return result;
+            };
+
             for (const auto& record : records) {
-                if (!first) out << ",\n";
-                out << "(";
+                out << "INSERT INTO `" << table.table_name << "` (";
+
+                // 列名（使用固定字段列表）
                 bool first_col = true;
-                for (const auto& [key, value] : record) {
+                for (const auto& field : field_order) {
                     if (!first_col) out << ", ";
-                    out << "'" << value << "'";
+                    out << "`" << field << "`";
                     first_col = false;
                 }
-                out << ")";
-                first = false;
+                out << ") VALUES (";
+
+                // 值（使用固定字段列表）
+                first_col = true;
+                for (const auto& field : field_order) {
+                    if (!first_col) out << ", ";
+
+                    auto it = record.find(field);
+                    if (it == record.end() || it->second.empty()) {
+                        out << "NULL";
+                    } else {
+                        out << "'" << escape_sql_value(it->second) << "'";
+                    }
+                    first_col = false;
+                }
+                out << ");\n";
             }
-            out << ";\n";
             out.close();
             std::cout << "  - SQL exported to: " << output_path << std::endl;
         }
