@@ -257,6 +257,5 @@ if(GUI_ENABLED)
 endif()
 
 # ==================== CLI Executable ====================
-add_executable(mysql_recover_cli main_cli.cpp)
-target_link_libraries(mysql_recover_cli PRIVATE dbrecovery_innodb)
-target_include_directories(mysql_recover_cli PRIVATE ${CMAKE_SOURCE_DIR}/include)
+# 主可执行文件在根目录 CMakeLists.txt 中定义
+# 这里不再重复定义 mysql_recover_cli

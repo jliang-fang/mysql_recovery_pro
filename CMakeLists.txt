@@ -193,8 +193,10 @@ if(HAVE_IO_URING)
     target_compile_definitions(dbrecovery_innodb PUBLIC HAVE_IO_URING=1)
 endif()
 
-add_executable(mysql_recovery_pro src/main.cpp)
+# 统一的 CLI 入口点 - 使用 RecoveryCLI 类
+add_executable(mysql_recovery_pro src/main_cli.cpp)
 target_link_libraries(mysql_recovery_pro dbrecovery_innodb)
+target_include_directories(mysql_recovery_pro PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 enable_testing()
 
