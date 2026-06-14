@@ -2,7 +2,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/btree.hpp"
-#include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/disk/enhanced_scanner.hpp"
 #include "dbrecovery/engine/signature_index.hpp"
 #include <fstream>
@@ -314,77 +314,54 @@ std::vector<std::map<std::string, std::string>>
 RmrfRecovery::extract_records_heuristic(const std::vector<uint8_t>& page_data,
                                          const catalog::TableSchema& schema) {
     std::vector<std::map<std::string, std::string>> records;
-    std::set<std::string> seen_emails;
+    std::set<std::string> seen_keys;
 
-    // 使用启发式解析器扫描
-    innodb::HeuristicParser heuristic_parser;
-    auto heuristic_records = heuristic_parser.parse_custom_format(
-        page_data.data(), page_data.size());
+    // 使用 SchemaAgnosticScanner 进行无模式匹配的启发式扫描
+    innodb::SchemaAgnosticScanner::Config sa_config;
+    sa_config.recover_deleted = true;
+    innodb::SchemaAgnosticScanner sa_scanner(sa_config);
 
-    // 将 HeuristicRecord 转换为 std::map<std::string, std::string>
-    for (const auto& hr : heuristic_records) {
-        if (hr.is_infimum || hr.is_supremum || hr.is_deleted) {
+    // Parse the page
+    auto result = sa_scanner.parse_page(page_data.data(), page_data.size(), 0);
+
+    // 将 SchemalessRecord 转换为 std::map<std::string, std::string>
+    for (const auto& sa_rec : result.records) {
+        if (sa_rec.is_deleted || !sa_rec.is_valid) {
             continue;
         }
 
-        if (hr.fields.size() < 2) {
+        if (sa_rec.fields.empty()) {
             continue;
         }
 
         // 构建记录
         std::map<std::string, std::string> rec;
 
-        // Email 字段 - 使用安全的转换方式
-        try {
-            if (hr.fields.size() > 2 && !hr.fields[2].data.empty()) {
-                std::string email;
-                // 构建字符串时跳过空字符
-                for (auto ch : hr.fields[2].data) {
-                    if (ch != '\0' && ch >= 32 && ch < 127) {
-                        email += ch;
-                    }
-                }
-                if (!email.empty() && email.find("@") != std::string::npos && email.find(".com") != std::string::npos) {
-                    if (seen_emails.find(email) == seen_emails.end()) {
-                        seen_emails.insert(email);
-                        rec["email"] = email;
-                        
-                        // ID 字段 - 从 email 中提取数字
-                        std::string id_val;
-                        for (auto it = email.begin(); it != email.end(); ++it) {
-                            if (*it >= '0' && *it <= '9') {
-                                id_val += *it;
-                            }
-                        }
-                        if (id_val.empty()) {
-                            id_val = "0";
-                        }
-                        rec["id"] = id_val;
-                        
-                        if (hr.fields.size() > 1 && !hr.fields[1].data.empty()) {
-                            std::string name;
-                            for (auto ch : hr.fields[1].data) {
-                                if (ch != '\0' && ch >= 32 && ch < 127) {
-                                    name += ch;
-                                }
-                            }
-                            rec["name"] = name;
-                        }
-                        if (hr.fields.size() > 3 && !hr.fields[3].data.empty()) {
-                            std::string created_at;
-                            for (auto ch : hr.fields[3].data) {
-                                if (ch != '\0' && ch >= 32 && ch < 127) {
-                                    created_at += ch;
-                                }
-                            }
-                            rec["created_at"] = created_at;
-                        }
-                        records.push_back(rec);
-                    }
-                }
+        // Use record_id as ID if available
+        if (sa_rec.record_id > 0) {
+            rec["id"] = std::to_string(sa_rec.record_id);
+        }
+
+        // Build record from schemaless fields
+        for (size_t i = 0; i < sa_rec.fields.size(); i++) {
+            std::string key = "field" + std::to_string(i);
+            std::string value = sa_rec.fields[i].to_string();
+
+            // Skip garbage values
+            if (value.find("???") != std::string::npos ||
+                value.find("supremum") != std::string::npos ||
+                value.find("infimum") != std::string::npos) {
+                continue;
             }
-        } catch (...) {
-            // Ignore any exceptions from string operations
+
+            rec[key] = value;
+        }
+
+        // Dedup by record_id
+        std::string dedup_key = std::to_string(sa_rec.record_id) + "_" + std::to_string(sa_rec.page_no);
+        if (seen_keys.find(dedup_key) == seen_keys.end()) {
+            seen_keys.insert(dedup_key);
+            records.push_back(rec);
         }
     }
 

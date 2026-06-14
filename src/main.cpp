@@ -442,8 +442,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::cout << "MySQL Recovery Pro v2.1.0\n";
-    std::cout << "Header Repair & MySQL 5.6-8.4 Support Complete\n";
+    std::cout << "MySQL Recovery Pro v1.0.0\n";
     std::cout << "Build: " << __DATE__ << " " << __TIME__ << "\n\n";
 
     // Parse arguments
@@ -1604,52 +1603,13 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ✅ 恢复模式：rm -rf 恢复
-    if (rmrf_recovery) {
-        std::cout << "[INFO] Starting rm -rf disaster recovery...\n";
-
-        if (ibd_path.empty()) {
-            std::cerr << "[ERROR] --ibd=<path> is required for rm -rf recovery\n";
-            return 1;
-        }
-
-        // 尝试从 SDI 解析表结构
-        auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
-        dbrecovery::catalog::TableSchema schema;
-
-        if (schema_opt.has_value()) {
-            schema = schema_opt.value();
-        } else {
-            std::cout << "[WARN] Failed to parse schema from SDI, using default schema\n";
-            schema = create_default_schema();
-        }
-
-        if (page_size > 0) {
-            schema.page_size = page_size;
-        }
-
-        // 使用 RmrfRecovery 进行恢复
-        dbrecovery::recovery::RmrfRecovery rmrf;
-        rmrf.set_page_size(schema.page_size);
-
-        std::vector<std::map<std::string, std::string>> recovered_records;
-        bool success = rmrf.reconstruct_from_file(ibd_path, schema, recovered_records);
-        
-        std::cout << "[INFO] rm -rf recovery completed. Found "
-                  << recovered_records.size() << " records.\n";
-
-        if (!recovered_records.empty()) {
-            std::string inferred_table_name = schema.table_name.empty() ? "recovered_table" : schema.table_name;
-            export_records_map(recovered_records, output_dir, inferred_table_name, format);
-        }
-
-        return 0;
-    }
+    // ✅ 恢复模式：rm -rf 恢复 - 已统一使用 InnoDBIndexParser (见下方 line 1700)
+    // rmrf_recovery 和 truncate_recovery 现在都使用高精度的 InnoDBIndexParser
+    // 此处仅保留注释，实际处理逻辑在下方统一处理
 
     // ✅ 恢复模式：Truncate 恢复
     // ✅ 使用新的 ibd2sql-style InnoDBIndexParser 进行 TRUNCATE 恢复
     // 这种方法可以正确解析 COMPACT/DYNAMIC 行格式，实现 >=99.9% 的恢复率
-    // 不再使用旧的 heuristic parser，因为它只能处理特定的 "user_" 模式
 
     // ✅ 恢复模式：BLOB 恢复
     if (blob_recovery) {

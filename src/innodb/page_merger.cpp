@@ -9,6 +9,7 @@
 #include "dbrecovery/innodb/page_merger.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -194,79 +195,63 @@ std::vector<HeuristicRecord> PageMerger::recover_page_heuristic(
     const uint8_t* page_data,
     size_t page_size,
     uint32_t page_no) {
-    
-    HeuristicParser parser;
-    return parser.parse_custom_format(page_data, page_size, page_no, false);
+
+    // Use SchemaAgnosticScanner for pattern-agnostic recovery
+    innodb::SchemaAgnosticScanner::Config sa_config;
+    sa_config.recover_deleted = true;
+    innodb::SchemaAgnosticScanner sa_scanner(sa_config);
+
+    auto result = sa_scanner.parse_page(page_data, page_size, page_no);
+
+    std::vector<HeuristicRecord> records;
+    for (const auto& sa_rec : result.records) {
+        if (sa_rec.is_deleted || !sa_rec.is_valid) {
+            continue;
+        }
+
+        HeuristicRecord rec;
+        rec.offset = sa_rec.record_offset;
+        rec.is_infimum = false;
+        rec.is_supremum = false;
+        rec.is_deleted = sa_rec.is_deleted;
+
+        // Convert SchemalessField to HeuristicField
+        for (const auto& sa_field : sa_rec.fields) {
+            HeuristicField field;
+            field.is_null = sa_field.is_null;
+            field.is_valid = sa_field.type != innodb::SchemalessField::Type::UNKNOWN;
+
+            // Copy raw bytes
+            field.data = sa_field.raw_bytes;
+
+            // Determine type - use LONGLONG for both int and float/double as storage is 8 bytes
+            switch (sa_field.type) {
+                case innodb::SchemalessField::Type::INT_VAL:
+                case innodb::SchemalessField::Type::DOUBLE_VAL:
+                case innodb::SchemalessField::Type::FLOAT_VAL:
+                    field.type = HeuristicFieldType::LONGLONG;
+                    break;
+                default:
+                    field.type = HeuristicFieldType::VARCHAR_SHORT;
+                    break;
+            }
+
+            rec.fields.push_back(field);
+        }
+
+        records.push_back(rec);
+    }
+
+    return records;
 }
 
 std::vector<HeuristicRecord> PageMerger::recover_page_pattern(
     const uint8_t* page_data,
     size_t page_size,
     uint32_t page_no) {
-    
-    std::vector<HeuristicRecord> records;
-    
-    // Search for "user<N>@test.com" pattern
-    for (size_t i = 0; i + 20 < page_size; i++) {
-        if (page_data[i] == 'u' && page_data[i+1] == 's' && 
-            page_data[i+2] == 'e' && page_data[i+3] == 'r') {
-            
-            // Find numeric ID
-            size_t id_start = i + 4;
-            while (id_start < page_size && !isdigit(page_data[id_start])) {
-                id_start++;
-            }
-            
-            size_t id_end = id_start;
-            while (id_end < page_size && isdigit(page_data[id_end])) {
-                id_end++;
-            }
-            
-            // Check for @test.com
-            if (id_end + 9 <= page_size &&
-                page_data[id_end] == '@' &&
-                page_data[id_end+1] == 't' &&
-                page_data[id_end+9] == 'm') {
-                
-                HeuristicRecord rec;
-                rec.offset = static_cast<uint16_t>(i);
-                rec.is_infimum = false;
-                rec.is_supremum = false;
-                rec.is_deleted = false;
-                
-                // Extract email
-                std::string email(reinterpret_cast<const char*>(&page_data[id_start]), 
-                                 id_end + 9 - id_start);
-                
-                // Parse ID
-                std::string id_str;
-                for (char c : email) {
-                    if (isdigit(c)) id_str += c;
-                }
-                
-                // Create fields
-                HeuristicField id_field, email_field;
-                id_field.type = HeuristicFieldType::LONGLONG;
-                if (!id_str.empty()) {
-                    id_field.data.assign(id_str.begin(), id_str.end());
-                }
-                id_field.is_null = false;
-                id_field.is_valid = true;
-                
-                email_field.type = HeuristicFieldType::VARCHAR_SHORT;
-                email_field.data.assign(email.begin(), email.end());
-                email_field.is_null = false;
-                email_field.is_valid = true;
-                
-                rec.fields = {id_field, email_field};
-                records.push_back(rec);
-                
-                i = id_end + 9;
-            }
-        }
-    }
-    
-    return records;
+
+    // Delegate to recover_page_heuristic which now uses SchemaAgnosticScanner
+    return recover_page_heuristic(page_data, page_size, page_no);
 }
 
 std::vector<HeuristicRecord> PageMerger::recover_page_merged(

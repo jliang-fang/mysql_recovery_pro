@@ -4,7 +4,7 @@
  */
 
 #include "dbrecovery/recovery/version_aware_recovery.hpp"
-#include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include <fstream>
 #include <iostream>
@@ -365,37 +365,35 @@ std::vector<std::map<std::string, std::string>> VersionAwareRecoveryEngine::pars
 std::vector<std::map<std::string, std::string>> VersionAwareRecoveryEngine::heuristic_parse(
     const uint8_t* data, size_t size, MySQLVersion version) {
 
-    // 使用启发式解析器进行极端恢复
-    innodb::HeuristicParser heuristic_parser;
-    auto heuristic_records = heuristic_parser.parse_custom_format(data, size);
+    // 使用 SchemaAgnosticScanner 进行无模式匹配的启发式扫描
+    innodb::SchemaAgnosticScanner::Config sa_config;
+    sa_config.recover_deleted = true;
+    innodb::SchemaAgnosticScanner sa_scanner(sa_config);
+
+    auto result = sa_scanner.parse_page(data, size, 0);
 
     std::vector<std::map<std::string, std::string>> records;
 
-    for (const auto& hr : heuristic_records) {
-        if (hr.is_infimum || hr.is_supremum || hr.is_deleted) {
+    for (const auto& sa_rec : result.records) {
+        if (sa_rec.is_deleted || !sa_rec.is_valid) {
             continue;
         }
 
-        if (hr.fields.empty()) {
+        if (sa_rec.fields.empty()) {
             continue;
         }
 
         std::map<std::string, std::string> rec;
 
-        if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
-            rec["id"] = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
+        // Use record_id if available
+        if (sa_rec.record_id > 0) {
+            rec["id"] = std::to_string(sa_rec.record_id);
         }
 
-        if (hr.fields.size() > 1 && !hr.fields[1].data.empty()) {
-            rec["name"] = std::string(hr.fields[1].data.begin(), hr.fields[1].data.end());
-        }
-
-        if (hr.fields.size() > 2 && !hr.fields[2].data.empty()) {
-            rec["email"] = std::string(hr.fields[2].data.begin(), hr.fields[2].data.end());
-        }
-
-        if (hr.fields.size() > 3 && !hr.fields[3].data.empty()) {
-            rec["created_at"] = std::string(hr.fields[3].data.begin(), hr.fields[3].data.end());
+        // Build record from schemaless fields
+        for (size_t i = 0; i < sa_rec.fields.size(); i++) {
+            std::string key = "field" + std::to_string(i);
+            rec[key] = sa_rec.fields[i].to_string();
         }
 
         records.push_back(rec);

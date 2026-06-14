@@ -1,4 +1,5 @@
 #include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include <cstring>
 #include <numeric>
 #include <algorithm>
@@ -1367,9 +1368,52 @@ std::vector<HeuristicRecord> HeuristicScanner::scan_page(
     // Try MySQL 5.6 COMPACT format parsing first (more accurate for real MySQL 5.6 data)
     page_records = parser_.parse_mysql56_compact(page_data, page_size, page_no, 0, 2);
 
-    // If that doesn't find records, try custom format parsing
+    // If that doesn't find records, use SchemaAgnosticScanner (pattern-agnostic recovery)
     if (page_records.empty()) {
-        page_records = parser_.parse_custom_format(page_data, page_size);
+        SchemaAgnosticScanner::Config sa_config;
+        sa_config.recover_deleted = false;
+        SchemaAgnosticScanner sa_scanner(sa_config);
+
+        auto result = sa_scanner.parse_page(page_data, page_size, page_no);
+
+        // Convert SchemalessRecord to HeuristicRecord
+        for (const auto& sa_rec : result.records) {
+            if (sa_rec.is_deleted || !sa_rec.is_valid) {
+                continue;
+            }
+
+            HeuristicRecord rec;
+            rec.offset = sa_rec.record_offset;
+            rec.is_infimum = false;
+            rec.is_supremum = false;
+            rec.is_deleted = sa_rec.is_deleted;
+
+            // Convert SchemalessField to HeuristicField
+            for (const auto& sa_field : sa_rec.fields) {
+                HeuristicField field;
+                field.is_null = sa_field.is_null;
+                field.is_valid = sa_field.type != SchemalessField::Type::UNKNOWN;
+                field.data = sa_field.raw_bytes;
+
+                // Determine type
+                switch (sa_field.type) {
+                    case SchemalessField::Type::INT_VAL:
+                        field.type = HeuristicFieldType::LONGLONG;
+                        break;
+                    case SchemalessField::Type::DOUBLE_VAL:
+                    case SchemalessField::Type::FLOAT_VAL:
+                        field.type = HeuristicFieldType::LONGLONG;
+                        break;
+                    default:
+                        field.type = HeuristicFieldType::VARCHAR_SHORT;
+                        break;
+                }
+
+                rec.fields.push_back(field);
+            }
+
+            page_records.push_back(rec);
+        }
     }
 
     if (!page_records.empty()) {

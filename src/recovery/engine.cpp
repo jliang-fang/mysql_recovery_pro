@@ -1,4 +1,5 @@
 #include "dbrecovery/recovery/engine.hpp"
+#include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/heuristic_parser.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
@@ -136,49 +137,35 @@ RecoveryEngine::recover_truncate(
                 }
             }
         } else {
-            // For non-INDEX pages, fall back to heuristic parser for special patterns
-            innodb::HeuristicParser heuristic_parser;
-            auto heuristic_records = heuristic_parser.parse_custom_format(
-                page_data.data(), page_data.size());
+            // For non-INDEX pages, fall back to SchemaAgnosticScanner (pattern-agnostic)
+            innodb::SchemaAgnosticScanner::Config sa_config;
+            sa_config.recover_deleted = true;
+            innodb::SchemaAgnosticScanner sa_scanner(sa_config);
 
-            for (const auto& hr : heuristic_records) {
-                if (hr.is_infimum || hr.is_supremum || hr.is_deleted) {
+            auto sa_records = sa_scanner.parse_page(page_data.data(), page_data.size(), page_no);
+
+            for (const auto& sa_rec : sa_records.records) {
+                if (sa_rec.is_deleted || !sa_rec.is_valid) {
                     continue;
                 }
 
-                if (hr.fields.empty()) {
+                if (sa_rec.fields.empty()) {
                     continue;
                 }
 
                 std::map<std::string, std::string> rec;
 
-                if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
-                    rec["id"] = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
+                // Build record from schemaless fields
+                for (size_t i = 0; i < sa_rec.fields.size(); i++) {
+                    std::string key = "field" + std::to_string(i);
+                    rec[key] = sa_rec.fields[i].to_string();
                 }
 
-                if (hr.fields.size() > 1 && !hr.fields[1].data.empty()) {
-                    rec["name"] = std::string(hr.fields[1].data.begin(), hr.fields[1].data.end());
-                }
-
-                if (hr.fields.size() > 2 && !hr.fields[2].data.empty()) {
-                    std::string email(hr.fields[2].data.begin(), hr.fields[2].data.end());
-                    std::string combination = email + "_" + std::to_string(page_no);
-                    if (seen_combinations.find(combination) == seen_combinations.end()) {
-                        seen_combinations.insert(combination);
-                        rec["email"] = email;
-
-                        if (hr.fields.size() > 3 && !hr.fields[3].data.empty()) {
-                            rec["created_at"] = std::string(hr.fields[3].data.begin(), hr.fields[3].data.end());
-                        }
-                        recovered_records.push_back(rec);
-                    }
-                } else if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
-                    std::string id_str = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
-                    std::string combination = id_str + "_" + std::to_string(page_no);
-                    if (seen_combinations.find(combination) == seen_combinations.end()) {
-                        seen_combinations.insert(combination);
-                        recovered_records.push_back(rec);
-                    }
+                // Use record_id as dedup key if available
+                std::string dedup_key = std::to_string(sa_rec.record_id) + "_" + std::to_string(page_no);
+                if (seen_combinations.find(dedup_key) == seen_combinations.end()) {
+                    seen_combinations.insert(dedup_key);
+                    recovered_records.push_back(rec);
                 }
             }
         }
