@@ -1124,7 +1124,9 @@ std::string export_records_to_csv(
         if (!first.is_infimum && !first.is_supremum && !first.fields.empty()) {
             std::string header = "id";
             for (size_t i = 1; i < first.fields.size(); ++i) {
-                header += ",field" + std::to_string(i);
+                char buf[20];
+                snprintf(buf, sizeof(buf), ",field_%04zu", i);
+                header += buf;
             }
             result += header + "\n";
         }

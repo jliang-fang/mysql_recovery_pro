@@ -343,8 +343,10 @@ RmrfRecovery::extract_records_heuristic(const std::vector<uint8_t>& page_data,
         }
 
         // Build record from schemaless fields
+        // Use zero-padded field names for correct alphabetical sorting
         for (size_t i = 0; i < sa_rec.fields.size(); i++) {
-            std::string key = "field" + std::to_string(i);
+            char key[16];
+            snprintf(key, sizeof(key), "field_%04zu", i);
             std::string value = sa_rec.fields[i].to_string();
 
             // Skip garbage values

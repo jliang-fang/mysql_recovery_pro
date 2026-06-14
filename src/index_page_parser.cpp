@@ -883,65 +883,105 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     }
 
     // === Step 5: Parse remaining fixed-length fields ===
-    // Try to identify common patterns: DATETIME, TIMESTAMP, INT, etc.
+    // Try to identify common patterns: DATETIME2, TIMESTAMP, INT, DECIMAL, etc.
+    // Reference: ibd2sql utils/b2data.py
+    //
+    // MySQL 5.6+ uses:
+    // - DATETIME2: 5 bytes (40-bit packed format)
+    // - TIMESTAMP: 4 bytes (Unix timestamp)
+    // - DATE: 3 bytes (24-bit packed)
+    // - TIME2: 3-6 bytes (biased integer)
+
     while (pos < data_end) {
         size_t remaining = data_end - pos;
         IndexFieldValue val;
 
-        if (remaining >= 8) {
-            uint64_t v8 = read_be<uint64_t>(page_data, pos);
-            uint64_t v8_signed = v8 ^ 0x8000000000000000ULL;
-            uint32_t v4_first = read_be<uint32_t>(page_data, pos);
+        // Check for DATETIME2 (5 bytes, MySQL 5.6+)
+        // ibd2sql B2DATETIME: (B2UINT4(data[:4])<<8) + B2UINT1(data[4:5])
+        // months = (t&549751619584)>>22 = (t&0x7FFFC00000)>>22
+        if (remaining >= 5) {
+            uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(page_data, pos)) << 8) |
+                         static_cast<uint64_t>(page_data[pos + 4]);
 
-            // Check for TIMESTAMP (4 bytes, 2000-2100 range)
-            if (v4_first >= 946684800 && v4_first <= 4102444800) {
-                val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
-                val.uint_value = v4_first;
-                time_t t = static_cast<time_t>(v4_first);
-                char buf[32];
-                struct tm tm_buf;
-                gmtime_r(&t, &tm_buf);
-                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-                val.str_value = buf;
-                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
-                result.push_back(val);
-                pos += 4;
-            }
-            // Check for BIGINT
-            else if (v8_signed < 10000000000ULL) {
-                val.type = IndexFieldValue::Type::INT_VAL;
-                val.int_value = static_cast<int64_t>(v8_signed);
-                val.str_value = std::to_string(val.int_value);
-                val.raw_bytes.assign(page_data + pos, page_data + pos + 8);
-                result.push_back(val);
-                pos += 8;
-            }
-            // Default to 4-byte unsigned
-            else {
-                val.type = IndexFieldValue::Type::UINT_VAL;
-                val.uint_value = v4_first;
-                val.str_value = std::to_string(v4_first);
-                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
-                result.push_back(val);
-                pos += 4;
+            // Extract year/month/day
+            uint64_t months = (t & 0x7FFFC00000ULL) >> 22;  // 19 bits for months
+            uint16_t year = static_cast<uint16_t>(months / 13);
+            uint8_t month = static_cast<uint8_t>(months % 13);
+            uint8_t day = static_cast<uint8_t>((t & 0x3E0000ULL) >> 17);   // 5 bits
+
+            // Validate date range (year 1000-9999 is valid for MySQL)
+            if (year >= 1000 && year <= 9999 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                uint8_t hour = static_cast<uint8_t>((t & 0x1F000ULL) >> 12);
+                uint8_t minute = static_cast<uint8_t>((t & 0xFC0ULL) >> 6);
+                uint8_t second = static_cast<uint8_t>(t & 0x3FULL);
+
+                if (hour <= 23 && minute <= 59 && second <= 59) {
+                    val.type = IndexFieldValue::Type::DATETIME_VAL;
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
+                             year, month, day, hour, minute, second);
+                    val.str_value = buf;
+                    val.raw_bytes.assign(page_data + pos, page_data + pos + 5);
+                    result.push_back(val);
+                    pos += 5;
+                    continue;
+                }
             }
         }
-        else if (remaining >= 4) {
+
+        // Check for TIMESTAMP (4 bytes, Unix timestamp)
+        // Valid range: 1970-01-01 to 2038-01-19 (Unix 0 to 2147483647)
+        // Extended range for MySQL 5.6+: up to 2100
+        if (remaining >= 4) {
             uint32_t v4 = read_be<uint32_t>(page_data, pos);
-            if (v4 >= 946684800 && v4 <= 4102444800) {
+
+            // TIMESTAMP range: 1970-2038 (classic) or extended to 2100
+            if (v4 >= 946684800 && v4 <= 4102444800) {  // 2000-01-01 to 2100-01-01
                 val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
                 val.uint_value = v4;
                 time_t t = static_cast<time_t>(v4);
-                char buf[32];
                 struct tm tm_buf;
                 gmtime_r(&t, &tm_buf);
+                char buf[32];
                 strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
                 val.str_value = buf;
-            } else {
-                val.type = IndexFieldValue::Type::UINT_VAL;
-                val.uint_value = v4;
-                val.str_value = std::to_string(v4);
+                val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
+                result.push_back(val);
+                pos += 4;
+                continue;
             }
+
+            // DATE (3 bytes) - ibd2sql B2DATE
+            if (remaining >= 3) {
+                uint32_t date_val = (static_cast<uint32_t>(page_data[pos]) << 16) |
+                                    (static_cast<uint32_t>(page_data[pos+1]) << 8) |
+                                    static_cast<uint32_t>(page_data[pos+2]);
+
+                // DATE format: year in bits 9-22, month in bits 5-8, day in bits 0-4
+                // Actually: year = (t&8388096)>>9, month = (t&480)>>5, day = t&31
+                // 8388096 = 0x7FFE00, 480 = 0x1E0, 31 = 0x1F
+                uint16_t year = (date_val & 0x7FFE00) >> 9;
+                uint8_t month = (date_val & 0x1E0) >> 5;
+                uint8_t day = date_val & 0x1F;
+
+                // Validate: year can be 0-9999 in MySQL's biased format
+                // The biased format adds sign bit at bit 23
+                if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+                    val.type = IndexFieldValue::Type::STRING_VAL;
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
+                    val.str_value = buf;
+                    val.raw_bytes.assign(page_data + pos, page_data + pos + 3);
+                    result.push_back(val);
+                    pos += 3;
+                    continue;
+                }
+            }
+
+            // Not a recognized date/time type, treat as integer
+            val.type = IndexFieldValue::Type::UINT_VAL;
+            val.uint_value = v4;
+            val.str_value = std::to_string(v4);
             val.raw_bytes.assign(page_data + pos, page_data + pos + 4);
             result.push_back(val);
             pos += 4;

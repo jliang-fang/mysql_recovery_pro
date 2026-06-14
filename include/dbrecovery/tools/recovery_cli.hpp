@@ -680,7 +680,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                 size_t field_idx = 0;
                 for (const auto& field : rec.fields) {
-                    std::string field_name = "field_" + std::to_string(field_idx);
+                    // Use zero-padded field names for correct alphabetical sorting
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "field_%04zu", field_idx);
+                    std::string field_name = buf;
 
                     if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
                         record_map[field_name] = "NULL";
@@ -761,7 +764,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 // Add field values
                 size_t field_idx = 0;
                 for (const auto& field : rec.fields) {
-                    std::string field_name = "field_" + std::to_string(field_idx);
+                    // Use zero-padded field names for correct alphabetical sorting
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "field_%04zu", field_idx);
+                    std::string field_name = buf;
 
                     if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
                         record_map[field_name] = "NULL";

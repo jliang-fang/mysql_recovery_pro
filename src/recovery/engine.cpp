@@ -110,7 +110,10 @@ RecoveryEngine::recover_truncate(
                     if (it != schema.columns.end()) {
                         col_name = it->second.name;
                     } else {
-                        col_name = "field" + std::to_string(i);
+                        // Use zero-padded field names for correct alphabetical sorting
+                        char buf[16];
+                        snprintf(buf, sizeof(buf), "field_%04zu", i);
+                        col_name = buf;
                     }
 
                     if (field.is_null) {
@@ -156,8 +159,11 @@ RecoveryEngine::recover_truncate(
                 std::map<std::string, std::string> rec;
 
                 // Build record from schemaless fields
+                // Use zero-padded field names for correct alphabetical sorting
+                // field_0000, field_0001, ... field_9999
                 for (size_t i = 0; i < sa_rec.fields.size(); i++) {
-                    std::string key = "field" + std::to_string(i);
+                    char key[16];
+                    snprintf(key, sizeof(key), "field_%04zu", i);
                     rec[key] = sa_rec.fields[i].to_string();
                 }
 
@@ -261,10 +267,22 @@ bool RecoveryEngine::export_to_csv(const std::vector<std::map<std::string, std::
         return true;
     }
 
-    // 写入表头（从schema中提取列名顺序）
-    for (const auto& pair : schema.columns) {
-        if (pair.first > 1) out << ",";
-        out << pair.second.name;
+    // Write header
+    if (!schema.columns.empty()) {
+        // Use schema column names
+        for (const auto& pair : schema.columns) {
+            if (pair.first > 1) out << ",";
+            out << pair.second.name;
+        }
+    } else if (!records.empty()) {
+        // Schemaless mode: write field names from first record
+        // The map keys are already sorted (zero-padded field_NNNN format)
+        bool first = true;
+        for (const auto& pair : records[0]) {
+            if (!first) out << ",";
+            out << pair.first;
+            first = false;
+        }
     }
     out << "\n";
 
