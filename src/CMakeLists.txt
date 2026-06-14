@@ -43,6 +43,7 @@ set(ENGINE_SOURCES
     engine/row_decoder.cpp
     engine/field_decoder.cpp
     engine/parallel_scanner.cpp
+    engine/drop_table_recovery.cpp
 )
 
 # Add utils module sources
@@ -72,6 +73,7 @@ set(PAGE_SOURCES
 set(DISK_SOURCES
     disk/raw_scanner.cpp
     disk/io_uring_scanner.cpp
+    disk/ibd_file_carver.cpp
 )
 
 # Add all sources to dbrecovery_innodb library
