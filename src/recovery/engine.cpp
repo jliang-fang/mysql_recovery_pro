@@ -1,6 +1,7 @@
 #include "dbrecovery/recovery/engine.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -63,85 +64,129 @@ RecoveryEngine::recover_truncate(
     }
 
     std::vector<std::map<std::string, std::string>> recovered_records;
-    // 移除 email 去重，使用 offset + email 组合去重，避免丢失有效记录
-    std::set<std::string> seen_combinations;  // 去重：基于 email + offset 组合
+    std::set<std::string> seen_combinations;
 
-    // 遍历所有页，直接使用启发式扫描
-    // 对于 TRUNCATE 场景，B+Tree 结构已被破坏，直接扫描所有页更可靠
     uint32_t total_pages = file_reader_->get_total_pages();
+    uint32_t page_size = file_reader_->get_page_size();
     std::cout << "[INFO] Processing " << total_pages << " pages with heuristic scan..." << std::endl;
 
-    // 进度显示频率：每 1000 页或每秒至少显示一次
     uint32_t last_progress_page = 0;
     auto last_progress_time = std::chrono::high_resolution_clock::now();
 
-    // 启发式扫描所有页
+    // Use InnoDBIndexParser for INDEX pages (schema-agnostic parsing)
+    innodb::InnoDBIndexParser index_parser;
+    index_parser.set_recover_deleted(true);  // Include deleted records for TRUNCATE recovery
+    index_parser.set_bad_page_mode(1);  // Fast mode for corrupted pages
+
     for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
         auto page_data = file_reader_->read_page_raw(page_no);
         if (page_data.empty()) {
             continue;
         }
 
-        // 使用启发式解析器扫描
-        innodb::HeuristicParser heuristic_parser;
-        auto heuristic_records = heuristic_parser.parse_custom_format(
-            page_data.data(), page_data.size());
+        // Check page type
+        uint16_t page_type = innodb::read_be<uint16_t>(page_data.data(), innodb::FIL_PAGE_TYPE_ABS);
 
-        // 将 HeuristicRecord 转换为 std::map<std::string, std::string>
-        for (const auto& hr : heuristic_records) {
-            if (hr.is_infimum || hr.is_supremum || hr.is_deleted) {
-                continue;
-            }
+        if (page_type == innodb::FIL_PAGE_INDEX) {
+            // Use IndexParser for INDEX pages - proper record parsing
+            auto index_records = index_parser.parse_page(page_data.data(), page_data.size(), page_no);
 
-            if (hr.fields.empty()) {
-                continue;
-            }
-
-            // 构建记录
-            std::map<std::string, std::string> rec;
-
-            // ID 字段
-            if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
-                rec["id"] = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
-            }
-
-            // Name 字段 (optional)
-            if (hr.fields.size() > 1 && !hr.fields[1].data.empty()) {
-                rec["name"] = std::string(hr.fields[1].data.begin(), hr.fields[1].data.end());
-            }
-
-            // Email 字段 (optional)
-            if (hr.fields.size() > 2 && !hr.fields[2].data.empty()) {
-                std::string email(hr.fields[2].data.begin(), hr.fields[2].data.end());
-                // 使用 email + offset 组合作为唯一标识，避免因重复 email 导致记录丢失
-                std::string combination = email + "_" + std::to_string(page_no);
-                if (seen_combinations.find(combination) == seen_combinations.end()) {
-                    seen_combinations.insert(combination);
-                    rec["email"] = email;
-
-                    // Created_at 字段 (optional)
-                    if (hr.fields.size() > 3 && !hr.fields[3].data.empty()) {
-                        rec["created_at"] = std::string(hr.fields[3].data.begin(), hr.fields[3].data.end());
-                    }
-                    recovered_records.push_back(rec);
+            for (const auto& idx_rec : index_records) {
+                if (idx_rec.is_infimum || idx_rec.is_supremum) {
+                    continue;
                 }
-            } else if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
-                // If no email field, try to use id as unique key
-                std::string id_str = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
-                std::string combination = id_str + "_" + std::to_string(page_no);
-                if (seen_combinations.find(combination) == seen_combinations.end()) {
-                    seen_combinations.insert(combination);
-                    recovered_records.push_back(rec);
+
+                std::map<std::string, std::string> rec;
+
+                // Convert IndexRecord fields to map
+                for (size_t i = 0; i < idx_rec.fields.size(); ++i) {
+                    const auto& field = idx_rec.fields[i];
+                    std::string col_name;
+
+                    // Try to get column name from schema
+                    uint32_t ordinal = static_cast<uint32_t>(i) + 1;
+                    auto it = schema.columns.find(ordinal);
+                    if (it != schema.columns.end()) {
+                        col_name = it->second.name;
+                    } else {
+                        col_name = "field" + std::to_string(i);
+                    }
+
+                    if (field.is_null) {
+                        rec[col_name] = "NULL";
+                    } else {
+                        rec[col_name] = field.to_string();
+                    }
+                }
+
+                if (!rec.empty()) {
+                    // Deduplication using first field + page_no
+                    std::string dedup_key;
+                    auto first_field = rec.begin();
+                    if (first_field != rec.end()) {
+                        dedup_key = first_field->second + "_" + std::to_string(page_no) + "_" + std::to_string(idx_rec.record_offset);
+                    } else {
+                        dedup_key = std::to_string(page_no) + "_" + std::to_string(idx_rec.record_offset);
+                    }
+
+                    if (seen_combinations.find(dedup_key) == seen_combinations.end()) {
+                        seen_combinations.insert(dedup_key);
+                        recovered_records.push_back(rec);
+                    }
+                }
+            }
+        } else {
+            // For non-INDEX pages, fall back to heuristic parser for special patterns
+            innodb::HeuristicParser heuristic_parser;
+            auto heuristic_records = heuristic_parser.parse_custom_format(
+                page_data.data(), page_data.size());
+
+            for (const auto& hr : heuristic_records) {
+                if (hr.is_infimum || hr.is_supremum || hr.is_deleted) {
+                    continue;
+                }
+
+                if (hr.fields.empty()) {
+                    continue;
+                }
+
+                std::map<std::string, std::string> rec;
+
+                if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
+                    rec["id"] = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
+                }
+
+                if (hr.fields.size() > 1 && !hr.fields[1].data.empty()) {
+                    rec["name"] = std::string(hr.fields[1].data.begin(), hr.fields[1].data.end());
+                }
+
+                if (hr.fields.size() > 2 && !hr.fields[2].data.empty()) {
+                    std::string email(hr.fields[2].data.begin(), hr.fields[2].data.end());
+                    std::string combination = email + "_" + std::to_string(page_no);
+                    if (seen_combinations.find(combination) == seen_combinations.end()) {
+                        seen_combinations.insert(combination);
+                        rec["email"] = email;
+
+                        if (hr.fields.size() > 3 && !hr.fields[3].data.empty()) {
+                            rec["created_at"] = std::string(hr.fields[3].data.begin(), hr.fields[3].data.end());
+                        }
+                        recovered_records.push_back(rec);
+                    }
+                } else if (hr.fields.size() > 0 && !hr.fields[0].data.empty()) {
+                    std::string id_str = std::string(hr.fields[0].data.begin(), hr.fields[0].data.end());
+                    std::string combination = id_str + "_" + std::to_string(page_no);
+                    if (seen_combinations.find(combination) == seen_combinations.end()) {
+                        seen_combinations.insert(combination);
+                        recovered_records.push_back(rec);
+                    }
                 }
             }
         }
 
-        // 更新进度
         if (progress_callback_) {
             progress_callback_(page_no, total_pages);
         }
 
-        // 定期显示进度
         auto now = std::chrono::high_resolution_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_progress_time);
         if (page_no - last_progress_page >= 1000 || elapsed.count() >= 1000) {
@@ -155,7 +200,6 @@ RecoveryEngine::recover_truncate(
 
     std::cout << "\r[INFO] Heuristic scan completed. Found " << recovered_records.size() << " records." << std::endl;
 
-    // 输出换行并完成提示
     if (total_pages > 0) {
         std::cout << "\r[INFO] Processing complete: " << total_pages << " pages processed." << std::endl;
     }
