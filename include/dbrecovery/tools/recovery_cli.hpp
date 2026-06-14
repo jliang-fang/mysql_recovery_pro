@@ -25,6 +25,7 @@
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/engine/drop_table_recovery.hpp"
+#include "dbrecovery/innodb/frm_parser.hpp"
 
 namespace fs = std::filesystem;
 
@@ -152,6 +153,7 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  " << program_name << " --search --table-name=<name> [options]\n\n";
     std::cout << "\033[1mBasic Options:\033[0m\n";
     std::cout << "  \033[1m--ibd=<path>\033[0m               Path to .ibd file (required for single file mode)\n";
+    std::cout << "  \033[1m--frm=<path>\033[0m               Path to .frm file for schema (MySQL 5.6/5.7)\n";
     std::cout << "  \033[1m--output=<dir>\033[0m             Output directory (default: /tmp/recovered)\n";
     std::cout << "  \033[1m--table-id=<id>\033[0m            Table ID for SDI lookup (default: 0)\n";
     std::cout << "  \033[1m--page-size=<size>\033[0m         Page size: 4096/8192/16384/32768/65536 (default: 16384)\n";
@@ -363,6 +365,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // DROP TABLE recovery specific options
     std::string system_tablespace = parser_.get_option("system-tablespace", "");
     std::string data_dir = parser_.get_option("data-dir", "");
+
+    // FRM file option for schema parsing
+    std::string frm_path = parser_.get_option("frm", "");
 
     // DROP TABLE recovery mode
     if (drop_table_recovery) {
@@ -585,61 +590,195 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return std::nullopt;
     };
 
-    // 辅助函数：创建默认表结构
-    auto create_default_schema = []() -> dbrecovery::catalog::TableSchema {
+    // 辅助函数：创建空 schema（让引擎使用 schemaless 模式）
+    // P0 FIX: 不再使用硬编码的 4 字段 schema，而是返回空 schema
+    // 让恢复引擎使用实际的字段数量和 field_NNNN 命名
+    auto create_empty_schema = []() -> dbrecovery::catalog::TableSchema {
         dbrecovery::catalog::TableSchema schema;
         schema.table_name = "recovered_table";
-        schema.row_format = 2;
+        schema.row_format = 2;  // DYNAMIC
         schema.page_size = 16384;
-
-        dbrecovery::catalog::ColumnInfo col1;
-        col1.name = "id";
-        col1.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-        col1.is_nullable = false;
-        col1.column_length = 8;
-        schema.columns[1] = col1;
-
-        dbrecovery::catalog::ColumnInfo col2;
-        col2.name = "name";
-        col2.mysql_type_id = dbrecovery::innodb::mysql_types::VARCHAR;
-        col2.is_nullable = true;
-        col2.column_length = 255;
-        schema.columns[2] = col2;
-
-        dbrecovery::catalog::ColumnInfo col3;
-        col3.name = "email";
-        col3.mysql_type_id = dbrecovery::innodb::mysql_types::VARCHAR;
-        col3.is_nullable = true;
-        col3.column_length = 255;
-        schema.columns[3] = col3;
-
-        dbrecovery::catalog::ColumnInfo col4;
-        col4.name = "created_at";
-        col4.mysql_type_id = dbrecovery::innodb::mysql_types::DATETIME;
-        col4.is_nullable = true;
-        schema.columns[4] = col4;
-
+        // 不添加任何预定义列 - 让引擎根据实际数据推断
         return schema;
     };
 
-    // Default recovery mode - use heuristic scanning for general recovery
-    if (default_recovery && !truncate_recovery && !rmrf_recovery) {
-        std::cout << "[INFO] Starting default recovery (heuristic scan)...\\n";
+    // 辅助函数：从 FRM 文件解析 schema 并设置到 InnoDBIndexParser
+    // 参考 main.cpp lines 2211-2288 的实现
+    auto parse_schema_from_frm = [&](const std::string& frm_path,
+                                      dbrecovery::innodb::InnoDBIndexParser& index_parser,
+                                      bool verbose) -> bool {
+        if (frm_path.empty()) return false;
 
-        auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
-        dbrecovery::catalog::TableSchema schema;
-
-        if (schema_opt.has_value()) {
-            schema = schema_opt.value();
-        } else {
-            std::cout << "[WARN] Failed to parse schema from SDI, using default schema\\n";
-            schema = create_default_schema();
+        std::cout << "[INFO] Parsing schema from .frm file: " << frm_path << "\n";
+        auto frm_schema = dbrecovery::innodb::FRMParser::parse(frm_path);
+        if (!frm_schema.has_value()) {
+            std::cout << "[WARN] Failed to parse .frm file\n";
+            return false;
         }
 
-        // Use truncate recovery which does heuristic scanning
-        recovered_records = engine.recover_truncate(schema);
-        std::cout << "[INFO] Default recovery completed. Found "
-                  << recovered_records.size() << " records.\\n";
+        std::cout << "[INFO] Schema obtained from .frm file (" << frm_schema->columns.size() << " columns)\n";
+
+        // Find PK columns from indexes
+        std::set<std::string> pk_column_names;
+        for (const auto& idx : frm_schema->indexes) {
+            if (idx.is_primary) {
+                for (const auto& col_name : idx.columns) {
+                    pk_column_names.insert(col_name);
+                }
+            }
+        }
+
+        std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
+        uint32_t n_pk = 0;
+
+        for (auto& [pos, col] : frm_schema->columns) {
+            dbrecovery::innodb::IndexColumnDef icol;
+            icol.name = col.name;
+            icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
+            icol.col_length = col.column_length;
+            icol.is_nullable = col.is_nullable;
+            icol.is_unsigned = !col.is_signed;
+            icol.mb_maxlen = 4;  // UTF8MB4
+
+            // Set precision/scale for DECIMAL types (InnoDB type 21)
+            if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
+                icol.precision = col.numeric_precision;
+                icol.scale = col.numeric_scale;
+            }
+
+            // Transfer ENUM/SET values
+            icol.enum_values = col.enum_values;
+            icol.set_values = col.set_values;
+
+            // Determine if variable length based on InnoDB type
+            switch (col.mysql_type_id) {
+                case 16:  // VARCHAR
+                    icol.is_big = (col.column_length * 4 > 255);
+                    break;
+                case 24: case 25: case 26: case 27: case 31:  // BLOB variants, JSON
+                    icol.is_big = true;
+                    break;
+                default:
+                    icol.is_big = false;
+                    break;
+            }
+
+            // Check if this column is part of PK
+            if (pk_column_names.count(col.name) > 0) {
+                n_pk++;
+            }
+
+            index_columns.push_back(icol);
+        }
+
+        if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
+
+        if (verbose) {
+            std::cout << "[DEBUG] Column types from FRM:\n";
+            for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
+                std::cout << "  " << i+1 << ". " << index_columns[i].name
+                          << " type=" << static_cast<int>(index_columns[i].col_type)
+                          << " len=" << index_columns[i].col_length << "\n";
+            }
+        }
+
+        index_parser.set_columns(index_columns, false, n_pk);
+        std::cout << "[INFO] Schema set from .frm file (" << index_columns.size()
+                  << " columns, " << n_pk << " PK columns)\n";
+        return true;
+    };
+
+    // Helper lambda: Convert IndexRecord to map with proper column names
+    auto convert_records_to_map = [](const std::vector<dbrecovery::innodb::IndexRecord>& records,
+                                      const dbrecovery::innodb::InnoDBIndexParser& parser)
+        -> std::vector<std::map<std::string, std::string>> {
+        std::vector<std::map<std::string, std::string>> result;
+        const auto& cols = parser.get_column_defs();
+
+        for (const auto& rec : records) {
+            std::map<std::string, std::string> record_map;
+            for (size_t i = 0; i < rec.fields.size(); i++) {
+                // Use column name if available, otherwise use field_NNNN
+                std::string field_name;
+                if (i < cols.size() && !cols[i].name.empty()) {
+                    field_name = cols[i].name;
+                } else {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "field_%04zu", i);
+                    field_name = buf;
+                }
+
+                const auto& field = rec.fields[i];
+                if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
+                    record_map[field_name] = "NULL";
+                } else if (!field.raw_bytes.empty()) {
+                    if (!field.str_value.empty()) {
+                        record_map[field_name] = field.str_value;
+                    } else {
+                        std::ostringstream hex_ss;
+                        for (uint8_t b : field.raw_bytes) {
+                            hex_ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
+                        }
+                        record_map[field_name] = hex_ss.str();
+                    }
+                }
+            }
+            result.push_back(record_map);
+        }
+        return result;
+    };
+
+    // Default recovery mode - use InnoDBIndexParser for high-accuracy recovery
+    if (default_recovery && !truncate_recovery && !rmrf_recovery) {
+        std::cout << "[INFO] Starting default recovery (InnoDBIndexParser)...\n";
+
+        // Detect page size
+        if (page_size == 0) {
+            std::ifstream fsp_file(ibd_path, std::ios::binary);
+            if (fsp_file) {
+                std::vector<uint8_t> first_page(16384);
+                fsp_file.read(reinterpret_cast<char*>(first_page.data()), 16384);
+                for (uint32_t ps : {16384, 8192, 32768, 4096, 65536}) {
+                    fsp_file.seekg(0);
+                    fsp_file.read(reinterpret_cast<char*>(first_page.data()), ps);
+                    if (fsp_file.gcount() >= ps) {
+                        page_size = ps;
+                        break;
+                    }
+                }
+            }
+        }
+        if (page_size == 0) page_size = 16384;
+
+        // Use InnoDBIndexParser for recovery
+        dbrecovery::innodb::InnoDBIndexParser index_parser;
+        index_parser.set_recover_deleted(true);
+        index_parser.set_bad_page_mode(2);
+
+        // Try FRM schema first
+        bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
+
+        auto records = index_parser.parse_ibd_force(ibd_path);
+
+        if (!records.empty()) {
+            std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
+            recovered_records = convert_records_to_map(records, index_parser);
+            std::cout << "[INFO] Default recovery completed. Found "
+                      << recovered_records.size() << " records.\n";
+        } else {
+            // Fallback to heuristic scanning
+            std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying heuristic fallback...\n";
+            auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+            dbrecovery::catalog::TableSchema schema;
+            if (schema_opt.has_value()) {
+                schema = schema_opt.value();
+            } else {
+                schema = create_empty_schema();
+            }
+            recovered_records = engine.recover_truncate(schema);
+            std::cout << "[INFO] Heuristic fallback completed. Found "
+                      << recovered_records.size() << " records.\n";
+        }
     }
 
     // Truncate 恢复 - 使用 InnoDBIndexParser 进行高精度恢复
@@ -669,40 +808,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         index_parser.set_recover_deleted(true);  // Include deleted records (critical for TRUNCATE)
         index_parser.set_bad_page_mode(2);       // Brute-force for corrupted pages
 
+        // Try FRM schema if provided
+        bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
+
         auto records = index_parser.parse_ibd_force(ibd_path);
 
         if (!records.empty()) {
             std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
-
-            // Convert InnoDBIndexRecord to map format
-            for (const auto& rec : records) {
-                std::map<std::string, std::string> record_map;
-
-                size_t field_idx = 0;
-                for (const auto& field : rec.fields) {
-                    // Use zero-padded field names for correct alphabetical sorting
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "field_%04zu", field_idx);
-                    std::string field_name = buf;
-
-                    if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
-                        record_map[field_name] = "NULL";
-                    } else if (!field.raw_bytes.empty()) {
-                        // Use string value if available, otherwise hex encode
-                        if (!field.str_value.empty()) {
-                            record_map[field_name] = field.str_value;
-                        } else {
-                            std::ostringstream hex_ss;
-                            for (uint8_t b : field.raw_bytes) {
-                                hex_ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
-                            }
-                            record_map[field_name] = hex_ss.str();
-                        }
-                    }
-                    field_idx++;
-                }
-                recovered_records.push_back(record_map);
-            }
+            recovered_records = convert_records_to_map(records, index_parser);
 
             std::cout << "[INFO] Truncate recovery completed. Found "
                       << recovered_records.size() << " records.\n";
@@ -714,7 +827,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (schema_opt.has_value()) {
                 schema = schema_opt.value();
             } else {
-                schema = create_default_schema();
+                schema = create_empty_schema();
             }
 
             recovered_records = engine.recover_truncate(schema);
@@ -752,41 +865,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         index_parser.set_recover_deleted(true);  // Include deleted records
         index_parser.set_bad_page_mode(2);       // Brute-force for corrupted pages
 
+        // Try FRM schema if provided
+        bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
+
         auto records = index_parser.parse_ibd_force(ibd_path);
 
         if (!records.empty()) {
             std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
-
-            // Convert InnoDBIndexRecord to map format
-            for (const auto& rec : records) {
-                std::map<std::string, std::string> record_map;
-
-                // Add field values
-                size_t field_idx = 0;
-                for (const auto& field : rec.fields) {
-                    // Use zero-padded field names for correct alphabetical sorting
-                    char buf[16];
-                    snprintf(buf, sizeof(buf), "field_%04zu", field_idx);
-                    std::string field_name = buf;
-
-                    if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
-                        record_map[field_name] = "NULL";
-                    } else if (!field.raw_bytes.empty()) {
-                        // Use string value if available, otherwise hex encode
-                        if (!field.str_value.empty()) {
-                            record_map[field_name] = field.str_value;
-                        } else {
-                            std::ostringstream hex_ss;
-                            for (uint8_t b : field.raw_bytes) {
-                                hex_ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
-                            }
-                            record_map[field_name] = hex_ss.str();
-                        }
-                    }
-                    field_idx++;
-                }
-                recovered_records.push_back(record_map);
-            }
+            recovered_records = convert_records_to_map(records, index_parser);
 
             std::cout << "[INFO] rm -rf recovery completed. Found "
                       << recovered_records.size() << " records.\n";
@@ -799,7 +885,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (schema_opt.has_value()) {
                 schema = schema_opt.value();
             } else {
-                schema = create_default_schema();
+                schema = create_empty_schema();
             }
 
             dbrecovery::recovery::RmrfRecovery rmrf;

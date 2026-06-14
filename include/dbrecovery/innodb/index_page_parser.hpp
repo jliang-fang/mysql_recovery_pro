@@ -701,6 +701,12 @@ public:
     };
     const Stats& get_stats() const { return stats_; }
 
+    /**
+     * @brief Get the column definitions (after set_columns was called)
+     * @return Vector of column definitions with names and types
+     */
+    const std::vector<IndexColumnDef>& get_column_defs() const { return columns_; }
+
 private:
     // ---- Internal Parsing ----
 
