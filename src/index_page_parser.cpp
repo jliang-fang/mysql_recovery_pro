@@ -676,13 +676,15 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     bool is_compact, bool is_leaf) {
     std::vector<IndexFieldValue> result;
 
+    // rec_offset = header position (5 bytes before origin)
+    // origin = where data starts (PK, TRX_ID, ROLL_PTR, user data)
     size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
     size_t origin = rec_offset + header_size;
 
     if (origin >= rec_end || rec_end > page_size) return result;
 
     size_t record_len = rec_end - origin;
-    if (record_len < 10) {
+    if (record_len < 21) {  // Minimum: PK(8) + TRX_ID(6) + ROLL_PTR(7) = 21
         IndexFieldValue val;
         val.type = IndexFieldValue::Type::BINARY_VAL;
         val.raw_bytes.assign(page_data + origin, page_data + rec_end);
@@ -690,90 +692,64 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         return result;
     }
 
-    // === Step 1: Read sizes backward from header position ===
-    // Same as before - sizes are stored BEFORE the header
+    // === Step 1: Read sizes from header position backward ===
+    // In COMPACT/DYNAMIC format, sizes and NULL bitmap are stored BEFORE header:
+    // [size bytes][NULL bitmap][header 5B][data...]
+    //
+    // For schemaless mode, we need to heuristically determine:
+    // - How many NULL bitmap bytes (depends on nullable column count)
+    // - How many size bytes (depends on variable-length column count)
+    //
+    // From analysis of test data:
+    // - Most tables have 1-2 bytes NULL bitmap
+    // - Each small VARCHAR field has 1 byte size (< 128 bytes)
+    // - Larger VARCHAR fields have 2 byte size
+    //
+    // Strategy: Try to find the size byte right before NULL bitmap
+    // NULL bitmap typically has value 0-15 (for up to 15 nullable columns)
+    // Size byte should be 1-127 for small fields
+
     std::vector<uint32_t> var_sizes;
     constexpr uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;
-    constexpr uint32_t OFF_PAGE_FLAG = 16404;
 
-    // Find NULL bitmap position
-    size_t null_bytes = 1;
-    for (size_t scan = 1; scan <= 3 && rec_offset >= scan; scan++) {
-        if (page_data[rec_offset - scan] == 0) {
-            null_bytes = scan;
-            break;
+    // Read backward from header position (rec_offset)
+    // Try to find a pattern: [valid size byte][small NULL bitmap value]
+    if (rec_offset >= 2) {
+        // Check offset rec_offset-1 and rec_offset-2
+        uint8_t byte_at_minus1 = page_data[rec_offset - 1];  // Likely NULL bitmap
+        uint8_t byte_at_minus2 = page_data[rec_offset - 2];  // Likely size
+
+        // Pattern: [size (1-127)][NULL bitmap (0-15)]
+        if (byte_at_minus1 <= 15 && byte_at_minus2 >= 1 && byte_at_minus2 <= REC_N_FIELDS_ONE_BYTE_MAX) {
+            var_sizes.push_back(byte_at_minus2);
         }
-    }
-
-    // Read sizes backward from after NULL bitmap
-    size_t read_pos = rec_offset - null_bytes - 1;
-    size_t min_read_pos = (rec_offset > 32) ? (rec_offset - 32) : 0;
-    int max_var_fields = 16;
-
-    size_t total_var_data_size = 0;  // Track total variable field data size
-
-    for (int field_idx = 0; field_idx < max_var_fields && read_pos > min_read_pos; field_idx++) {
-        uint8_t byte = page_data[read_pos];
-
-        if (byte == 0) break;
-
-        if (byte >= 1 && byte <= REC_N_FIELDS_ONE_BYTE_MAX) {
-            // Validate size doesn't exceed remaining record
-            if (byte > record_len - 21) break;
-            var_sizes.push_back(byte);
-            total_var_data_size += byte;
-            read_pos -= 1;
+        // Alternative: size might be at rec_offset-1 if there's no NULL bitmap
+        else if (byte_at_minus1 >= 1 && byte_at_minus1 <= REC_N_FIELDS_ONE_BYTE_MAX) {
+            var_sizes.push_back(byte_at_minus1);
         }
-        else if (byte > REC_N_FIELDS_ONE_BYTE_MAX && read_pos >= min_read_pos + 1) {
-            uint8_t low_byte = page_data[read_pos - 1];
-            uint32_t vsize = (static_cast<uint32_t>(byte & 0x7F) << 8) | low_byte;
-
-            if (vsize == OFF_PAGE_FLAG || (vsize >= 128 && vsize <= record_len)) {
-                var_sizes.push_back(vsize);
-                total_var_data_size += vsize;
-                read_pos -= 2;
-            } else {
-                break;
+        // Try checking further back for more size bytes
+        else if (rec_offset >= 3) {
+            uint8_t byte_at_minus3 = page_data[rec_offset - 3];
+            if (byte_at_minus3 >= 1 && byte_at_minus3 <= REC_N_FIELDS_ONE_BYTE_MAX) {
+                var_sizes.push_back(byte_at_minus3);
             }
         }
-        else {
-            break;
-        }
     }
 
-    // === Step 2: Find Primary Key ===
-    // PK is at origin, typically 4 or 8 bytes
+    // === Step 2: Parse Primary Key ===
+    // PK is at origin, BIGINT (8 bytes) with sign bit 0x80...
     size_t pk_pos = origin;
-    size_t pk_size = 8;  // Default to BIGINT
-
-    // Detect PK size by looking for 0x80 pattern
+    size_t pk_size = 8;
     uint64_t pk_value = 0;
-    for (size_t i = origin; i + 8 <= rec_end; i++) {
-        if (page_data[i] == 0x80 && page_data[i+1] == 0x00) {
-            uint64_t raw = read_be<uint64_t>(page_data, i);
-            uint64_t val = raw ^ 0x8000000000000000ULL;
-            if (val < 10000000000ULL) {
-                pk_pos = i;
-                pk_size = 8;
-                pk_value = val;
-                break;
-            }
-        }
-    }
 
-    // If no 8-byte PK found, try 4-byte
-    if (pk_value == 0) {
-        for (size_t i = origin; i + 4 <= rec_end; i++) {
-            if (page_data[i] == 0x80 && page_data[i+1] == 0x00 && page_data[i+2] == 0x00) {
-                uint32_t raw = read_be<uint32_t>(page_data, i);
-                uint32_t val = raw ^ 0x80000000;
-                if (val < 100000000) {
-                    pk_pos = i;
-                    pk_size = 4;
-                    pk_value = val;
-                    break;
-                }
-            }
+    // Read BIGINT with sign bit
+    if (origin + 8 <= rec_end) {
+        uint64_t raw = read_be<uint64_t>(page_data, origin);
+        // InnoDB stores positive integers as: value + 0x8000000000000000
+        if ((raw >> 56) == 0x80) {
+            pk_value = raw ^ 0x8000000000000000ULL;
+        } else {
+            pk_value = raw;
         }
     }
 
@@ -787,88 +763,79 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     }
     result.push_back(pk_val);
 
-    // === Step 3: Calculate fixed data range ===
-    // After PK + TRX_ID(6) + ROLL_PTR(7), before variable data
-    size_t fixed_data_start = pk_pos + pk_size;
+    // === Step 3: Parse fields in COMPACT order ===
+    // In COMPACT/DYNAMIC format, field order is:
+    // [PK] [TRX_ID] [ROLL_PTR] [Variable-length fields] [Fixed-length fields]
+    // Variable fields come BEFORE fixed fields (after TRX/ROLL)
+
+    size_t data_pos = origin + pk_size;
     if (is_leaf) {
-        fixed_data_start += 6 + 7;  // Skip TRX_ID and ROLL_PTR
+        data_pos += 6 + 7;  // Skip TRX_ID + ROLL_PTR
     }
 
-    // Variable data is at the END of the record
-    // Fixed data is before variable data
-    size_t var_data_end = rec_end;
-    size_t var_data_start = rec_end;
-
-    // Calculate where variable data starts (from end backward)
-    for (size_t i = var_sizes.size(); i > 0 && var_data_start >= fixed_data_start; i--) {
-        var_data_start -= var_sizes[i-1];
+    // Calculate total variable field size
+    size_t total_var_size = 0;
+    for (auto sz : var_sizes) {
+        total_var_size += sz;
     }
 
-    size_t fixed_data_end = var_data_start;
+    // Parse variable-length fields first (they come right after TRX/ROLL)
+    size_t var_pos = data_pos;
+    size_t var_end = data_pos + total_var_size;
 
-    // === Step 4: Parse variable-length fields (from end of record) ===
-    size_t var_pos = var_data_start;
+    if (var_end > rec_end) {
+        var_end = rec_end;  // Safety check
+    }
 
-    for (size_t i = 0; i < var_sizes.size() && var_pos < var_data_end; i++) {
-        uint32_t vs = var_sizes[i];
+    for (size_t i = 0; i < var_sizes.size() && var_pos < var_end; i++) {
+        uint32_t sz = var_sizes[i];
+        if (sz == 0 || var_pos + sz > var_end) continue;
 
-        if (vs == OFF_PAGE_FLAG && var_pos + 20 <= var_data_end) {
-            IndexFieldValue val;
-            val.is_overflow = true;
-            val.type = IndexFieldValue::Type::OVERFLOW_PTR;
-            val.raw_bytes.assign(page_data + var_pos, page_data + var_pos + 20);
-            result.push_back(val);
-            var_pos += 20;
+        IndexFieldValue val;
+        val.raw_bytes.assign(page_data + var_pos, page_data + var_pos + sz);
+
+        // Check if it's a printable string
+        size_t printable_count = 0;
+        for (size_t j = 0; j < sz; j++) {
+            uint8_t b = page_data[var_pos + j];
+            if (b >= 32 && b < 127) printable_count++;
         }
-        else if (vs > 0 && vs < OFF_PAGE_FLAG && var_pos + vs <= var_data_end) {
-            IndexFieldValue val;
-            val.raw_bytes.assign(page_data + var_pos, page_data + var_pos + vs);
 
-            // Detect if string
-            size_t printable_count = 0;
-            for (size_t j = 0; j < vs; j++) {
-                uint8_t b = page_data[var_pos + j];
-                if (b >= 32 && b < 127) printable_count++;
-            }
-            bool looks_like_string = (printable_count > vs * 2 / 3);
-
-            if (looks_like_string) {
-                val.type = IndexFieldValue::Type::STRING_VAL;
-                val.str_value = std::string(reinterpret_cast<const char*>(page_data + var_pos), vs);
-            } else {
-                val.type = IndexFieldValue::Type::BINARY_VAL;
-            }
-            result.push_back(val);
-            var_pos += vs;
+        if (printable_count >= sz * 2 / 3) {
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            val.str_value = std::string(reinterpret_cast<const char*>(page_data + var_pos), sz);
+        } else {
+            val.type = IndexFieldValue::Type::BINARY_VAL;
         }
+
+        result.push_back(val);
+        var_pos += sz;
     }
 
-    // === Step 5: Parse fixed-length fields (between system and variable data) ===
-    size_t fixed_pos = fixed_data_start;
+    // Parse fixed-length fields after variable fields
+    size_t fixed_pos = var_end;
 
-    while (fixed_pos < fixed_data_end) {
-        size_t remaining = fixed_data_end - fixed_pos;
+    while (fixed_pos < rec_end) {
+        size_t remaining = rec_end - fixed_pos;
         IndexFieldValue val;
 
         // Try 4-byte INT with sign bit
-        if (remaining >= 4 && fixed_pos + 4 <= fixed_data_end) {
+        if (remaining >= 4) {
             uint32_t raw4 = read_be<uint32_t>(page_data, fixed_pos);
 
-            // Check for INT with sign bit
-            if ((raw4 & 0xFF000000) == 0x80000000 || (raw4 & 0xFF000000) == 0x00000000) {
+            // Check for INT with sign bit (0x80...)
+            if ((raw4 & 0xFF000000) == 0x80000000) {
                 uint32_t int_val = raw4 ^ 0x80000000;
-                if (int_val < 10000000) {
-                    val.type = IndexFieldValue::Type::INT_VAL;
-                    val.int_value = static_cast<int64_t>(int_val);
-                    val.str_value = std::to_string(int_val);
-                    val.raw_bytes.assign(page_data + fixed_pos, page_data + fixed_pos + 4);
-                    result.push_back(val);
-                    fixed_pos += 4;
-                    continue;
-                }
+                val.type = IndexFieldValue::Type::INT_VAL;
+                val.int_value = static_cast<int64_t>(int_val);
+                val.str_value = std::to_string(int_val);
+                val.raw_bytes.assign(page_data + fixed_pos, page_data + fixed_pos + 4);
+                result.push_back(val);
+                fixed_pos += 4;
+                continue;
             }
 
-            // Check for TIMESTAMP
+            // Check for TIMESTAMP (Unix timestamp range: 2020-01-01 to 2100-01-01)
             if (raw4 >= 1577836800 && raw4 <= 4102444800) {
                 time_t t = static_cast<time_t>(raw4);
                 struct tm tm_buf;
@@ -885,53 +852,21 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
             }
         }
 
-        // Try 5-byte DATETIME
-        if (remaining >= 5 && fixed_pos + 5 <= fixed_data_end) {
-            uint64_t packed = (static_cast<uint64_t>(read_be<uint32_t>(page_data, fixed_pos)) << 8) |
-                              static_cast<uint64_t>(page_data[fixed_pos + 4]);
-
-            uint64_t months = (packed & 0x7FFFC00000ULL) >> 22;
-            uint16_t year = static_cast<uint16_t>(months / 13);
-
-            if (year >= 2000 && year <= 2100) {
-                uint8_t month = static_cast<uint8_t>(months % 13);
-                uint8_t day = static_cast<uint8_t>((packed & 0x3E0000ULL) >> 17);
-                uint8_t hour = static_cast<uint8_t>((packed & 0x1F000ULL) >> 12);
-                uint8_t minute = static_cast<uint8_t>((packed & 0xFC0ULL) >> 6);
-                uint8_t second = static_cast<uint8_t>(packed & 0x3FULL);
-
-                if (month >= 1 && month <= 12 && day >= 1 && day <= 31 &&
-                    hour <= 23 && minute <= 59 && second <= 59) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
-                             year, month, day, hour, minute, second);
-
-                    val.type = IndexFieldValue::Type::DATETIME_VAL;
-                    val.str_value = buf;
-                    val.raw_bytes.assign(page_data + fixed_pos, page_data + fixed_pos + 5);
-                    result.push_back(val);
-                    fixed_pos += 5;
-                    continue;
-                }
-            }
-        }
-
-        // Fallback: output remaining as binary
+        // Fallback: output remaining bytes as binary
         val.type = IndexFieldValue::Type::BINARY_VAL;
-        val.raw_bytes.assign(page_data + fixed_pos, page_data + fixed_data_end);
-
+        val.raw_bytes.assign(page_data + fixed_pos, page_data + rec_end);
         std::ostringstream hex_ss;
         hex_ss << std::hex << std::setfill('0');
-        for (size_t i = fixed_pos; i < fixed_data_end; i++) {
+        for (size_t i = fixed_pos; i < rec_end; i++) {
             hex_ss << std::setw(2) << static_cast<int>(page_data[i]);
         }
         val.str_value = hex_ss.str();
         result.push_back(val);
-        fixed_pos = fixed_data_end;
+        fixed_pos = rec_end;
         break;
     }
 
-    // === Step 6: Enhanced fallback for poor results ===
+    // === Step 5: Enhanced fallback for poor results ===
     // Check quality: need at least 3 fields, and less than 50% should be BINARY/UNKNOWN
     int binary_count = 0;
     for (const auto& f : result) {
