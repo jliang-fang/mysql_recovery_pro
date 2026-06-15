@@ -15,6 +15,7 @@ set(RECOVERY_SOURCES
     recovery/rmrf_recovery.cpp
     recovery/blob_chain_rebuilder.cpp
     recovery/disaster_recovery.cpp
+    recovery/truncate_recovery.cpp
 )
 
 # Add innodb module sources
