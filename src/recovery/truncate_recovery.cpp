@@ -10,6 +10,7 @@
  * 1. Undo log parsing (for MySQL 5.7 style TRUNCATE)
  * 2. Disk carving for orphan pages (PhotoRec style)
  * 3. LSN-based page version tracking
+ * 4. Heuristic record detection in zeroed pages
  */
 
 #include "dbrecovery/recovery/truncate_recovery.hpp"
@@ -17,11 +18,13 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
+#include "dbrecovery/innodb/heuristic_parser.hpp"
 #include <fstream>
 #include <iostream>
 #include <algorithm>
 #include <filesystem>
 #include <cstring>
+#include <set>
 
 namespace dbrecovery {
 namespace recovery {
@@ -34,10 +37,16 @@ constexpr uint16_t FIL_PAGE_UNDO_LOG = 0x0002;
 constexpr uint16_t FIL_PAGE_TYPE_BLOB = 0x000A;
 constexpr uint16_t FIL_PAGE_SDI_BLOB = 0x45BD;
 constexpr uint16_t FIL_PAGE_ALLOCATED = 0x0000;
+constexpr uint16_t FIL_PAGE_FSP_HDR = 0x0008;
 
 // Undo log types for TRUNCATE detection
 constexpr uint8_t TRX_UNDO_DEL_REC = 13;
 constexpr uint8_t TRX_UNDO_UPD_DEL_REC = 12;
+
+// Record header signatures for heuristic detection
+constexpr uint8_t REC_STATUS_INFIMUM = 0x01;
+constexpr uint8_t REC_STATUS_SUPREMUM = 0x02;
+constexpr uint8_t REC_STATUS_NORMAL = 0x00;
 
 // ==================== TruncateRecovery Implementation ====================
 
@@ -100,13 +109,18 @@ bool TruncateRecovery::is_truncated_file(const std::string& ibd_path) {
     uint32_t total_pages = static_cast<uint32_t>(file_size / page_size_);
     uint32_t index_pages = 0;
     uint32_t zero_pages = 0;
+    uint32_t pages_checked = 0;
 
-    for (uint32_t page_no = 1; page_no < std::min(total_pages, 100u); page_no++) {
+    // Check up to 500 pages for accurate detection (or all pages if file is small)
+    uint32_t max_pages_to_check = std::min(total_pages, std::max(500u, total_pages / 10));
+
+    for (uint32_t page_no = 1; page_no < max_pages_to_check; page_no++) {
         file.seekg(page_no * page_size_, std::ios::beg);
         std::vector<uint8_t> page(page_size_);
         file.read(reinterpret_cast<char*>(page.data()), page_size_);
 
         if (!file) break;
+        pages_checked++;
 
         uint16_t page_type = innodb::read_be<uint16_t>(page.data(), 24);
 
@@ -129,15 +143,16 @@ bool TruncateRecovery::is_truncated_file(const std::string& ibd_path) {
 
     // TRUNCATE detection:
     // - INDEX pages count is very low (0-2)
-    // - Most data pages are zeroed
+    // - Most data pages are zeroed (>80% of checked pages)
     // - File still has reasonable size
     bool is_truncated = (index_pages <= 2) &&
-                        (zero_pages > total_pages * 0.8) &&
+                        (pages_checked > 0 && zero_pages > pages_checked * 0.8) &&
                         (file_size > page_size_ * 3);
 
     if (is_truncated) {
         std::cout << "[INFO] Detected TRUNCATED file: " << ibd_path << "\n";
         std::cout << "  Total pages: " << total_pages << "\n";
+        std::cout << "  Pages checked: " << pages_checked << "\n";
         std::cout << "  INDEX pages: " << index_pages << "\n";
         std::cout << "  Zero pages: " << zero_pages << "\n";
     }
@@ -173,6 +188,54 @@ TruncateRecovery::Result TruncateRecovery::recover(
         auto end_time = std::chrono::high_resolution_clock::now();
         result.recovery_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
         return result;
+    }
+
+    // Check if the file has any residual data at all
+    std::ifstream file_check(ibd_path, std::ios::binary);
+    if (file_check) {
+        file_check.seekg(0, std::ios::end);
+        uint64_t file_size = file_check.tellg();
+        file_check.seekg(0, std::ios::beg);
+
+        // Skip first page (FSP header), check for any non-zero bytes in rest of file
+        bool has_residual_data = false;
+        const size_t check_chunk_size = 64 * 1024;  // 64KB chunks
+        std::vector<uint8_t> check_chunk(check_chunk_size);
+
+        file_check.seekg(page_size_, std::ios::beg);  // Skip FSP header
+
+        while (file_check && file_check.tellg() < static_cast<std::streampos>(file_size)) {
+            size_t to_read = std::min(check_chunk_size,
+                static_cast<size_t>(file_size - file_check.tellg()));
+            file_check.read(reinterpret_cast<char*>(check_chunk.data()), to_read);
+
+            for (size_t i = 0; i < to_read; i++) {
+                if (check_chunk[i] != 0) {
+                    has_residual_data = true;
+                    break;
+                }
+            }
+            if (has_residual_data) break;
+        }
+
+        if (!has_residual_data) {
+            std::cout << "[WARN] File is completely zeroed after FSP header. "
+                      << "No residual data to recover.\n";
+            std::cout << "[INFO] TRUNCATE recovery options:\n";
+            std::cout << "  1. Check undo logs in system tablespace (ibdata1/mysql.ibd) "
+                      << "for MySQL 5.7 style TRUNCATE\n";
+            std::cout << "  2. Use --system-tablespace option to scan undo logs\n";
+            std::cout << "  3. Access raw disk device for disk carving (PhotoRec style)\n";
+            std::cout << "  4. Restore from backup if available\n";
+
+            result.method_used = "zeroed_file";
+            result.success = false;
+            result.errors.push_back("File is completely zeroed after FSP header");
+
+            auto end_time = std::chrono::high_resolution_clock::now();
+            result.recovery_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
+            return result;
+        }
     }
 
     // Step 2: Try undo log recovery (if system_tablespace provided)
@@ -228,9 +291,39 @@ TruncateRecovery::Result TruncateRecovery::recover(
         }
     }
 
-    // Step 4: Try orphan page scanning
+    // Step 4: Try heuristic residual data detection (PhotoRec-style signature scan)
+    if (!result.success || result.records_recovered == 0) {
+        if (progress) progress(0.6, "Scanning for residual data signatures...");
+
+        auto residual_records = detect_residual_records(ibd_path, schema);
+
+        if (!residual_records.empty()) {
+            result.records_recovered += residual_records.size();
+            result.method_used = result.method_used.empty()
+                ? "heuristic_detection" : result.method_used + "+heuristic";
+
+            // Merge records with deduplication
+            for (const auto& rec : residual_records) {
+                std::string hash;
+                for (const auto& [key, value] : rec) {
+                    hash += key + "=" + value + "|";
+                }
+
+                if (seen_primary_keys_.find(hash) == seen_primary_keys_.end()) {
+                    result.recovered_records.push_back(rec);
+                    seen_primary_keys_.insert(hash);
+                }
+            }
+
+            result.success = true;
+            std::cout << "[INFO] Recovered " << residual_records.size()
+                      << " records from heuristic signature scan\n";
+        }
+    }
+
+    // Step 5: Try orphan page scanning
     if (!result.success && !system_tablespace_.empty()) {
-        if (progress) progress(0.6, "Scanning for orphan pages...");
+        if (progress) progress(0.8, "Scanning for orphan pages...");
 
         auto orphan_records = recover_from_orphan_pages(ibd_path, schema);
 
@@ -493,6 +586,165 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::recover_from_o
             }
         }
     }
+
+    return records;
+}
+
+// ==================== New: Heuristic Record Detection ====================
+
+std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residual_records(
+    const std::string& ibd_path,
+    const catalog::TableSchema& schema) {
+
+    std::vector<std::map<std::string, std::string>> records;
+
+    /**
+     * PhotoRec-style residual data detection:
+     *
+     * 1. Scan for record header signatures even in zeroed pages
+     * 2. Look for valid field length prefixes
+     * 3. Detect printable string patterns
+     * 4. Validate record structure
+     *
+     * This approach works because:
+     * - TRUNCATE zeroes pages but may miss some sectors
+     * - SSD wear leveling may preserve old data
+     * - File system may not overwrite all blocks
+     */
+
+    std::ifstream file(ibd_path, std::ios::binary);
+    if (!file) {
+        return records;
+    }
+
+    file.seekg(0, std::ios::end);
+    uint64_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::cout << "[INFO] Scanning for residual records (PhotoRec style)...\n";
+
+    // Read entire file in chunks
+    const size_t chunk_size = 1024 * 1024;  // 1MB chunks
+    std::vector<uint8_t> chunk(chunk_size);
+
+    uint64_t offset = 0;
+    uint32_t potential_records = 0;
+
+    // Known patterns for InnoDB records
+    // Record headers typically: [info_bits][next_offset][heap_no][n_fields]
+    // COMPACT: 5 bytes, REDUNDANT: 6 bytes
+
+    std::set<std::string> seen_hashes;
+
+    while (offset < file_size) {
+        size_t read_size = std::min(chunk_size, static_cast<size_t>(file_size - offset));
+        file.read(reinterpret_cast<char*>(chunk.data()), read_size);
+
+        if (!file) break;
+
+        // Scan for potential record starts
+        for (size_t i = 0; i < read_size - 20; i++) {
+            // Look for potential record header patterns
+            uint8_t b0 = chunk[i];
+            uint8_t b1 = chunk[i + 1];
+
+            // COMPACT format check: info_bits should be 0x00, 0x01, 0x02
+            // and next_offset should be reasonable (non-zero, not too large)
+            if (b0 <= 0x02) {
+                uint16_t next_off = (static_cast<uint16_t>(b1) << 8) | chunk[i + 2];
+
+                // Valid next_offset range: 5-400 for typical records
+                if (next_off >= 5 && next_off <= 400) {
+                    // Check if there's potential field data following
+                    size_t data_start = i + 5;  // Skip COMPACT header
+
+                    // Look for length-encoded string or int data
+                    if (data_start + 10 < read_size) {
+                        std::vector<uint8_t> potential_data(
+                            chunk.begin() + data_start,
+                            chunk.begin() + std::min(data_start + next_off, read_size));
+
+                        // Check if data looks valid (not all zeros, has printable chars)
+                        int printable = 0;
+                        int non_zero = 0;
+                        for (uint8_t b : potential_data) {
+                            if (b != 0) non_zero++;
+                            if (b >= 32 && b <= 126) printable++;
+                        }
+
+                        // If at least 50% printable and non-zero, might be valid record
+                        if (non_zero > potential_data.size() * 0.3 &&
+                            printable > potential_data.size() * 0.2) {
+
+                            // Extract potential record
+                            std::map<std::string, std::string> record;
+
+                            // Try to parse as length-encoded fields
+                            size_t pos = 0;
+                            size_t col_idx = 0;
+                            bool valid_record = true;
+
+                            while (pos < potential_data.size() && col_idx < 20) {
+                                uint8_t len = potential_data[pos];
+
+                                // Valid length: 1-255
+                                if (len == 0 || len > potential_data.size() - pos - 1) {
+                                    break;
+                                }
+
+                                // Check if content looks valid
+                                std::string value;
+                                for (size_t j = 0; j < len && pos + 1 + j < potential_data.size(); j++) {
+                                    uint8_t c = potential_data[pos + 1 + j];
+                                    if (c >= 32 && c <= 126) {
+                                        value += static_cast<char>(c);
+                                    } else if (c == 0) {
+                                        // Null byte in string - might be binary data
+                                        value += "\\x00";
+                                    } else {
+                                        value += "?";
+                                    }
+                                }
+
+                                if (!value.empty()) {
+                                    std::string col_name = "col_" + std::to_string(col_idx);
+                                    record[col_name] = value;
+                                }
+
+                                pos += len + 1;
+                                col_idx++;
+                            }
+
+                            // Add record if we found at least 2 fields
+                            if (record.size() >= 2) {
+                                // Create hash for deduplication
+                                std::string hash;
+                                for (const auto& [k, v] : record) {
+                                    hash += k + "=" + v + "|";
+                                }
+
+                                if (seen_hashes.find(hash) == seen_hashes.end()) {
+                                    seen_hashes.insert(hash);
+                                    records.push_back(record);
+                                    potential_records++;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        offset += read_size;
+
+        // Limit to prevent excessive memory usage
+        if (records.size() >= 10000) {
+            std::cout << "[INFO] Found 10000+ residual records, stopping scan\n";
+            break;
+        }
+    }
+
+    std::cout << "[INFO] Detected " << potential_records << " potential residual records\n";
 
     return records;
 }

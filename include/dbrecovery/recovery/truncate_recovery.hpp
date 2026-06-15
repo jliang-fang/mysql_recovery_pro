@@ -143,6 +143,13 @@ private:
         const std::string& ibd_path,
         const catalog::TableSchema& schema);
 
+    /**
+     * @brief Detect residual records using PhotoRec-style signature scanning
+     */
+    std::vector<std::map<std::string, std::string>> detect_residual_records(
+        const std::string& ibd_path,
+        const catalog::TableSchema& schema);
+
     uint32_t page_size_;
     std::string system_tablespace_;
     bool scan_disk_;

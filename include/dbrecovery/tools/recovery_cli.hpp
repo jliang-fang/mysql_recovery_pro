@@ -23,6 +23,7 @@
 #include "dbrecovery/utils/cli_parser.hpp"
 #include "dbrecovery/recovery/engine.hpp"
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
+#include "dbrecovery/recovery/truncate_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/engine/drop_table_recovery.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
@@ -865,8 +866,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cout << "[INFO] Default recovery completed. Found "
                       << recovered_records.size() << " records.\n";
         } else {
-            // Fallback to heuristic scanning
-            std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying heuristic fallback...\n";
+            // Fallback to TruncateRecovery for specialized TRUNCATE handling
+            std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying TRUNCATE recovery...\n";
             auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
             dbrecovery::catalog::TableSchema schema;
             if (schema_opt.has_value()) {
@@ -874,9 +875,29 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             } else {
                 schema = create_empty_schema();
             }
-            recovered_records = engine.recover_truncate(schema);
-            std::cout << "[INFO] Heuristic fallback completed. Found "
-                      << recovered_records.size() << " records.\n";
+            schema.page_size = page_size;
+
+            // Use TruncateRecovery for PhotoRec-style residual data detection
+            dbrecovery::recovery::TruncateRecovery truncate_rec;
+            truncate_rec.set_page_size(page_size);
+            truncate_rec.enable_disk_scan(true);
+            if (!system_tablespace.empty()) {
+                truncate_rec.set_system_tablespace(system_tablespace);
+                truncate_rec.enable_undo_log(true);
+            }
+
+            auto result = truncate_rec.recover(ibd_path, schema,
+                [](double progress, const std::string& msg) {
+                    std::cout << "  [" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
+                });
+
+            if (result.success && result.records_recovered > 0) {
+                recovered_records = result.recovered_records;
+                std::cout << "[INFO] TRUNCATE recovery succeeded using: " << result.method_used << "\n";
+                std::cout << "[INFO] Recovered " << result.records_recovered << " records\n";
+            } else {
+                std::cout << "[INFO] TRUNCATE recovery found no records.\n";
+            }
         }
     }
 
@@ -919,7 +940,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cout << "[INFO] Truncate recovery completed. Found "
                       << recovered_records.size() << " records.\n";
         } else {
-            std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying heuristic fallback...\n";
+            std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying specialized TRUNCATE recovery...\n";
 
             auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
             dbrecovery::catalog::TableSchema schema;
@@ -928,10 +949,29 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             } else {
                 schema = create_empty_schema();
             }
+            schema.page_size = page_size;
 
-            recovered_records = engine.recover_truncate(schema);
-            std::cout << "[INFO] Truncate recovery completed. Found "
-                      << recovered_records.size() << " records.\n";
+            // Use TruncateRecovery for PhotoRec-style residual data detection
+            dbrecovery::recovery::TruncateRecovery truncate_rec;
+            truncate_rec.set_page_size(page_size);
+            truncate_rec.enable_disk_scan(true);
+            if (!system_tablespace.empty()) {
+                truncate_rec.set_system_tablespace(system_tablespace);
+                truncate_rec.enable_undo_log(true);
+            }
+
+            auto result = truncate_rec.recover(ibd_path, schema,
+                [](double progress, const std::string& msg) {
+                    std::cout << "  [" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
+                });
+
+            if (result.success && result.records_recovered > 0) {
+                recovered_records = result.recovered_records;
+                std::cout << "[INFO] TRUNCATE recovery succeeded using: " << result.method_used << "\n";
+                std::cout << "[INFO] Recovered " << result.records_recovered << " records\n";
+            } else {
+                std::cout << "[INFO] Truncate recovery found no records.\n";
+            }
         }
     }
 
