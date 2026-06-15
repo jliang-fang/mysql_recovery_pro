@@ -557,22 +557,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         uint32_t page_size = reader.get_page_size();
 
         // MySQL 8.0+ SDI pages are typically at pages 3 and 4
-        std::cout << "[DEBUG] parse_schema_from_sdi: total_pages=" << total_pages << " page_size=" << page_size << "\n";
         for (uint32_t page_no = 0; page_no < std::min(total_pages, static_cast<uint32_t>(10)); ++page_no) {
             auto page_data = reader.read_page_raw(page_no);
-            if (page_data.empty()) {
-                std::cout << "[DEBUG] page " << page_no << " is empty\n";
-                continue;
-            }
+            if (page_data.empty()) continue;
 
             // InnoDB FIL header fields are stored in BIG-ENDIAN format
             uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
                 page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
-            std::cout << "[DEBUG] page " << page_no << " type=0x" << std::hex << page_type << std::dec << "\n";
 
             // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
             if (dbrecovery::innodb::is_sdi_page_type(page_type)) {
-                std::cout << "[DEBUG] Found SDI page at page_no=" << page_no << "\n";
                 // For compressed SDI (0x45BD), use ibd2sql approach
                 if (page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP && page_size >= 100) {
                     // ibd2sql: offset = struct.unpack('>h',data[97:99])[0] + 99
@@ -580,7 +574,6 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         (static_cast<uint16_t>(page_data[97]) << 8) |
                         static_cast<uint16_t>(page_data[98]));
                     uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
-                    std::cout << "[DEBUG] slot_offset=" << slot_offset << " record_offset=" << record_offset << "\n";
 
                     if (record_offset > 0 && record_offset < page_size - 50) {
                         // Read lengths at offset+25 and offset+29 (big-endian)
@@ -588,14 +581,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             page_data.data(), record_offset + 25);
                         uint32_t compressed_len = dbrecovery::innodb::read_be<uint32_t>(
                             page_data.data(), record_offset + 29);
-                        std::cout << "[DEBUG] uncompressed_len=" << uncompressed_len << " compressed_len=" << compressed_len << "\n";
 
                         if (compressed_len > 0 && compressed_len < page_size &&
                             record_offset + 33 + compressed_len <= page_size) {
                             const uint8_t* compressed_data = page_data.data() + record_offset + 33;
-                            std::cout << "[DEBUG] Attempting decompression, first bytes: "
-                                      << std::hex << (int)compressed_data[0] << " " << (int)compressed_data[1]
-                                      << std::dec << "\n";
 
                             z_stream strm = {};
                             strm.next_in = const_cast<Bytef*>(compressed_data);
@@ -607,7 +596,6 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                             // Use standard zlib decompression (not raw deflate)
                             int ret = inflateInit(&strm);
-                            std::cout << "[DEBUG] inflateInit returned " << ret << "\n";
                             if (ret == Z_OK) {
                                 do {
                                     ret = inflate(&strm, Z_NO_FLUSH);
@@ -618,12 +606,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                                     }
                                 } while (ret == Z_OK);
 
-                                std::cout << "[DEBUG] inflate loop ended with ret=" << ret << " total_out=" << strm.total_out << "\n";
                                 if (ret == Z_STREAM_END) {
                                     decompressed.resize(strm.total_out);
                                     std::string json_str(reinterpret_cast<const char*>(decompressed.data()),
                                                           decompressed.size());
-                                    std::cout << "[DEBUG] Decompressed JSON length=" << json_str.size() << "\n";
                                     try {
                                         auto json = nlohmann::json::parse(json_str);
                                         dbrecovery::catalog::TableSchema schema;
@@ -639,18 +625,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                                                       << schema.table_name << " (" << schema.columns.size() << " columns)\n";
                                             inflateEnd(&strm);
                                             return schema;
-                                        } else {
-                                            std::cout << "[DEBUG] Schema validation failed\n";
                                         }
-                                    } catch (const nlohmann::json::parse_error& e) {
-                                        std::cout << "[DEBUG] JSON parse error: " << e.what() << "\n";
-                                    }
+                                    } catch (const nlohmann::json::parse_error&) {}
                                 }
                                 inflateEnd(&strm);
                             }
-                        } else {
-                            std::cout << "[DEBUG] Invalid compressed_len or offset: compressed_len=" << compressed_len
-                                      << " page_size=" << page_size << " end_offset=" << (record_offset + 33 + compressed_len) << "\n";
                         }
                     }
                 }
@@ -849,11 +828,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // Try FRM schema first
         bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
-        std::cout << "[DEBUG] has_frm_schema=" << has_frm_schema << " frm_path=" << frm_path << "\n";
 
         // If no FRM, try SDI schema (MySQL 8.0+)
         if (!has_frm_schema) {
-            std::cout << "[DEBUG] Attempting SDI schema extraction...\n";
             auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id);
             if (sdi_schema_opt.has_value()) {
                 std::cout << "[INFO] Using SDI schema: " << sdi_schema_opt->table_name
@@ -876,7 +853,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 index_parser.set_columns(sdi_columns);
                 has_frm_schema = true;
             } else {
-                std::cout << "[DEBUG] SDI schema extraction returned empty\n";
+                std::cout << "[INFO] No schema found, using schemaless recovery\n";
             }
         }
 
