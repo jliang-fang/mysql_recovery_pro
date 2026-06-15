@@ -192,12 +192,17 @@ class DisasterRecoveryValidator:
         output_dir = f"{OUTPUT_BASE}/{version}/sdi"
         result = self.run_recovery(ibd_file, output_dir, ['--extract-sdi'])
 
+        # Check if SDI was extracted
+        import re
+        sdi_extracted = re.search(r'sdi_extracted=(\d+)', result.get('stdout', ''), re.IGNORECASE)
+        has_sdi = sdi_extracted and int(sdi_extracted.group(1)) > 0
+
         return {
             'test': 'sdi_recovery',
             'version': version,
             'file': os.path.basename(ibd_file),
-            'records': result.get('records', 0),
-            'success': result.get('returncode') == 0 and result.get('records', 0) > 0
+            'sdi_extracted': has_sdi,
+            'success': has_sdi
         }
 
     def test_drop_table_recovery(self, version, sys_tablespace_path):
@@ -295,7 +300,7 @@ class DisasterRecoveryValidator:
                     total_tests += 1
                     if result['success']:
                         passed_tests += 1
-                        self.log(f"  ✓ SDI recovery: {result['records']} records")
+                        self.log(f"  ✓ SDI recovery: extracted={result['sdi_extracted']}")
 
             # DROP TABLE recovery
             sys_tablespace = os.path.join(data_dir, config['sys_tablespace'])
@@ -307,7 +312,7 @@ class DisasterRecoveryValidator:
                     passed_tests += 1
 
         # Print summary
-        self.print_summary(total_tests, passed_tests)
+        self.print_summary(passed_tests, total_tests)
 
         return passed_tests, total_tests
 
