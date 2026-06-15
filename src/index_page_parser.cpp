@@ -836,6 +836,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
             }
 
             // Check for TIMESTAMP (Unix timestamp range: 2020-01-01 to 2100-01-01)
+            // Also handle TIMESTAMP with fractional seconds (1-3 extra bytes)
             if (raw4 >= 1577836800 && raw4 <= 4102444800) {
                 time_t t = static_cast<time_t>(raw4);
                 struct tm tm_buf;
@@ -848,8 +849,27 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
                 val.raw_bytes.assign(page_data + fixed_pos, page_data + fixed_pos + 4);
                 result.push_back(val);
                 fixed_pos += 4;
+
+                // Check for fractional seconds bytes (1-3 bytes)
+                // InnoDB stores fractional seconds as 1-3 bytes depending on precision:
+                // TIMESTAMP(1-2): 1 byte, TIMESTAMP(3-4): 2 bytes, TIMESTAMP(5-6): 3 bytes
+                size_t remaining_after_ts = rec_end - fixed_pos;
+                if (remaining_after_ts >= 1 && remaining_after_ts <= 3) {
+                    // Likely fractional seconds - consume them but don't output as separate field
+                    // The value represents fractional seconds in 1/10000th second increments
+                    val.raw_bytes.assign(page_data + fixed_pos, page_data + rec_end);
+                    fixed_pos = rec_end;  // Consume remaining bytes
+                }
                 continue;
             }
+        }
+
+        // Try small fixed-size fields before falling back to binary
+        if (remaining >= 1 && remaining <= 3) {
+            // Small remaining bytes after TIMESTAMP are likely fractional seconds
+            // or padding - consume them without outputting as a separate field
+            fixed_pos = rec_end;
+            break;
         }
 
         // Fallback: output remaining bytes as binary
