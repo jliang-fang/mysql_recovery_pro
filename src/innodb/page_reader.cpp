@@ -334,12 +334,12 @@ static bool is_valid_page_type(const uint8_t* page_data, size_t page_size, size_
         return false;
     }
 
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, offset);
+    // ✅ 修复：FIL_PAGE_TYPE 存储为大端格式，必须使用 read_be
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, offset);
 
-    // InnoDB 有效页类型（参考 MySQL 5.6/5.7/8.0/8.0 官方文档）
-    // MySQL 5.6/5.7 使用旧值 (0x45BC=17852, 0x45BF=48965)，MySQL 8.0+ 使用新值
-    // MySQL 5.6 InnoDB 索引页类型: 0x45BC (17852) 或 0x45BF (48965)
-    // MySQL 8.0+ InnoDB 索引页类型: 0x26F1 (9969)
+    // InnoDB 有效页类型（参考 MySQL 5.6/5.7/8.0/8.4/9.0 官方文档）
+    // ✅ 修复：FIL_PAGE_TYPE 存储为大端格式，所以值应该是大端读取的结果
+    // MySQL 5.6/5.7 使用旧值 (0x45BC=17852, 0x45BF=17855), MySQL 8.0+ 使用新值
     switch (page_type) {
         case 0x0000:  // FIL_PAGE_TYPE_ALLOCATED - 新分配的页
         case 0x0001:  // FIL_PAGE_INDEX - B+Tree 索引页 (MySQL 8.0 别名)
@@ -359,8 +359,14 @@ static bool is_valid_page_type(const uint8_t* page_data, size_t page_size, size_
         case 0x0010:  // FIL_PAGE_TYPE_ZBLOB - 压缩 BLOB 页
         case 0x0011:  // FIL_PAGE_TYPE_ZBLOB2 - 压缩 BLOB 页 2
         case 0x0020:  // FIL_PAGE_TYPE_INDEX - 索引页 (另一种编码)
-        case 0x45BC:  // ✅ 新增: MySQL 5.6 索引页 (0x45BC = 17852)
-        case 0x45BF:  // ✅ 新增: MySQL 5.6 索引页变体 (0x45BF = 48965)
+        case 0x45B2:  // ✅ MySQL 5.6/5.7 Undo log page (17842)
+        case 0x45B3:  // ✅ MySQL 5.6/5.7 Index page (17843)
+        case 0x45B4:  // ✅ MySQL 5.6/5.7 Blob page (17844)
+        case 0x45B5:  // ✅ MySQL 5.6/5.7 Compressed page (17845)
+        case 0x45BC:  // ✅ MySQL 5.6 索引页 (17852)
+        case 0x45BD:  // ✅ MySQL 8.0+ SDI_ZIP / BLOB page (17853)
+        case 0x45BE:  // ✅ MySQL 8.0+ SDI page (17854)
+        case 0x45BF:  // ✅ MySQL 5.6/5.7 索引页 (17855)
             return true;
         default:
             return false;
@@ -434,9 +440,9 @@ static int calculate_header_score(const uint8_t* page_data, size_t page_size) {
     // 5. 检查FIL_PAGE_TYPE的值是否偏向某些页大小
     // MySQL 5.6/5.7: FIL_PAGE_INDEX = 0x45BF (17855)
     // MySQL 8.0+: FIL_PAGE_INDEX = 0x0006 (6)
-    // ✅ 修复：使用正确的偏移 FIL_PAGE_TYPE_ABS (24) 而不是 16
+    // ✅ 修复：FIL_PAGE_TYPE 存储为大端格式，必须使用 read_be
     if (page_size > 38) {
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 24);
+        uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, 24);
 
         // 检查页类型值是否可能是被错误解读的
         // 如果页类型看起来像大值（如17855, 17852），可能是页大小被误判了
@@ -532,10 +538,14 @@ InnoDBFileReader::InnoDBFileReader(const std::string& file_path, uint32_t page_s
         // - 大表：10000-1000000 页 (16KB)
         // 32KB 和 64KB 页较少见，通常只在特定场景使用
         // 页数过少（<10000）的64KB页不太合理
+
+        // ✅ 修复：对于小文件，不因页数过少而扣分
+        // 小文件（<100页）可能是测试数据或刚创建的表，页数少是正常的
         if (num_pages >= 10 && num_pages <= 100000) {
             score += 20;  // 页数在合理范围内
-        } else if (num_pages < 10) {
-            score -= 10;  // 页数过少
+        } else if (num_pages < 10 && ps >= 32768) {
+            // 只对大页大小（32KB/64KB）扣分，小页大小不扣分
+            score -= 10;  // 大页+少页数 = 不合理
         }
 
         // ✅ 新增：页大小合理性评分 - 基于文件大小
