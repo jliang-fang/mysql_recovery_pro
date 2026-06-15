@@ -1351,7 +1351,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        // ==================== ENUM (type 247) ====================
+        // ==================== ENUM (InnoDB type 22, MySQL type 247) ====================
+        // InnoDB stores ENUM with internal type 22, MySQL server type is 247
+        case 22:
         case 247: {
             val.type = IndexFieldValue::Type::STRING_VAL;
             if (field_size > 0 && !col.enum_values.empty()) {
@@ -1369,7 +1371,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        // ==================== SET (type 248) ====================
+        // ==================== SET (InnoDB type 23, MySQL type 248) ====================
+        // InnoDB stores SET with internal type 23, MySQL server type is 248
+        case 23:
         case 248: {
             val.type = IndexFieldValue::Type::STRING_VAL;
             if (field_size > 0 && !col.set_values.empty()) {
