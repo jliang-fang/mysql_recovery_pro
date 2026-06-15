@@ -7,6 +7,7 @@
 #include "dbrecovery/engine/signature_scraper.hpp"
 #include "dbrecovery/engine/system_table_sdi.hpp"
 #include "dbrecovery/utils/innodb_checksum.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -19,6 +20,9 @@
 
 namespace dbrecovery {
 namespace engine {
+
+// Import RedundantHeader for convenience
+using innodb::RedundantHeader;
 
 // ==================== Helper Functions ====================
 
@@ -410,22 +414,22 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             }
         }
 
-        // Parse records from system tables using deleted record scanning
+        // Parse records from system tables
         if (pages_by_index_id.count(sys_index_ids::SYS_TABLES)) {
             for (const auto& page_data : pages_by_index_id[sys_index_ids::SYS_TABLES]) {
-                parse_sys_tables_page_deleted(page_data.data());
+                parse_sys_tables_page(page_data.data());
             }
         }
 
         if (pages_by_index_id.count(sys_index_ids::SYS_COLUMNS)) {
             for (const auto& page_data : pages_by_index_id[sys_index_ids::SYS_COLUMNS]) {
-                parse_sys_columns_page_deleted(page_data.data());
+                parse_sys_columns_page(page_data.data());
             }
         }
 
         if (pages_by_index_id.count(sys_index_ids::SYS_INDEXES)) {
             for (const auto& page_data : pages_by_index_id[sys_index_ids::SYS_INDEXES]) {
-                parse_sys_indexes_page_deleted(page_data.data());
+                parse_sys_indexes_page(page_data.data());
             }
         }
     }
@@ -468,15 +472,46 @@ void SystemTablespaceScanner::parse_sys_tables_page(const uint8_t* data) {
     uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
     if (page_type != 0x45BF) return;
 
-    // Scan for records - simplified heuristic scanning
-    for (size_t offset = 120; offset < page_size_ - 100; offset++) {
-        SysTableEntry table;
-        table.deleted = false;
-        table.dropped = false;
+    // Parse page header to get slot directory info
+    uint16_t n_dir_slots = (static_cast<uint16_t>(data[38]) << 8) | data[39];
+    if (n_dir_slots == 0 || n_dir_slots > 1000) return;
 
-        size_t pos = offset;
+    // Slot directory is at the end of the page
+    size_t slot_dir_offset = page_size_ - n_dir_slots * 2;
 
-        // Try to find a valid table name (schema/table format)
+    // Iterate through slots (skip first 2: infimum and supremum)
+    for (size_t slot = 2; slot < n_dir_slots; slot++) {
+        size_t slot_pos = slot_dir_offset + slot * 2;
+        if (slot_pos + 2 > page_size_) break;
+
+        // Read record offset from slot (big-endian)
+        uint16_t record_offset = (static_cast<uint16_t>(data[slot_pos]) << 8) | data[slot_pos + 1];
+        if (record_offset == 0 || record_offset >= page_size_ - 50) continue;
+
+        // Parse REDUNDANT record header at record_offset
+        auto header_opt = RedundantHeader::parse(data + record_offset, page_size_ - record_offset);
+        if (!header_opt.has_value()) continue;
+
+        RedundantHeader header = header_opt.value();
+
+        // Skip deleted records for normal tables (we want existing tables)
+        if (header.is_deleted()) continue;
+
+        // Get record data start (after 6-byte header for REDUNDANT)
+        size_t pos = record_offset + 6;
+        if (pos >= page_size_ - 20) continue;
+
+        // SYS_TABLES row format (REDUNDANT):
+        // Field 1: NAME (length-encoded string)
+        // Field 2: ID (8 bytes)
+        // Field 3: N_COLS (4 bytes)
+        // Field 4: TYPE (4 bytes)
+        // Field 5: MIX_ID (8 bytes)
+        // Field 6: MIX_LEN (4 bytes)
+        // Field 7: CLUSTER_NAME (length-encoded string)
+        // Field 8: SPACE (4 bytes)
+
+        // Read name length (first byte is length for REDUNDANT)
         uint8_t name_len = data[pos++];
         if (name_len == 0 || name_len > 200 || pos + name_len > page_size_ - 50) continue;
 
@@ -489,6 +524,9 @@ void SystemTablespaceScanner::parse_sys_tables_page(const uint8_t* data) {
             continue;
         }
 
+        SysTableEntry table;
+        table.deleted = false;
+        table.dropped = false;
         table.schema_name = name.substr(0, slash_pos);
         table.table_name = name.substr(slash_pos + 1);
 
@@ -546,10 +584,36 @@ void SystemTablespaceScanner::parse_sys_columns_page(const uint8_t* data) {
     uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
     if (page_type != 0x45BF) return;
 
-    for (size_t offset = 120; offset < page_size_ - 50; offset++) {
-        SysColumnEntry col;
+    // Parse page header to get slot directory info
+    uint16_t n_dir_slots = (static_cast<uint16_t>(data[38]) << 8) | data[39];
+    if (n_dir_slots == 0 || n_dir_slots > 1000) return;
 
-        size_t pos = offset;
+    // Slot directory is at the end of the page
+    size_t slot_dir_offset = page_size_ - n_dir_slots * 2;
+
+    // Iterate through slots (skip first 2: infimum and supremum)
+    for (size_t slot = 2; slot < n_dir_slots; slot++) {
+        size_t slot_pos = slot_dir_offset + slot * 2;
+        if (slot_pos + 2 > page_size_) break;
+
+        // Read record offset from slot (big-endian)
+        uint16_t record_offset = (static_cast<uint16_t>(data[slot_pos]) << 8) | data[slot_pos + 1];
+        if (record_offset == 0 || record_offset >= page_size_ - 50) continue;
+
+        // Parse REDUNDANT record header at record_offset
+        auto header_opt = RedundantHeader::parse(data + record_offset, page_size_ - record_offset);
+        if (!header_opt.has_value()) continue;
+
+        RedundantHeader header = header_opt.value();
+
+        // Skip deleted records for normal columns
+        if (header.is_deleted()) continue;
+
+        // Get record data start (after 6-byte header for REDUNDANT)
+        size_t pos = record_offset + 6;
+        if (pos >= page_size_ - 20) continue;
+
+        SysColumnEntry col;
 
         // Parse table_id (8 bytes)
         if (pos + 8 > page_size_) continue;
@@ -610,10 +674,36 @@ void SystemTablespaceScanner::parse_sys_indexes_page(const uint8_t* data) {
     uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
     if (page_type != 0x45BF) return;
 
-    for (size_t offset = 120; offset < page_size_ - 50; offset++) {
-        SysIndexEntry idx;
+    // Parse page header to get slot directory info
+    uint16_t n_dir_slots = (static_cast<uint16_t>(data[38]) << 8) | data[39];
+    if (n_dir_slots == 0 || n_dir_slots > 1000) return;
 
-        size_t pos = offset;
+    // Slot directory is at the end of the page
+    size_t slot_dir_offset = page_size_ - n_dir_slots * 2;
+
+    // Iterate through slots (skip first 2: infimum and supremum)
+    for (size_t slot = 2; slot < n_dir_slots; slot++) {
+        size_t slot_pos = slot_dir_offset + slot * 2;
+        if (slot_pos + 2 > page_size_) break;
+
+        // Read record offset from slot (big-endian)
+        uint16_t record_offset = (static_cast<uint16_t>(data[slot_pos]) << 8) | data[slot_pos + 1];
+        if (record_offset == 0 || record_offset >= page_size_ - 50) continue;
+
+        // Parse REDUNDANT record header at record_offset
+        auto header_opt = RedundantHeader::parse(data + record_offset, page_size_ - record_offset);
+        if (!header_opt.has_value()) continue;
+
+        RedundantHeader header = header_opt.value();
+
+        // Skip deleted records for normal indexes
+        if (header.is_deleted()) continue;
+
+        // Get record data start (after 6-byte header for REDUNDANT)
+        size_t pos = record_offset + 6;
+        if (pos >= page_size_ - 20) continue;
+
+        SysIndexEntry idx;
 
         // Parse table_id (8 bytes)
         if (pos + 8 > page_size_) continue;
@@ -861,6 +951,11 @@ DropTableRecovery::Result DropTableRecovery::recover(
 
     Result result;
     result.success = false;
+    result.tables_found = 0;
+    result.tables_recovered = 0;
+    result.total_records = 0;
+    result.scan_time_seconds = 0;
+    result.recovery_time_seconds = 0;
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
