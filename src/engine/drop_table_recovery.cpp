@@ -13,6 +13,9 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <set>
+#include <nlohmann/json.hpp>
+#include <zlib.h>
 
 namespace dbrecovery {
 namespace engine {
@@ -151,63 +154,278 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
     // Allocate buffer for reading pages
     std::vector<uint8_t> page_buffer(page_size_);
 
-    // Map to store found pages by index_id
-    std::map<uint64_t, std::vector<std::vector<uint8_t>>> pages_by_index_id;
-
-    // Scan all pages looking for INDEX pages with system table index IDs
-    for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
-        file.seekg(page_no * page_size_, std::ios::beg);
-        file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
-
-        if (!file) break;
-
-        // Check if this is an INDEX page
-        if (!is_index_page_type(page_buffer.data())) continue;
-
-        // Extract index_id
-        uint64_t idx_id = extract_index_id_from_page(page_buffer.data());
-
-        // Check if it's one of the system table index IDs
-        bool is_sys_table = false;
-        if (is_mysql80_format()) {
-            // MySQL 8.0 DD tables have low index IDs
-            is_sys_table = (idx_id >= 1 && idx_id <= 100);
-        } else {
-            // MySQL 5.7 system tables
-            is_sys_table = (idx_id == sys_index_ids::SYS_TABLES ||
-                           idx_id == sys_index_ids::SYS_COLUMNS ||
-                           idx_id == sys_index_ids::SYS_INDEXES ||
-                           idx_id == sys_index_ids::SYS_FIELDS);
-        }
-
-        if (is_sys_table) {
-            pages_by_index_id[idx_id].push_back(page_buffer);
-        }
-    }
-
-    // Parse records from system tables
     if (is_mysql80_format()) {
-        // TODO: Implement MySQL 8.0 DD table parsing
-        // This requires parsing compressed SDI pages
+        // MySQL 8.0+: Parse SDI pages from mysql.ibd to get DD table schemas
+        // Then scan INDEX pages for deleted records in DD tables
+
+        // Step 1: Parse SDI pages (pages 3 and 4) to get DD table index IDs
+        std::map<std::string, uint64_t> dd_table_index_ids;
+        std::map<uint64_t, std::string> index_id_to_table_name;
+
+        // Parse SDI pages to extract DD table metadata
+        for (uint64_t page_no = 0; page_no < std::min(num_pages, static_cast<uint64_t>(10)); ++page_no) {
+            file.seekg(page_no * page_size_, std::ios::beg);
+            file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
+            if (!file) break;
+
+            // Check for SDI page type
+            uint16_t page_type = (static_cast<uint16_t>(page_buffer[24]) << 8) | page_buffer[25];
+
+            if (page_type == 0x45BD) {  // FIL_PAGE_SDI_ZIP (compressed SDI)
+                // Use ibd2sql approach: slot-based offset calculation
+                int16_t slot_offset = static_cast<int16_t>(
+                    (static_cast<uint16_t>(page_buffer[97]) << 8) |
+                    static_cast<uint16_t>(page_buffer[98]));
+                uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
+
+                if (record_offset > 0 && record_offset < page_size_ - 50) {
+                    // Read lengths at offset+25 and offset+29 (big-endian)
+                    uint32_t uncompressed_len = read_be_u32(page_buffer.data() + record_offset + 25);
+                    uint32_t compressed_len = read_be_u32(page_buffer.data() + record_offset + 29);
+
+                    if (compressed_len > 0 && compressed_len < page_size_ &&
+                        record_offset + 33 + compressed_len <= page_size_) {
+
+                        const uint8_t* compressed_data = page_buffer.data() + record_offset + 33;
+
+                        // Decompress using standard zlib
+                        z_stream strm = {};
+                        strm.next_in = const_cast<Bytef*>(compressed_data);
+                        strm.avail_in = compressed_len;
+
+                        std::vector<uint8_t> decompressed(uncompressed_len > 0 ? uncompressed_len : compressed_len * 4);
+                        strm.next_out = decompressed.data();
+                        strm.avail_out = decompressed.size();
+
+                        int ret = inflateInit(&strm);  // Standard zlib
+                        if (ret == Z_OK) {
+                            do {
+                                ret = inflate(&strm, Z_NO_FLUSH);
+                                if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
+                                    decompressed.resize(decompressed.size() * 2);
+                                    strm.next_out = decompressed.data() + strm.total_out;
+                                    strm.avail_out = decompressed.size() - strm.total_out;
+                                }
+                            } while (ret == Z_OK);
+
+                            if (ret == Z_STREAM_END) {
+                                decompressed.resize(strm.total_out);
+                                std::string json_str(reinterpret_cast<const char*>(decompressed.data()),
+                                                      decompressed.size());
+
+                                try {
+                                    auto json = nlohmann::json::parse(json_str);
+
+                                    // Check if this is a DD table (mysql.tables, mysql.columns, etc.)
+                                    if (json.contains("dd_object")) {
+                                        auto& dd_obj = json["dd_object"];
+                                        std::string schema_ref = dd_obj.value("schema_ref", "");
+                                        std::string table_name = dd_obj.value("name", "");
+
+                                        if (schema_ref == "mysql" && dd_obj.contains("indexes")) {
+                                            // Get the PRIMARY index ID from se_private_data
+                                            for (auto& idx : dd_obj["indexes"]) {
+                                                if (idx.value("name", "") == "PRIMARY" && idx.contains("se_private_data")) {
+                                                    std::string private_data = idx["se_private_data"].get<std::string>();
+                                                    // Parse id=xxx from se_private_data
+                                                    size_t id_pos = private_data.find("id=");
+                                                    if (id_pos != std::string::npos) {
+                                                        uint64_t idx_id = std::stoull(private_data.substr(id_pos + 3));
+                                                        dd_table_index_ids[table_name] = idx_id;
+                                                        index_id_to_table_name[idx_id] = table_name;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } catch (const nlohmann::json::parse_error&) {
+                                    // Ignore parse errors
+                                }
+                            }
+                            inflateEnd(&strm);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Scan all INDEX pages for deleted records in DD tables
+        // DD tables in MySQL 8.0: tables, columns, indexes, index_column_usage, etc.
+        static const std::set<std::string> DD_TABLES = {
+            "tables", "columns", "indexes", "index_column_usage",
+            "foreign_keys", "foreign_key_column_usage", "check_constraints",
+            "table_partitions", "schemata", "tablespaces"
+        };
+
+        // Map index_id -> pages
+        std::map<uint64_t, std::vector<std::vector<uint8_t>>> dd_index_pages;
+
+        for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
+            file.seekg(page_no * page_size_, std::ios::beg);
+            file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
+            if (!file) break;
+
+            if (!is_index_page_type(page_buffer.data())) continue;
+
+            uint64_t idx_id = extract_index_id_from_page(page_buffer.data());
+
+            // Check if this is a DD table index
+            if (index_id_to_table_name.count(idx_id)) {
+                dd_index_pages[idx_id].push_back(page_buffer);
+            }
+        }
+
+        // Step 3: Parse deleted records from DD tables
+        // Key fields: tables.id -> table_id, tables.name -> table_name
+        std::map<uint64_t, std::map<std::string, std::string>> dd_tables_data;
+        std::map<uint64_t, std::vector<std::map<std::string, std::string>>> dd_columns_data;
+        std::map<uint64_t, std::vector<std::map<std::string, std::string>>> dd_indexes_data;
+
+        // Parse mysql.tables pages for deleted records
+        if (dd_table_index_ids.count("tables")) {
+            uint64_t tables_idx_id = dd_table_index_ids["tables"];
+            for (const auto& page_data : dd_index_pages[tables_idx_id]) {
+                parse_dd_records_deleted(page_data.data(), "tables", dd_tables_data);
+            }
+        }
+
+        // Parse mysql.columns pages
+        if (dd_table_index_ids.count("columns")) {
+            uint64_t columns_idx_id = dd_table_index_ids["columns"];
+            for (const auto& page_data : dd_index_pages[columns_idx_id]) {
+                parse_dd_records_deleted_columns(page_data.data(), dd_columns_data);
+            }
+        }
+
+        // Parse mysql.indexes pages
+        if (dd_table_index_ids.count("indexes")) {
+            uint64_t indexes_idx_id = dd_table_index_ids["indexes"];
+            for (const auto& page_data : dd_index_pages[indexes_idx_id]) {
+                parse_dd_records_deleted_indexes(page_data.data(), dd_indexes_data);
+            }
+        }
+
+        // Step 4: Build recovered table metadata
+        for (const auto& [table_id, table_data] : dd_tables_data) {
+            // Get name from map
+            std::string name;
+            if (table_data.count("name")) name = table_data.at("name");
+            if (name.empty()) continue;
+
+            // Parse schema/table format
+            size_t slash_pos = name.find('/');
+            if (slash_pos == std::string::npos) continue;
+
+            std::string schema_name = name.substr(0, slash_pos);
+            std::string table_name = name.substr(slash_pos + 1);
+
+            // Skip system schemas
+            if (schema_name == "mysql" || schema_name == "sys" ||
+                schema_name == "information_schema" || schema_name == "performance_schema") {
+                continue;
+            }
+
+            RecoveredTableMetadata metadata;
+            metadata.table_id = table_id;
+            metadata.schema_name = schema_name;
+            metadata.table_name = table_name;
+            metadata.recovered_from_deleted = true;
+            metadata.confidence = 0.9;
+
+            // Get columns
+            if (dd_columns_data.count(table_id)) {
+                for (const auto& col_data : dd_columns_data[table_id]) {
+                    SysColumnEntry col;
+                    col.table_id = table_id;
+                    if (col_data.count("name")) col.name = col_data.at("name");
+                    if (col_data.count("ordinal_position")) col.pos = std::stoul(col_data.at("ordinal_position"));
+                    if (col_data.count("type")) col.mtype = std::stoul(col_data.at("type"));
+                    if (col_data.count("char_length")) col.len = std::stoul(col_data.at("char_length"));
+                    col.is_nullable = col_data.count("is_nullable") && col_data.at("is_nullable") != "0";
+                    col.is_unsigned = col_data.count("is_unsigned") && col_data.at("is_unsigned") != "0";
+                    metadata.columns.push_back(col);
+                }
+
+                // Sort by position
+                std::sort(metadata.columns.begin(), metadata.columns.end(),
+                    [](const SysColumnEntry& a, const SysColumnEntry& b) { return a.pos < b.pos; });
+            }
+
+            // Build schema
+            metadata.schema = build_schema_from_dd(table_name, metadata.columns);
+
+            // Get indexes and find primary key
+            if (dd_indexes_data.count(table_id)) {
+                for (const auto& idx_data : dd_indexes_data[table_id]) {
+                    SysIndexEntry idx;
+                    idx.table_id = table_id;
+                    if (idx_data.count("name")) idx.name = idx_data.at("name");
+                    if (idx_data.count("id")) idx.index_id = std::stoull(idx_data.at("id"));
+                    if (idx_data.count("type")) idx.type = std::stoul(idx_data.at("type"));
+
+                    if (idx.name == "PRIMARY") {
+                        metadata.primary_index_id = idx.index_id;
+
+                        // Parse index_id from se_private_data
+                        if (idx_data.count("se_private_data")) {
+                            std::string private_data = idx_data.at("se_private_data");
+                            size_t id_pos = private_data.find("id=");
+                            if (id_pos != std::string::npos) {
+                                metadata.primary_index_id = std::stoull(private_data.substr(id_pos + 3));
+                            }
+                        }
+                    }
+                    metadata.indexes.push_back(idx);
+                }
+            }
+
+            recovered_tables.push_back(metadata);
+        }
     } else {
         // MySQL 5.7: Parse SYS_TABLES
+        // Map to store found pages by index_id
+        std::map<uint64_t, std::vector<std::vector<uint8_t>>> pages_by_index_id;
+
+        // Scan all pages looking for INDEX pages with system table index IDs
+        for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
+            file.seekg(page_no * page_size_, std::ios::beg);
+            file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
+
+            if (!file) break;
+
+            // Check if this is an INDEX page
+            if (!is_index_page_type(page_buffer.data())) continue;
+
+            // Extract index_id
+            uint64_t idx_id = extract_index_id_from_page(page_buffer.data());
+
+            // Check if it's one of the system table index IDs
+            bool is_sys_table = (idx_id == sys_index_ids::SYS_TABLES ||
+                               idx_id == sys_index_ids::SYS_COLUMNS ||
+                               idx_id == sys_index_ids::SYS_INDEXES ||
+                               idx_id == sys_index_ids::SYS_FIELDS);
+
+            if (is_sys_table) {
+                pages_by_index_id[idx_id].push_back(page_buffer);
+            }
+        }
+
+        // Parse records from system tables using deleted record scanning
         if (pages_by_index_id.count(sys_index_ids::SYS_TABLES)) {
             for (const auto& page_data : pages_by_index_id[sys_index_ids::SYS_TABLES]) {
-                parse_sys_tables_page(page_data.data());
+                parse_sys_tables_page_deleted(page_data.data());
             }
         }
 
-        // Parse SYS_COLUMNS
         if (pages_by_index_id.count(sys_index_ids::SYS_COLUMNS)) {
             for (const auto& page_data : pages_by_index_id[sys_index_ids::SYS_COLUMNS]) {
-                parse_sys_columns_page(page_data.data());
+                parse_sys_columns_page_deleted(page_data.data());
             }
         }
 
-        // Parse SYS_INDEXES
         if (pages_by_index_id.count(sys_index_ids::SYS_INDEXES)) {
             for (const auto& page_data : pages_by_index_id[sys_index_ids::SYS_INDEXES]) {
-                parse_sys_indexes_page(page_data.data());
+                parse_sys_indexes_page_deleted(page_data.data());
             }
         }
     }
@@ -802,6 +1020,456 @@ bool DropTableRecovery::try_recover_from_ibd(
 
     // TODO: Implement IBD file recovery
     return false;
+}
+
+// ==================== Deleted Record Parsing Helpers ====================
+
+void SystemTablespaceScanner::parse_sys_tables_page_deleted(const uint8_t* data) {
+    uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
+    if (page_type != 0x45BF) return;
+
+    // Get deleted record offset from page directory (offset 44-46, big-endian)
+    // This is the "free" list head - first deleted record
+    uint16_t deleted_offset = (static_cast<uint16_t>(data[44]) << 8) | data[45];
+
+    if (deleted_offset == 0 || deleted_offset >= page_size_) return;
+
+    // Follow the deleted record chain
+    size_t current_offset = deleted_offset;
+    int max_iterations = 1000;  // Safety limit
+    int iterations = 0;
+
+    while (current_offset > 100 && current_offset < page_size_ - 50 && iterations < max_iterations) {
+        iterations++;
+
+        // Try to parse record at this offset
+        // Record format: [record header] [trx_id] [roll_ptr] [field data...]
+        size_t pos = current_offset;
+
+        // Skip record header (variable size, typically 5-6 bytes)
+        // Check for valid record start
+        if (pos + 20 > page_size_) break;
+
+        // Parse record info bytes
+        uint8_t info_bits = data[pos];
+
+        // Check if this looks like a valid record
+        // Try to extract table name (first field in SYS_TABLES)
+        // In DYNAMIC format, variable-length fields are stored with length prefix
+
+        // Skip the record header and system columns (DB_TRX_ID, DB_ROLL_PTR)
+        // For SYS_TABLES, the user columns are: NAME, ID, N_COLS, TYPE, MIX_ID, MIX_LEN, CLUSTER_NAME, SPACE
+
+        // Try heuristic: look for schema/table pattern
+        for (size_t probe = pos + 5; probe < std::min<size_t>(pos + 100, page_size_ - 50); probe++) {
+            uint8_t len = data[probe];
+            if (len == 0 || len > 200 || probe + len > page_size_ - 50) continue;
+
+            std::string name(reinterpret_cast<const char*>(data + probe + 1), len);
+
+            // Check for schema/table format
+            size_t slash_pos = name.find('/');
+            if (slash_pos != std::string::npos && slash_pos > 0 && slash_pos < name.length() - 1) {
+                SysTableEntry table;
+                table.deleted = true;
+                table.dropped = true;
+                table.schema_name = name.substr(0, slash_pos);
+                table.table_name = name.substr(slash_pos + 1);
+
+                // Skip system tables
+                if (table.schema_name != "SYS" && table.schema_name != "mysql" &&
+                    !table.schema_name.empty() && !table.table_name.empty() &&
+                    table.table_name.substr(0, 4) != "FTS_") {
+
+                    // Try to parse remaining fields
+                    size_t field_pos = probe + 1 + len;
+
+                    // ID (8 bytes, big-endian)
+                    if (field_pos + 8 <= page_size_) {
+                        table.table_id = read_be_u64(data + field_pos);
+                        field_pos += 8;
+                    }
+
+                    // N_COLS (4 bytes)
+                    if (field_pos + 4 <= page_size_) {
+                        table.n_cols = read_be_u32(data + field_pos);
+                    }
+
+                    if (table.table_id > 0 && table.table_id < 1000000000) {
+                        tables_.push_back(table);
+                    }
+                }
+            }
+        }
+
+        // Move to next deleted record (offset stored in record header)
+        // In InnoDB, deleted records form a linked list via "next" pointer in record header
+        // The next offset is typically at offset+2 from current position (2 bytes, big-endian)
+        if (pos + 2 < page_size_) {
+            uint16_t next_offset = (static_cast<uint16_t>(data[pos]) << 8) | data[pos + 1];
+            if (next_offset == 0 || next_offset >= current_offset) break;  // End of chain or invalid
+            current_offset = next_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+void SystemTablespaceScanner::parse_sys_columns_page_deleted(const uint8_t* data) {
+    uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
+    if (page_type != 0x45BF) return;
+
+    // Get deleted record offset
+    uint16_t deleted_offset = (static_cast<uint16_t>(data[44]) << 8) | data[45];
+
+    if (deleted_offset == 0 || deleted_offset >= page_size_) return;
+
+    // Follow the deleted record chain
+    size_t current_offset = deleted_offset;
+    int iterations = 0;
+
+    while (current_offset > 100 && current_offset < page_size_ - 50 && iterations < 1000) {
+        iterations++;
+
+        // Try to parse column record
+        // SYS_COLUMNS format: TABLE_ID, POS, NAME, MTYPE, PRTYPE, LEN
+
+        for (size_t probe = current_offset; probe < std::min<size_t>(current_offset + 100, page_size_ - 30); probe++) {
+            // Look for table_id pattern (8 bytes big-endian)
+            if (probe + 20 > page_size_) break;
+
+            uint64_t potential_table_id = read_be_u64(data + probe);
+
+            // Validate table_id range (user tables typically have IDs > 1)
+            if (potential_table_id > 1 && potential_table_id < 1000000000) {
+                // Try to parse column position
+                uint32_t pos_val = read_be_u32(data + probe + 8);
+
+                // Skip virtual columns (pos >> 16 != 0)
+                if ((pos_val >> 16) == 0 && pos_val < 1000) {
+                    // Try to find column name (variable length string)
+                    for (size_t name_probe = probe + 12; name_probe < probe + 40 && name_probe < page_size_ - 20; name_probe++) {
+                        uint8_t name_len = data[name_probe];
+                        if (name_len > 0 && name_len < 100 && name_probe + name_len < page_size_) {
+                            std::string col_name(reinterpret_cast<const char*>(data + name_probe + 1), name_len);
+
+                            // Skip system columns
+                            if (col_name != "DB_TRX_ID" && col_name != "DB_ROLL_PTR" &&
+                                col_name != "DB_ROW_ID" && !col_name.empty()) {
+
+                                SysColumnEntry col;
+                                col.table_id = potential_table_id;
+                                col.pos = pos_val;
+                                col.name = col_name;
+
+                                // Parse mtype, prtype, len
+                                size_t field_pos = name_probe + 1 + name_len;
+                                if (field_pos + 12 <= page_size_) {
+                                    col.mtype = read_be_u32(data + field_pos);
+                                    col.prtype = read_be_u32(data + field_pos + 4);
+                                    col.len = read_be_u32(data + field_pos + 8);
+
+                                    // Parse prtype
+                                    ParsedPrType parsed = parse_prtype(col.prtype);
+                                    col.is_nullable = parsed.is_nullable;
+                                    col.is_unsigned = parsed.is_unsigned;
+
+                                    columns_.push_back(col);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Move to next deleted record
+        if (current_offset + 2 < page_size_) {
+            uint16_t next_offset = (static_cast<uint16_t>(data[current_offset]) << 8) | data[current_offset + 1];
+            if (next_offset == 0 || next_offset >= current_offset) break;
+            current_offset = next_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+void SystemTablespaceScanner::parse_sys_indexes_page_deleted(const uint8_t* data) {
+    uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
+    if (page_type != 0x45BF) return;
+
+    uint16_t deleted_offset = (static_cast<uint16_t>(data[44]) << 8) | data[45];
+
+    if (deleted_offset == 0 || deleted_offset >= page_size_) return;
+
+    size_t current_offset = deleted_offset;
+    int iterations = 0;
+
+    while (current_offset > 100 && current_offset < page_size_ - 50 && iterations < 1000) {
+        iterations++;
+
+        // SYS_INDEXES format: TABLE_ID, ID, NAME, N_FIELDS, TYPE, SPACE, PAGE_NO
+
+        for (size_t probe = current_offset; probe < std::min<size_t>(current_offset + 100, page_size_ - 30); probe++) {
+            if (probe + 30 > page_size_) break;
+
+            uint64_t potential_table_id = read_be_u64(data + probe);
+
+            if (potential_table_id > 1 && potential_table_id < 1000000000) {
+                uint64_t potential_index_id = read_be_u64(data + probe + 8);
+
+                if (potential_index_id > 0 && potential_index_id < 1000000000) {
+                    // Try to find index name
+                    for (size_t name_probe = probe + 16; name_probe < probe + 50 && name_probe < page_size_ - 20; name_probe++) {
+                        uint8_t name_len = data[name_probe];
+                        if (name_len > 0 && name_len < 100 && name_probe + name_len < page_size_) {
+                            std::string idx_name(reinterpret_cast<const char*>(data + name_probe + 1), name_len);
+
+                            if (!idx_name.empty()) {
+                                SysIndexEntry idx;
+                                idx.table_id = potential_table_id;
+                                idx.index_id = potential_index_id;
+                                idx.name = idx_name;
+                                idx.deleted = true;
+
+                                // Parse remaining fields
+                                size_t field_pos = name_probe + 1 + name_len;
+                                if (field_pos + 16 <= page_size_) {
+                                    // Skip N_FIELDS (4 bytes)
+                                    idx.type = read_be_u32(data + field_pos + 4);
+                                    idx.space_id = read_be_u32(data + field_pos + 8);
+                                    idx.page_no = read_be_u32(data + field_pos + 12);
+                                }
+
+                                indexes_.push_back(idx);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (current_offset + 2 < page_size_) {
+            uint16_t next_offset = (static_cast<uint16_t>(data[current_offset]) << 8) | data[current_offset + 1];
+            if (next_offset == 0 || next_offset >= current_offset) break;
+            current_offset = next_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+void SystemTablespaceScanner::parse_dd_records_deleted(
+    const uint8_t* data,
+    const std::string& table_name,
+    std::map<uint64_t, std::map<std::string, std::string>>& records) {
+
+    uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
+    if (page_type != 0x45BF) return;
+
+    uint16_t deleted_offset = (static_cast<uint16_t>(data[44]) << 8) | data[45];
+
+    if (deleted_offset == 0 || deleted_offset >= page_size_) return;
+
+    // For mysql.tables table, parse id and name fields
+    // The format is different from 5.7 SYS_TABLES
+    // We need to parse based on the DD table schema
+
+    // Simplified approach: scan for id and name patterns
+    size_t current_offset = deleted_offset;
+    int iterations = 0;
+
+    while (current_offset > 100 && current_offset < page_size_ - 50 && iterations < 1000) {
+        iterations++;
+
+        if (table_name == "tables") {
+            // Look for id (first column, primary key)
+            // In DD format, id is typically at the beginning
+            for (size_t probe = current_offset; probe < std::min<size_t>(current_offset + 200, page_size_ - 50); probe++) {
+                // Look for a valid table_id followed by table name pattern
+                if (probe + 20 > page_size_) break;
+
+                // Try to find table name (schema/table format)
+                for (size_t name_start = probe; name_start < probe + 100 && name_start < page_size_ - 30; name_start++) {
+                    uint8_t len = data[name_start];
+                    if (len > 0 && len < 200 && name_start + len < page_size_) {
+                        std::string name(reinterpret_cast<const char*>(data + name_start + 1), len);
+                        size_t slash_pos = name.find('/');
+
+                        if (slash_pos != std::string::npos && slash_pos > 0 && slash_pos < name.length() - 1) {
+                            std::string schema = name.substr(0, slash_pos);
+                            std::string table = name.substr(slash_pos + 1);
+
+                            // Validate this looks like a real table name
+                            if (schema != "mysql" && schema != "sys" && schema != "information_schema" &&
+                                schema != "performance_schema" && !schema.empty() && !table.empty()) {
+
+                                // Try to find id (should be before or after name)
+                                // Look for 8-byte value that could be table_id
+                                for (size_t id_probe = probe; id_probe < name_start; id_probe++) {
+                                    if (id_probe + 8 > page_size_) break;
+                                    uint64_t potential_id = read_be_u64(data + id_probe);
+
+                                    if (potential_id > 1 && potential_id < 1000000000) {
+                                        records[potential_id]["name"] = name;
+                                        records[potential_id]["schema"] = schema;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (current_offset + 2 < page_size_) {
+            uint16_t next_offset = (static_cast<uint16_t>(data[current_offset]) << 8) | data[current_offset + 1];
+            if (next_offset == 0 || next_offset >= current_offset) break;
+            current_offset = next_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+void SystemTablespaceScanner::parse_dd_records_deleted_columns(
+    const uint8_t* data,
+    std::map<uint64_t, std::vector<std::map<std::string, std::string>>>& columns_data) {
+
+    uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
+    if (page_type != 0x45BF) return;
+
+    uint16_t deleted_offset = (static_cast<uint16_t>(data[44]) << 8) | data[45];
+    if (deleted_offset == 0 || deleted_offset >= page_size_) return;
+
+    size_t current_offset = deleted_offset;
+    int iterations = 0;
+
+    while (current_offset > 100 && current_offset < page_size_ - 50 && iterations < 1000) {
+        iterations++;
+
+        // Parse mysql.columns records
+        // Key fields: table_id, name, ordinal_position, type, char_length, etc.
+
+        for (size_t probe = current_offset; probe < std::min<size_t>(current_offset + 200, page_size_ - 50); probe++) {
+            if (probe + 20 > page_size_) break;
+
+            // Look for table_id
+            uint64_t potential_table_id = read_be_u64(data + probe);
+
+            if (potential_table_id > 1 && potential_table_id < 1000000000) {
+                // Try to find column name
+                for (size_t name_probe = probe + 8; name_probe < probe + 100 && name_probe < page_size_ - 20; name_probe++) {
+                    uint8_t name_len = data[name_probe];
+                    if (name_len > 0 && name_len < 100 && name_probe + name_len < page_size_) {
+                        std::string col_name(reinterpret_cast<const char*>(data + name_probe + 1), name_len);
+
+                        if (!col_name.empty() && col_name != "DB_TRX_ID" && col_name != "DB_ROLL_PTR") {
+                            std::map<std::string, std::string> col_data;
+                            col_data["name"] = col_name;
+
+                            // Try to parse additional fields
+                            size_t field_pos = name_probe + 1 + name_len;
+
+                            // ordinal_position might be stored
+                            // For simplicity, assign based on position in array
+                            columns_data[potential_table_id].push_back(col_data);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (current_offset + 2 < page_size_) {
+            uint16_t next_offset = (static_cast<uint16_t>(data[current_offset]) << 8) | data[current_offset + 1];
+            if (next_offset == 0 || next_offset >= current_offset) break;
+            current_offset = next_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+void SystemTablespaceScanner::parse_dd_records_deleted_indexes(
+    const uint8_t* data,
+    std::map<uint64_t, std::vector<std::map<std::string, std::string>>>& indexes_data) {
+
+    uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
+    if (page_type != 0x45BF) return;
+
+    uint16_t deleted_offset = (static_cast<uint16_t>(data[44]) << 8) | data[45];
+    if (deleted_offset == 0 || deleted_offset >= page_size_) return;
+
+    size_t current_offset = deleted_offset;
+    int iterations = 0;
+
+    while (current_offset > 100 && current_offset < page_size_ - 50 && iterations < 1000) {
+        iterations++;
+
+        // Parse mysql.indexes records
+        // Key fields: table_id, id, name, type, se_private_data
+
+        for (size_t probe = current_offset; probe < std::min<size_t>(current_offset + 200, page_size_ - 50); probe++) {
+            if (probe + 30 > page_size_) break;
+
+            uint64_t potential_table_id = read_be_u64(data + probe);
+
+            if (potential_table_id > 1 && potential_table_id < 1000000000) {
+                uint64_t potential_index_id = read_be_u64(data + probe + 8);
+
+                if (potential_index_id > 0) {
+                    // Try to find index name
+                    for (size_t name_probe = probe + 16; name_probe < probe + 80 && name_probe < page_size_ - 20; name_probe++) {
+                        uint8_t name_len = data[name_probe];
+                        if (name_len > 0 && name_len < 100 && name_probe + name_len < page_size_) {
+                            std::string idx_name(reinterpret_cast<const char*>(data + name_probe + 1), name_len);
+
+                            if (!idx_name.empty()) {
+                                std::map<std::string, std::string> idx_data;
+                                idx_data["name"] = idx_name;
+                                idx_data["id"] = std::to_string(potential_index_id);
+
+                                indexes_data[potential_table_id].push_back(idx_data);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (current_offset + 2 < page_size_) {
+            uint16_t next_offset = (static_cast<uint16_t>(data[current_offset]) << 8) | data[current_offset + 1];
+            if (next_offset == 0 || next_offset >= current_offset) break;
+            current_offset = next_offset;
+        } else {
+            break;
+        }
+    }
+}
+
+catalog::TableSchema SystemTablespaceScanner::build_schema_from_dd(
+    const std::string& table_name,
+    const std::vector<SysColumnEntry>& cols) {
+
+    catalog::TableSchema schema;
+    schema.table_name = table_name;
+
+    int ordinal = 0;
+    for (const auto& col : cols) {
+        catalog::ColumnInfo column;
+        column.name = col.name;
+        column.mysql_type_id = col.mtype;
+        column.is_nullable = col.is_nullable;
+        column.column_length = col.len;
+        schema.columns[ordinal++] = column;
+    }
+
+    return schema;
 }
 
 } // namespace engine

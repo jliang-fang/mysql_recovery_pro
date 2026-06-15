@@ -225,6 +225,45 @@ private:
      */
     catalog::TableSchema build_schema(const SysTableEntry& table,
                                        const std::vector<SysColumnEntry>& cols);
+
+    /**
+     * @brief Parse SYS_TABLES page for deleted records (MySQL 5.7)
+     */
+    void parse_sys_tables_page_deleted(const uint8_t* data);
+
+    /**
+     * @brief Parse SYS_COLUMNS page for deleted records (MySQL 5.7)
+     */
+    void parse_sys_columns_page_deleted(const uint8_t* data);
+
+    /**
+     * @brief Parse SYS_INDEXES page for deleted records (MySQL 5.7)
+     */
+    void parse_sys_indexes_page_deleted(const uint8_t* data);
+
+    /**
+     * @brief Parse DD records from deleted list (MySQL 8.0+)
+     */
+    void parse_dd_records_deleted(const uint8_t* data, const std::string& table_name,
+                                   std::map<uint64_t, std::map<std::string, std::string>>& records);
+
+    /**
+     * @brief Parse DD columns records from deleted list (MySQL 8.0+)
+     */
+    void parse_dd_records_deleted_columns(const uint8_t* data,
+                                           std::map<uint64_t, std::vector<std::map<std::string, std::string>>>& columns_data);
+
+    /**
+     * @brief Parse DD indexes records from deleted list (MySQL 8.0+)
+     */
+    void parse_dd_records_deleted_indexes(const uint8_t* data,
+                                           std::map<uint64_t, std::vector<std::map<std::string, std::string>>>& indexes_data);
+
+    /**
+     * @brief Build schema from DD column data (MySQL 8.0+)
+     */
+    catalog::TableSchema build_schema_from_dd(const std::string& table_name,
+                                               const std::vector<SysColumnEntry>& cols);
 };
 
 // ==================== Orphaned Page Scanner ====================
