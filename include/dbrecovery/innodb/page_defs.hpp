@@ -56,9 +56,17 @@ constexpr uint16_t FIL_PAGE_UNDO_LOG    = 17842; // 0x45B2 — Undo log page (My
 /// @brief Freshly allocated page type
 constexpr uint16_t FIL_PAGE_TYPE_ALLOCATED = 0;  // Freshly allocated page
 /// @brief SDI (Space Descriptor Index) page type - MySQL 8.0+ (0x45BE = 17854)
+/// Note: This is the uncompressed SDI page type (rarely used)
 constexpr uint16_t FIL_PAGE_SDI         = 17854; // 0x45BE — SDI metadata page (MySQL 8.0+)
-/// @brief BLOB page type (0x45BD = 17853)
-constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 17853; // 0x45BD — BLOB page
+/// @brief Compressed SDI (SDI_ZIP) page type - MySQL 8.0+ (0x45BD = 17853)
+/// This is the actual page type used for SDI pages in MySQL 8.0+ standalone tablespaces.
+/// Pages 3 and 4 in a standalone IBD file typically contain compressed SDI data.
+/// Reference: ibd2sql IS_SDI() checks for data[24:26] == b'E\xbd' (0x45BD big-endian)
+constexpr uint16_t FIL_PAGE_SDI_ZIP     = 17853; // 0x45BD — Compressed SDI metadata page (MySQL 8.0+)
+/// @brief BLOB page type (shares 0x45BD with compressed SDI)
+/// Note: 0x45BD is used for BOTH compressed SDI pages AND BLOB pages.
+/// The distinction is by page position: SDI pages are at pages 3,4; BLOB pages are elsewhere.
+constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 17853; // 0x45BD — BLOB page (same as SDI_ZIP)
 /// @brief Compressed BLOB page type (0x45B5 = 17845)
 constexpr uint16_t FIL_PAGE_COMPRESSED  = 17845; // 0x45B5 — Compressed page
 
@@ -71,9 +79,21 @@ inline bool is_valid_index_page_type(uint16_t type) {
 inline bool is_valid_page_type(uint16_t type) {
     return type == FIL_PAGE_INDEX ||         // 0x45BF = 17855
            type == FIL_PAGE_UNDO_LOG ||      // 0x45B2 = 17842
-           type == FIL_PAGE_SDI ||           // 0x45BE = 17854
-           type == FIL_PAGE_TYPE_BLOB ||     // 0x45BD = 17853
+           type == FIL_PAGE_SDI ||           // 0x45BE = 17854 (uncompressed SDI)
+           type == FIL_PAGE_SDI_ZIP ||       // 0x45BD = 17853 (compressed SDI)
+           type == FIL_PAGE_TYPE_BLOB ||     // 0x45BD = 17853 (same as SDI_ZIP)
            type == FIL_PAGE_TYPE_ALLOCATED;  // 0x0000 = 0
+}
+
+/// @brief Check if page is an SDI page (compressed or uncompressed)
+inline bool is_sdi_page_type(uint16_t type) {
+    return type == FIL_PAGE_SDI || type == FIL_PAGE_SDI_ZIP;
+}
+
+/// @brief Check if page is likely an SDI page by position
+/// SDI pages are typically at pages 3 and 4 in MySQL 8.0+ standalone tablespaces
+inline bool is_sdi_page_position(uint32_t page_no) {
+    return page_no == 3 || page_no == 4;
 }
 
 // ✅ 新增：页类型读取辅助函数（使用绝对偏移，更直观）
@@ -97,10 +117,13 @@ inline std::string page_type_to_string(uint16_t type) {
         case FIL_PAGE_INDEX:           return "FIL_PAGE_INDEX";       // 0x45BF
         case FIL_PAGE_UNDO_LOG:        return "FIL_PAGE_UNDO_LOG";    // 0x45B2
         case FIL_PAGE_TYPE_ALLOCATED:  return "FIL_PAGE_TYPE_ALLOCATED"; // 0x0000
-        case FIL_PAGE_SDI:             return "FIL_PAGE_SDI";        // 0x45BE
-        case FIL_PAGE_TYPE_BLOB:       return "FIL_PAGE_TYPE_BLOB";  // 0x45BD
-        case FIL_PAGE_COMPRESSED:      return "FIL_PAGE_COMPRESSED"; // 0x45BF (context)
+        case FIL_PAGE_SDI:             return "FIL_PAGE_SDI";        // 0x45BE (uncompressed)
+        case FIL_PAGE_COMPRESSED:      return "FIL_PAGE_COMPRESSED"; // 0x45B5
         default: {
+            // Handle 0x45BD which is used for both SDI_ZIP and BLOB
+            if (type == FIL_PAGE_SDI_ZIP) {
+                return "FIL_PAGE_SDI_ZIP/BLOB";  // 0x45BD (compressed SDI or BLOB)
+            }
             std::ostringstream oss;
             oss << "UNKNOWN(0x" << std::hex << type << std::dec << ")";
             return oss.str();

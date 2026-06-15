@@ -31,7 +31,11 @@ std::string to_lower(const std::string& str) {
     return result;
 }
 
-// 辅助函数：从 SDI 页解析表结构
+// 辅助函数：从 SDI 页解析表结构 (支持压缩 SDI 页 0x45BD)
+// 参考 ibd2sql scan_drop_table.py 的 SDI 解析逻辑:
+//   offset = struct.unpack('>h',tdata[97:99])[0] + 99
+//   dunzip_len,dzip_len = struct.unpack('>LL',tdata[offset+33-8:offset+33])
+//   unzbdata = zlib.decompress(tdata[offset+33:offset+33+dzip_len])
 std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
     const std::string& ibd_path, uint64_t table_id) {
 
@@ -42,43 +46,155 @@ std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
     }
 
     uint32_t total_pages = reader.get_total_pages();
+    uint32_t page_size = reader.get_page_size();
 
     // 遍历所有页查找 SDI 页
-    for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
+    // MySQL 8.0+ SDI 页通常在 page_no=3 和 page_no=4
+    for (uint32_t page_no = 0; page_no < std::min(total_pages, static_cast<uint32_t>(10)); ++page_no) {
         auto page_data = reader.read_page_raw(page_no);
         if (page_data.empty()) continue;
 
-        // 检查页类型是否为 SDI (17854 = 0x45BE)
-        // InnoDB FIL header fields are stored in BIG-ENDIAN format
+        // 检查页类型
+        // FIL header fields are stored in BIG-ENDIAN format
         uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
             page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
-        if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
-            // 提取 SDI payload
-            const uint8_t* sdi_payload = page_data.data() + 38;
-            if (page_data.size() < 38 + 20) continue;
+        // 支持 FIL_PAGE_SDI (0x45BE) 和 FIL_PAGE_SDI_ZIP (0x45BD)
+        if (page_type == dbrecovery::innodb::FIL_PAGE_SDI ||
+            page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP) {
 
-            // 解析 SDI
-            auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
-                sdi_payload, page_data.size() - 38);
+            // ibd2sql approach for compressed SDI pages:
+            // offset = struct.unpack('>h',data[97:99])[0] + 99
+            // The page directory slot at offset 97-99 points to the first record
+            // For SDI pages, the SDI record starts at that offset
 
-            if (json_opt.has_value()) {
+            if (page_size < 100) continue;
+
+            // Read the first slot from page directory (at page_end - 2)
+            // Page directory starts at page_size - (n_dir_slots * 2)
+            // First slot points to the first user record (infimum is ignored)
+
+            // For SDI pages, the record offset calculation:
+            // Read slot offset from byte 97-99 (big-endian signed short)
+            int16_t slot_offset = static_cast<int16_t>(
+                (static_cast<uint16_t>(page_data[97]) << 8) |
+                static_cast<uint16_t>(page_data[98]));
+
+            uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
+
+            // Alternative: try simpler offset calculation
+            // The SDI payload often starts right after the FIL header + page header
+            // FIL header = 38 bytes, page header = 56 bytes (for SDI page)
+            // But ibd2sql uses the slot-based approach
+
+            // Try both approaches:
+            std::vector<std::pair<uint32_t, std::string>> sdi_payloads;
+
+            // Approach 1: ibd2sql slot-based
+            if (record_offset > 0 && record_offset < page_size - 50) {
+                // Read SDI header: type(4) + id(8) + uncompressed_len(4) + compressed_len(4) = 20 bytes
+                // But ibd2sql reads at offset+25 for lengths
+                uint32_t offset1 = record_offset;
+                if (offset1 + 50 < page_size) {
+                    // Read compressed/uncompressed lengths
+                    // ibd2sql: dunzip_len,dzip_len = struct.unpack('>LL',tdata[offset+33-8:offset+33])
+                    // This means lengths are at offset+25 (offset+33-8)
+                    uint32_t uncompressed_len = dbrecovery::innodb::read_be<uint32_t>(
+                        page_data.data(), offset1 + 25);
+                    uint32_t compressed_len = dbrecovery::innodb::read_be<uint32_t>(
+                        page_data.data(), offset1 + 29);
+
+                    if (compressed_len > 0 && compressed_len < page_size &&
+                        offset1 + 33 + compressed_len <= page_size) {
+                        // Decompress using zlib
+                        // MySQL SDI uses standard zlib compression (with header), not raw deflate
+                        const uint8_t* compressed_data = page_data.data() + offset1 + 33;
+
+                        z_stream strm = {};
+                        strm.next_in = const_cast<Bytef*>(compressed_data);
+                        strm.avail_in = compressed_len;
+
+                        std::vector<uint8_t> decompressed(uncompressed_len > 0 ? uncompressed_len : compressed_len * 4);
+                        strm.next_out = decompressed.data();
+                        strm.avail_out = decompressed.size();
+
+                        // Use default window bits (15) for standard zlib format
+                        // This handles data compressed with zlib.compress() in Python
+                        int ret = inflateInit(&strm);  // Standard zlib (not raw deflate)
+                        if (ret == Z_OK) {
+                            do {
+                                ret = inflate(&strm, Z_NO_FLUSH);
+                                if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
+                                    decompressed.resize(decompressed.size() * 2);
+                                    strm.next_out = decompressed.data() + strm.total_out;
+                                    strm.avail_out = decompressed.size() - strm.total_out;
+                                }
+                            } while (ret == Z_OK);
+
+                            if (ret == Z_STREAM_END) {
+                                decompressed.resize(strm.total_out);
+                                std::string json_str(reinterpret_cast<const char*>(decompressed.data()),
+                                                      decompressed.size());
+                                sdi_payloads.push_back({offset1, json_str});
+                            }
+                            inflateEnd(&strm);
+                        }
+                    }
+                }
+            }
+
+            // Approach 2: Simple FIL header + fixed offset (for uncompressed SDI 0x45BE)
+            if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
+                const uint8_t* sdi_payload = page_data.data() + 38;
+                if (page_data.size() >= 38 + 20) {
+                    auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
+                        sdi_payload, page_data.size() - 38);
+                    if (json_opt.has_value()) {
+                        sdi_payloads.push_back({38, json_opt.value()});
+                    }
+                }
+            }
+
+            // Try to parse each SDI payload
+            for (const auto& [offset, json_str] : sdi_payloads) {
                 try {
-                    auto json = nlohmann::json::parse(json_opt.value());
+                    auto json = nlohmann::json::parse(json_str);
+
+                    // MySQL 8.0+ SDI format: {"dd_object": {...}}
                     dbrecovery::catalog::TableSchema schema;
 
-                    if (schema.from_json(json)) {
-                        std::cout << "[INFO] Successfully parsed schema from SDI: "
-                                  << schema.table_name << "\n";
-                        return schema;
+                    // Try different JSON formats
+                    if (json.contains("dd_object")) {
+                        // Standard MySQL 8.0+ SDI format
+                        if (schema.from_json(json)) {
+                            std::cout << "[INFO] Successfully parsed schema from SDI (offset " << offset << "): "
+                                      << schema.table_name << " (" << schema.columns.size() << " columns)\n";
+                            return schema;
+                        }
+                    } else if (json.contains("dictionary")) {
+                        // Alternative format
+                        auto dict = json["dictionary"];
+                        if (dict.contains("table") && schema.from_json(dict["table"])) {
+                            std::cout << "[INFO] Successfully parsed schema from SDI dictionary: "
+                                      << schema.table_name << "\n";
+                            return schema;
+                        }
+                    } else {
+                        // Try direct parsing
+                        if (schema.from_json(json)) {
+                            std::cout << "[INFO] Successfully parsed schema from SDI: "
+                                      << schema.table_name << "\n";
+                            return schema;
+                        }
                     }
                 } catch (const nlohmann::json::parse_error& e) {
-                    // SDI JSON 解析失败，继续处理其他页
+                    std::cerr << "[WARN] JSON parse error at offset " << offset << ": " << e.what() << "\n";
                 }
             }
         }
     }
 
+    std::cerr << "[WARN] No valid SDI schema found in " << ibd_path << "\n";
     return std::nullopt;
 }
 

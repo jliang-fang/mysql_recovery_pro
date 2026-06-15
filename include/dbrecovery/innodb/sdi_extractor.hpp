@@ -124,22 +124,72 @@ inline bool SDIExtractor::is_sdi_page(const uint8_t* page_data) const {
         return false;
     }
 
-    // 读取页类型
-    uint16_t type = read_le<uint16_t>(page_data, 16);
-    return type == FIL_PAGE_SDI;
+    // 读取页类型 (at offset 24, big-endian)
+    uint16_t type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+    // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
+    return type == FIL_PAGE_SDI || type == FIL_PAGE_SDI_ZIP;
 }
 
 inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(const uint8_t* page_data, size_t page_size) {
-    if (!page_data || page_size < 38) {
+    if (!page_data || page_size < 100) {
         return std::nullopt;
     }
 
-    // 读取页类型
-    uint16_t type = read_le<uint16_t>(page_data, 16);
-    if (type != FIL_PAGE_SDI) {
+    // 读取页类型 (at offset 24, big-endian)
+    uint16_t type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+    if (type != FIL_PAGE_SDI && type != FIL_PAGE_SDI_ZIP) {
         return std::nullopt;
     }
 
+    // For compressed SDI (0x45BD), use ibd2sql approach:
+    // offset = struct.unpack('>h',data[97:99])[0] + 99
+    if (type == FIL_PAGE_SDI_ZIP) {
+        int16_t slot_offset = static_cast<int16_t>(
+            (static_cast<uint16_t>(page_data[97]) << 8) |
+            static_cast<uint16_t>(page_data[98]));
+        uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
+
+        if (record_offset > 0 && record_offset < page_size - 50) {
+            // Read lengths at offset+25 and offset+29 (big-endian)
+            uint32_t uncompressed_len = read_be<uint32_t>(page_data, record_offset + 25);
+            uint32_t compressed_len = read_be<uint32_t>(page_data, record_offset + 29);
+
+            if (compressed_len > 0 && compressed_len < page_size &&
+                record_offset + 33 + compressed_len <= page_size) {
+                // Decompress using standard zlib
+                const uint8_t* compressed_data = page_data + record_offset + 33;
+
+                z_stream strm = {};
+                strm.next_in = const_cast<Bytef*>(compressed_data);
+                strm.avail_in = compressed_len;
+
+                std::vector<uint8_t> decompressed(uncompressed_len > 0 ? uncompressed_len : compressed_len * 4);
+                strm.next_out = decompressed.data();
+                strm.avail_out = decompressed.size();
+
+                int ret = inflateInit(&strm);  // Standard zlib
+                if (ret == Z_OK) {
+                    do {
+                        ret = inflate(&strm, Z_NO_FLUSH);
+                        if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
+                            decompressed.resize(decompressed.size() * 2);
+                            strm.next_out = decompressed.data() + strm.total_out;
+                            strm.avail_out = decompressed.size() - strm.total_out;
+                        }
+                    } while (ret == Z_OK);
+
+                    if (ret == Z_STREAM_END) {
+                        decompressed.resize(strm.total_out);
+                        inflateEnd(&strm);
+                        return decompressed;
+                    }
+                    inflateEnd(&strm);
+                }
+            }
+        }
+    }
+
+    // For uncompressed SDI (0x45BE), try simple offset
     // SDI 数据从页头之后开始
     // Page Header 从偏移 38 开始，SDI 负载在 Page Header 之后
     // SDI 格式：[type:4] [id:8] [uncompressed_len:4] [compressed_len:4] [data...]
@@ -155,13 +205,13 @@ inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(con
         }
 
         // 检查是否可能是 SDI 头部
-        uint32_t type = read_le<uint32_t>(page_data, offset);
+        uint32_t sdi_type = read_le<uint32_t>(page_data, offset);
         uint64_t id = read_le<uint64_t>(page_data, offset + 4);
         uint32_t uncompressed_len = read_le<uint32_t>(page_data, offset + 12);
         uint32_t compressed_len = read_le<uint32_t>(page_data, offset + 16);
 
         // 验证 SDI 头部
-        if (type <= 10 && id > 0 && uncompressed_len > 0 && compressed_len > 0 &&
+        if (sdi_type <= 10 && id > 0 && uncompressed_len > 0 && compressed_len > 0 &&
             compressed_len <= uncompressed_len) {
             // 可能是有效的 SDI
             std::vector<uint8_t> payload(page_size - offset);
@@ -260,30 +310,86 @@ inline std::optional<ExtractedSDI> SDIExtractor::extract_sdi_at_offset(const uin
 inline std::vector<ExtractedSDI> SDIExtractor::extract_from_page(const uint8_t* page_data, size_t page_size) {
     std::vector<ExtractedSDI> results;
 
-    if (!page_data || page_size < 38) {
+    if (!page_data || page_size < 100) {
         return results;
     }
 
-    // 检查页类型
-    uint16_t type = read_le<uint16_t>(page_data, 16);
-    if (type != FIL_PAGE_SDI) {
+    // 检查页类型 (at offset 24, big-endian)
+    uint16_t type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+    if (type != FIL_PAGE_SDI && type != FIL_PAGE_SDI_ZIP) {
         return results;
     }
 
     extract_stats_.sdi_pages++;
 
-    // 尝试从不同偏移提取 SDI
-    constexpr size_t MIN_SDI_OFFSET = 70;
-    constexpr size_t MAX_SDI_OFFSET = 500;
+    // For compressed SDI (0x45BD), use ibd2sql approach
+    if (type == FIL_PAGE_SDI_ZIP) {
+        int16_t slot_offset = static_cast<int16_t>(
+            (static_cast<uint16_t>(page_data[97]) << 8) |
+            static_cast<uint16_t>(page_data[98]));
+        uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
 
-    for (size_t offset = MIN_SDI_OFFSET; offset < std::min(MAX_SDI_OFFSET, page_size - 20); offset++) {
-        auto extracted_opt = extract_sdi_at_offset(page_data, page_size, offset);
-        if (extracted_opt.has_value()) {
-            auto& extracted = extracted_opt.value();
-            if (extracted.is_valid) {
-                extract_stats_.sdi_extracted++;
-                results.push_back(extracted);
-                break;  // 找到一个有效的 SDI 就停止
+        if (record_offset > 0 && record_offset < page_size - 50) {
+            uint32_t uncompressed_len = read_be<uint32_t>(page_data, record_offset + 25);
+            uint32_t compressed_len = read_be<uint32_t>(page_data, record_offset + 29);
+
+            if (compressed_len > 0 && compressed_len < page_size &&
+                record_offset + 33 + compressed_len <= page_size) {
+
+                const uint8_t* compressed_data = page_data + record_offset + 33;
+
+                z_stream strm = {};
+                strm.next_in = const_cast<Bytef*>(compressed_data);
+                strm.avail_in = compressed_len;
+
+                std::vector<uint8_t> decompressed(uncompressed_len > 0 ? uncompressed_len : compressed_len * 4);
+                strm.next_out = decompressed.data();
+                strm.avail_out = decompressed.size();
+
+                int ret = inflateInit(&strm);
+                if (ret == Z_OK) {
+                    do {
+                        ret = inflate(&strm, Z_NO_FLUSH);
+                        if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
+                            decompressed.resize(decompressed.size() * 2);
+                            strm.next_out = decompressed.data() + strm.total_out;
+                            strm.avail_out = decompressed.size() - strm.total_out;
+                        }
+                    } while (ret == Z_OK);
+
+                    if (ret == Z_STREAM_END) {
+                        decompressed.resize(strm.total_out);
+
+                        ExtractedSDI extracted{};
+                        extracted.page_no = read_be<uint32_t>(page_data, FIL_PAGE_OFFSET);  // 页号
+                        extracted.offset = record_offset;
+                        extracted.sdi_json = std::string(reinterpret_cast<const char*>(decompressed.data()),
+                                                         decompressed.size());
+                        extracted.is_valid = true;
+
+                        extract_stats_.sdi_extracted++;
+                        results.push_back(extracted);
+                    }
+                    inflateEnd(&strm);
+                }
+            }
+        }
+    }
+
+    // For uncompressed SDI or as fallback, try different offsets
+    if (results.empty()) {
+        constexpr size_t MIN_SDI_OFFSET = 70;
+        constexpr size_t MAX_SDI_OFFSET = 500;
+
+        for (size_t offset = MIN_SDI_OFFSET; offset < std::min(MAX_SDI_OFFSET, page_size - 20); offset++) {
+            auto extracted_opt = extract_sdi_at_offset(page_data, page_size, offset);
+            if (extracted_opt.has_value()) {
+                auto& extracted = extracted_opt.value();
+                if (extracted.is_valid) {
+                    extract_stats_.sdi_extracted++;
+                    results.push_back(extracted);
+                    break;  // 找到一个有效的 SDI 就停止
+                }
             }
         }
     }
