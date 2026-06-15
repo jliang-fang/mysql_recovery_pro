@@ -191,6 +191,13 @@ class DisasterValidator:
         if corruption_type in ['header', 'truncate']:
             extra_args = ['--header-repair']
 
+        # For TRUNCATE, also try system tablespace
+        if corruption_type == 'truncate':
+            sys_tablespace = os.path.join(MYSQL_VERSIONS[version]['data_dir'],
+                                          'ibdata1' if MYSQL_VERSIONS[version]['has_frm'] else 'mysql.ibd')
+            if os.path.exists(sys_tablespace):
+                extra_args.append('--system-tablespace=' + sys_tablespace)
+
         result = self.run_recovery(corrupted_path, f"{OUTPUT_BASE}/{version}/{corruption_type}", extra_args)
 
         recovered_records = result.get('records', 0)
