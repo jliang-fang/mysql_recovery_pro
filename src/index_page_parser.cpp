@@ -198,10 +198,11 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     }
 
     // Read null bitmask as integer for bit testing
+    // CRITICAL: InnoDB uses BIG-ENDIAN for NULL bitmap (ibd2sql line 332)
     uint32_t null_bit_value = 0;
     if (null_bytes > 0) {
         for (size_t i = 0; i < null_bytes; i++) {
-            null_bit_value |= (static_cast<uint32_t>(result.null_bitmask[i]) << (i * 8));
+            null_bit_value |= (static_cast<uint32_t>(result.null_bitmask[i]) << ((null_bytes - 1 - i) * 8));
         }
     }
 
@@ -638,15 +639,17 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         IndexFieldValue val;
 
         // Check NULL status
+        // CRITICAL: InnoDB uses BIG-ENDIAN for NULL bitmap
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
             uint32_t nullable_idx = 0;
             for (size_t j = 0; j < col_idx; j++) {
                 if (columns[j].is_nullable) nullable_idx++;
             }
-            if (nullable_idx < null_bitmask.size() * 8) {
-                size_t byte_idx = nullable_idx / 8;
-                uint8_t bit_idx = nullable_idx % 8;
+            // For big-endian: bit N → byte index = (size - 1) - (N / 8), bit pos = N % 8
+            size_t byte_idx = (null_bitmask.size() - 1) - (nullable_idx / 8);
+            uint8_t bit_idx = nullable_idx % 8;
+            if (byte_idx < null_bitmask.size()) {
                 is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
             }
         }
@@ -697,15 +700,17 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         IndexFieldValue val;
 
         // Check NULL status
+        // CRITICAL: InnoDB uses BIG-ENDIAN for NULL bitmap
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
             uint32_t nullable_idx = 0;
             for (size_t j = 0; j < col_idx; j++) {
                 if (columns[j].is_nullable) nullable_idx++;
             }
-            if (nullable_idx < null_bitmask.size() * 8) {
-                size_t byte_idx = nullable_idx / 8;
-                uint8_t bit_idx = nullable_idx % 8;
+            // For big-endian: bit N → byte index = (size - 1) - (N / 8), bit pos = N % 8
+            size_t byte_idx = (null_bitmask.size() - 1) - (nullable_idx / 8);
+            uint8_t bit_idx = nullable_idx % 8;
+            if (byte_idx < null_bitmask.size()) {
                 is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
             }
         }

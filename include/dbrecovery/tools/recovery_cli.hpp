@@ -851,6 +851,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     }
                 }
                 for (const auto& [idx, col] : sdi_schema_opt->columns) {
+                    // Skip InnoDB system columns - these are handled internally
+                    // and should not be part of the user schema
+                    if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
+                        continue;
+                    }
+
                     dbrecovery::innodb::IndexColumnDef col_def;
                     col_def.name = col.name;
 
