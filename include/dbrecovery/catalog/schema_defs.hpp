@@ -340,6 +340,11 @@ struct TableSchema {
                         }
                     }
                 }
+                // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
+                // These are internal columns not part of user table schema
+                if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
+                    continue;
+                }
                 columns[ordinal++] = col;
             }
             debug_schema = true;  // Only print debug once

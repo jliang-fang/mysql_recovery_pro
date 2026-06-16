@@ -391,6 +391,13 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
 
     std::set<uint16_t> visited;
 
+    // DEBUG: Print first record info
+    static bool debug_chain = false;
+    bool do_debug = !debug_chain;
+    if (do_debug) {
+        std::cerr << "[DEBUG CHAIN] Starting at origin=" << current_origin << " header_size=" << header_size << "\n";
+    }
+
     for (uint32_t safety = 0; safety < MAX_RECORDS_PER_PAGE; safety++) {
         if (current_origin < header_size || current_origin >= page_hdr.heap_top) {
             break;
@@ -405,6 +412,13 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
         if (is_compact) {
             auto hdr = parse_new_record_header(page_data, header_start, page_size);
             if (!hdr) break;
+
+            if (do_debug && hdr->heap_no >= 2) {
+                std::cerr << "[DEBUG CHAIN] Record at origin=" << current_origin
+                          << " header_start=" << header_start
+                          << " heap_no=" << static_cast<int>(hdr->heap_no)
+                          << " next_offset=" << hdr->next_offset << "\n";
+            }
 
             // Skip INFIMUM (heap_no=0) and SUPREMUM (heap_no=1)
             if (hdr->heap_no >= 2) {
@@ -438,6 +452,11 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
                 break;
             }
             current_origin = hdr->next_offset;
+        }
+
+        // Only debug first record
+        if (do_debug) {
+            debug_chain = true;
         }
     }
 
