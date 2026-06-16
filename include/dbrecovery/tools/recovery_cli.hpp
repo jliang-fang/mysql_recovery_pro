@@ -859,12 +859,22 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     col_def.col_type = static_cast<uint8_t>(col.mysql_type_id);
 
                     col_def.is_nullable = col.is_nullable;
+                    col_def.is_unsigned = !col.is_signed;  // InnoDB: is_signed=false means unsigned
                     col_def.char_set_id = col.charset_id;
                     col_def.col_length = col.column_length;
                     col_def.mb_maxlen = 4;  // utf8mb4 default
 
                     // Set precision/scale for DECIMAL types (InnoDB type 21)
                     if (col.mysql_type_id == 21) {
+                        // DEBUG: Print DECIMAL column info
+                        static bool decimal_debug_printed = false;
+                        if (!decimal_debug_printed) {
+                            std::cout << "[DEBUG DECIMAL] Column '" << col.name
+                                      << "' mysql_type_id=" << col.mysql_type_id
+                                      << " numeric_precision=" << col.numeric_precision
+                                      << " numeric_scale=" << col.numeric_scale << "\n";
+                            decimal_debug_printed = true;
+                        }
                         if (col.numeric_precision > 0) {
                             col_def.precision = col.numeric_precision;
                             col_def.scale = col.numeric_scale;

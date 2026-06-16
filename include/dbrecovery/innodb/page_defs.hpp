@@ -508,33 +508,42 @@ struct Record {
 };
 
 // ==================== MySQL 类型常量 ====================
+// These are InnoDB internal type IDs, NOT MySQL server type IDs!
+// Reference: ibd2sql/ibd2sql/innodb_page/column_type.py
 namespace mysql_types {
 
-constexpr uint8_t TINY        = 1;
-constexpr uint8_t SHORT       = 2;
-constexpr uint8_t LONG        = 3;
-constexpr uint8_t FLOAT       = 4;
-constexpr uint8_t DOUBLE      = 5;
-constexpr uint8_t LONGLONG    = 8;
-constexpr uint8_t INT24       = 9;
-constexpr uint8_t DATE        = 10;
-constexpr uint8_t TIME        = 11;
-constexpr uint8_t DATETIME    = 12;
-constexpr uint8_t YEAR        = 13;
-constexpr uint8_t VARCHAR     = 15;
-constexpr uint8_t VAR_STRING  = 253; // ✅ 修复：VAR_STRING 是独立类型 (253)，不是 VARCHAR 的别名
-constexpr uint8_t BIT         = 16;
-constexpr uint8_t TIMESTAMP2  = 17;
-constexpr uint8_t DATETIME2   = 18;
-constexpr uint8_t TIME2       = 19;
-constexpr uint8_t NEWDECIMAL  = 246;
-constexpr uint8_t JSON        = 245;
-
-// BLOB 类型
-constexpr uint8_t TINY_BLOB   = 249;
-constexpr uint8_t MEDIUM_BLOB = 250;
-constexpr uint8_t LONG_BLOB   = 251;
-constexpr uint8_t BLOB        = 252;
+// InnoDB internal type IDs (from ibd2sql)
+constexpr uint8_t DECIMAL     = 1;   // DECIMAL (MySQL server type 0)
+constexpr uint8_t TINY        = 2;   // TINYINT (MySQL server type 1)
+constexpr uint8_t SHORT       = 3;   // SMALLINT (MySQL server type 2)
+constexpr uint8_t LONG        = 4;   // INT (MySQL server type 3)
+constexpr uint8_t FLOAT       = 5;   // FLOAT (MySQL server type 4)
+constexpr uint8_t DOUBLE      = 6;   // DOUBLE (MySQL server type 5)
+constexpr uint8_t TIMESTAMP   = 8;   // TIMESTAMP (MySQL server type 7)
+constexpr uint8_t LONGLONG    = 9;   // BIGINT (MySQL server type 8)
+constexpr uint8_t INT24       = 10;  // MEDIUMINT (MySQL server type 9)
+constexpr uint8_t DATE        = 11;  // DATE (MySQL server type 10)
+constexpr uint8_t TIME        = 12;  // TIME (MySQL server type 11)
+constexpr uint8_t DATETIME    = 13;  // DATETIME (MySQL server type 12)
+constexpr uint8_t YEAR        = 14;  // YEAR (MySQL server type 13)
+constexpr uint8_t NEWDATE     = 15;  // NEWDATE (MySQL server type 14)
+constexpr uint8_t VARCHAR     = 16;  // VARCHAR (MySQL server type 15)
+constexpr uint8_t BIT         = 17;  // BIT (MySQL server type 16)
+constexpr uint8_t TIMESTAMP2  = 18;  // TIMESTAMP2 (MySQL server type 17)
+constexpr uint8_t DATETIME2   = 19;  // DATETIME2 (MySQL server type 18)
+constexpr uint8_t TIME2       = 20;  // TIME2 (MySQL server type 19)
+constexpr uint8_t NEWDECIMAL  = 21;  // NEWDECIMAL (MySQL server type 246)
+constexpr uint8_t ENUM        = 22;  // ENUM (MySQL server type 247)
+constexpr uint8_t SET         = 23;  // SET (MySQL server type 248)
+constexpr uint8_t TINY_BLOB   = 24;  // TINY_BLOB/TINYTEXT (MySQL server type 249)
+constexpr uint8_t MEDIUM_BLOB = 25;  // MEDIUM_BLOB/MEDIUMTEXT (MySQL server type 250)
+constexpr uint8_t LONG_BLOB   = 26;  // LONG_BLOB/LONGTEXT (MySQL server type 251)
+constexpr uint8_t BLOB        = 27;  // BLOB/TEXT (MySQL server type 252)
+constexpr uint8_t VAR_STRING  = 28;  // VAR_STRING (MySQL server type 253)
+constexpr uint8_t STRING      = 29;  // STRING/CHAR (MySQL server type 254)
+constexpr uint8_t GEOMETRY    = 30;  // GEOMETRY (MySQL server type 255)
+constexpr uint8_t JSON        = 31;  // JSON (MySQL server type 245)
+constexpr uint8_t VECTOR      = 32;  // VECTOR (MySQL 9.0+)
 
 } // namespace mysql_types
 

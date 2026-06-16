@@ -92,31 +92,59 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     for (const auto& col : table_json["columns"]) {
                         catalog::ColumnInfo column_info;
                         column_info.name = col.value("name", "");
-                        
+
                         // Handle type field - can be string or number
                         if (col.contains("type")) {
                             if (col["type"].is_string()) {
                                 // Type is string like "LONGLONG", "VARCHAR", etc.
+                                // Map to InnoDB internal type IDs (see ibd2sql column_type.py)
                                 std::string type_str = col["type"].get<std::string>();
-                                // Map type string to MySQL type ID
-                                if (type_str == "LONGLONG") column_info.mysql_type_id = 8;  // MYSQL_TYPE_LONGLONG
-                                else if (type_str == "VARCHAR") column_info.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
-                                else if (type_str == "CHAR") column_info.mysql_type_id = 254;  // MYSQL_TYPE_STRING
-                                else if (type_str == "TINYINT") column_info.mysql_type_id = 1;  // MYSQL_TYPE_TINY
-                                else if (type_str == "INT") column_info.mysql_type_id = 3;  // MYSQL_TYPE_LONG
-                                else if (type_str == "TEXT") column_info.mysql_type_id = 252;  // MYSQL_TYPE_TINY_BLOB
-                                else if (type_str == "JSON") column_info.mysql_type_id = 245;  // MYSQL_TYPE_JSON
-                                else if (type_str == "LONGBLOB") column_info.mysql_type_id = 252;  // MYSQL_TYPE_BLOB
-                                else if (type_str == "DATETIME") column_info.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
-                                else if (type_str == "TIMESTAMP") column_info.mysql_type_id = 7;  // MYSQL_TYPE_TIMESTAMP
-                                else if (type_str == "DATE") column_info.mysql_type_id = 10;  // MYSQL_TYPE_DATE
-                                else if (type_str == "TIME") column_info.mysql_type_id = 11;  // MYSQL_TYPE_TIME
-                                else if (type_str == "FLOAT") column_info.mysql_type_id = 4;  // MYSQL_TYPE_FLOAT
-                                else if (type_str == "DOUBLE") column_info.mysql_type_id = 5;  // MYSQL_TYPE_DOUBLE
-                                else if (type_str == "DECIMAL") column_info.mysql_type_id = 3;  // MYSQL_TYPE_NEWDECIMAL
+                                // CRITICAL: Use InnoDB internal type IDs, NOT MySQL server type IDs!
+                                std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type_str='" << type_str << "'\n";
+                                if (type_str == "DECIMAL") column_info.mysql_type_id = 1;   // InnoDB DECIMAL
+                                else if (type_str == "TINY") column_info.mysql_type_id = 2;   // InnoDB TINY (TINYINT)
+                                else if (type_str == "SHORT") column_info.mysql_type_id = 3;  // InnoDB SHORT (SMALLINT)
+                                else if (type_str == "LONG") column_info.mysql_type_id = 4;   // InnoDB LONG (INT)
+                                else if (type_str == "FLOAT") column_info.mysql_type_id = 5;  // InnoDB FLOAT
+                                else if (type_str == "DOUBLE") column_info.mysql_type_id = 6; // InnoDB DOUBLE
+                                else if (type_str == "TIMESTAMP") column_info.mysql_type_id = 8;  // InnoDB TIMESTAMP
+                                else if (type_str == "LONGLONG") column_info.mysql_type_id = 9;  // InnoDB LONGLONG (BIGINT)
+                                else if (type_str == "INT24") column_info.mysql_type_id = 10; // InnoDB INT24 (MEDIUMINT)
+                                else if (type_str == "DATE") column_info.mysql_type_id = 11; // InnoDB DATE
+                                else if (type_str == "TIME") column_info.mysql_type_id = 12; // InnoDB TIME
+                                else if (type_str == "DATETIME") column_info.mysql_type_id = 13;  // InnoDB DATETIME
+                                else if (type_str == "YEAR") column_info.mysql_type_id = 14; // InnoDB YEAR
+                                else if (type_str == "NEWDATE") column_info.mysql_type_id = 15;  // InnoDB NEWDATE
+                                else if (type_str == "VARCHAR") column_info.mysql_type_id = 16;  // InnoDB VARCHAR
+                                else if (type_str == "BIT") column_info.mysql_type_id = 17;  // InnoDB BIT
+                                else if (type_str == "TIMESTAMP2") column_info.mysql_type_id = 18;  // InnoDB TIMESTAMP2
+                                else if (type_str == "DATETIME2") column_info.mysql_type_id = 19;  // InnoDB DATETIME2
+                                else if (type_str == "TIME2") column_info.mysql_type_id = 20;  // InnoDB TIME2
+                                else if (type_str == "NEWDECIMAL") column_info.mysql_type_id = 21;  // InnoDB NEWDECIMAL
+                                else if (type_str == "ENUM") column_info.mysql_type_id = 22;  // InnoDB ENUM
+                                else if (type_str == "SET") column_info.mysql_type_id = 23;   // InnoDB SET
+                                else if (type_str == "TINY_BLOB") column_info.mysql_type_id = 24;  // InnoDB TINY_BLOB
+                                else if (type_str == "MEDIUM_BLOB") column_info.mysql_type_id = 25;  // InnoDB MEDIUM_BLOB
+                                else if (type_str == "LONG_BLOB") column_info.mysql_type_id = 26;  // InnoDB LONG_BLOB
+                                else if (type_str == "BLOB") column_info.mysql_type_id = 27;  // InnoDB BLOB (TEXT)
+                                else if (type_str == "VAR_STRING") column_info.mysql_type_id = 28;  // InnoDB VAR_STRING
+                                else if (type_str == "STRING") column_info.mysql_type_id = 29;  // InnoDB STRING (CHAR)
+                                else if (type_str == "GEOMETRY") column_info.mysql_type_id = 30;  // InnoDB GEOMETRY
+                                else if (type_str == "JSON") column_info.mysql_type_id = 31;  // InnoDB JSON
+                                else if (type_str == "VECTOR") column_info.mysql_type_id = 32;  // InnoDB VECTOR
+                                // Legacy MySQL server type names (fallback)
+                                else if (type_str == "TINYINT") column_info.mysql_type_id = 2;
+                                else if (type_str == "SMALLINT") column_info.mysql_type_id = 3;
+                                else if (type_str == "INT") column_info.mysql_type_id = 4;
+                                else if (type_str == "BIGINT") column_info.mysql_type_id = 9;
+                                else if (type_str == "CHAR") column_info.mysql_type_id = 29;
+                                else if (type_str == "TEXT") column_info.mysql_type_id = 27;
+                                else if (type_str == "LONGBLOB") column_info.mysql_type_id = 26;
                                 else column_info.mysql_type_id = 0;
+                                std::cerr << "[DEBUG SDI] Mapped to mysql_type_id=" << static_cast<int>(column_info.mysql_type_id) << "\n";
                             } else {
                                 column_info.mysql_type_id = col.value("type", 0);
+                                std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' numeric type=" << static_cast<int>(column_info.mysql_type_id) << "\n";
                             }
                         }
                         

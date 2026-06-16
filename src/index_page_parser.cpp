@@ -206,16 +206,15 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     }
 
     // Step 2: Read variable sizes (they are before NULL bitmap, at lower addresses)
-    // ibd2sql reads in FORWARD column order, but reads sizes BACKWARD from low address
-    // We iterate columns in FORWARD order to match NULL bitmap positions,
-    // but build sizes in reverse order (last column first)
+    // ibd2sql reads sizes in FORWARD column order using read_reverse()
+    // Each read_reverse(1) reads a byte from pos-1, then decreases pos
+    // Sizes are stored: [size_N]...[size_2][size_1][NULL bitmap][header]
+    // where size_1 is for FIRST variable column (closest to NULL bitmap)
 
-    std::vector<uint32_t> var_col_sizes_reversed;
-    uint32_t nullable_bit_pos = 0;  // Bit position in NULL bitmap (excludes system cols)
+    std::vector<uint32_t> var_col_sizes;  // Will store sizes in forward order
 
-    // Iterate columns in FORWARD order to track NULL bitmap positions correctly
-    // But push sizes to reversed vector (we'll reverse at end)
-    for (int col_idx = static_cast<int>(columns.size()) - 1; col_idx >= 0 && pos > 0; col_idx--) {
+    // Iterate columns in FORWARD order to match ibd2sql's behavior
+    for (size_t col_idx = 0; col_idx < columns.size() && pos > 0; col_idx++) {
         const auto& col = columns[col_idx];
 
         // CRITICAL: Skip system columns! They don't participate in NULL/var-size
@@ -231,7 +230,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         // Need to recalculate bit position by counting nullable columns BEFORE this one
         // (excluding system columns)
         uint32_t bit_pos = 0;
-        for (int j = 0; j < col_idx; j++) {
+        for (size_t j = 0; j < col_idx; j++) {
             if (!columns[j].is_system_column() && columns[j].is_nullable) {
                 bit_pos++;
             }
@@ -240,7 +239,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         bool is_null = (null_bit_value & (1 << bit_pos)) != 0;
 
         if (is_null) {
-            var_col_sizes_reversed.push_back(0);  // NULL columns have size 0
+            var_col_sizes.push_back(0);  // NULL columns have size 0
         } else {
             // Read size byte(s) from the current position (going backward)
             if (pos >= 1) {
@@ -252,23 +251,20 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                     if (pos >= 1) {
                         pos--;
                         uint8_t byte2 = page_data[pos];
-                        var_col_sizes_reversed.push_back((static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2);
+                        var_col_sizes.push_back((static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2);
                         result.var_size_bytes_read += 2;
                     } else {
-                        var_col_sizes_reversed.push_back(byte1);
+                        var_col_sizes.push_back(byte1);
                     }
                 } else {
-                    var_col_sizes_reversed.push_back(byte1);
+                    var_col_sizes.push_back(byte1);
                     result.var_size_bytes_read += 1;
                 }
             } else {
-                var_col_sizes_reversed.push_back(0);
+                var_col_sizes.push_back(0);
             }
         }
     }
-
-    // Reverse to get correct order (first variable column first)
-    std::reverse(var_col_sizes_reversed.begin(), var_col_sizes_reversed.end());
 
     // Now build the final size list in FORWARD column order
     // System columns get their fixed sizes, other columns get appropriate sizes
@@ -294,8 +290,8 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
             if (is_null) {
                 vsize = 0;
             } else if (col.is_variable_length()) {
-                if (var_idx < var_col_sizes_reversed.size()) {
-                    vsize = var_col_sizes_reversed[var_idx++];
+                if (var_idx < var_col_sizes.size()) {
+                    vsize = var_col_sizes[var_idx++];
                 }
             } else {
                 // Fixed column: use pre-computed storage size
@@ -320,18 +316,19 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         std::cout << "[DEBUG NULL_BITMAP] real_n_nullable=" << real_n_nullable
                   << ", real_n_variable=" << real_n_variable
                   << ", null_bytes=" << null_bytes
-                  << ", var_sizes_read=" << var_col_sizes_reversed.size() << "\n";
+                  << ", var_sizes_read=" << var_col_sizes.size() << "\n";
         std::cout << "[DEBUG COL_TYPES] Column types (InnoDB): ";
         for (size_t i = 0; i < columns.size() && i < 20; i++) {
-            std::cout << columns[i].col_type << "(" << columns[i].name.substr(0,8) << ") ";
+            std::cout << static_cast<int>(columns[i].col_type) << "(" << columns[i].name.substr(0,8) << ") ";
             if (columns[i].is_variable_length()) std::cout << "[VAR] ";
             if (columns[i].is_system_column()) std::cout << "[SYS] ";
+            if (columns[i].col_type == 21) { // DECIMAL
+                std::cout << "[prec=" << columns[i].precision << ",scale=" << columns[i].scale << "] ";
+            }
         }
         std::cout << "\n";
         debug_printed = true;
     }
-
-    result.data_start_offset = pos;
 
     return result;
 }
@@ -647,7 +644,13 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
         if (do_debug) {
             std::cout << "[DEBUG EXTRACT] PK col " << col_idx << " '" << col.name
-                      << "' at pos " << pos << " size " << field_size << "\n";
+                      << "' at pos " << pos << " size " << field_size
+                      << " is_unsigned=" << col.is_unsigned << "\n";
+            std::cerr << "[DEBUG PK] Raw bytes at pos " << pos << ": ";
+            for (size_t j = 0; j < field_size && pos + j < page_size; j++) {
+                fprintf(stderr, "%02X ", page_data[pos + j]);
+            }
+            std::cerr << "\n";
         }
 
         if (pos + field_size <= data_end) {
@@ -1306,29 +1309,54 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 21: { // NEWDECIMAL - InnoDB type 21
             val.type = IndexFieldValue::Type::DECIMAL_VAL;
 
-            // Calculate digit groups using MySQL's decimal encoding
-            // Reference: ibd2sql/utils/b2data.py B2DECIMAL()
+            // Reference: ibd2sql/utils/b2data.py B2DECIMAL() and _READ_DECIMAL()
             //
-            // CRITICAL FIX: The encoding uses base-256 multiplication, NOT string concatenation!
-            // For groups [[4,9], [1,1]]:
-            // - The value is: first_group_value * 256^(second_group_bytes) + second_group_value
-            // - NOT str(first).zfill(9) + str(second).zfill(1) (which was wrong!)
+            // DECIMAL encoding in InnoDB:
+            // 1. Sign bit in first byte: bit 7 (0x80)
+            //    - If set (positive): data is stored directly with first byte -= 128
+            //    - If not set (negative): invert all bytes, then first byte -= 128
+            // 2. Data is split into groups using map_decimal()
+            // 3. Each group: [bytes, digits] - read bytes as big-endian int, zfill to digits
 
             uint32_t precision = col.precision > 0 ? col.precision : 10;
             uint32_t scale = col.scale;
             uint32_t int_digits = precision - scale;
 
-            // Calculate group structure using map_decimal logic
+            // DEBUG: Print raw bytes for DECIMAL
+            static bool debug_decimal = false;
+            bool do_debug = !debug_decimal;
+            if (do_debug) {
+                std::cerr << "[DEBUG DECIMAL] Column '" << col.name << "' precision=" << precision
+                          << " scale=" << scale << " int_digits=" << int_digits
+                          << " field_size=" << field_size << "\n";
+                std::cerr << "[DEBUG DECIMAL] Raw bytes at offset " << offset << ": ";
+                for (size_t i = 0; i < field_size && i < 20; i++) {
+                    fprintf(stderr, "%02X ", data[offset + i]);
+                }
+                std::cerr << "\n";
+                // Also print as chars to see if it's string data
+                std::cerr << "[DEBUG DECIMAL] As chars: ";
+                for (size_t i = 0; i < field_size && i < 20; i++) {
+                    char c = static_cast<char>(data[offset + i]);
+                    if (c >= 32 && c < 127) fprintf(stderr, "%c", c);
+                    else fprintf(stderr, ".");
+                }
+                std::cerr << "\n";
+            }
+
+            // map_decimal: [[4,9] for n//9 groups] + [[bytes,remainder_digits] if remainder>0]
+            // bytes = ((remainder+1)//2) if remainder < 7, else 4
             auto calc_groups = [](uint32_t digits) -> std::vector<std::pair<int,int>> {
                 std::vector<std::pair<int,int>> result;
                 int full_groups = digits / 9;
                 int remainder = digits % 9;
                 for (int i = 0; i < full_groups; i++) {
-                    result.push_back({4, 9});
+                    result.push_back({4, 9});  // 4 bytes represent 9 digits
                 }
                 if (remainder > 0) {
-                    int bytes = (remainder + 1) / 2;
-                    if (remainder >= 7) bytes = 4;
+                    int bytes;
+                    if (remainder < 7) bytes = (remainder + 1) / 2;
+                    else bytes = 4;
                     result.push_back({bytes, remainder});
                 }
                 return result;
@@ -1340,89 +1368,98 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             // Check sign: 0x80 bit set = positive, not set = negative
             bool is_negative = (data[offset] & 0x80) == 0;
 
+            if (do_debug) {
+                std::cerr << "[DEBUG DECIMAL] is_negative=" << is_negative
+                          << " (first byte & 0x80 = " << (data[offset] & 0x80) << ")\n";
+            }
+
             // Copy data for processing
             std::vector<uint8_t> proc_data(data + offset, data + offset + field_size);
 
             if (is_negative) {
-                // Invert all bytes for negative numbers
+                // Invert all bytes for negative numbers (bitwise NOT)
                 for (auto& b : proc_data) {
                     b = ~b;
                 }
             }
             // Subtract 128 from first byte (after inversion if negative)
+            // This normalizes the sign bit
             proc_data[0] -= 128;
 
-            // CORRECTED: Read groups and compute value using base-256 multiplication
-            // The value = sum of (group_value * 256^total_bytes_of_following_groups)
+            if (do_debug) {
+                std::cerr << "[DEBUG DECIMAL] After processing: ";
+                for (size_t i = 0; i < proc_data.size() && i < 20; i++) {
+                    fprintf(stderr, "%02X ", proc_data[i]);
+                }
+                std::cerr << "\n";
+            }
 
-            // First compute the integer part using mathematical approach
-            uint64_t int_value = 0;
+            // Read each group and build string representation
+            // This matches ibd2sql's _READ_DECIMAL exactly:
+            // rdata += str(int.from_bytes(data[offset:offset+psize],'big')).zfill(pzfill)
+
             size_t read_offset = 0;
+            std::string int_str = "";
+            std::string frac_str = "";
 
-            // Calculate total bytes for remaining groups to determine multiplier
-            size_t total_remaining_bytes = 0;
-            for (size_t i = 0; i < p1.size(); i++) {
-                total_remaining_bytes += p1[i].first;
-            }
+            // Read integer part groups (p1)
+            for (const auto& [psize, pzfill] : p1) {
+                if (read_offset + psize > field_size) break;
 
-            for (size_t i = 0; i < p1.size(); i++) {
-                int bytes = p1[i].first;
-                if (read_offset + bytes > field_size) break;
-
-                // Subtract bytes of this group from remaining
-                total_remaining_bytes -= bytes;
-
-                // Read this group's value
+                // Read big-endian integer from bytes
                 uint64_t group_val = 0;
-                for (int j = 0; j < bytes && read_offset + j < field_size; j++) {
+                for (int j = 0; j < psize; j++) {
                     group_val = (group_val << 8) | proc_data[read_offset + j];
                 }
+                read_offset += psize;
 
-                // Multiply by 256^total_remaining_bytes and add
-                uint64_t multiplier = 1;
-                for (size_t k = 0; k < total_remaining_bytes; k++) {
-                    multiplier *= 256;
+                // Convert to string and zero-fill
+                std::string group_str = std::to_string(group_val);
+                while (group_str.length() < pzfill) {
+                    group_str = "0" + group_str;
                 }
-                int_value += group_val * multiplier;
-
-                read_offset += bytes;
+                int_str += group_str;
             }
 
-            // For fractional part, similarly compute
-            uint64_t frac_value = 0;
-            total_remaining_bytes = 0;
-            for (size_t i = 0; i < p2.size(); i++) {
-                total_remaining_bytes += p2[i].first;
-            }
-
-            for (size_t i = 0; i < p2.size(); i++) {
-                int bytes = p2[i].first;
-                if (read_offset + bytes > field_size) break;
-
-                total_remaining_bytes -= bytes;
+            // Read fractional part groups (p2)
+            for (const auto& [psize, pzfill] : p2) {
+                if (read_offset + psize > field_size) break;
 
                 uint64_t group_val = 0;
-                for (int j = 0; j < bytes && read_offset + j < field_size; j++) {
+                for (int j = 0; j < psize; j++) {
                     group_val = (group_val << 8) | proc_data[read_offset + j];
                 }
+                read_offset += psize;
 
-                uint64_t multiplier = 1;
-                for (size_t k = 0; k < total_remaining_bytes; k++) {
-                    multiplier *= 256;
+                std::string group_str = std::to_string(group_val);
+                while (group_str.length() < pzfill) {
+                    group_str = "0" + group_str;
                 }
-                frac_value += group_val * multiplier;
-
-                read_offset += bytes;
+                frac_str += group_str;
             }
 
-            // Format result: int_value.frac_value (pad frac to scale digits)
-            std::string frac_str = std::to_string(frac_value);
-            while (frac_str.length() < scale) {
-                frac_str = "0" + frac_str;
+            // Remove leading zeros from integer part (but keep at least one digit)
+            // ibd2sql: p1_data = str(0 if p1_data == '' else int(p1_data))
+            // This means converting to int to strip leading zeros, then back to string
+            if (!int_str.empty()) {
+                // Strip leading zeros by converting to int
+                try {
+                    uint64_t int_val = std::stoull(int_str);
+                    int_str = std::to_string(int_val);
+                } catch (...) {
+                    // If too large, keep original
+                }
             }
+            if (int_str.empty()) int_str = "0";
 
-            // Build result string
-            val.str_value = (is_negative ? "-" : "") + std::to_string(int_value) + "." + frac_str;
+            // Build result: sign + int_str + "." + frac_str
+            val.str_value = (is_negative ? "-" : "") + int_str + "." + frac_str;
+
+            if (do_debug) {
+                std::cerr << "[DEBUG DECIMAL] int_str='" << int_str << "' frac_str='" << frac_str
+                          << "' result='" << val.str_value << "'\n";
+                debug_decimal = true;
+            }
             break;
         }
         // ==================== JSON ====================

@@ -255,16 +255,69 @@ struct TableSchema {
 
         if (j.contains("columns") && j["columns"].is_array()) {
             uint32_t ordinal = 1;
+            static bool debug_schema = false;
             for (const auto& col_json : j["columns"]) {
                 catalog::ColumnInfo col;
                 if (col_json.contains("name")) {
                     col.name = col_json["name"].get<std::string>();
                 }
                 if (col_json.contains("type")) {
-                    col.mysql_type_id = col_json["type"].get<uint32_t>();
+                    // SDI stores InnoDB type IDs directly as numbers
+                    // Reference: ibd2sql/ibd2sql/innodb_page/column_type.py
+                    if (col_json["type"].is_number()) {
+                        col.mysql_type_id = col_json["type"].get<uint32_t>();
+                    } else if (col_json["type"].is_string()) {
+                        // Some SDI versions might store type as string
+                        std::string type_str = col_json["type"].get<std::string>();
+                        // Map string names to InnoDB type IDs
+                        if (type_str == "DECIMAL") col.mysql_type_id = 1;
+                        else if (type_str == "TINY") col.mysql_type_id = 2;
+                        else if (type_str == "SHORT") col.mysql_type_id = 3;
+                        else if (type_str == "LONG") col.mysql_type_id = 4;
+                        else if (type_str == "FLOAT") col.mysql_type_id = 5;
+                        else if (type_str == "DOUBLE") col.mysql_type_id = 6;
+                        else if (type_str == "TIMESTAMP") col.mysql_type_id = 8;
+                        else if (type_str == "LONGLONG") col.mysql_type_id = 9;
+                        else if (type_str == "INT24") col.mysql_type_id = 10;
+                        else if (type_str == "DATE") col.mysql_type_id = 11;
+                        else if (type_str == "TIME") col.mysql_type_id = 12;
+                        else if (type_str == "DATETIME") col.mysql_type_id = 13;
+                        else if (type_str == "YEAR") col.mysql_type_id = 14;
+                        else if (type_str == "NEWDATE") col.mysql_type_id = 15;
+                        else if (type_str == "VARCHAR") col.mysql_type_id = 16;
+                        else if (type_str == "BIT") col.mysql_type_id = 17;
+                        else if (type_str == "TIMESTAMP2") col.mysql_type_id = 18;
+                        else if (type_str == "DATETIME2") col.mysql_type_id = 19;
+                        else if (type_str == "TIME2") col.mysql_type_id = 20;
+                        else if (type_str == "NEWDECIMAL") col.mysql_type_id = 21;
+                        else if (type_str == "ENUM") col.mysql_type_id = 22;
+                        else if (type_str == "SET") col.mysql_type_id = 23;
+                        else if (type_str == "TINY_BLOB") col.mysql_type_id = 24;
+                        else if (type_str == "MEDIUM_BLOB") col.mysql_type_id = 25;
+                        else if (type_str == "LONG_BLOB") col.mysql_type_id = 26;
+                        else if (type_str == "BLOB") col.mysql_type_id = 27;
+                        else if (type_str == "VAR_STRING") col.mysql_type_id = 28;
+                        else if (type_str == "STRING") col.mysql_type_id = 29;
+                        else if (type_str == "GEOMETRY") col.mysql_type_id = 30;
+                        else if (type_str == "JSON") col.mysql_type_id = 31;
+                        else col.mysql_type_id = 0;
+                    }
+                    if (!debug_schema) {
+                        std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' type=" << col.mysql_type_id << "\n";
+                    }
                 }
                 if (col_json.contains("is_nullable")) {
                     col.is_nullable = col_json["is_nullable"].get<bool>();
+                }
+                // Parse is_signed for numeric types (affects unsigned handling)
+                if (col_json.contains("is_signed")) {
+                    col.is_signed = col_json["is_signed"].get<bool>();
+                } else if (col_json.contains("is_unsigned")) {
+                    col.is_signed = !col_json["is_unsigned"].get<bool>();
+                }
+                if (!debug_schema && col.mysql_type_id == 9) {
+                    std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' type=" << col.mysql_type_id
+                              << " is_signed=" << col.is_signed << "\n";
                 }
                 // Parse DECIMAL precision/scale for type 21 (NEWDECIMAL)
                 if (col_json.contains("numeric_precision")) {
@@ -289,6 +342,7 @@ struct TableSchema {
                 }
                 columns[ordinal++] = col;
             }
+            debug_schema = true;  // Only print debug once
         }
 
         return validate();
