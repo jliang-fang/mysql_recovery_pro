@@ -187,8 +187,16 @@ struct IndexColumnDef {
 
     /**
      * @brief Get total storage size including fractional part for temporal types
+     * IMPORTANT: System columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID) have FIXED sizes
+     * regardless of their type IDs in SDI (which may be incorrect).
      */
     uint32_t storage_size() const {
+        // CRITICAL: System columns have fixed sizes by NAME, not by type!
+        // SDI may store wrong types for system columns.
+        if (name == "DB_TRX_ID") return 6;
+        if (name == "DB_ROLL_PTR") return 7;
+        if (name == "DB_ROW_ID") return 6;
+
         uint32_t base = fixed_size();
         // Add fractional seconds storage for new temporal types
         if (col_type == 17 || col_type == 18 || col_type == 19) {
@@ -197,6 +205,17 @@ struct IndexColumnDef {
             else if (scale >= 5 && scale <= 6) base += 3;
         }
         return base;
+    }
+
+    /**
+     * @brief Check if this is a system column (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
+     * System columns are NOT included in NULL bitmap and variable size calculations.
+     * ibd2sql skips these in _read_nullbitmask_varsize_new():
+     *   if self.table.column[colid]['name'] in ['DB_TRX_ID','DB_ROLL_PTR']:
+     *       continue
+     */
+    bool is_system_column() const {
+        return name == "DB_TRX_ID" || name == "DB_ROLL_PTR" || name == "DB_ROW_ID";
     }
 };
 

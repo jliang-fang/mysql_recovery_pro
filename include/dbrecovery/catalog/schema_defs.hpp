@@ -266,6 +266,27 @@ struct TableSchema {
                 if (col_json.contains("is_nullable")) {
                     col.is_nullable = col_json["is_nullable"].get<bool>();
                 }
+                // Parse DECIMAL precision/scale for type 21 (NEWDECIMAL)
+                if (col_json.contains("numeric_precision")) {
+                    col.numeric_precision = col_json["numeric_precision"].get<int>();
+                }
+                if (col_json.contains("numeric_scale")) {
+                    col.numeric_scale = col_json["numeric_scale"].get<int>();
+                }
+                // Also parse char_length for VARCHAR
+                if (col_json.contains("char_length")) {
+                    col.column_length = col_json["char_length"].get<uint32_t>();
+                } else if (col_json.contains("length")) {
+                    col.column_length = col_json["length"].get<uint32_t>();
+                }
+                // Parse ENUM/SET elements
+                if (col_json.contains("elements") && col_json["elements"].is_array()) {
+                    for (const auto& elem : col_json["elements"]) {
+                        if (elem.contains("name")) {
+                            col.enum_values.push_back(elem["name"].get<std::string>());
+                        }
+                    }
+                }
                 columns[ordinal++] = col;
             }
         }

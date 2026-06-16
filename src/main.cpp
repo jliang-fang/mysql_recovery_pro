@@ -16,6 +16,7 @@
 #include "dbrecovery/utils/cli_parser.hpp"
 #include "dbrecovery/recovery/engine.hpp"
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
+#include "dbrecovery/recovery/truncate_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/repair/corruption_detector.hpp"
@@ -2330,6 +2331,100 @@ int main(int argc, char** argv) {
         std::cout << "  Duplicates removed: " << idx_stats.dedup_removed << "\n";
         std::cout << "  Total unique records: " << total_recovered << "\n";
         std::cout << "  Scan time: " << std::fixed << std::setprecision(2) << scan_seconds << "s\n";
+
+        // Phase 1.5: Check for TRUNCATE scenario and try specialized recovery
+        if (total_recovered == 0 && idx_stats.pages_index_leaf == 0 && idx_stats.pages_scanned > 5) {
+            std::cout << "\n[INFO] Detected potential TRUNCATE scenario (0 INDEX pages found).\n";
+
+            // Check if file has FSP header but zeroed data pages
+            bool is_truncated = false;
+            {
+                std::ifstream fsp_check(actual_ibd_path, std::ios::binary);
+                if (fsp_check) {
+                    std::vector<uint8_t> fsp_page(16384);
+                    fsp_check.read(reinterpret_cast<char*>(fsp_page.data()), 16384);
+                    uint16_t fsp_type = dbrecovery::innodb::read_be<uint16_t>(fsp_page.data(), 24);
+                    is_truncated = (fsp_type == 0x0008 && idx_stats.pages_index_leaf == 0);
+                }
+            }
+
+            if (is_truncated) {
+                std::cout << "[INFO] TRUNCATE detected. Trying specialized TRUNCATE recovery...\n";
+
+                dbrecovery::recovery::TruncateRecovery truncate_recovery;
+                truncate_recovery.set_page_size(page_size);
+
+                // Set system tablespace for undo log recovery
+                if (!system_tablespace.empty()) {
+                    truncate_recovery.set_system_tablespace(system_tablespace);
+                }
+                truncate_recovery.enable_disk_scan(true);
+                truncate_recovery.enable_undo_log(!system_tablespace.empty());
+
+                // Create a minimal schema
+                dbrecovery::catalog::TableSchema schema;
+                schema.table_name = result_table;
+                schema.page_size = page_size;
+
+                auto truncate_result = truncate_recovery.recover(actual_ibd_path, schema,
+                    [](double progress, const std::string& msg) {
+                        std::cout << "  [" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
+                    });
+
+                if (truncate_result.success && truncate_result.records_recovered > 0) {
+                    std::cout << "[INFO] TRUNCATE recovery succeeded using: " << truncate_result.method_used << "\n";
+                    std::cout << "[INFO] Recovered " << truncate_result.records_recovered << " records\n";
+
+                    // Export recovered records
+                    if (!truncate_result.recovered_records.empty()) {
+                        std::string csv_path = output_dir + "/" + result_table + "_truncate.csv";
+                        std::ofstream csv_file(csv_path);
+                        if (csv_file) {
+                            // Write header
+                            if (!truncate_result.recovered_records.empty()) {
+                                bool first_col = true;
+                                for (const auto& [key, value] : truncate_result.recovered_records.front()) {
+                                    if (!first_col) csv_file << ",";
+                                    csv_file << key;
+                                    first_col = false;
+                                }
+                                csv_file << "\n";
+                            }
+
+                            // Write data
+                            for (const auto& rec : truncate_result.recovered_records) {
+                                bool first_col = true;
+                                for (const auto& [key, value] : rec) {
+                                    if (!first_col) csv_file << ",";
+                                    // Escape quotes and commas
+                                    std::string escaped = value;
+                                    if (escaped.find(',') != std::string::npos ||
+                                        escaped.find('"') != std::string::npos ||
+                                        escaped.find('\n') != std::string::npos) {
+                                        size_t pos = 0;
+                                        while ((pos = escaped.find('"', pos)) != std::string::npos) {
+                                            escaped.insert(pos, 1, '"');
+                                            pos += 2;
+                                        }
+                                        csv_file << "\"" << escaped << "\"";
+                                    } else {
+                                        csv_file << escaped;
+                                    }
+                                    first_col = false;
+                                }
+                                csv_file << "\n";
+                            }
+                            csv_file.close();
+                            std::cout << "[INFO] TRUNCATE recovery results exported to: " << csv_path << "\n";
+                        }
+                    }
+
+                    total_recovered = truncate_result.records_recovered;
+                } else {
+                    std::cout << "[INFO] TRUNCATE recovery found no residual data (data pages were fully zeroed)\n";
+                }
+            }
+        }
 
         // Phase 2: Fallback to heuristic scanner if index parser found nothing
         if (total_recovered == 0 && !schemaless_recovery) {

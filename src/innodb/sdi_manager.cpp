@@ -135,8 +135,19 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                             column_info.collation_id = col.value("collation_id", 255);
                         }
 
-                        if (col.contains("precision") && col.contains("scale")) {
+                        // Parse numeric precision/scale for DECIMAL types
+                        // SDI uses "numeric_precision" and "numeric_scale"
+                        if (col.contains("numeric_precision")) {
+                            column_info.numeric_precision = col["numeric_precision"];
+                        }
+                        if (col.contains("numeric_scale")) {
+                            column_info.numeric_scale = col["numeric_scale"];
+                        }
+                        // Also check for "precision" and "scale" as fallback
+                        if (col.contains("precision") && column_info.numeric_precision == 0) {
                             column_info.numeric_precision = col["precision"];
+                        }
+                        if (col.contains("scale") && column_info.numeric_scale == 0) {
                             column_info.numeric_scale = col["scale"];
                         }
 

@@ -149,31 +149,48 @@ std::optional<OldRecordHeader> InnoDBIndexParser::parse_old_record_header(
 
 InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     const uint8_t* page_data, size_t page_size,
-    size_t rec_start, size_t rec_end,
+    size_t origin, size_t data_end,
     uint32_t n_nullable, uint32_t n_variable,
     const std::vector<IndexColumnDef>& columns) {
 
     FieldMetadata result;
-    if (rec_end <= rec_start || rec_end > page_size) return result;
+    if (origin > page_size || data_end > page_size) return result;
 
     // CRITICAL FIX: Match ibd2sql's _read_nullbitmask_varsize_new() exactly!
     //
-    // InnoDB COMPACT/DYNAMIC format:
-    // 1. NULL bitmap and variable sizes are BEFORE the record header
-    // 2. Sizes are read BACKWARD from header position
-    // 3. For EACH column (in physical order):
-    //    - If NULL: vsize = 0, no size bytes read
-    //    - If fixed: vsize = col.storage_size()
-    //    - If variable: vsize = read from size bytes
-    // 4. Result size_list has entry for EVERY column
+    // Key insight from ibd2sql: System columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
+    // are NOT included in NULL bitmap and variable size calculations.
+    // ibd2sql code (index.py:319-320):
+    //   if self.table.column[colid]['name'] in ['DB_TRX_ID','DB_ROLL_PTR']:
+    //       continue
+    //
+    // We must recalculate n_nullable and n_variable by EXCLUDING system columns!
 
-    // Calculate null bitmask size
-    size_t null_bytes = (n_nullable + 7) / 8;
+    // Count nullable and variable columns EXCLUDING system columns
+    uint32_t real_n_nullable = 0;
+    uint32_t real_n_variable = 0;
+    for (const auto& col : columns) {
+        if (col.is_system_column()) {
+            continue;  // Skip system columns completely
+        }
+        if (col.is_nullable) {
+            real_n_nullable++;
+        }
+        if (col.is_variable_length()) {
+            real_n_variable++;
+        }
+    }
 
-    // Position for reading sizes backward (start from header position)
-    size_t pos = rec_start;
+    // Use recalculated counts instead of passed values
+    size_t null_bytes = (real_n_nullable + 7) / 8;
 
-    // Read NULL bitmap backward from header position
+    // Layout (low address -> high address):
+    // [...][Sizes for each var col][NULL bitmap][Header 5B][PK][TRX+ROLL][Data...]
+    //                           ^- origin-5-...  ^- origin-5  ^- origin
+
+    size_t pos = origin - REC_HEADER_SIZE_NEW;  // After header, pos = origin - 5
+
+    // Read NULL bitmap from pos-null_bytes to pos
     if (null_bytes > 0 && pos >= null_bytes) {
         pos -= null_bytes;
         result.null_bitmask.assign(page_data + pos, page_data + pos + null_bytes);
@@ -188,32 +205,44 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         }
     }
 
-    // CRITICAL: Build size_list for ALL columns (matching ibd2sql)
-    // For each column in physical order:
-    // - Determine NULL status
-    // - If NULL: vsize = 0
-    // - If fixed: vsize = col.storage_size()
-    // - If variable: vsize = read size bytes from record
+    // Step 2: Read variable sizes (they are before NULL bitmap, at lower addresses)
+    // ibd2sql reads in FORWARD column order, but reads sizes BACKWARD from low address
+    // We iterate columns in FORWARD order to match NULL bitmap positions,
+    // but build sizes in reverse order (last column first)
 
-    uint32_t nullable_bit_pos = 0;  // Bit position in null bitmap
+    std::vector<uint32_t> var_col_sizes_reversed;
+    uint32_t nullable_bit_pos = 0;  // Bit position in NULL bitmap (excludes system cols)
 
-    for (size_t col_idx = 0; col_idx < columns.size() && pos > 0; col_idx++) {
+    // Iterate columns in FORWARD order to track NULL bitmap positions correctly
+    // But push sizes to reversed vector (we'll reverse at end)
+    for (int col_idx = static_cast<int>(columns.size()) - 1; col_idx >= 0 && pos > 0; col_idx--) {
         const auto& col = columns[col_idx];
 
-        // Check NULL status for this column
-        bool is_null = false;
-        if (col.is_nullable) {
-            is_null = (null_bit_value & (1 << nullable_bit_pos)) != 0;
-            nullable_bit_pos++;
+        // CRITICAL: Skip system columns! They don't participate in NULL/var-size
+        if (col.is_system_column()) {
+            continue;
         }
 
-        uint32_t vsize = 0;
+        if (!col.is_variable_length()) {
+            continue;  // Skip fixed columns (they don't have size bytes)
+        }
+
+        // Check NULL status for this column
+        // Need to recalculate bit position by counting nullable columns BEFORE this one
+        // (excluding system columns)
+        uint32_t bit_pos = 0;
+        for (int j = 0; j < col_idx; j++) {
+            if (!columns[j].is_system_column() && columns[j].is_nullable) {
+                bit_pos++;
+            }
+        }
+
+        bool is_null = (null_bit_value & (1 << bit_pos)) != 0;
 
         if (is_null) {
-            // NULL column: size = 0, no bytes to read
-            vsize = 0;
-        } else if (col.is_variable_length()) {
-            // Variable column: read size bytes from record
+            var_col_sizes_reversed.push_back(0);  // NULL columns have size 0
+        } else {
+            // Read size byte(s) from the current position (going backward)
             if (pos >= 1) {
                 pos--;
                 uint8_t byte1 = page_data[pos];
@@ -223,23 +252,62 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                     if (pos >= 1) {
                         pos--;
                         uint8_t byte2 = page_data[pos];
-                        vsize = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+                        var_col_sizes_reversed.push_back((static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2);
                         result.var_size_bytes_read += 2;
+                    } else {
+                        var_col_sizes_reversed.push_back(byte1);
                     }
                 } else {
-                    // 1-byte encoding
-                    vsize = byte1;
+                    var_col_sizes_reversed.push_back(byte1);
                     result.var_size_bytes_read += 1;
                 }
+            } else {
+                var_col_sizes_reversed.push_back(0);
             }
+        }
+    }
+
+    // Reverse to get correct order (first variable column first)
+    std::reverse(var_col_sizes_reversed.begin(), var_col_sizes_reversed.end());
+
+    // Now build the final size list in FORWARD column order
+    // System columns get their fixed sizes, other columns get appropriate sizes
+    size_t var_idx = 0;
+    uint32_t nullable_bit_pos2 = 0;  // Bit position for NULL check (excludes system cols)
+
+    for (size_t col_idx = 0; col_idx < columns.size(); col_idx++) {
+        const auto& col = columns[col_idx];
+
+        uint32_t vsize = 0;
+
+        // System columns: use fixed size
+        if (col.is_system_column()) {
+            vsize = col.storage_size();  // DB_TRX_ID=6, DB_ROLL_PTR=7, DB_ROW_ID=6
         } else {
-            // Fixed column: use pre-computed storage size
-            vsize = col.storage_size();
+            // Regular column: check NULL status
+            bool is_null = false;
+            if (col.is_nullable) {
+                is_null = (null_bit_value & (1 << nullable_bit_pos2)) != 0;
+                nullable_bit_pos2++;
+            }
+
+            if (is_null) {
+                vsize = 0;
+            } else if (col.is_variable_length()) {
+                if (var_idx < var_col_sizes_reversed.size()) {
+                    vsize = var_col_sizes_reversed[var_idx++];
+                }
+            } else {
+                // Fixed column: use pre-computed storage size
+                vsize = col.storage_size();
+            }
         }
 
-        // Store size for this column (ALL columns have a size entry)
         result.variable_sizes.push_back(vsize);
     }
+
+    // Store the position after reading all sizes
+    result.data_start_offset = origin;
 
     // DEBUG: Print sizes for first record
     static bool debug_printed = false;
@@ -249,10 +317,20 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
             std::cout << result.variable_sizes[i] << " ";
         }
         std::cout << "\n";
+        std::cout << "[DEBUG NULL_BITMAP] real_n_nullable=" << real_n_nullable
+                  << ", real_n_variable=" << real_n_variable
+                  << ", null_bytes=" << null_bytes
+                  << ", var_sizes_read=" << var_col_sizes_reversed.size() << "\n";
+        std::cout << "[DEBUG COL_TYPES] Column types (InnoDB): ";
+        for (size_t i = 0; i < columns.size() && i < 20; i++) {
+            std::cout << columns[i].col_type << "(" << columns[i].name.substr(0,8) << ") ";
+            if (columns[i].is_variable_length()) std::cout << "[VAR] ";
+            if (columns[i].is_system_column()) std::cout << "[SYS] ";
+        }
+        std::cout << "\n";
         debug_printed = true;
     }
 
-    // Store the position after reading all sizes
     result.data_start_offset = pos;
 
     return result;
@@ -455,22 +533,27 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     }
 
     // Parse fields
-    // CRITICAL: In COMPACT/DYNAMIC format, the structure is:
-    // [Sizes/Nulls] [Header 5B] [PK] [TRX_ID] [ROLL_PTR] [Var Data] [Fixed Data]
+    // CRITICAL: Match ibd2sql's exact layout!
     //
-    // - Header is at rec_offset (5 bytes)
-    // - Sizes/nulls are BEFORE the header (at lower addresses)
-    // - Data starts at record origin (rec_offset + 5)
+    // ibd2sql COMPACT/DYNAMIC layout:
+    // [变长大小 + NULL bitmap] <- 低地址, _offset 向这里移动 (read_reverse)
+    // [记录头 5B] <- origin - 5
+    // [PK + TRX + ROLL + 字段数据] <- origin (高地址), offset 指向这里 (read)
     //
-    // We read sizes backward from header position, then read data forward from origin.
+    // ibd2sql's _offset starts at origin, then read_reverse() moves toward low addresses.
+    // We need to read from rec_origin (NOT from data_end)!
+
     if (!columns_.empty()) {
+        // Pass rec_origin as the start position for read_reverse
+        // The NULL bitmap and sizes are BEFORE the header (at lower addresses from origin)
+        size_t reverse_start = rec_origin;  // Start from origin, read backward
+
         auto field_meta = read_null_and_varsizes(
-            page_data, page_size, rec_offset, data_end,
+            page_data, page_size, reverse_start, data_end,
             n_nullable_, n_variable_, columns_);
 
         // Data starts at record origin (rec_offset + 5)
-        // NOT at rec_origin + null_bytes + var_size_bytes (those are before header!)
-        size_t actual_data_start = rec_origin;  // = rec_offset + REC_HEADER_SIZE_NEW
+        size_t actual_data_start = rec_origin;
 
         record.fields = extract_fields_with_schema(
             page_data, page_size, actual_data_start, data_end,

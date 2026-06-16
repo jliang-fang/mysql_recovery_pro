@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <iomanip>
 #include <chrono>
+#include <set>
+#include <map>
 
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
@@ -838,20 +840,62 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                           << " (" << sdi_schema_opt->columns.size() << " columns)\n";
                 // Apply SDI schema to index_parser
                 std::vector<dbrecovery::innodb::IndexColumnDef> sdi_columns;
+                uint32_t n_pk = 0;
+                std::set<std::string> pk_col_names;
+                // Find PK columns from indexes
+                for (const auto& idx : sdi_schema_opt->indexes) {
+                    if (idx.is_primary) {
+                        for (const auto& col_name : idx.columns) {
+                            pk_col_names.insert(col_name);
+                        }
+                    }
+                }
                 for (const auto& [idx, col] : sdi_schema_opt->columns) {
                     dbrecovery::innodb::IndexColumnDef col_def;
                     col_def.name = col.name;
+
+                    // SDI already stores InnoDB internal types (not MySQL server types)
+                    // No conversion needed - use directly
                     col_def.col_type = static_cast<uint8_t>(col.mysql_type_id);
+
                     col_def.is_nullable = col.is_nullable;
                     col_def.char_set_id = col.charset_id;
                     col_def.col_length = col.column_length;
+                    col_def.mb_maxlen = 4;  // utf8mb4 default
+
+                    // Set precision/scale for DECIMAL types (InnoDB type 21)
+                    if (col.mysql_type_id == 21) {
+                        if (col.numeric_precision > 0) {
+                            col_def.precision = col.numeric_precision;
+                            col_def.scale = col.numeric_scale;
+                        }
+                    }
+
                     // Handle ENUM/SET elements
                     for (const auto& val : col.enum_values) {
                         col_def.enum_values.push_back(val);
                     }
+                    for (const auto& val : col.set_values) {
+                        col_def.set_values.push_back(val);
+                    }
+
+                    // Determine if variable length and is_big
+                    // InnoDB types: 16=VARCHAR, 24-27=BLOB variants, 28=VAR_STRING, 29=STRING, 31=JSON
+                    if (col_def.is_variable_length()) {
+                        col_def.is_big = (col_def.col_length * col_def.mb_maxlen > 255);
+                    }
+
+                    // Check if PK column
+                    if (pk_col_names.count(col.name) > 0) {
+                        n_pk++;
+                    }
+
                     sdi_columns.push_back(col_def);
                 }
-                index_parser.set_columns(sdi_columns);
+                if (n_pk == 0 && !sdi_columns.empty()) {
+                    n_pk = 1;  // Default: first column is PK
+                }
+                index_parser.set_columns(sdi_columns, false, n_pk);
                 has_frm_schema = true;
             } else {
                 std::cout << "[INFO] No schema found, using schemaless recovery\n";
