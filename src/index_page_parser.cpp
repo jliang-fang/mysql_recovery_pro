@@ -21,6 +21,206 @@
 namespace dbrecovery {
 namespace innodb {
 
+// ==================== JSON Binary Decoder ====================
+// 参考 ibd2sql/utils/mysql_json.py 实现
+
+namespace {
+
+// JSON 类型常量
+constexpr uint8_t JSON_TYPE_SMALL_OBJECT = 0x00;
+constexpr uint8_t JSON_TYPE_LARGE_OBJECT = 0x01;
+constexpr uint8_t JSON_TYPE_SMALL_ARRAY = 0x02;
+constexpr uint8_t JSON_TYPE_LARGE_ARRAY = 0x03;
+constexpr uint8_t JSON_TYPE_LITERAL = 0x04;
+constexpr uint8_t JSON_TYPE_INT16 = 0x05;
+constexpr uint8_t JSON_TYPE_UINT16 = 0x06;
+constexpr uint8_t JSON_TYPE_INT32 = 0x07;
+constexpr uint8_t JSON_TYPE_UINT32 = 0x08;
+constexpr uint8_t JSON_TYPE_INT64 = 0x09;
+constexpr uint8_t JSON_TYPE_UINT64 = 0x0A;
+constexpr uint8_t JSON_TYPE_DOUBLE = 0x0B;
+constexpr uint8_t JSON_TYPE_STRING = 0x0C;
+
+// 递归解析 JSON 二进制数据
+std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_size, uint8_t type, size_t& consumed);
+
+// 读取小端整数
+inline uint16_t read_json_le16(const uint8_t* data, size_t offset) {
+    return static_cast<uint16_t>(data[offset]) | (static_cast<uint16_t>(data[offset + 1]) << 8);
+}
+
+inline uint32_t read_json_le32(const uint8_t* data, size_t offset) {
+    return static_cast<uint32_t>(data[offset]) |
+           (static_cast<uint32_t>(data[offset + 1]) << 8) |
+           (static_cast<uint32_t>(data[offset + 2]) << 16) |
+           (static_cast<uint32_t>(data[offset + 3]) << 24);
+}
+
+inline uint64_t read_json_le64(const uint8_t* data, size_t offset) {
+    return static_cast<uint64_t>(read_json_le32(data, offset)) |
+           (static_cast<uint64_t>(read_json_le32(data, offset + 4)) << 32);
+}
+
+// 解析 JSON 字符串
+std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len) {
+    if (offset >= max_len) return "\"\"";
+    // 读取可变长度
+    uint8_t first = data[offset];
+    size_t str_len = 0;
+    size_t len_bytes = 1;
+    if (first & 0x80) {
+        // 两字节长度
+        if (offset + 1 >= max_len) return "\"\"";
+        str_len = ((first & 0x7F) | (data[offset + 1] << 7));
+        len_bytes = 2;
+    } else {
+        str_len = first;
+    }
+    if (offset + len_bytes + str_len > max_len) {
+        str_len = max_len - offset - len_bytes;
+    }
+    std::string result(data + offset + len_bytes, data + offset + len_bytes + str_len);
+    // 转义特殊字符
+    std::string escaped = "\"";
+    for (char c : result) {
+        if (c == '"' || c == '\\') {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    escaped += '"';
+    return escaped;
+}
+
+// 解析 JSON 值
+std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_size, uint8_t type, size_t& consumed) {
+    consumed = 0;
+    if (offset >= data_size) return "null";
+
+    switch (type) {
+        case JSON_TYPE_LITERAL: {
+            if (offset >= data_size) return "null";
+            uint8_t literal = data[offset];
+            consumed = 1;
+            if (literal == 0) return "null";
+            if (literal == 1) return "true";
+            if (literal == 2) return "false";
+            return "null";
+        }
+        case JSON_TYPE_INT16: {
+            if (offset + 2 > data_size) return "0";
+            int16_t val = static_cast<int16_t>(read_json_le16(data, offset));
+            consumed = 2;
+            return std::to_string(val);
+        }
+        case JSON_TYPE_UINT16: {
+            if (offset + 2 > data_size) return "0";
+            uint16_t val = read_json_le16(data, offset);
+            consumed = 2;
+            return std::to_string(val);
+        }
+        case JSON_TYPE_INT32: {
+            if (offset + 4 > data_size) return "0";
+            int32_t val = static_cast<int32_t>(read_json_le32(data, offset));
+            consumed = 4;
+            return std::to_string(val);
+        }
+        case JSON_TYPE_UINT32: {
+            if (offset + 4 > data_size) return "0";
+            uint32_t val = read_json_le32(data, offset);
+            consumed = 4;
+            return std::to_string(val);
+        }
+        case JSON_TYPE_INT64: {
+            if (offset + 8 > data_size) return "0";
+            int64_t val = static_cast<int64_t>(read_json_le64(data, offset));
+            consumed = 8;
+            return std::to_string(val);
+        }
+        case JSON_TYPE_UINT64: {
+            if (offset + 8 > data_size) return "0";
+            uint64_t val = read_json_le64(data, offset);
+            consumed = 8;
+            return std::to_string(val);
+        }
+        case JSON_TYPE_DOUBLE: {
+            if (offset + 8 > data_size) return "0.0";
+            uint64_t bits = read_json_le64(data, offset);
+            double val;
+            std::memcpy(&val, &bits, 8);
+            consumed = 8;
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.15g", val);
+            return buf;
+        }
+        case JSON_TYPE_STRING: {
+            return parse_json_string(data, offset, data_size);
+        }
+        case JSON_TYPE_SMALL_OBJECT:
+        case JSON_TYPE_LARGE_OBJECT:
+        case JSON_TYPE_SMALL_ARRAY:
+        case JSON_TYPE_LARGE_ARRAY: {
+            // 复杂类型：简化处理，返回原始数据的字符串表示
+            bool is_object = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT);
+            bool is_small = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_SMALL_ARRAY);
+            size_t entry_size = is_small ? 2 : 4;
+
+            if (offset + entry_size * 2 > data_size) return is_object ? "{}" : "[]";
+
+            size_t element_count = is_small ? read_json_le16(data, offset) : read_json_le32(data, offset);
+            size_t total_size = is_small ? read_json_le16(data, offset + entry_size) : read_json_le32(data, offset + entry_size);
+
+            if (element_count == 0) return is_object ? "{}" : "[]";
+            if (element_count > 1000) return is_object ? "{\"...\":\"truncated\"}" : "[\"truncated\"]";
+
+            // 简化输出：返回包含元素数量的占位符
+            if (is_object) {
+                return "{\"_count\":" + std::to_string(element_count) + "}";
+            } else {
+                return "[\"_count\":" + std::to_string(element_count) + "]";
+            }
+        }
+        default:
+            return "null";
+    }
+}
+
+// 解析完整 JSON 文档
+std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size) {
+    if (field_size < 1) return "null";
+
+    // JSON 数据格式：[长度前缀] [类型字节] [数据]
+    // 首先读取长度前缀
+    size_t json_offset = offset;
+    uint16_t json_len = 0;
+    size_t len_bytes = 0;
+
+    // 检查长度前缀（小端序）
+    if (field_size >= 2) {
+        json_len = read_json_le16(data, offset);
+        len_bytes = 2;
+        json_offset = offset + 2;
+        if (json_len > field_size - 2) {
+            json_len = field_size - 2;
+        }
+    } else {
+        json_len = field_size;
+    }
+
+    if (json_len == 0 || json_offset >= offset + field_size) {
+        return "null";
+    }
+
+    // 读取类型字节
+    uint8_t type = data[json_offset];
+    size_t consumed = 0;
+    std::string result = parse_json_value(data, json_offset + 1, offset + field_size, type, consumed);
+
+    return result;
+}
+
+} // anonymous namespace
+
 // ==================== Constructor / Destructor ====================
 
 InnoDBIndexParser::InnoDBIndexParser() = default;
@@ -1259,26 +1459,76 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         case 20: {  // TIME2 (MySQL 5.6+ time format, 3-6 bytes) - InnoDB type 20
             val.type = IndexFieldValue::Type::STRING_VAL;
-            // TIME2 format: biased 24-bit integer + optional fractional seconds
-            // stored_value = 0x800000 + (hour * 10000 + minute * 100 + second)
+            // ✅ 修复：完全按照 ibd2sql 的 B2TIME 函数实现
+            // 参考: ibd2sql/utils/b2data.py 第 104-129 行
             if (field_size >= 3) {
-                uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
-                             (static_cast<uint32_t>(data[offset + 1]) << 8) |
-                             static_cast<uint32_t>(data[offset + 2]);
+                // 读取 3 字节作为有符号整数（大端序）
+                // B2INT3: (struct.unpack('>L',data+b'\x00')[0]>>8) - 8388608
+                uint32_t raw = (static_cast<uint32_t>(data[offset]) << 16) |
+                               (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                               static_cast<uint32_t>(data[offset + 2]);
+                int32_t t = static_cast<int32_t>(raw) - 8388608;  // 0x800000
 
-                int32_t biased = static_cast<int32_t>(t) - 0x800000;
-                bool negative = biased < 0;
-                int32_t packed = negative ? -biased : biased;
+                std::string signed_str = "";
+                std::string fractional = "";
 
-                uint32_t hour = packed / 10000;
-                uint32_t minute = (packed % 10000) / 100;
-                uint32_t second = packed % 100;
+                if (t < 0) {
+                    // 负时间
+                    signed_str = "-";
+                    // 使用 ibd2sql 的掩码公式
+                    uint32_t hour = 2047 - ((8384512 & raw) >> 12);   // 2047 = 0x7FF, 8384512 = 0x7FF000
+                    uint32_t minute = 63 - ((4032 & raw) >> 6);        // 63 = 0x3F, 4032 = 0xFC0
+                    uint32_t second = 63 - (63 & raw);
 
-                if (hour > 838 || minute > 59 || second > 59) {
-                    val.str_value = "<INVALID_TIME>";
+                    // 处理小数部分
+                    int pad = col.datetime_precision;
+                    if (pad > 0 && field_size > 3) {
+                        size_t fr_bytes = std::min(static_cast<size_t>(field_size - 3), static_cast<size_t>(3));
+                        uint32_t fr = 0;
+                        for (size_t i = 0; i < fr_bytes; i++) {
+                            fr = (fr << 8) | data[offset + 3 + i];
+                        }
+                        if (fr == 0) {
+                            second += 1;
+                            fractional = "0";
+                        } else {
+                            fractional = std::to_string((1 << (fr_bytes * 8)) - fr);
+                        }
+                    }
+                    char buf[32];
+                    if (!fractional.empty()) {
+                        std::string frac_padded = std::string(pad - fractional.length(), '0') + fractional;
+                        frac_padded = frac_padded.substr(0, pad);
+                        snprintf(buf, sizeof(buf), "-%03u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
+                    } else {
+                        snprintf(buf, sizeof(buf), "-%03u:%02u:%02u", hour, minute, second);
+                    }
+                    val.str_value = buf;
                 } else {
-                    char buf[24];
-                    snprintf(buf, sizeof(buf), "%s%02u:%02u:%02u", negative ? "-" : "", hour, minute, second);
+                    // 正时间
+                    uint32_t hour = (8384512 & raw) >> 12;
+                    uint32_t minute = (4032 & raw) >> 6;
+                    uint32_t second = 63 & raw;
+
+                    // 处理小数部分
+                    int pad = col.datetime_precision;
+                    if (pad > 0 && field_size > 3) {
+                        size_t fr_bytes = std::min(static_cast<size_t>(field_size - 3), static_cast<size_t>(3));
+                        uint32_t fr = 0;
+                        for (size_t i = 0; i < fr_bytes; i++) {
+                            fr = (fr << 8) | data[offset + 3 + i];
+                        }
+                        fractional = std::to_string(fr);
+                    }
+
+                    char buf[32];
+                    if (!fractional.empty()) {
+                        std::string frac_padded = std::string(pad - fractional.length(), '0') + fractional;
+                        frac_padded = frac_padded.substr(0, pad);
+                        snprintf(buf, sizeof(buf), "%03u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
+                    } else {
+                        snprintf(buf, sizeof(buf), "%03u:%02u:%02u", hour, minute, second);
+                    }
                     val.str_value = buf;
                 }
             } else {
@@ -1486,12 +1736,15 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        // ==================== JSON ====================
-        case 245: { // JSON
+        // ==================== JSON (InnoDB type 31, MySQL type 245) ====================
+        case 31:   // InnoDB JSON type
+        case 245: { // JSON (MySQL server type)
             val.type = IndexFieldValue::Type::STRING_VAL;
             if (field_size > 0) {
-                // Simple output as string
-                val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                // ✅ 修复：使用二进制 JSON 解码器
+                val.str_value = decode_json_binary(data, offset, field_size);
+            } else {
+                val.str_value = "null";
             }
             break;
         }

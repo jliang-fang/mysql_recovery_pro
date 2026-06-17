@@ -85,6 +85,7 @@ struct IndexColumnDef {
     uint32_t char_set_id = 0;   // Character set ID
     uint16_t precision = 0;     // For DECIMAL
     uint16_t scale = 0;         // For DECIMAL
+    uint8_t datetime_precision = 0;  // For TIME2, DATETIME2, TIMESTAMP2 (0-6)
     uint32_t mb_minlen = 1;     // Min bytes per character
     uint32_t mb_maxlen = 1;     // Max bytes per character
     bool is_big = false;        // True if col_length > 255 (affects var-size encoding)

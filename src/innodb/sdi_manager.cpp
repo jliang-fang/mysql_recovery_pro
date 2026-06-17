@@ -72,7 +72,9 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
     inflateEnd(&strm);
 
     std::cerr << "[DEBUG] Decompressed size=" << decompressed.size() << "\n";
-    std::cerr << "[DEBUG] First 500 bytes: " << std::string(decompressed.begin(), decompressed.begin() + std::min((size_t)500, decompressed.size())) << "\n";
+    // ✅ 调试：输出完整的 JSON 内容以检查字段名
+    std::string json_str(decompressed.begin(), decompressed.end());
+    std::cerr << "[DEBUG SDI JSON] " << json_str.substr(0, std::min(json_str.length(), (size_t)5000)) << "\n";
 
     // Parse JSON
     try {
@@ -180,14 +182,25 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                         }
 
                         // Parse datetime_precision for temporal types (DATETIME2, TIMESTAMP2, TIME2)
+                        // ✅ 修复：检查多个可能的字段名
                         if (col.contains("datetime_precision")) {
                             column_info.datetime_precision = col["datetime_precision"];
+                        } else if (col.contains("datetimePrec")) {
+                            // MySQL 8.0 某些版本使用 datetimePrec
+                            column_info.datetime_precision = col["datetimePrec"];
+                        }
+                        if (column_info.datetime_precision > 0) {
+                            std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' datetime_precision="
+                                      << column_info.datetime_precision << "\n";
                         }
 
                         // Parse ENUM/SET elements (stored as base64 in SDI)
+                        // ✅ 修复：区分 ENUM 和 SET，将元素放入正确的列表
                         if (col.contains("elements") && col["elements"].is_array()) {
                             static const std::string base64_chars =
                                 "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                            std::vector<std::string>* target_values =
+                                (column_info.mysql_type_id == 23) ? &column_info.set_values : &column_info.enum_values;
                             for (const auto& elem : col["elements"]) {
                                 if (elem.contains("name")) {
                                     std::string encoded = elem["name"].get<std::string>();
@@ -205,9 +218,12 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                                             valb -= 8;
                                         }
                                     }
-                                    column_info.enum_values.push_back(decoded);
+                                    target_values->push_back(decoded);
                                 }
                             }
+                            std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
+                                      << target_values->size() << " elements (type="
+                                      << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")\n";
                         }
 
                         // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)

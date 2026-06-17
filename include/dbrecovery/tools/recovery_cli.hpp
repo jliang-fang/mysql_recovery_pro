@@ -887,11 +887,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         }
                     }
 
-                    // Set scale for temporal types (DATETIME2=19, TIMESTAMP2=18, TIME2=20)
-                    // The scale is the fractional seconds precision (0-6)
+                    // Set datetime_precision for temporal types (DATETIME2=19, TIMESTAMP2=18, TIME2=20)
+                    // The datetime_precision is the fractional seconds precision (0-6)
+                    // ✅ 修复：正确传递 datetime_precision 到 IndexColumnDef
                     if (col.mysql_type_id == 19 || col.mysql_type_id == 18 || col.mysql_type_id == 20) {
                         if (col.datetime_precision > 0) {
-                            col_def.scale = col.datetime_precision;
+                            col_def.datetime_precision = col.datetime_precision;
+                            col_def.scale = col.datetime_precision;  // 同时设置 scale 用于显示
                         }
                     }
 

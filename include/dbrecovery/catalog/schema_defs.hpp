@@ -338,7 +338,10 @@ struct TableSchema {
                 }
                 // Parse ENUM/SET elements
                 // SDI stores element names in base64 encoding (MySQL 8.0+)
+                // ✅ 修复：区分 ENUM 和 SET，将元素放入正确的列表
                 if (col_json.contains("elements") && col_json["elements"].is_array()) {
+                    std::vector<std::string>* target_values =
+                        (col.mysql_type_id == 23) ? &col.set_values : &col.enum_values;
                     for (const auto& elem : col_json["elements"]) {
                         if (elem.contains("name")) {
                             std::string encoded = elem["name"].get<std::string>();
@@ -359,7 +362,7 @@ struct TableSchema {
                                     valb -= 8;
                                 }
                             }
-                            col.enum_values.push_back(decoded);
+                            target_values->push_back(decoded);
                         }
                     }
                 }
