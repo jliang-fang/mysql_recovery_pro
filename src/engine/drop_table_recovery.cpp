@@ -8,6 +8,7 @@
 #include "dbrecovery/engine/system_table_sdi.hpp"
 #include "dbrecovery/utils/innodb_checksum.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -962,8 +963,9 @@ DropTableRecovery::Result DropTableRecovery::recover(
     try {
         if (progress) progress(0.0, "Starting DROP TABLE recovery...");
 
+        // Step 1: Scan system tablespace for deleted table metadata
         if (!config_.system_tablespace.empty()) {
-            if (progress) progress(0.2, "Scanning system tablespace...");
+            if (progress) progress(0.1, "Scanning system tablespace for deleted tables...");
 
             sys_scanner_ = std::make_unique<SystemTablespaceScanner>(
                 config_.system_tablespace, config_.page_size);
@@ -971,13 +973,113 @@ DropTableRecovery::Result DropTableRecovery::recover(
             auto recovered_tables = sys_scanner_->scan_deleted_tables();
             result.tables_found = recovered_tables.size();
             result.recovered_tables = recovered_tables;
+
+            if (progress) {
+                std::ostringstream oss;
+                oss << "Found " << recovered_tables.size() << " deleted table(s) in system tablespace";
+                progress(0.2, oss.str());
+            }
         }
 
-        if (progress) progress(0.4, "Searching for .ibd files...");
-        auto ibd_files = find_ibd_files();
+        // Step 2: If we have recovered table metadata, scan for orphaned pages
+        if (!result.recovered_tables.empty()) {
+            // Collect all primary index IDs to scan for
+            std::vector<uint64_t> primary_index_ids;
+            for (const auto& table : result.recovered_tables) {
+                if (table.primary_index_id > 0) {
+                    primary_index_ids.push_back(table.primary_index_id);
+                }
+            }
 
-        if (progress) progress(0.6, "Recovering data...");
-        // TODO: Implement actual data recovery from orphaned pages
+            if (!primary_index_ids.empty() && !config_.device_path.empty()) {
+                // Deep scan raw device for orphaned pages
+                if (progress) progress(0.3, "Scanning raw device for orphaned pages...");
+
+                RawDiskIOEngine engine;
+                if (engine.open(config_.device_path)) {
+                    page_scanner_ = std::make_unique<OrphanedPageScanner>(engine);
+
+                    auto orphaned_pages = page_scanner_->scan_by_index_ids(
+                        primary_index_ids, config_.page_size);
+
+                    if (progress) {
+                        uint64_t total_pages = 0;
+                        for (const auto& [id, pages] : orphaned_pages) {
+                            total_pages += pages.size();
+                        }
+                        std::ostringstream oss;
+                        oss << "Found " << total_pages << " orphaned INDEX page(s)";
+                        progress(0.5, oss.str());
+                    }
+
+                    // Step 3: Extract records from orphaned pages
+                    if (progress) progress(0.6, "Extracting records from orphaned pages...");
+
+                    for (auto& table : result.recovered_tables) {
+                        if (table.primary_index_id == 0) continue;
+
+                        auto it = orphaned_pages.find(table.primary_index_id);
+                        if (it == orphaned_pages.end() || it->second.empty()) continue;
+
+                        auto records = extract_records(it->second, table.schema);
+                        if (!records.empty()) {
+                            result.records_per_table[table.table_id] = records.size();
+                            result.total_records += records.size();
+
+                            // Export recovered data
+                            if (export_data(table.table_name, table.schema, records)) {
+                                result.tables_recovered++;
+                            }
+                        }
+                    }
+                }
+            } else if (!config_.data_directory.empty()) {
+                // Scan data directory for .ibd files
+                if (progress) progress(0.3, "Scanning data directory for orphaned pages...");
+
+                auto ibd_files = find_ibd_files();
+
+                if (progress) {
+                    std::ostringstream oss;
+                    oss << "Found " << ibd_files.size() << " .ibd file(s) to scan";
+                    progress(0.4, oss.str());
+                }
+
+                // Scan each .ibd file for orphaned INDEX pages
+                for (const auto& ibd_path : ibd_files) {
+                    RawDiskIOEngine engine;
+                    if (!engine.open(ibd_path)) continue;
+
+                    page_scanner_ = std::make_unique<OrphanedPageScanner>(engine);
+
+                    // Scan for all primary index IDs
+                    auto orphaned_pages = page_scanner_->scan_by_index_ids(
+                        primary_index_ids, config_.page_size);
+
+                    // Extract records
+                    for (auto& table : result.recovered_tables) {
+                        if (table.primary_index_id == 0) continue;
+
+                        auto it = orphaned_pages.find(table.primary_index_id);
+                        if (it == orphaned_pages.end() || it->second.empty()) continue;
+
+                        auto records = extract_records(it->second, table.schema);
+                        if (!records.empty()) {
+                            result.records_per_table[table.table_id] += records.size();
+                            result.total_records += records.size();
+
+                            // Export recovered data
+                            export_data(table.table_name, table.schema, records);
+                        }
+                    }
+                }
+
+                // Count tables with recovered records
+                for (const auto& [table_id, count] : result.records_per_table) {
+                    if (count > 0) result.tables_recovered++;
+                }
+            }
+        }
 
         if (progress) progress(1.0, "Recovery complete");
         result.success = true;
@@ -1018,8 +1120,57 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
     const std::vector<OrphanedPageScanner::OrphanedPage>& pages,
     const catalog::TableSchema& schema) {
 
-    // TODO: Implement using PageParserV3 to extract records
-    return {};
+    std::vector<std::map<std::string, std::string>> all_records;
+
+    // Build column definitions for InnoDBIndexParser
+    std::vector<innodb::IndexColumnDef> col_defs;
+    for (const auto& [idx, col] : schema.columns) {
+        innodb::IndexColumnDef def;
+        def.name = col.name;
+        def.col_type = col.mysql_type_id;
+        def.is_nullable = col.is_nullable;
+        def.is_unsigned = !col.is_signed;  // ColumnInfo uses is_signed, invert it
+        def.col_length = col.column_length;
+        def.precision = col.numeric_precision;
+        def.scale = col.numeric_scale;
+        def.datetime_precision = col.datetime_precision;
+        def.enum_values = col.enum_values;
+        def.set_values = col.set_values;
+        col_defs.push_back(def);
+    }
+
+    // Create parser with schema
+    innodb::InnoDBIndexParser parser;
+    parser.set_columns(col_defs, false, 1);
+    parser.set_recover_deleted(true);  // Include deleted records
+    parser.set_bad_page_mode(1);  // Fast mode for damaged pages
+
+    // Process each orphaned page
+    for (const auto& page : pages) {
+        if (page.data.empty() || page.data.size() < 100) continue;
+
+        // Check if this is a leaf page (level 0)
+        // Page header: offset 26-27 = level (big-endian)
+        uint16_t level = (static_cast<uint16_t>(page.data[26]) << 8) | page.data[27];
+        if (level != 0) continue;  // Skip non-leaf pages
+
+        try {
+            // Use InnoDBIndexParser to extract records
+            auto records = parser.parse_page(page.data.data(), page.page_size, page.page_number);
+
+            for (const auto& rec : records) {
+                std::map<std::string, std::string> record_map;
+                for (size_t i = 0; i < rec.fields.size() && i < col_defs.size(); i++) {
+                    record_map[col_defs[i].name] = rec.fields[i].str_value;
+                }
+                all_records.push_back(record_map);
+            }
+        } catch (...) {
+            // Continue with next page if parsing fails
+        }
+    }
+
+    return all_records;
 }
 
 bool DropTableRecovery::export_data(
