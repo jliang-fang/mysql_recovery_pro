@@ -326,6 +326,10 @@ struct TableSchema {
                 if (col_json.contains("numeric_scale")) {
                     col.numeric_scale = col_json["numeric_scale"].get<int>();
                 }
+                // Parse datetime_precision for temporal types
+                if (col_json.contains("datetime_precision")) {
+                    col.datetime_precision = col_json["datetime_precision"].get<int>();
+                }
                 // Also parse char_length for VARCHAR
                 if (col_json.contains("char_length")) {
                     col.column_length = col_json["char_length"].get<uint32_t>();
@@ -333,10 +337,29 @@ struct TableSchema {
                     col.column_length = col_json["length"].get<uint32_t>();
                 }
                 // Parse ENUM/SET elements
+                // SDI stores element names in base64 encoding (MySQL 8.0+)
                 if (col_json.contains("elements") && col_json["elements"].is_array()) {
                     for (const auto& elem : col_json["elements"]) {
                         if (elem.contains("name")) {
-                            col.enum_values.push_back(elem["name"].get<std::string>());
+                            std::string encoded = elem["name"].get<std::string>();
+                            // Decode base64: SDI stores ENUM values as base64
+                            // Simple base64 decode
+                            static const std::string base64_chars =
+                                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                            std::string decoded;
+                            std::vector<int> T(256, -1);
+                            for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+                            int val = 0, valb = -8;
+                            for (unsigned char c : encoded) {
+                                if (T[c] == -1) break;
+                                val = (val << 6) + T[c];
+                                valb += 6;
+                                if (valb >= 0) {
+                                    decoded.push_back(char((val >> valb) & 0xFF));
+                                    valb -= 8;
+                                }
+                            }
+                            col.enum_values.push_back(decoded);
                         }
                     }
                 }

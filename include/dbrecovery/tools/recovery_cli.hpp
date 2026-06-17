@@ -887,6 +887,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         }
                     }
 
+                    // Set scale for temporal types (DATETIME2=19, TIMESTAMP2=18, TIME2=20)
+                    // The scale is the fractional seconds precision (0-6)
+                    if (col.mysql_type_id == 19 || col.mysql_type_id == 18 || col.mysql_type_id == 20) {
+                        if (col.datetime_precision > 0) {
+                            col_def.scale = col.datetime_precision;
+                        }
+                    }
+
                     // Handle ENUM/SET elements
                     for (const auto& val : col.enum_values) {
                         col_def.enum_values.push_back(val);

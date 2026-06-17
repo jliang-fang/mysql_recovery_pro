@@ -179,6 +179,37 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                             column_info.numeric_scale = col["scale"];
                         }
 
+                        // Parse datetime_precision for temporal types (DATETIME2, TIMESTAMP2, TIME2)
+                        if (col.contains("datetime_precision")) {
+                            column_info.datetime_precision = col["datetime_precision"];
+                        }
+
+                        // Parse ENUM/SET elements (stored as base64 in SDI)
+                        if (col.contains("elements") && col["elements"].is_array()) {
+                            static const std::string base64_chars =
+                                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                            for (const auto& elem : col["elements"]) {
+                                if (elem.contains("name")) {
+                                    std::string encoded = elem["name"].get<std::string>();
+                                    // Simple base64 decode
+                                    std::string decoded;
+                                    std::vector<int> T(256, -1);
+                                    for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+                                    int val = 0, valb = -8;
+                                    for (unsigned char c : encoded) {
+                                        if (T[c] == -1) break;
+                                        val = (val << 6) + T[c];
+                                        valb += 6;
+                                        if (valb >= 0) {
+                                            decoded.push_back(char((val >> valb) & 0xFF));
+                                            valb -= 8;
+                                        }
+                                    }
+                                    column_info.enum_values.push_back(decoded);
+                                }
+                            }
+                        }
+
                         // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
                         // These are internal columns not part of user table schema
                         if (column_info.name == "DB_TRX_ID" || column_info.name == "DB_ROLL_PTR" || column_info.name == "DB_ROW_ID") {
