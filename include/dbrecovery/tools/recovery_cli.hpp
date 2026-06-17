@@ -123,6 +123,9 @@ private:
     // 解析页
     innodb::BPlusTreeNodeParser parse_page(const std::vector<uint8_t>& page_data);
 
+    // CSV字段转义
+    std::string escape_csv_field(const std::string& value);
+
     // 导出数据
     bool export_data(const std::string& output_path, const std::string& format,
                     const std::vector<std::map<std::string, std::string>>& records);
@@ -273,6 +276,27 @@ inline innodb::BlobChainRebuilder RecoveryCLI::rebuild_blob_chain(const std::str
     return rebuilder;
 }
 
+inline std::string RecoveryCLI::escape_csv_field(const std::string& value) {
+    // Check if the value needs quoting
+    if (value.find(',') != std::string::npos ||
+        value.find('"') != std::string::npos ||
+        value.find('\n') != std::string::npos ||
+        value.find('\r') != std::string::npos) {
+        // Quote the value and escape internal quotes
+        std::string result = "\"";
+        for (char c : value) {
+            if (c == '"') {
+                result += "\"\"";  // Escape quotes by doubling them
+            } else {
+                result += c;
+            }
+        }
+        result += "\"";
+        return result;
+    }
+    return value;
+}
+
 inline bool RecoveryCLI::export_data(const std::string& output_path, const std::string& format,
                                      const std::vector<std::map<std::string, std::string>>& records) {
     if (format == "csv") {
@@ -289,12 +313,12 @@ inline bool RecoveryCLI::export_data(const std::string& output_path, const std::
             }
             file << "\n";
 
-            // 写入数据
+            // 写入数据 - 使用CSV转义
             for (const auto& record : records) {
                 first = true;
                 for (const auto& kv : record) {
                     if (!first) file << ",";
-                    file << kv.second;
+                    file << escape_csv_field(kv.second);
                     first = false;
                 }
                 file << "\n";

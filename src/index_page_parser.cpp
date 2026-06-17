@@ -1426,11 +1426,18 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 19: {  // DATETIME2 (new format, 5 bytes) - InnoDB type 19
+        case 19: {  // DATETIME2 (new format, 5 bytes base + fractional) - InnoDB type 19
             val.type = IndexFieldValue::Type::DATETIME_VAL;
+            // DATETIME2: 5 bytes base + (precision+1)/2 bytes fractional
+            // Only read the first 5 bytes for datetime value
+            if (field_size < 5) {
+                val.str_value = "0000-00-00 00:00:00";
+                break;
+            }
             // Read 5 bytes as 40-bit value
             uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(data, offset)) << 8) |
                          static_cast<uint64_t>(data[offset + 4]);
+
             // Extract bit fields using ibd2sql's exact mask values
             // months = (t & 549751619584) >> 22  where 549751619584 = 0x7FFFC00000
             uint64_t months = (t & 0x7FFFC00000ULL) >> 22;  // 19 bits
@@ -1440,21 +1447,62 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             uint8_t hour = static_cast<uint8_t>((t & 0x1F000ULL) >> 12);    // 5 bits
             uint8_t minute = static_cast<uint8_t>((t & 0xFC0ULL) >> 6);     // 6 bits
             uint8_t second = static_cast<uint8_t>(t & 0x3FULL);             // 6 bits
+
+            // Handle fractional seconds if present
+            std::string frac_str;
+            if (field_size > 5) {
+                // Read fractional bytes
+                uint32_t frac = 0;
+                size_t frac_bytes = field_size - 5;
+                for (size_t i = 0; i < frac_bytes; i++) {
+                    frac = (frac << 8) | data[offset + 5 + i];
+                }
+                // Format fractional seconds based on precision
+                int precision = col.datetime_precision;
+                if (precision > 0) {
+                    char fbuf[16];
+                    snprintf(fbuf, sizeof(fbuf), ".%0*u", precision, frac);
+                    frac_str = fbuf;
+                }
+            }
+
             char buf[32];
-            snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u", year, month, day, hour, minute, second);
+            snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u%s",
+                     year, month, day, hour, minute, second, frac_str.c_str());
             val.str_value = buf;
             break;
         }
-        // InnoDB type 18 = TIMESTAMP2 (4 bytes, same as TIMESTAMP)
-        case 18: { // TIMESTAMP2 (4 bytes) - InnoDB type 18
+        // InnoDB type 18 = TIMESTAMP2 (4 bytes base + fractional)
+        case 18: { // TIMESTAMP2 (4 bytes + fractional) - InnoDB type 18
             val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
+            if (field_size < 4) {
+                val.str_value = "0000-00-00 00:00:00";
+                break;
+            }
             uint32_t ts = read_be<uint32_t>(data, offset);
             time_t t = static_cast<time_t>(ts);
             struct tm tm_buf;
             gmtime_r(&t, &tm_buf);
+
+            // Handle fractional seconds if present
+            std::string frac_str;
+            if (field_size > 4) {
+                uint32_t frac = 0;
+                size_t frac_bytes = field_size - 4;
+                for (size_t i = 0; i < frac_bytes; i++) {
+                    frac = (frac << 8) | data[offset + 4 + i];
+                }
+                int precision = col.datetime_precision;
+                if (precision > 0) {
+                    char fbuf[16];
+                    snprintf(fbuf, sizeof(fbuf), ".%0*u", precision, frac);
+                    frac_str = fbuf;
+                }
+            }
+
             char buf[32];
             strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-            val.str_value = buf;
+            val.str_value = std::string(buf) + frac_str;
             break;
         }
         case 20: {  // TIME2 (MySQL 5.6+ time format, 3-6 bytes) - InnoDB type 20
