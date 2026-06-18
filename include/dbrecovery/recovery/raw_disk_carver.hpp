@@ -26,6 +26,7 @@ namespace recovery {
  * 2. 按InnoDB页签名检测有效数据页
  * 3. 按index_id分组孤立页
  * 4. Schema-less启发式记录恢复
+ * 5. 支持MySQL 5.6/5.7/8.0/8.4/9.0页格式
  *
  * 参考: ibd2sql SCAN_DEV_WORKER实现
  */
@@ -43,6 +44,31 @@ public:
         bool scan_all_index = true;   // 扫描所有INDEX页
         bool recover_deleted = true;  // 恢复已删除记录
         bool verbose = false;         // 详细输出
+        bool auto_detect_page_size = true; // 自动检测页大小
+        bool scan_frm_files = true;   // 扫描FRM文件签名
+        bool scan_sdi_pages = true;   // 扫描SDI页
+    };
+
+    // 页类型枚举
+    enum class PageType : uint8_t {
+        UNKNOWN = 0,
+        INDEX = 1,       // FIL_PAGE_INDEX (0x45BF)
+        SDI = 2,         // FIL_PAGE_SDI (0x45BE)
+        SDI_ZIP = 3,     // FIL_PAGE_SDI_ZIP (0x45BD)
+        UNDO_LOG = 4,    // FIL_PAGE_UNDO_LOG (0x45B2)
+        BLOB = 5,        // BLOB页
+        FRM = 6,         // FRM文件签名
+        ALLOCATED = 7    // FIL_PAGE_TYPE_ALLOCATED (0x0000)
+    };
+
+    // 扫描到的页信息
+    struct FoundPage {
+        PageType type;
+        uint64_t offset;
+        uint64_t index_id;
+        uint32_t space_id;
+        uint32_t page_no;
+        std::vector<uint8_t> data;
     };
 
     // 扫描结果
@@ -53,8 +79,12 @@ public:
         uint64_t index_pages_found = 0;
         uint64_t sdi_pages_found = 0;
         uint64_t blob_pages_found = 0;
+        uint64_t frm_files_found = 0;
         double elapsed_seconds = 0.0;
-        std::map<uint64_t, std::vector<std::vector<uint8_t>>> pages_by_index_id; // index_id -> pages (multiple pages)
+        std::map<uint64_t, std::vector<std::vector<uint8_t>>> pages_by_index_id; // index_id -> pages
+        std::vector<FoundPage> all_found_pages; // 所有找到的页
+        std::map<uint32_t, std::vector<uint8_t>> sdi_pages; // space_id -> SDI data
+        std::vector<std::string> frm_files; // FRM文件数据
         std::vector<std::string> errors;
     };
 
@@ -63,6 +93,7 @@ public:
         bool success = false;
         uint64_t total_records = 0;
         std::map<uint64_t, std::vector<std::map<std::string, std::string>>> records_by_index_id;
+        std::map<uint64_t, catalog::TableSchema> inferred_schemas; // index_id -> inferred schema
         std::vector<std::string> output_files;
         std::vector<std::string> errors;
     };
@@ -104,6 +135,7 @@ public:
 private:
     Config config_;
     ScanResult last_scan_result_;
+    uint64_t actual_scan_stop_ = 0;  // 实际扫描结束位置
 
     // 进程间共享的原子变量
     std::atomic<uint64_t> current_offset_{0};
@@ -138,10 +170,32 @@ private:
     static bool is_blob_page(const uint8_t* data, size_t page_size);
 
     /**
+     * @brief 检测FRM文件签名
+     * 参考ibd2sql IS_FRM: data[:10] == b'\xfe\x01\n\x0c\x03\x00\x00\x10\x01\x00'
+     */
+    static bool is_frm_signature(const uint8_t* data, size_t len);
+
+    /**
      * @brief 从页数据提取index_id
      * 参考: index_id在offset 66-74 (大端序)
      */
     static uint64_t extract_index_id(const uint8_t* data, size_t page_size);
+
+    /**
+     * @brief 从页数据提取space_id
+     */
+    static uint32_t extract_space_id(const uint8_t* data, size_t page_size);
+
+    /**
+     * @brief 从页数据提取page_no
+     */
+    static uint32_t extract_page_no(const uint8_t* data, size_t page_size);
+
+    /**
+     * @brief 自动检测页大小
+     * 支持4KB/8KB/16KB/32KB/64KB
+     */
+    static uint32_t detect_page_size(const uint8_t* data, size_t max_len);
 
     /**
      * @brief 工作线程函数
@@ -160,6 +214,18 @@ private:
      */
     std::vector<std::pair<size_t, size_t>> detect_field_boundaries(
         const uint8_t* record_start, size_t max_len);
+
+    /**
+     * @brief 从SDI页提取表结构 (MySQL 8.0+)
+     */
+    std::optional<catalog::TableSchema> extract_schema_from_sdi(
+        const std::vector<uint8_t>& page_data);
+
+    /**
+     * @brief 从FRM数据提取表结构 (MySQL 5.6/5.7)
+     */
+    std::optional<catalog::TableSchema> extract_schema_from_frm(
+        const uint8_t* data, size_t len);
 };
 
 } // namespace recovery

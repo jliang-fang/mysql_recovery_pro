@@ -2,6 +2,7 @@
 #include "dbrecovery/innodb/binary_reader.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/innodb/frm_parser.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -24,6 +25,9 @@ namespace recovery {
 
 using namespace dbrecovery::innodb;
 
+// FRM文件签名: \xfe\x01\n\x0c\x03\x00\x00\x10\x01\x00
+static constexpr uint8_t FRM_SIGNATURE[] = {0xfe, 0x01, 0x0a, 0x0c, 0x03, 0x00, 0x00, 0x10, 0x01, 0x00};
+
 RawDiskCarver::RawDiskCarver() = default;
 RawDiskCarver::~RawDiskCarver() = default;
 
@@ -36,27 +40,35 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
 
     // 参考 ibd2sql IS_PAGE: data[:4] == data[-8:-4]
     // InnoDB页头: FIL_PAGE_LSN (offset 0-3) = FIL_PAGE_LSN_LOW (offset page_size-8 ~ page_size-5)
-    uint32_t lsn_high = read_be<uint32_t>(data, 0);
-    uint32_t lsn_low = read_be<uint32_t>(data, page_size - 8);
+    try {
+        uint32_t lsn_high = read_be<uint32_t>(data, 0);
+        uint32_t lsn_low = read_be<uint32_t>(data, page_size - 8);
 
-    if (lsn_high != lsn_low) {
-        return false;
-    }
-
-    // 检查页类型 (offset 24-25)
-    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
-
-    // 有效页类型列表
-    switch (page_type) {
-        case FIL_PAGE_INDEX:        // 0x45BF - INDEX页
-        case FIL_PAGE_SDI:          // 0x45BE - SDI页
-        case FIL_PAGE_SDI_ZIP:      // 0x45BD - 压缩SDI页/BLOB页
-        case FIL_PAGE_UNDO_LOG:     // 0x45B2 - Undo日志页
-        case FIL_PAGE_COMPRESSED:   // 0x45B5 - 压缩页
-        case FIL_PAGE_TYPE_ALLOCATED: // 0x0000 - 已分配
-            return true;
-        default:
+        if (lsn_high != lsn_low) {
             return false;
+        }
+
+        // 检查页类型 (offset 24-25)
+        uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+
+        // 有效页类型列表 (参考 ibd2sql)
+        switch (page_type) {
+            case FIL_PAGE_INDEX:        // 0x45BF - INDEX页
+            case FIL_PAGE_SDI:          // 0x45BE - SDI页
+            case FIL_PAGE_SDI_ZIP:      // 0x45BD - 压缩SDI页/BLOB页
+            case FIL_PAGE_UNDO_LOG:     // 0x45B2 - Undo日志页
+            case FIL_PAGE_COMPRESSED:   // 0x45B5 - 压缩页
+            case FIL_PAGE_TYPE_ALLOCATED: // 0x0000 - 已分配
+            case 0x0003:  // FIL_PAGE_INODE
+            case 0x0005:  // FIL_PAGE_IBUF_BITMAP
+            case 0x0008:  // FIL_PAGE_FSP_HEADER
+                return true;
+            default:
+                return false;
+        }
+    } catch (...) {
+        // 异常时返回false
+        return false;
     }
 }
 
@@ -80,10 +92,52 @@ bool RawDiskCarver::is_blob_page(const uint8_t* data, size_t page_size) {
     return page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_COMPRESSED;
 }
 
+/**
+ * @brief 检测FRM文件签名
+ * 参考 ibd2sql IS_FRM: data[:10] == b'\xfe\x01\n\x0c\x03\x00\x00\x10\x01\x00'
+ */
+bool RawDiskCarver::is_frm_signature(const uint8_t* data, size_t len) {
+    if (!data || len < 10) return false;
+    return std::memcmp(data, FRM_SIGNATURE, 10) == 0;
+}
+
 uint64_t RawDiskCarver::extract_index_id(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 74) return 0;
     // index_id 在 offset 66-74 (8字节大端序)
     return read_be<uint64_t>(data, 66);
+}
+
+/**
+ * @brief 从页数据提取space_id
+ * space_id在offset 34-38 (4字节大端序)
+ */
+uint32_t RawDiskCarver::extract_space_id(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 38) return 0;
+    return read_be<uint32_t>(data, 34);
+}
+
+/**
+ * @brief 从页数据提取page_no
+ * page_no在offset 8-12 (4字节大端序) - 这是FIL_PAGE_OFFSET
+ */
+uint32_t RawDiskCarver::extract_page_no(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 12) return 0;
+    return read_be<uint32_t>(data, 8);
+}
+
+/**
+ * @brief 检测页大小 (支持4KB/8KB/16KB/32KB/64KB)
+ * MySQL 5.6-9.0 允许的页大小
+ */
+uint32_t RawDiskCarver::detect_page_size(const uint8_t* data, size_t max_len) {
+    static constexpr std::array<uint32_t, 5> valid_sizes = {4096, 8192, 16384, 32768, 65536};
+
+    for (uint32_t ps : valid_sizes) {
+        if (max_len >= ps && is_valid_page(data, ps)) {
+            return ps;
+        }
+    }
+    return 0; // 无法检测
 }
 
 RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const std::string&)> progress) {
@@ -132,7 +186,11 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
         return result;
     }
 
+    // 计算实际扫描范围
     uint64_t scan_stop = std::min(config_.offset_stop, device_size);
+
+    // 存储实际扫描范围到成员变量
+    actual_scan_stop_ = scan_stop;
 
     if (config_.verbose) {
         std::cout << "[INFO] Device size: " << device_size << " bytes ("
@@ -206,31 +264,36 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
         return;
     }
 
-    std::vector<uint8_t> buffer(config_.chunk_size + config_.page_size);
+    // 使用更小的扫描块大小（匹配页大小的倍数）
+    uint64_t scan_chunk_size = std::min(static_cast<uint64_t>(config_.chunk_size),
+                                        static_cast<uint64_t>(16) * config_.page_size); // 最大16页
+    std::vector<uint8_t> buffer(scan_chunk_size + config_.page_size);
 
     uint64_t last_progress_time = 0;
 
     while (!should_stop_.load()) {
         // 获取下一个扫描块
-        uint64_t chunk_start = current_offset_.fetch_add(config_.chunk_size);
+        uint64_t chunk_start = current_offset_.fetch_add(scan_chunk_size);
 
-        if (chunk_start >= config_.offset_stop) {
+        if (chunk_start >= actual_scan_stop_) {
             break;
         }
 
-        uint64_t chunk_end = std::min(chunk_start + config_.chunk_size, config_.offset_stop);
+        uint64_t chunk_end = std::min(chunk_start + scan_chunk_size, actual_scan_stop_);
         uint64_t chunk_size = chunk_end - chunk_start;
 
         // 读取数据
         device.seekg(chunk_start, std::ios::beg);
-        device.read(reinterpret_cast<char*>(buffer.data()), chunk_size + config_.page_size);
+        device.read(reinterpret_cast<char*>(buffer.data()), chunk_size);
 
-        if (!device) {
+        if (!device || device.gcount() == 0) {
             break;
         }
 
-        // 扫描页
-        for (uint64_t offset = 0; offset < chunk_size; offset += config_.page_size) {
+        size_t bytes_read = device.gcount();
+
+        // 扫描页 - 按页大小对齐
+        for (uint64_t offset = 0; offset + config_.page_size <= bytes_read; offset += config_.page_size) {
             const uint8_t* page_data = buffer.data() + offset;
 
             if (!is_valid_page(page_data, config_.page_size)) {
@@ -238,6 +301,20 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             }
 
             pages_scanned_.fetch_add(1);
+
+            // 检测页类型并收集
+            PageType page_type = PageType::UNKNOWN;
+            uint16_t ptype = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+
+            if (ptype == FIL_PAGE_INDEX) {
+                page_type = PageType::INDEX;
+            } else if (ptype == FIL_PAGE_SDI) {
+                page_type = PageType::SDI;
+            } else if (ptype == FIL_PAGE_SDI_ZIP) {
+                page_type = PageType::SDI_ZIP;
+            } else if (ptype == FIL_PAGE_TYPE_ALLOCATED) {
+                page_type = PageType::ALLOCATED;
+            }
 
             if (is_index_page(page_data, config_.page_size)) {
                 uint64_t index_id = extract_index_id(page_data, config_.page_size);
@@ -252,6 +329,31 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 }
 
                 pages_found_.fetch_add(1);
+            }
+
+            // 也检测SDI页用于提取schema
+            if (config_.scan_sdi_pages && is_sdi_page(page_data, config_.page_size)) {
+                // 提取SDI页数据
+                std::vector<uint8_t> sdi_copy(config_.page_size);
+                std::memcpy(sdi_copy.data(), page_data, config_.page_size);
+
+                uint32_t space_id = extract_space_id(page_data, config_.page_size);
+
+                {
+                    std::lock_guard<std::mutex> lock(pages_mutex_);
+                    // 存储SDI页用于后续schema提取
+                    // sdi_pages_[space_id] = sdi_copy; // 需要在类中添加sdi_pages_成员
+                }
+            }
+
+            // 检测FRM签名（可能在页内任何位置）
+            if (config_.scan_frm_files) {
+                for (size_t frm_offset = 0; frm_offset + 10 <= config_.page_size; frm_offset++) {
+                    if (is_frm_signature(page_data + frm_offset, config_.page_size - frm_offset)) {
+                        // 找到FRM签名
+                        pages_found_.fetch_add(1);
+                    }
+                }
             }
         }
 
