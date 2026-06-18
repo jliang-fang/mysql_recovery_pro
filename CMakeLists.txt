@@ -115,6 +115,7 @@ set(SOURCES
     src/engine/raw_disk_engine.cpp
     src/engine/signature_scraper.cpp
     src/engine/schema_aware_parser.cpp
+    src/engine/drop_table_recovery.cpp
     # ✅ 新增：终极恢复引擎模块 (>=99.9% recovery)
     src/engine/enhanced_raw_disk_engine.cpp
     src/engine/advanced_signature_scraper.cpp
@@ -122,6 +123,10 @@ set(SOURCES
     src/innodb/schema_aware_parser.cpp
     # ✅ 新增：版本感知恢复引擎 (MySQL 5.6-9.0)
     src/recovery/version_aware_recovery.cpp
+    # ✅ 新增：原始磁盘雕刻 (PhotoRec风格，无备份恢复)
+    src/recovery/raw_disk_carver.cpp
+    src/recovery/truncate_recovery.cpp
+    src/recovery/disaster_recovery.cpp
     # ✅ 新增：ibd2sql-style INDEX page parser (core parser for >=99.9% recovery)
     src/index_page_parser.cpp
     # ✅ 新增：平台特定实现

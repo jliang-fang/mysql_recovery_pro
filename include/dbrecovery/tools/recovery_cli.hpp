@@ -29,6 +29,7 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/engine/drop_table_recovery.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
+#include "dbrecovery/recovery/raw_disk_carver.hpp"
 
 namespace fs = std::filesystem;
 
@@ -170,6 +171,9 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--truncate-recovery\033[0m        Recover from truncated table\n";
     std::cout << "  \033[1m--rmrf-recovery\033[0m            Recover from rm -rf scenario\n";
     std::cout << "  \033[1m--drop-table-recovery\033[0m      Recover from DROP TABLE (scan system tablespace)\n";
+    std::cout << "  \033[1m--disk-carving\033[0m             Raw disk carving (PhotoRec style, no backup needed)\n";
+    std::cout << "  \033[1m--device-path=<path>\033[0m       Raw device path for disk carving (e.g., /dev/sda)\n";
+    std::cout << "  \033[1m--num-workers=<n>\033[0m          Number of worker threads for disk carving (default: 4)\n";
     std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1 or mysql.ibd)\n";
     std::cout << "  \033[1m--data-dir=<path>\033[0m           MySQL data directory for DROP TABLE recovery\n";
     std::cout << "  \033[1m--header-repair\033[0m            Repair corrupted page headers\n";
@@ -373,6 +377,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool blob_recovery = parser_.get_bool_option("blob-recovery", false);
     bool rmrf_recovery = parser_.get_bool_option("rmrf-recovery", false);
     bool drop_table_recovery = parser_.get_bool_option("drop-table-recovery", false);
+    bool disk_carving = parser_.get_bool_option("disk-carving", false);
     bool default_recovery = parser_.get_bool_option("default-recovery", false);
     bool scan_only = parser_.get_bool_option("scan", false);
     bool rebuild_chain = parser_.get_bool_option("rebuild-chain", false);
@@ -380,7 +385,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool verbose = parser_.get_bool_option("verbose", false);
 
     // Default recovery mode if no specific mode is specified
-    if (!truncate_recovery && !rmrf_recovery && !drop_table_recovery && !default_recovery) {
+    if (!truncate_recovery && !rmrf_recovery && !drop_table_recovery && !default_recovery && !disk_carving) {
         default_recovery = true;  // Enable default recovery by default
     }
     std::string format = parser_.get_option("format", "csv");
@@ -393,8 +398,70 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string system_tablespace = parser_.get_option("system-tablespace", "");
     std::string data_dir = parser_.get_option("data-dir", "");
 
+    // Disk carving specific options
+    std::string device_path = parser_.get_option("device-path", "");
+    auto num_workers_opt = parser_.get_int_option("num-workers", 4);
+    uint32_t num_workers = static_cast<uint32_t>(num_workers_opt.value_or(4));
+
     // FRM file option for schema parsing
     std::string frm_path = parser_.get_option("frm", "");
+
+    // Disk carving recovery mode - raw device scanning (no backup needed)
+    if (disk_carving) {
+        if (device_path.empty()) {
+            std::cerr << "[ERROR] Disk carving requires --device-path (e.g., /dev/sda)\n";
+            show_help(argv[0]);
+            return 1;
+        }
+
+        std::cout << "[INFO] Starting raw disk carving recovery...\n";
+        std::cout << "[INFO] Device: " << device_path << "\n";
+        std::cout << "[INFO] Workers: " << num_workers << "\n";
+        std::cout << "[INFO] Page size: " << page_size << "\n";
+
+        dbrecovery::recovery::RawDiskCarver carver;
+        dbrecovery::recovery::RawDiskCarver::Config config;
+        config.device_path = device_path;
+        config.output_dir = output_dir;
+        config.page_size = page_size;
+        config.num_workers = num_workers;
+        config.verbose = verbose;
+        config.recover_deleted = true;
+        carver.set_config(config);
+
+        auto result = carver.scan_and_recover([&](double progress, const std::string& msg) {
+            if (verbose) {
+                std::cout << "[" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
+            }
+        });
+
+        if (result.success) {
+            std::cout << "[INFO] Disk carving completed.\n";
+            std::cout << "  Total records: " << result.total_records << "\n";
+            std::cout << "  Unique index_ids: " << result.records_by_index_id.size() << "\n";
+            std::cout << "  Output files: " << result.output_files.size() << "\n";
+
+            for (const auto& file : result.output_files) {
+                std::cout << "    - " << file << "\n";
+            }
+
+            if (!result.errors.empty()) {
+                std::cout << "\n  Errors:\n";
+                for (const auto& err : result.errors) {
+                    std::cout << "    - " << err << "\n";
+                }
+            }
+
+            std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
+            return 0;
+        } else {
+            std::cerr << "[ERROR] Disk carving failed.\n";
+            for (const auto& err : result.errors) {
+                std::cerr << "  - " << err << "\n";
+            }
+            return 1;
+        }
+    }
 
     // DROP TABLE recovery mode
     if (drop_table_recovery) {

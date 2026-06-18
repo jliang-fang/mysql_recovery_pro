@@ -1,0 +1,471 @@
+#include "dbrecovery/recovery/raw_disk_carver.hpp"
+#include "dbrecovery/innodb/binary_reader.hpp"
+#include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
+
+#include <chrono>
+#include <cstring>
+#include <algorithm>
+#include <iostream>
+#include <filesystem>
+#include <sstream>
+#include <iomanip>
+
+#ifdef __linux__
+#include <sys/stat.h>
+#include <sys/ioctl.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <linux/fs.h>
+#endif
+
+namespace dbrecovery {
+namespace recovery {
+
+using namespace dbrecovery::innodb;
+
+RawDiskCarver::RawDiskCarver() = default;
+RawDiskCarver::~RawDiskCarver() = default;
+
+void RawDiskCarver::set_config(const Config& config) {
+    config_ = config;
+}
+
+bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 64) return false;
+
+    // 参考 ibd2sql IS_PAGE: data[:4] == data[-8:-4]
+    // InnoDB页头: FIL_PAGE_LSN (offset 0-3) = FIL_PAGE_LSN_LOW (offset page_size-8 ~ page_size-5)
+    uint32_t lsn_high = read_be<uint32_t>(data, 0);
+    uint32_t lsn_low = read_be<uint32_t>(data, page_size - 8);
+
+    if (lsn_high != lsn_low) {
+        return false;
+    }
+
+    // 检查页类型 (offset 24-25)
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+
+    // 有效页类型列表
+    switch (page_type) {
+        case FIL_PAGE_INDEX:        // 0x45BF - INDEX页
+        case FIL_PAGE_SDI:          // 0x45BE - SDI页
+        case FIL_PAGE_SDI_ZIP:      // 0x45BD - 压缩SDI页/BLOB页
+        case FIL_PAGE_UNDO_LOG:     // 0x45B2 - Undo日志页
+        case FIL_PAGE_COMPRESSED:   // 0x45B5 - 压缩页
+        case FIL_PAGE_TYPE_ALLOCATED: // 0x0000 - 已分配
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool RawDiskCarver::is_index_page(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 26) return false;
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    return page_type == FIL_PAGE_INDEX; // 0x45BF
+}
+
+bool RawDiskCarver::is_sdi_page(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 26) return false;
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    return page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP;
+}
+
+bool RawDiskCarver::is_blob_page(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 26) return false;
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    // FIL_PAGE_SDI_ZIP (0x45BD) is used for both compressed SDI and BLOB pages
+    // FIL_PAGE_COMPRESSED (0x45B5) is used for compressed pages
+    return page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_COMPRESSED;
+}
+
+uint64_t RawDiskCarver::extract_index_id(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 74) return 0;
+    // index_id 在 offset 66-74 (8字节大端序)
+    return read_be<uint64_t>(data, 66);
+}
+
+RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const std::string&)> progress) {
+    ScanResult result;
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // 检查设备路径
+    if (config_.device_path.empty()) {
+        result.errors.push_back("Device path not specified");
+        return result;
+    }
+
+    // 获取设备大小
+    uint64_t device_size = 0;
+
+#ifdef __linux__
+    struct stat st;
+    if (stat(config_.device_path.c_str(), &st) != 0) {
+        result.errors.push_back("Cannot access device: " + config_.device_path);
+        return result;
+    }
+
+    if (S_ISBLK(st.st_mode)) {
+        // 块设备 - 使用ioctl获取大小
+        int fd = open(config_.device_path.c_str(), O_RDONLY);
+        if (fd >= 0) {
+            ioctl(fd, BLKGETSIZE64, &device_size);
+            close(fd);
+        }
+    } else if (S_ISREG(st.st_mode)) {
+        // 普通文件
+        device_size = st.st_size;
+    }
+#else
+    // 非Linux系统，使用文件系统获取大小
+    try {
+        device_size = std::filesystem::file_size(config_.device_path);
+    } catch (...) {
+        result.errors.push_back("Cannot get device size");
+        return result;
+    }
+#endif
+
+    if (device_size == 0) {
+        result.errors.push_back("Device size is 0");
+        return result;
+    }
+
+    uint64_t scan_stop = std::min(config_.offset_stop, device_size);
+
+    if (config_.verbose) {
+        std::cout << "[INFO] Device size: " << device_size << " bytes ("
+                  << (device_size / 1024.0 / 1024.0 / 1024.0) << " GB)\n";
+        std::cout << "[INFO] Scan range: " << config_.offset_start << " - " << scan_stop << "\n";
+        std::cout << "[INFO] Page size: " << config_.page_size << "\n";
+        std::cout << "[INFO] Workers: " << config_.num_workers << "\n";
+    }
+
+    // 初始化原子变量
+    current_offset_ = config_.offset_start;
+    pages_scanned_ = 0;
+    pages_found_ = 0;
+    should_stop_ = false;
+    collected_pages_.clear();
+
+    // 创建工作线程
+    std::vector<std::thread> workers;
+    for (uint32_t i = 0; i < config_.num_workers; ++i) {
+        workers.emplace_back(&RawDiskCarver::worker_thread, this, i, progress);
+    }
+
+    // 等待所有工作线程完成
+    for (auto& w : workers) {
+        w.join();
+    }
+
+    // 收集结果
+    result.total_pages_scanned = pages_scanned_.load();
+    result.valid_pages_found = pages_found_.load();
+
+    // 合并收集的页
+    {
+        std::lock_guard<std::mutex> lock(pages_mutex_);
+        for (auto& [index_id, pages] : collected_pages_) {
+            for (auto& page : pages) {
+                result.pages_by_index_id[index_id].push_back(std::move(page));
+            }
+        }
+    }
+
+    // 统计各类页
+    for (const auto& [index_id, pages] : result.pages_by_index_id) {
+        result.index_pages_found += pages.size();
+    }
+
+    auto end_time = std::chrono::high_resolution_clock::now();
+    result.elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
+    result.success = true;
+
+    if (config_.verbose) {
+        std::cout << "[INFO] Scan completed:\n";
+        std::cout << "  Pages scanned: " << result.total_pages_scanned << "\n";
+        std::cout << "  Valid pages: " << result.valid_pages_found << "\n";
+        std::cout << "  INDEX pages: " << result.index_pages_found << "\n";
+        std::cout << "  Unique index_ids: " << result.pages_by_index_id.size() << "\n";
+        std::cout << "  Time: " << result.elapsed_seconds << "s\n";
+    }
+
+    last_scan_result_ = result;
+    return result;
+}
+
+void RawDiskCarver::worker_thread(uint32_t worker_id,
+                                   std::function<void(double, const std::string&)> progress) {
+    std::ifstream device(config_.device_path, std::ios::binary);
+    if (!device) {
+        if (config_.verbose) {
+            std::cerr << "[Worker " << worker_id << "] Cannot open device\n";
+        }
+        return;
+    }
+
+    std::vector<uint8_t> buffer(config_.chunk_size + config_.page_size);
+
+    uint64_t last_progress_time = 0;
+
+    while (!should_stop_.load()) {
+        // 获取下一个扫描块
+        uint64_t chunk_start = current_offset_.fetch_add(config_.chunk_size);
+
+        if (chunk_start >= config_.offset_stop) {
+            break;
+        }
+
+        uint64_t chunk_end = std::min(chunk_start + config_.chunk_size, config_.offset_stop);
+        uint64_t chunk_size = chunk_end - chunk_start;
+
+        // 读取数据
+        device.seekg(chunk_start, std::ios::beg);
+        device.read(reinterpret_cast<char*>(buffer.data()), chunk_size + config_.page_size);
+
+        if (!device) {
+            break;
+        }
+
+        // 扫描页
+        for (uint64_t offset = 0; offset < chunk_size; offset += config_.page_size) {
+            const uint8_t* page_data = buffer.data() + offset;
+
+            if (!is_valid_page(page_data, config_.page_size)) {
+                continue;
+            }
+
+            pages_scanned_.fetch_add(1);
+
+            if (is_index_page(page_data, config_.page_size)) {
+                uint64_t index_id = extract_index_id(page_data, config_.page_size);
+
+                // 提取页数据
+                std::vector<uint8_t> page_copy(config_.page_size);
+                std::memcpy(page_copy.data(), page_data, config_.page_size);
+
+                {
+                    std::lock_guard<std::mutex> lock(pages_mutex_);
+                    collected_pages_[index_id].push_back(std::move(page_copy));
+                }
+
+                pages_found_.fetch_add(1);
+            }
+        }
+
+        // 进度报告 (每10秒)
+        auto now = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (progress && now - last_progress_time >= 10) {
+            double pct = static_cast<double>(chunk_start - config_.offset_start) /
+                        static_cast<double>(config_.offset_stop - config_.offset_start) * 100.0;
+            std::ostringstream oss;
+            oss << "Worker " << worker_id << ": " << std::fixed << std::setprecision(1) << pct << "%";
+            progress(pct / 100.0, oss.str());
+            last_progress_time = now;
+        }
+    }
+}
+
+RawDiskCarver::RecoveryResult RawDiskCarver::recover(
+    const ScanResult& scan_result,
+    std::function<void(double, const std::string&)> progress) {
+
+    RecoveryResult result;
+
+    if (!scan_result.success) {
+        result.errors.push_back("Scan was not successful");
+        return result;
+    }
+
+    // 创建输出目录
+    try {
+        std::filesystem::create_directories(config_.output_dir);
+    } catch (const std::exception& e) {
+        result.errors.push_back("Cannot create output directory: " + std::string(e.what()));
+        return result;
+    }
+
+    size_t total_index_ids = scan_result.pages_by_index_id.size();
+    size_t processed = 0;
+
+    for (const auto& [index_id, pages] : scan_result.pages_by_index_id) {
+        if (progress) {
+            double pct = static_cast<double>(processed) / total_index_ids;
+            progress(pct, "Recovering index_id " + std::to_string(index_id));
+        }
+
+        // 对每个index_id的页进行Schema-less解析
+        std::vector<std::map<std::string, std::string>> all_records;
+
+        for (const auto& page_data : pages) {
+            auto records = parse_records_schemaless(page_data);
+            all_records.insert(all_records.end(), records.begin(), records.end());
+        }
+
+        if (!all_records.empty()) {
+            result.records_by_index_id[index_id] = all_records;
+            result.total_records += all_records.size();
+
+            // 导出到CSV
+            std::string output_file = config_.output_dir + "/index_" +
+                                      std::to_string(index_id) + ".csv";
+            std::ofstream out(output_file);
+            if (out) {
+                // 写入表头
+                if (!all_records.empty()) {
+                    bool first = true;
+                    for (const auto& kv : all_records[0]) {
+                        if (!first) out << ",";
+                        out << kv.first;
+                        first = false;
+                    }
+                    out << "\n";
+
+                    // 写入数据
+                    for (const auto& rec : all_records) {
+                        first = true;
+                        for (const auto& kv : rec) {
+                            if (!first) out << ",";
+                            // CSV转义
+                            std::string val = kv.second;
+                            if (val.find(',') != std::string::npos ||
+                                val.find('"') != std::string::npos ||
+                                val.find('\n') != std::string::npos) {
+                                out << "\"";
+                                for (char c : val) {
+                                    if (c == '"') out << "\"\"";
+                                    else out << c;
+                                }
+                                out << "\"";
+                            } else {
+                                out << val;
+                            }
+                            first = false;
+                        }
+                        out << "\n";
+                    }
+                    result.output_files.push_back(output_file);
+                }
+            }
+        }
+
+        processed++;
+    }
+
+    result.success = true;
+    return result;
+}
+
+RawDiskCarver::RecoveryResult RawDiskCarver::scan_and_recover(
+    std::function<void(double, const std::string&)> progress) {
+
+    auto scan_result = scan([&](double pct, const std::string& msg) {
+        if (progress) progress(pct * 0.7, msg);
+    });
+
+    if (!scan_result.success) {
+        RecoveryResult result;
+        result.errors = scan_result.errors;
+        return result;
+    }
+
+    return recover(scan_result, [&](double pct, const std::string& msg) {
+        if (progress) progress(0.7 + pct * 0.3, msg);
+    });
+}
+
+const RawDiskCarver::ScanResult& RawDiskCarver::get_last_scan_result() const {
+    return last_scan_result_;
+}
+
+std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_schemaless(
+    const std::vector<uint8_t>& page_data) {
+
+    std::vector<std::map<std::string, std::string>> records;
+
+    if (page_data.size() < 100) return records;
+
+    // INDEX页格式:
+    // offset 24-25: page type (0x45BF)
+    // offset 38-39: number of records
+    // offset 40-41: heap top
+    // offset 46-47: first record offset
+
+    uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+    if (page_type != FIL_PAGE_INDEX) return records;
+
+    uint16_t n_recs = read_be<uint16_t>(page_data.data(), 38);
+    uint16_t heap_top = read_be<uint16_t>(page_data.data(), 40);
+    uint16_t first_rec_offset = read_be<uint16_t>(page_data.data(), 46);
+
+    if (n_recs == 0 || n_recs > 1000) return records;
+    if (first_rec_offset < 100 || first_rec_offset >= heap_top) return records;
+
+    // 使用SchemaAgnosticScanner进行启发式解析
+    innodb::SchemaAgnosticScanner::Config sa_config;
+    sa_config.recover_deleted = config_.recover_deleted;
+
+    innodb::SchemaAgnosticScanner scanner(sa_config);
+    auto page_result = scanner.parse_page(page_data.data(), page_data.size(), 0);
+
+    for (const auto& rec : page_result.records) {
+        if (rec.is_deleted && !config_.recover_deleted) continue;
+        if (!rec.is_valid) continue;
+
+        std::map<std::string, std::string> record;
+        for (size_t i = 0; i < rec.fields.size(); i++) {
+            std::string field_name = "field_" + std::to_string(i);
+            if (rec.fields[i].is_null) {
+                record[field_name] = "NULL";
+            } else {
+                record[field_name] = rec.fields[i].str_value;
+            }
+        }
+        records.push_back(record);
+    }
+
+    return records;
+}
+
+std::vector<std::pair<size_t, size_t>> RawDiskCarver::detect_field_boundaries(
+    const uint8_t* record_start, size_t max_len) {
+    // 启发式字段边界检测
+    // 参考: ibd2sql的schema-less解析
+
+    std::vector<std::pair<size_t, size_t>> boundaries;
+
+    // 简化实现: 使用固定长度分割
+    // 实际实现应根据数据类型特征进行智能检测
+    const size_t min_field_size = 4;
+    const size_t max_field_size = 256;
+
+    size_t pos = 0;
+    while (pos + min_field_size < max_len) {
+        // 尝试检测字符串字段 (可打印字符序列)
+        size_t str_len = 0;
+        while (pos + str_len < max_len && str_len < max_field_size) {
+            char c = static_cast<char>(record_start[pos + str_len]);
+            if (isprint(c) && c != '\0') {
+                str_len++;
+            } else {
+                break;
+            }
+        }
+
+        if (str_len >= min_field_size) {
+            boundaries.push_back({pos, str_len});
+            pos += str_len;
+        } else {
+            // 跳过非字符串字段
+            pos += min_field_size;
+        }
+    }
+
+    return boundaries;
+}
+
+} // namespace recovery
+} // namespace dbrecovery
