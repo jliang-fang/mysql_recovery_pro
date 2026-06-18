@@ -92,6 +92,58 @@ std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len
     return escaped;
 }
 
+// 解析JSON对象/数组的元素
+std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_size,
+                                size_t element_count, bool is_object, size_t entry_size) {
+    if (element_count == 0) return is_object ? "{}" : "[]";
+    if (element_count > 100) {
+        // 防止解析过大JSON导致性能问题
+        return is_object ? "{\"_count\":" + std::to_string(element_count) + "}"
+                         : "[\"_count\":" + std::to_string(element_count) + "]";
+    }
+
+    std::string result = is_object ? "{" : "[";
+    size_t key_entry_offset = offset;
+    size_t value_entry_offset = offset + element_count * entry_size;
+
+    for (size_t i = 0; i < element_count && value_entry_offset + entry_size <= data_size; i++) {
+        if (i > 0) result += ",";
+
+        // 读取值类型和偏移
+        size_t type_offset = value_entry_offset + (is_object ? element_count * entry_size : 0) + i * entry_size;
+        uint8_t val_type = 0;
+        size_t val_offset = 0;
+
+        if (entry_size == 2) {
+            uint16_t entry = read_json_le16(data, value_entry_offset + i * entry_size);
+            val_type = entry >> 4;
+            val_offset = entry & 0x0F;
+        } else {
+            uint32_t entry = read_json_le32(data, value_entry_offset + i * entry_size);
+            val_type = (entry >> 20) & 0xFF;
+            val_offset = entry & 0xFFFFF;
+        }
+
+        if (is_object) {
+            // 解析键
+            uint16_t key_offset = read_json_le16(data, key_entry_offset + i * 2);
+            if (key_offset + 1 < data_size) {
+                uint8_t key_len = data[key_offset];
+                std::string key(reinterpret_cast<const char*>(data + key_offset + 1), key_len);
+                result += "\"" + key + "\":";
+            }
+        }
+
+        // 解析值
+        size_t consumed = 0;
+        std::string value = parse_json_value(data, val_offset, data_size, val_type, consumed);
+        result += value;
+    }
+
+    result += is_object ? "}" : "]";
+    return result;
+}
+
 // 解析 JSON 值
 std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_size, uint8_t type, size_t& consumed) {
     consumed = 0;
@@ -185,12 +237,18 @@ std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_siz
     }
 }
 
+// 递归解析JSON对象/数组的元素
+std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_size,
+                                size_t element_count, bool is_object, size_t entry_size);
+
 // 解析完整 JSON 文档
 std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size) {
     if (field_size < 1) return "null";
 
     // JSON 数据格式：[长度前缀] [类型字节] [数据]
-    // 首先读取长度前缀
+    // MySQL JSON二进制格式参考：
+    // https://dev.mysql.com/doc/dev/mysql-server/latest/page_json_binary_representation.html
+
     size_t json_offset = offset;
     uint16_t json_len = 0;
     size_t len_bytes = 0;
@@ -214,8 +272,31 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
     // 读取类型字节
     uint8_t type = data[json_offset];
     size_t consumed = 0;
-    std::string result = parse_json_value(data, json_offset + 1, offset + field_size, type, consumed);
 
+    // 对于复杂类型（对象和数组），尝试完整解析
+    if (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT ||
+        type == JSON_TYPE_SMALL_ARRAY || type == JSON_TYPE_LARGE_ARRAY) {
+        bool is_object = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT);
+        bool is_small = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_SMALL_ARRAY);
+        size_t entry_size = is_small ? 2 : 4;
+
+        size_t data_start = json_offset + 1;
+        if (data_start + entry_size * 2 > offset + field_size) {
+            return is_object ? "{}" : "[]";
+        }
+
+        size_t element_count = is_small ? read_json_le16(data, data_start) : read_json_le32(data, data_start);
+        size_t total_size = is_small ? read_json_le16(data, data_start + entry_size)
+                                     : read_json_le32(data, data_start + entry_size);
+
+        if (element_count == 0) return is_object ? "{}" : "[]";
+
+        // 尝试解析元素
+        return parse_json_elements(data, data_start + entry_size * 2, offset + field_size,
+                                   element_count, is_object, entry_size);
+    }
+
+    std::string result = parse_json_value(data, json_offset + 1, offset + field_size, type, consumed);
     return result;
 }
 
