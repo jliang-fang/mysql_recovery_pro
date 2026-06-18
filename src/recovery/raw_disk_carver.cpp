@@ -490,43 +490,178 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_sch
 
     if (page_data.size() < 100) return records;
 
-    // INDEX页格式:
-    // offset 24-25: page type (0x45BF)
-    // offset 38-39: number of records
-    // offset 40-41: heap top
-    // offset 46-47: first record offset
+    const uint8_t* data = page_data.data();
+    size_t page_size = page_data.size();
 
-    uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+    // INDEX页格式验证
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
     if (page_type != FIL_PAGE_INDEX) return records;
 
-    uint16_t n_recs = read_be<uint16_t>(page_data.data(), 38);
-    uint16_t heap_top = read_be<uint16_t>(page_data.data(), 40);
-    uint16_t first_rec_offset = read_be<uint16_t>(page_data.data(), 46);
+    // 首先尝试使用InnoDBIndexParser进行schema-less解析
+    // 它能自动检测字段数量和类型
+    innodb::InnoDBIndexParser parser;
+    parser.set_recover_deleted(config_.recover_deleted);
+    parser.set_bad_page_mode(2);  // 暴力模式
 
-    if (n_recs == 0 || n_recs > 1000) return records;
-    if (first_rec_offset < 100 || first_rec_offset >= heap_top) return records;
+    // 尝试推断字段数量
+    // 从页目录获取记录数量
+    uint16_t n_dir_slots = read_be<uint16_t>(data, 38);
+    uint16_t n_heap = read_be<uint16_t>(data, 42) & 0x7FFF;  // 低15位
+    uint16_t n_recs = read_be<uint16_t>(data, 54);
 
-    // 使用SchemaAgnosticScanner进行启发式解析
-    innodb::SchemaAgnosticScanner::Config sa_config;
-    sa_config.recover_deleted = config_.recover_deleted;
+    if (n_recs > 0 && n_recs < 1000) {
+        // 使用InnoDBIndexParser解析
+        auto index_records = parser.parse_page(data, page_size, 0);
 
-    innodb::SchemaAgnosticScanner scanner(sa_config);
-    auto page_result = scanner.parse_page(page_data.data(), page_data.size(), 0);
+        for (const auto& rec : index_records) {
+            if (rec.is_deleted && !config_.recover_deleted) continue;
 
-    for (const auto& rec : page_result.records) {
-        if (rec.is_deleted && !config_.recover_deleted) continue;
-        if (!rec.is_valid) continue;
+            std::map<std::string, std::string> record;
+            for (size_t i = 0; i < rec.fields.size(); i++) {
+                std::string field_name = "field_" + std::to_string(i);
+                if (rec.fields[i].is_null) {
+                    record[field_name] = "NULL";
+                } else if (!rec.fields[i].str_value.empty()) {
+                    record[field_name] = rec.fields[i].str_value;
+                } else if (!rec.fields[i].raw_bytes.empty()) {
+                    // 十六进制输出
+                    std::ostringstream hex;
+                    for (uint8_t b : rec.fields[i].raw_bytes) {
+                        hex << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+                    }
+                    record[field_name] = hex.str();
+                }
+            }
 
-        std::map<std::string, std::string> record;
-        for (size_t i = 0; i < rec.fields.size(); i++) {
-            std::string field_name = "field_" + std::to_string(i);
-            if (rec.fields[i].is_null) {
-                record[field_name] = "NULL";
-            } else {
-                record[field_name] = rec.fields[i].str_value;
+            if (!record.empty()) {
+                records.push_back(record);
             }
         }
-        records.push_back(record);
+
+        if (!records.empty()) {
+            return records;
+        }
+    }
+
+    // 回退：使用页目录（Page Directory）进行快速记录定位
+    // 参考: ibd2sql get_all_rows_fast 方法
+    if (n_dir_slots < 2 || n_dir_slots > 1000) return records;
+
+    size_t slot_dir_offset = page_size - 8 - n_dir_slots * 2;
+
+    std::set<uint16_t> visited_offsets;
+
+    for (uint16_t slot = 0; slot < n_dir_slots; slot++) {
+        size_t slot_pos = slot_dir_offset + slot * 2;
+        if (slot_pos + 2 > page_size - 8) break;
+
+        uint16_t rec_offset = read_be<uint16_t>(data, slot_pos);
+        if (rec_offset < 100 || rec_offset >= page_size - 50) continue;
+
+        uint16_t current_offset = rec_offset;
+        int max_iterations = 20;
+
+        while (max_iterations-- > 0 && current_offset >= 100 && current_offset < page_size - 50) {
+            if (visited_offsets.count(current_offset)) break;
+            visited_offsets.insert(current_offset);
+
+            // COMPACT格式记录头 (5字节)
+            uint8_t n_owned = (data[current_offset + 1] >> 4) & 0x0F;
+            uint8_t rec_type = data[current_offset + 2] & 0x07;
+            bool is_deleted = (data[current_offset] & 0x10) != 0;
+
+            if (rec_type == 2 || rec_type == 3) break;  // INFIMUM/SUPREMUM
+
+            if (rec_type == 0) {  // ORDINARY
+                size_t data_start = current_offset + 5;
+                size_t max_data_len = page_size - data_start - 20;
+
+                if (max_data_len > 0 && max_data_len < 8192) {
+                    std::map<std::string, std::string> record;
+
+                    // 尝试检测可变长字段
+                    size_t field_idx = 0;
+                    size_t pos = 0;
+
+                    while (pos < max_data_len && field_idx < 50) {
+                        // 检测字符串
+                        if (pos + 4 <= max_data_len) {
+                            size_t str_len = 0;
+                            bool is_printable = true;
+
+                            for (size_t i = 0; i < std::min(max_data_len - pos, (size_t)255); i++) {
+                                char c = static_cast<char>(data[data_start + pos + i]);
+                                if (c >= 32 && c <= 126) {
+                                    str_len++;
+                                } else if (c == 0) {
+                                    break;
+                                } else {
+                                    is_printable = false;
+                                    break;
+                                }
+                            }
+
+                            if (str_len >= 2 && is_printable) {
+                                std::string value(reinterpret_cast<const char*>(data + data_start + pos), str_len);
+                                record["field_" + std::to_string(field_idx++)] = value;
+                                pos += str_len;
+                            } else {
+                                // 尝试作为固定长度数值
+                                if (pos + 8 <= max_data_len) {
+                                    // 8字节整数
+                                    uint64_t val = read_be<uint64_t>(data + data_start + pos);
+                                    record["field_" + std::to_string(field_idx++)] = std::to_string(val);
+                                    pos += 8;
+                                } else if (pos + 4 <= max_data_len) {
+                                    uint32_t val = read_be<uint32_t>(data + data_start + pos);
+                                    record["field_" + std::to_string(field_idx++)] = std::to_string(val);
+                                    pos += 4;
+                                } else {
+                                    break;
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if (!record.empty()) {
+                        record["_deleted"] = is_deleted ? "1" : "0";
+                        records.push_back(record);
+                    }
+                }
+            }
+
+            int16_t next_offset = static_cast<int16_t>(read_be<uint16_t>(data, current_offset + 3));
+            if (next_offset <= 0) break;
+            current_offset = current_offset + 5 + next_offset;
+            if (n_owned > 0) break;
+        }
+    }
+
+    // 最终回退：SchemaAgnosticScanner
+    if (records.empty()) {
+        innodb::SchemaAgnosticScanner::Config sa_config;
+        sa_config.recover_deleted = config_.recover_deleted;
+
+        innodb::SchemaAgnosticScanner scanner(sa_config);
+        auto page_result = scanner.parse_page(page_data.data(), page_data.size(), 0);
+
+        for (const auto& rec : page_result.records) {
+            if (rec.is_deleted && !config_.recover_deleted) continue;
+            if (!rec.is_valid) continue;
+
+            std::map<std::string, std::string> record;
+            for (size_t i = 0; i < rec.fields.size(); i++) {
+                std::string field_name = "field_" + std::to_string(i);
+                if (rec.fields[i].is_null) {
+                    record[field_name] = "NULL";
+                } else {
+                    record[field_name] = rec.fields[i].str_value;
+                }
+            }
+            records.push_back(record);
+        }
     }
 
     return records;
