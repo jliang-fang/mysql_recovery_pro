@@ -1628,9 +1628,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     if (!fractional.empty()) {
                         std::string frac_padded = std::string(pad - fractional.length(), '0') + fractional;
                         frac_padded = frac_padded.substr(0, pad);
-                        snprintf(buf, sizeof(buf), "-%03u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
+                        snprintf(buf, sizeof(buf), "-%02u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
                     } else {
-                        snprintf(buf, sizeof(buf), "-%03u:%02u:%02u", hour, minute, second);
+                        snprintf(buf, sizeof(buf), "-%02u:%02u:%02u", hour, minute, second);
                     }
                     val.str_value = buf;
                 } else {
@@ -1654,9 +1654,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     if (!fractional.empty()) {
                         std::string frac_padded = std::string(pad - fractional.length(), '0') + fractional;
                         frac_padded = frac_padded.substr(0, pad);
-                        snprintf(buf, sizeof(buf), "%03u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
+                        snprintf(buf, sizeof(buf), "%02u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
                     } else {
-                        snprintf(buf, sizeof(buf), "%03u:%02u:%02u", hour, minute, second);
+                        snprintf(buf, sizeof(buf), "%02u:%02u:%02u", hour, minute, second);
                     }
                     val.str_value = buf;
                 }
@@ -1947,11 +1947,49 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
         } else if (bad_page_mode_ == 2) {
             return parse_page_try(page_data, page_size, page_no);
         }
-        return records;
+        // 自动检测损坏并尝试恢复
+        // 如果页头无效但页类型是INDEX，尝试暴力扫描
+        return parse_page_try(page_data, page_size, page_no);
     }
 
     bool is_compact = page_hdr->is_compact_format;
     records = follow_record_chain(page_data, page_size, *page_hdr, page_no, is_compact);
+
+    // 检查是否恢复率过低（记录数远少于预期）
+    // 如果 n_recs > 0 但恢复记录数 < n_recs/2，尝试损坏页恢复
+    uint16_t expected_recs = page_hdr->n_recs;
+    if (expected_recs > 0 && records.size() < expected_recs / 2) {
+        // 记录链可能断裂，尝试页目录扫描
+        auto fast_records = parse_page_fast(page_data, page_size, page_no);
+        if (fast_records.size() > records.size()) {
+            // 合并结果，去重
+            std::set<uint16_t> seen_heap_no;
+            for (const auto& rec : records) {
+                seen_heap_no.insert(rec.heap_no);
+            }
+            for (const auto& rec : fast_records) {
+                if (seen_heap_no.insert(rec.heap_no).second) {
+                    records.push_back(rec);
+                }
+            }
+        }
+    }
+
+    // 如果仍然恢复不足，尝试暴力扫描
+    if (expected_recs > 0 && records.size() < expected_recs / 3) {
+        auto try_records = parse_page_try(page_data, page_size, page_no);
+        if (try_records.size() > records.size()) {
+            std::set<uint16_t> seen_heap_no;
+            for (const auto& rec : records) {
+                seen_heap_no.insert(rec.heap_no);
+            }
+            for (const auto& rec : try_records) {
+                if (seen_heap_no.insert(rec.heap_no).second) {
+                    records.push_back(rec);
+                }
+            }
+        }
+    }
 
     // Recover deleted records if enabled
     if (recover_deleted_ && page_hdr->page_free != 0) {
@@ -1971,14 +2009,168 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
 std::vector<IndexRecord> InnoDBIndexParser::parse_page_fast(
     const uint8_t* page_data, size_t page_size, uint32_t page_no) {
     std::vector<IndexRecord> records;
-    // Fast mode: use page directory
+
+    if (!page_data || page_size < 100) return records;
+
+    // Fast mode: use page directory (ibd2sql's get_all_rows_fast)
+    // Reference: ibd2sql/innodb_page/index.py:181-204
+    //
+    // Page directory is at the end of the page:
+    // - n_dir_slots at offset 38 (PAGE_N_DIR_SLOTS)
+    // - Slots are 2-byte offsets, stored at page_end - 2*n_dir_slots - 8 to page_end - 8
+    // - Each slot points to a record origin
+    // - Follow the record chain from each slot
+
+    // Read n_dir_slots
+    uint16_t n_dir_slots = read_be<uint16_t>(page_data, 38);
+
+    // Sanity check
+    if (n_dir_slots == 0 || n_dir_slots > 1000) {
+        // Invalid directory, fall back to try mode
+        return parse_page_try(page_data, page_size, page_no);
+    }
+
+    // Read page directory slots (at page_size - 2*n_dir_slots - 8)
+    // Slots are stored big-endian
+    size_t dir_offset = page_size - 2 * n_dir_slots - 8;
+    if (dir_offset < 100) {
+        return parse_page_try(page_data, page_size, page_no);
+    }
+
+    std::vector<uint16_t> slot_offsets;
+    for (uint16_t i = 0; i < n_dir_slots && dir_offset + 2 * i + 2 <= page_size - 8; i++) {
+        uint16_t slot = read_be<uint16_t>(page_data, dir_offset + 2 * i);
+        slot_offsets.push_back(slot);
+    }
+
+    // Reverse the slots (ibd2sql reverses them)
+    std::reverse(slot_offsets.begin(), slot_offsets.end());
+
+    // Read heap_top to know where record data ends
+    uint16_t heap_top = read_be<uint16_t>(page_data, 40);
+
+    // Track visited origins to avoid duplicates
+    std::set<uint16_t> visited_origins;
+
+    for (uint16_t slot : slot_offsets) {
+        if (slot < 100 || slot >= heap_top) continue;
+
+        size_t current_origin = slot;
+        uint16_t owned_count = 0;
+        uint16_t max_iterations = 16;  // Prevent infinite loops
+
+        while (owned_count <= 1 && max_iterations > 0) {
+            max_iterations--;
+
+            if (current_origin < REC_HEADER_SIZE_NEW || current_origin >= heap_top) break;
+
+            // Check if already visited
+            if (visited_origins.count(static_cast<uint16_t>(current_origin))) break;
+            visited_origins.insert(static_cast<uint16_t>(current_origin));
+
+            size_t header_start = current_origin - REC_HEADER_SIZE_NEW;
+
+            auto hdr = parse_new_record_header(page_data, header_start, page_size);
+            if (!hdr) break;
+
+            // Check REC_N_OWNED
+            if (hdr->n_owned > 0) {
+                owned_count++;
+            }
+
+            // Skip REC_TYPE == 3 (supremum marker)
+            if (hdr->rec_type == 3) break;
+
+            // Only parse data records (REC_TYPE <= 1)
+            if (hdr->rec_type <= 1 && !hdr->deleted) {
+                auto rec = parse_user_record(page_data, page_size, header_start, page_no, true, true);
+                if (rec) {
+                    records.push_back(std::move(*rec));
+                }
+            }
+
+            // Move to next record
+            if (hdr->next_offset == 0) break;
+            ssize_t next_origin = static_cast<ssize_t>(current_origin) + hdr->next_offset;
+            if (next_origin <= 0 || static_cast<size_t>(next_origin) >= page_size) break;
+            current_origin = static_cast<size_t>(next_origin);
+        }
+    }
+
+    stats_.records_recovered += records.size();
+
     return records;
 }
 
 std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
     const uint8_t* page_data, size_t page_size, uint32_t page_no) {
     std::vector<IndexRecord> records;
-    // Try mode: brute-force scan
+
+    if (!page_data || page_size < 100) return records;
+
+    // Try mode: brute-force byte scan (ibd2sql's get_all_rows_try)
+    // Reference: ibd2sql/innodb_page/index.py:206-217
+    //
+    // Scan every possible offset from 99 to page_size - 8
+    // Try to parse as a record header
+    // If valid, extract the record
+
+    // Read heap_top for range validation
+    uint16_t heap_top = read_be<uint16_t>(page_data, 40);
+    if (heap_top < 100 || heap_top > page_size) {
+        heap_top = page_size - 8;  // Use full page
+    }
+
+    // Track visited origins to avoid duplicates
+    std::set<uint16_t> visited_origins;
+
+    // Start from INFIMUM offset (99) and scan forward
+    for (size_t offset = INFIMUM_OFFSET; offset < heap_top - REC_HEADER_SIZE_NEW; offset++) {
+        // Skip if already processed
+        if (visited_origins.count(static_cast<uint16_t>(offset))) continue;
+
+        size_t header_start = offset - REC_HEADER_SIZE_NEW;
+
+        // Try to parse as COMPACT/DYNAMIC header
+        auto hdr = parse_new_record_header(page_data, header_start, page_size);
+        if (!hdr) continue;
+
+        // Validate heap_no - must be >= 2 (skip infimum/supremum)
+        if (hdr->heap_no < 2) continue;
+
+        // Validate REC_TYPE - must be <= 1 for data records
+        if (hdr->rec_type > 1) continue;
+
+        // Check if this looks like a valid record
+        // - next_offset should point within the page
+        // - heap_no should be reasonable
+        if (hdr->next_offset < -1000 || hdr->next_offset > 1000) continue;
+
+        // Mark this origin as visited
+        visited_origins.insert(static_cast<uint16_t>(offset));
+
+        // Parse the record
+        auto rec = parse_user_record(page_data, page_size, header_start, page_no, true, true);
+        if (rec && !rec->is_deleted) {
+            records.push_back(std::move(*rec));
+        }
+
+        // Also try REDUNDANT format if COMPACT fails
+        if (!hdr || records.empty()) {
+            size_t old_header_start = offset - REC_HEADER_SIZE_OLD;
+            auto old_hdr = parse_old_record_header(page_data, old_header_start, page_size);
+            if (old_hdr && old_hdr->heap_no >= 2 && old_hdr->n_fields > 0) {
+                visited_origins.insert(static_cast<uint16_t>(offset));
+                auto rec = parse_user_record(page_data, page_size, old_header_start, page_no, false, true);
+                if (rec && !rec->is_deleted) {
+                    records.push_back(std::move(*rec));
+                }
+            }
+        }
+    }
+
+    stats_.records_recovered += records.size();
+
     return records;
 }
 
