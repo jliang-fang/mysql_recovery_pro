@@ -850,8 +850,18 @@ uint32_t TupleParser::get_fixed_field_size(const SchemaTemplate::Column& col) co
         case mt::DOUBLE:     return 8;
         case mt::DATE:       return 3;
         case mt::TIME:       return 3;
-        case mt::DATETIME:   return 8;
+        case mt::DATETIME:   return 8;   // Old MySQL 5.6 format
+        case mt::DATETIME2: {            // MySQL 5.6+ new format
+            // 5 bytes base + fractional seconds (0-3 bytes for DATETIME(0-6))
+            uint8_t frac_digits = col.datetime_precision;
+            return 5 + (frac_digits > 0 ? (frac_digits + 1) / 2 : 0);
+        }
         case mt::TIMESTAMP2: return 4;
+        case mt::TIME2: {                // MySQL 5.6+ new format
+            // 3 bytes base + fractional seconds (0-3 bytes for TIME(0-6))
+            uint8_t frac_digits = col.datetime_precision;
+            return 3 + (frac_digits > 0 ? (frac_digits + 1) / 2 : 0);
+        }
         case mt::YEAR:       return 1;
         case mt::BIT:        return (col.max_length + 7) / 8;
         case mt::NEWDECIMAL: {
