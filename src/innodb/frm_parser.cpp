@@ -80,7 +80,8 @@ static uint8_t mysql_to_innodb_type(uint8_t mysql_type) {
         case 251: return 26;  // LONG_BLOB -> InnoDB LONG_BLOB (type 26)
         case 252: return 27;  // BLOB -> InnoDB BLOB (type 27)
         case 253: return 16;  // VAR_STRING -> InnoDB VARCHAR (type 16)
-        case 254: return 16;  // CHAR/STRING -> InnoDB VARCHAR (type 16, 变长存储)
+        case 254: return 29;  // CHAR/STRING -> InnoDB STRING (type 29, 参考ibd2sql column_type.py)
+                               // CHAR在InnoDB中对于多字节字符集(utf8/utf8mb4)是变长存储
         case 255: return 30;  // GEOMETRY -> InnoDB GEOMETRY (type 30)
         default:  return mysql_type; // 对于未识别的类型，保持原值
     }
