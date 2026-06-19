@@ -113,27 +113,39 @@ bool IBDExporter::export_to_ibd(const std::string& file_path,
     return true;
 }
 
+
 // ==================== Exporter 静态方法实现 ====================
-
-bool Exporter::export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
-                             const std::vector<std::string>& headers,
-                             const std::string& output_path) {
-    dbrecovery::exporter::CSVExporter exporter(headers);
-
-    for (const auto& record : records) {
-        if (!exporter.export_record(record)) {
-            std::cerr << "[ERROR] Failed to export record to CSV" << std::endl;
-            return false;
-        }
-    }
-
-    return exporter.export_to_file(output_path);
-}
+// export_to_csv is in csv_exporter.cpp
 
 bool Exporter::export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
                              const std::string& table_name,
                              const std::string& output_path) {
     dbrecovery::exporter::SQLOutputter outputter(table_name);
+
+    for (const auto& record : records) {
+        if (!outputter.export_record(record)) {
+            std::cerr << "[ERROR] Failed to export record to SQL" << std::endl;
+            return false;
+        }
+    }
+
+    std::ofstream file(output_path);
+    if (!file) {
+        std::cerr << "[ERROR] Failed to open file for writing: " << output_path << std::endl;
+        return false;
+    }
+
+    file << outputter.get_result();
+    file.close();
+
+    return true;
+}
+
+bool Exporter::export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
+                             const std::string& table_name,
+                             const std::vector<std::string>& column_order,
+                             const std::string& output_path) {
+    dbrecovery::exporter::SQLOutputter outputter(table_name, column_order);
 
     for (const auto& record : records) {
         if (!outputter.export_record(record)) {

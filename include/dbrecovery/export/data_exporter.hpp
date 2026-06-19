@@ -82,6 +82,7 @@ private:
 class SQLOutputter : public DataExporter {
 public:
     explicit SQLOutputter(const std::string& table_name);
+    explicit SQLOutputter(const std::string& table_name, const std::vector<std::string>& column_order);
     ~SQLOutputter() override;
 
     bool export_record(const std::map<std::string, std::string>& record) override;
@@ -89,6 +90,7 @@ public:
 
 private:
     std::string table_name_;
+    std::vector<std::string> column_order_;  // 列顺序（如果为空则使用 map 的顺序）
     std::vector<std::string> sql_statements_;
 };
 
@@ -151,6 +153,21 @@ public:
      */
     static bool export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
                               const std::string& table_name,
+                              const std::string& output_path);
+
+    /**
+     * @brief 导出为 SQL（保持列顺序）
+     *
+     * @param records 记录数据
+     * @param table_name 表名
+     * @param column_order 列顺序
+     * @param output_path 输出文件路径
+     * @return true 成功
+     * @return false 失败
+     */
+    static bool export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
+                              const std::string& table_name,
+                              const std::vector<std::string>& column_order,
                               const std::string& output_path);
 
     /**

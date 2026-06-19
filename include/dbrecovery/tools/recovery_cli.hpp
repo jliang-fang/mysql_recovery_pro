@@ -28,6 +28,7 @@
 #include "dbrecovery/recovery/truncate_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/engine/drop_table_recovery.hpp"
+#include "dbrecovery/export/data_exporter.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
 #include "dbrecovery/recovery/raw_disk_carver.hpp"
 
@@ -638,6 +639,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::cout << "[INFO] Successfully opened file: " << ibd_path << "\n";
 
     std::vector<std::map<std::string, std::string>> recovered_records;
+    std::vector<std::string> recovered_column_order;  // 用于保持列顺序
 
     // 辅助函数：从 SDI 页解析表结构
     auto parse_schema_from_sdi = [&](const std::string& ibd_path, uint64_t table_id) -> std::optional<dbrecovery::catalog::TableSchema> {
@@ -854,11 +856,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     };
 
     // Helper lambda: Convert IndexRecord to map with proper column names
+    // Returns pair: {records, column_order}
     auto convert_records_to_map = [](const std::vector<dbrecovery::innodb::IndexRecord>& records,
                                       const dbrecovery::innodb::InnoDBIndexParser& parser)
-        -> std::vector<std::map<std::string, std::string>> {
+        -> std::pair<std::vector<std::map<std::string, std::string>>, std::vector<std::string>> {
         std::vector<std::map<std::string, std::string>> result;
+        std::vector<std::string> column_order;
         const auto& cols = parser.get_column_defs();
+
+        // Build column order from schema
+        for (size_t i = 0; i < cols.size(); i++) {
+            if (!cols[i].name.empty()) {
+                column_order.push_back(cols[i].name);
+            } else {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "field_%04zu", i);
+                column_order.push_back(buf);
+            }
+        }
 
         for (const auto& rec : records) {
             std::map<std::string, std::string> record_map;
@@ -890,7 +905,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
             result.push_back(record_map);
         }
-        return result;
+        return {result, column_order};
     };
 
     // Default recovery mode - use InnoDBIndexParser for high-accuracy recovery
@@ -1022,7 +1037,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         if (!records.empty()) {
             std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
-            recovered_records = convert_records_to_map(records, index_parser);
+            auto [recs, cols] = convert_records_to_map(records, index_parser);
+            recovered_records = recs;
+            recovered_column_order = cols;
             std::cout << "[INFO] Default recovery completed. Found "
                       << recovered_records.size() << " records.\n";
         } else {
@@ -1095,7 +1112,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         if (!records.empty()) {
             std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
-            recovered_records = convert_records_to_map(records, index_parser);
+            auto [recs, cols] = convert_records_to_map(records, index_parser);
+            recovered_records = recs;
+            recovered_column_order = cols;
 
             std::cout << "[INFO] Truncate recovery completed. Found "
                       << recovered_records.size() << " records.\n";
@@ -1171,7 +1190,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         if (!records.empty()) {
             std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
-            recovered_records = convert_records_to_map(records, index_parser);
+            auto [recs, cols] = convert_records_to_map(records, index_parser);
+            recovered_records = recs;
+            recovered_column_order = cols;
 
             std::cout << "[INFO] rm -rf recovery completed. Found "
                       << recovered_records.size() << " records.\n";
@@ -1207,14 +1228,32 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string output_path;
     if (format == "csv") {
         output_path = output_dir + "/recovered.csv";
-        if (export_data(output_path, format, recovered_records)) {
+        // CSV导出时使用列顺序作为表头
+        if (recovered_column_order.empty()) {
+            // 没有列顺序信息，从第一条记录提取
+            if (!recovered_records.empty()) {
+                for (const auto& [key, value] : recovered_records[0]) {
+                    recovered_column_order.push_back(key);
+                }
+            }
+        }
+        if (dbrecovery::exporter::Exporter::export_to_csv(recovered_records, recovered_column_order, output_path)) {
             std::cout << "[INFO] Exported " << recovered_records.size() << " records to CSV: " << output_path << "\n";
         } else {
             std::cerr << "[WARN] Failed to export to CSV.\n";
         }
     } else if (format == "sql") {
         output_path = output_dir + "/recovered.sql";
-        if (engine.export_to_sql(recovered_records, "recovered_table", output_path)) {
+        // SQL导出时使用列顺序
+        if (recovered_column_order.empty()) {
+            // 没有列顺序信息，从第一条记录提取
+            if (!recovered_records.empty()) {
+                for (const auto& [key, value] : recovered_records[0]) {
+                    recovered_column_order.push_back(key);
+                }
+            }
+        }
+        if (dbrecovery::exporter::Exporter::export_to_sql(recovered_records, "recovered_table", recovered_column_order, output_path)) {
             std::cout << "[INFO] Exported " << recovered_records.size() << " records to SQL: " << output_path << "\n";
         } else {
             std::cerr << "[WARN] Failed to export to SQL.\n";
