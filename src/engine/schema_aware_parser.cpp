@@ -203,9 +203,10 @@ static std::string decode_datetime(const uint8_t* data, uint32_t& offset, uint8_
     offset += 5;
 
     // Extract fields using ibd2sql's bit masks
-    uint64_t months = (t & 0x8000000000ULL) >> 22;  // 549751619584 = 0x8000000000
-    uint32_t year = static_cast<uint32_t>(months / 13);
-    uint32_t month = static_cast<uint32_t>(months % 13);
+    // YearMonth: 17 bits at position 22-38 (mask 0x7fffc00000 = 549751619584)
+    uint64_t yearmonth = (t & 0x7FFFC00000ULL) >> 22;  // 549751619584 = 0x7FFFC00000
+    uint32_t year = static_cast<uint32_t>(yearmonth / 13);
+    uint32_t month = static_cast<uint32_t>(yearmonth % 13);
     uint32_t day = static_cast<uint32_t>((t & 0x3E0000ULL) >> 17);     // 4063232 = 0x3E0000
     uint32_t hour = static_cast<uint32_t>((t & 0x1F000ULL) >> 12);     // 126976 = 0x1F000
     uint32_t minute = static_cast<uint32_t>((t & 0xFC0ULL) >> 6);      // 4032 = 0xFC0
