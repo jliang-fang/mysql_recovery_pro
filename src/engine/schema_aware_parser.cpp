@@ -186,51 +186,61 @@ static std::string decode_blob(const uint8_t* data, uint32_t& offset) {
 /**
  * @brief Decode a DATETIME field (8 bytes, InnoDB binary format)
  */
-static std::string decode_datetime(const uint8_t* data, uint32_t& offset) {
-    // InnoDB DATETIME binary format (8 bytes, big-endian-like):
-    // Bits:  1 bit sign | 17 bits year*13+month | 5 bits day | 5 bits hour |
-    //        6 bits minute | 6 bits second | 24 bits microsecond
-    // InnoDB stores DATETIME as big-endian 8 bytes
-    uint64_t raw = innodb::read_be<uint64_t>(data, offset);
-    offset += 8;
+static std::string decode_datetime(const uint8_t* data, uint32_t& offset, uint8_t fractional_digits = 0) {
+    // InnoDB DATETIME binary format (5 bytes + fractional):
+    // Reference: ibd2sql/utils/b2data.py B2DATETIME()
+    // t = (B2UINT4(data[:4])<<8) + B2UINT1(data[4:5])
+    // months = (t&549751619584)>>22  = (t & 0x8000000000) >> 22
+    // year = months//13, month = months%13
+    // day = (t&4063232)>>17 = (t & 0x3E0000) >> 17
+    // hour = (t&126976)>>12 = (t & 0x1F000) >> 12
+    // minute = (t&4032)>>6 = (t & 0xFC0) >> 6
+    // second = t&63 = t & 0x3F
 
-    // MySQL 5.6 DATETIME format (packed, big-endian):
-    // The high bit is sign (0 for positive)
-    // Next 17 bits: year*13+month
-    // Next 5 bits: day
-    // Next 5 bits: hour
-    // Next 6 bits: minute
-    // Next 6 bits: second
-    // Remaining 24 bits: microsecond
+    // Read 5 bytes: 4 bytes BE shifted left by 8, plus 1 byte
+    uint64_t t = (static_cast<uint64_t>(innodb::read_be<uint32_t>(data, offset)) << 8) |
+                 static_cast<uint64_t>(data[offset + 4]);
+    offset += 5;
 
-    uint64_t val = raw;
-    bool negative = (val >> 63) & 1;
-    uint32_t year_month = (val >> 46) & 0x1FFFF;
-    uint32_t day = (val >> 41) & 0x1F;
-    uint32_t hour = (val >> 36) & 0x1F;
-    uint32_t minute = (val >> 30) & 0x3F;
-    uint32_t second = (val >> 24) & 0x3F;
-    uint32_t microsecond = val & 0xFFFFFF;
+    // Extract fields using ibd2sql's bit masks
+    uint64_t months = (t & 0x8000000000ULL) >> 22;  // 549751619584 = 0x8000000000
+    uint32_t year = static_cast<uint32_t>(months / 13);
+    uint32_t month = static_cast<uint32_t>(months % 13);
+    uint32_t day = static_cast<uint32_t>((t & 0x3E0000ULL) >> 17);     // 4063232 = 0x3E0000
+    uint32_t hour = static_cast<uint32_t>((t & 0x1F000ULL) >> 12);     // 126976 = 0x1F000
+    uint32_t minute = static_cast<uint32_t>((t & 0xFC0ULL) >> 6);      // 4032 = 0xFC0
+    uint32_t second = static_cast<uint32_t>(t & 0x3FULL);              // 63 = 0x3F
 
-    uint32_t year = year_month / 13;
-    uint32_t month = year_month % 13;
+    // Handle fractional seconds if specified (DATETIME(6))
+    std::string fractional = "";
+    if (fractional_digits > 0 && offset + fractional_digits <= 1024) {
+        uint32_t frac_val = 0;
+        if (fractional_digits <= 3) {
+            frac_val = innodb::read_be<uint32_t>(data, offset) >> (24 - fractional_digits * 8);
+            offset += fractional_digits;
+        } else if (fractional_digits <= 6) {
+            // For DATETIME(6), read 3 bytes for microseconds
+            frac_val = (static_cast<uint32_t>(data[offset]) << 16) |
+                       (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                       static_cast<uint32_t>(data[offset + 2]);
+            offset += 3;
+        }
+        std::ostringstream frac_oss;
+        frac_oss << "." << std::setfill('0') << std::setw(fractional_digits) << frac_val;
+        fractional = frac_oss.str();
+    }
 
-    if (year == 0 && month == 0 && day == 0) {
+    if (year == 0 && month == 0 && day == 0 && hour == 0 && minute == 0 && second == 0) {
         return "0000-00-00 00:00:00";
     }
 
     std::ostringstream oss;
-    if (negative) oss << "-";
     oss << std::setfill('0') << std::setw(4) << year << "-"
         << std::setw(2) << month << "-"
         << std::setw(2) << day << " "
         << std::setw(2) << hour << ":"
         << std::setw(2) << minute << ":"
-        << std::setw(2) << second;
-
-    if (microsecond > 0) {
-        oss << "." << std::setw(6) << microsecond;
-    }
+        << std::setw(2) << second << fractional;
 
     return oss.str();
 }
@@ -238,8 +248,9 @@ static std::string decode_datetime(const uint8_t* data, uint32_t& offset) {
 /**
  * @brief Decode a TIMESTAMP field (4 bytes, Unix epoch seconds LE)
  */
-static std::string decode_timestamp(const uint8_t* data, uint32_t& offset) {
+static std::string decode_timestamp(const uint8_t* data, uint32_t& offset, uint8_t fractional_digits = 0) {
     // InnoDB stores TIMESTAMP as big-endian 4-byte Unix epoch
+    // Reference: ibd2sql B2TIMESTAMP - uses time.localtime(B2UINT4(data[:4]))
     uint32_t epoch = innodb::read_be<uint32_t>(data, offset);
     offset += 4;
 
@@ -253,7 +264,26 @@ static std::string decode_timestamp(const uint8_t* data, uint32_t& offset) {
 
     char buf[32];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-    return std::string(buf);
+    std::string result(buf);
+
+    // Handle fractional seconds for TIMESTAMP(6)
+    if (fractional_digits > 0 && offset + fractional_digits <= 1024) {
+        uint32_t frac_val = 0;
+        if (fractional_digits <= 3) {
+            frac_val = innodb::read_be<uint32_t>(data, offset) >> (24 - fractional_digits * 8);
+            offset += fractional_digits;
+        } else if (fractional_digits <= 6) {
+            frac_val = (static_cast<uint32_t>(data[offset]) << 16) |
+                       (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                       static_cast<uint32_t>(data[offset + 2]);
+            offset += 3;
+        }
+        std::ostringstream frac_oss;
+        frac_oss << "." << std::setfill('0') << std::setw(fractional_digits) << frac_val;
+        result += frac_oss.str();
+    }
+
+    return result;
 }
 
 /**
@@ -282,23 +312,59 @@ static std::string decode_date(const uint8_t* data, uint32_t& offset) {
 /**
  * @brief Decode a TIME field (3 bytes)
  */
-static std::string decode_time(const uint8_t* data, uint32_t& offset) {
-    // InnoDB TIME format: 3 bytes, big-endian
-    uint32_t raw = (static_cast<uint32_t>(data[offset]) << 16) |
-                   (static_cast<uint32_t>(data[offset + 1]) << 8) |
-                   data[offset + 2];
+static std::string decode_time(const uint8_t* data, uint32_t& offset, uint8_t fractional_digits = 0) {
+    // InnoDB TIME format: 3 bytes + optional fractional
+    // Reference: ibd2sql/utils/b2data.py B2TIME()
+    // t = B2INT3(data[:3]) - signed 3-byte integer
+    // For negative: hour = 2047 - ((8384512&t)>>12), minute = 63 - ((4032&t)>>6), second = 63 - (63&t)
+    // For positive: hour = (8384512&t)>>12, minute = (4032&t)>>6, second = 63&t
+
+    int32_t raw = static_cast<int32_t>(
+        (static_cast<uint32_t>(data[offset]) << 16) |
+        (static_cast<uint32_t>(data[offset + 1]) << 8) |
+        static_cast<uint32_t>(data[offset + 2]));
+    // Sign extend 24-bit to 32-bit
+    if (raw & 0x800000) raw |= 0xFF000000;
     offset += 3;
 
-    bool negative = (raw >> 23) & 1;
-    uint32_t hour = (raw >> 12) & 0x3FF;
-    uint32_t minute = (raw >> 6) & 0x3F;
-    uint32_t second = raw & 0x3F;
+    std::string sign = "";
+    uint32_t hour, minute, second;
+
+    if (raw < 0) {
+        sign = "-";
+        uint32_t t = static_cast<uint32_t>(-raw);
+        hour = 2047 - ((t & 0x800000) >> 12);   // 8384512 = 0x800000
+        minute = 63 - ((t & 0xFC0) >> 6);       // 4032 = 0xFC0
+        second = 63 - (t & 0x3F);               // 63 = 0x3F
+    } else {
+        uint32_t t = static_cast<uint32_t>(raw);
+        hour = (t & 0x800000) >> 12;            // 8384512 = 0x800000
+        minute = (t & 0xFC0) >> 6;              // 4032 = 0xFC0
+        second = t & 0x3F;                      // 63 = 0x3F
+    }
+
+    // Handle fractional seconds for TIME(6)
+    std::string fractional = "";
+    if (fractional_digits > 0 && offset + fractional_digits <= 1024) {
+        uint32_t frac_val = 0;
+        if (fractional_digits <= 3) {
+            frac_val = innodb::read_be<uint32_t>(data, offset) >> (24 - fractional_digits * 8);
+            offset += fractional_digits;
+        } else if (fractional_digits <= 6) {
+            frac_val = (static_cast<uint32_t>(data[offset]) << 16) |
+                       (static_cast<uint32_t>(data[offset + 1]) << 8) |
+                       static_cast<uint32_t>(data[offset + 2]);
+            offset += 3;
+        }
+        std::ostringstream frac_oss;
+        frac_oss << "." << std::setfill('0') << std::setw(fractional_digits) << frac_val;
+        fractional = frac_oss.str();
+    }
 
     std::ostringstream oss;
-    if (negative) oss << "-";
-    oss << std::setfill('0') << std::setw(2) << hour << ":"
+    oss << sign << std::setfill('0') << std::setw(2) << hour << ":"
         << std::setw(2) << minute << ":"
-        << std::setw(2) << second;
+        << std::setw(2) << second << fractional;
     return oss.str();
 }
 
@@ -1052,19 +1118,33 @@ std::string TupleParser::decode_field_data(
         case mt::VARCHAR:
         case mt::VAR_STRING: {
             // Variable-length data — data_size is already known from var_lengths
-            std::string result;
-            result.reserve(data_size);
-            for (uint32_t i = 0; i < data_size; i++) {
-                char c = static_cast<char>(data[offset + i]);
-                if (c >= 32 && c < 127) {
-                    result += c;
-                } else if (c == 0) {
-                    // null byte
-                } else {
-                    result += '?';
+            // Check if this is binary data (charset_id=63 for binary) or text
+            if (col.charset_id == 63) {
+                // Binary data (BINARY/VARBINARY) - output as HEX
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (uint32_t i = 0; i < data_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
                 }
+                oss << "')";
+                value = oss.str();
+            } else {
+                // Text data (VARCHAR/CHAR)
+                std::string result;
+                result.reserve(data_size);
+                for (uint32_t i = 0; i < data_size; i++) {
+                    char c = static_cast<char>(data[offset + i]);
+                    if (c >= 32 && c < 127) {
+                        result += c;
+                    } else if (c == 0) {
+                        // null byte
+                    } else {
+                        result += '?';
+                    }
+                }
+                value = result;
             }
-            value = result;
             offset += data_size;
             break;
         }
@@ -1086,73 +1166,19 @@ std::string TupleParser::decode_field_data(
             }
             break;
         }
-        case mt::DATETIME: {
-            if (data_size >= 8) {
-                uint64_t raw = innodb::read_be<uint64_t>(data, offset);
-                bool negative = (raw >> 63) & 1;
-                uint32_t year_month = (raw >> 46) & 0x1FFFF;
-                uint32_t day = (raw >> 41) & 0x1F;
-                uint32_t hour = (raw >> 36) & 0x1F;
-                uint32_t minute = (raw >> 30) & 0x3F;
-                uint32_t second = (raw >> 24) & 0x3F;
-                uint32_t microsecond = raw & 0xFFFFFF;
-                uint32_t year = year_month / 13;
-                uint32_t month = year_month % 13;
-                if (year == 0 && month == 0 && day == 0) {
-                    value = "0000-00-00 00:00:00";
-                } else {
-                    std::ostringstream oss;
-                    if (negative) oss << "-";
-                    oss << std::setfill('0') << std::setw(4) << year << "-"
-                        << std::setw(2) << month << "-"
-                        << std::setw(2) << day << " "
-                        << std::setw(2) << hour << ":"
-                        << std::setw(2) << minute << ":"
-                        << std::setw(2) << second;
-                    if (microsecond > 0) {
-                        oss << "." << std::setw(6) << microsecond;
-                    }
-                    value = oss.str();
-                }
-                offset += 8;
-            }
+        case mt::DATETIME:
+        case mt::DATETIME2: {
+            // Use ibd2sql-style DATETIME decoding
+            value = decode_datetime(data, offset, col.datetime_precision);
             break;
         }
         case mt::TIMESTAMP2: {
-            if (data_size >= 4) {
-                uint32_t epoch = innodb::read_be<uint32_t>(data, offset);
-                if (epoch == 0) {
-                    value = "0000-00-00 00:00:00";
-                } else {
-                    time_t t = static_cast<time_t>(epoch);
-                    struct tm tm_buf;
-                    gmtime_r(&t, &tm_buf);
-                    char buf[32];
-                    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
-                    value = std::string(buf);
-                }
-                offset += 4;
-            }
+            value = decode_timestamp(data, offset, col.datetime_precision);
             break;
         }
-        case mt::TIME: {
-            if (data_size >= 3) {
-                // Big-endian 3-byte TIME
-                uint32_t raw = (static_cast<uint32_t>(data[offset]) << 16) |
-                               (static_cast<uint32_t>(data[offset + 1]) << 8) |
-                               data[offset + 2];
-                bool neg = (raw >> 23) & 1;
-                uint32_t h = (raw >> 12) & 0x3FF;
-                uint32_t m = (raw >> 6) & 0x3F;
-                uint32_t s = raw & 0x3F;
-                std::ostringstream oss;
-                if (neg) oss << "-";
-                oss << std::setfill('0') << std::setw(2) << h << ":"
-                    << std::setw(2) << m << ":"
-                    << std::setw(2) << s;
-                value = oss.str();
-                offset += 3;
-            }
+        case mt::TIME:
+        case mt::TIME2: {
+            value = decode_time(data, offset, col.datetime_precision);
             break;
         }
         case mt::YEAR: {
@@ -1178,8 +1204,22 @@ std::string TupleParser::decode_field_data(
         case mt::MEDIUM_BLOB:
         case mt::LONG_BLOB:
         case mt::BLOB:
+            // Binary BLOB data - output as HEX for SQL compatibility
+            {
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (uint32_t i = 0; i < data_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
+                }
+                oss << "')";
+                value = oss.str();
+                offset += data_size;
+            }
+            break;
+
         case mt::JSON: {
-            // BLOB/TEXT data stored inline (if not off-page)
+            // JSON data stored inline (if not off-page) - parse as text
             std::string result;
             for (uint32_t i = 0; i < data_size; i++) {
                 char c = static_cast<char>(data[offset + i]);
@@ -1530,16 +1570,16 @@ uint32_t BinaryTupleParser::parse_field_value(
             break;
 
         case mt::TIME:
-            value = decode_time(data, offset);
+            value = decode_time(data, offset, column.datetime_precision);
             break;
 
         case mt::DATETIME:
         case mt::DATETIME2:
-            value = decode_datetime(data, offset);
+            value = decode_datetime(data, offset, column.datetime_precision);
             break;
 
         case mt::TIMESTAMP2:
-            value = decode_timestamp(data, offset);
+            value = decode_timestamp(data, offset, column.datetime_precision);
             break;
 
         case mt::YEAR:

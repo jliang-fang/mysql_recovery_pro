@@ -49,6 +49,7 @@ struct SchemaTemplate {
         bool is_signed = true;            // Signed vs unsigned integer
         uint32_t decimal_precision = 0;   ///< For DECIMAL: total digits
         uint32_t decimal_scale = 0;       ///< For DECIMAL: digits after decimal point
+        uint8_t datetime_precision = 0;   ///< For DATETIME/TIMESTAMP/TIME: fractional seconds precision (0-6)
 
         // Default value (as string)
         std::string default_value;
