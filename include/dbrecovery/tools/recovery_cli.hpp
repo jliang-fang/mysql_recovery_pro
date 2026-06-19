@@ -951,7 +951,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             else if (type_upper == "BIGINT") { icol.col_type = 9; icol.col_length = 8; }
             else if (type_upper == "FLOAT") { icol.col_type = 5; icol.col_length = 4; }
             else if (type_upper == "DOUBLE") { icol.col_type = 6; icol.col_length = 8; }
-            else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 21; }
+            else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") {
+                icol.col_type = 21;
+                // precision and scale already set from parsing DECIMAL(M,D)
+                // Default if not specified
+                if (icol.precision == 0) icol.precision = 10;
+                if (icol.scale == 0) icol.scale = 0;
+            }
             else if (type_upper == "TIMESTAMP" || type_upper == "TIMESTAMP2") { icol.col_type = 18; icol.col_length = 4; }
             else if (type_upper == "DATETIME" || type_upper == "DATETIME2") { icol.col_type = 19; icol.col_length = 5; }
             else if (type_upper == "TIME" || type_upper == "TIME2") { icol.col_type = 20; icol.col_length = 3; }
@@ -979,6 +985,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 icol.col_type = 31;  // JSON type in InnoDB
                 icol.is_big = true;
                 icol.col_length = 4294967295;
+            }
+            else if (type_upper == "ENUM") {
+                icol.col_type = 22;  // ENUM type in InnoDB
+                icol.col_length = 1;  // Default 1 byte for small enums
+            }
+            else if (type_upper == "SET") {
+                icol.col_type = 23;  // SET type in InnoDB
+                icol.col_length = 1;
             }
             else {
                 icol.col_type = 15;  // Default to NEWDATE/unknown
