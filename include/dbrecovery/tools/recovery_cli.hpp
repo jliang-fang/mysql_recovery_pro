@@ -162,6 +162,7 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "\033[1mBasic Options:\033[0m\n";
     std::cout << "  \033[1m--ibd=<path>\033[0m               Path to .ibd file (required for single file mode)\n";
     std::cout << "  \033[1m--frm=<path>\033[0m               Path to .frm file for schema (MySQL 5.6/5.7)\n";
+    std::cout << "  \033[1m--schema=<def>\033[0m            Manual schema definition (format: col:type:size:pk,...)\n";
     std::cout << "  \033[1m--output=<dir>\033[0m             Output directory (default: /tmp/recovered)\n";
     std::cout << "  \033[1m--table-id=<id>\033[0m            Table ID for SDI lookup (default: 0)\n";
     std::cout << "  \033[1m--page-size=<size>\033[0m         Page size: 4096/8192/16384/32768/65536 (default: 16384)\n";
@@ -406,6 +407,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // FRM file option for schema parsing
     std::string frm_path = parser_.get_option("frm", "");
+
+    // Manual schema option (format: col_name:type:size:pk,...)
+    std::string schema_str = parser_.get_option("schema", "");
 
     // Disk carving recovery mode - raw device scanning (no backup needed)
     if (disk_carving) {
@@ -855,6 +859,173 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return true;
     };
 
+    // 辅助函数：从字符串解析 schema 并设置到 InnoDBIndexParser
+    // Format: col_name:type:size:flags, col_name2:type2:size2:flags2, ...
+    // Example: id:INT:pk, name:VARCHAR:255, email:VARCHAR:100, created_at:DATETIME
+    auto parse_schema_from_string = [&](const std::string& schema_str,
+                                          dbrecovery::innodb::InnoDBIndexParser& index_parser,
+                                          bool verbose) -> bool {
+        if (schema_str.empty()) return false;
+
+        std::cout << "[INFO] Parsing schema from --schema option\n";
+
+        // Split by comma (but not inside parentheses)
+        std::vector<std::string> col_defs;
+        std::string current_def;
+        int paren_depth = 0;
+        for (char c : schema_str) {
+            if (c == '(') paren_depth++;
+            else if (c == ')') paren_depth--;
+            else if (c == ',' && paren_depth == 0) {
+                if (!current_def.empty()) {
+                    col_defs.push_back(current_def);
+                    current_def.clear();
+                }
+                continue;
+            }
+            current_def += c;
+        }
+        if (!current_def.empty()) {
+            col_defs.push_back(current_def);
+        }
+
+        std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
+        uint32_t n_pk = 0;
+
+        for (const auto& col_def : col_defs) {
+            dbrecovery::innodb::IndexColumnDef icol;
+
+            // Split by ':'
+            std::istringstream cs(col_def);
+            std::string token;
+            std::vector<std::string> parts;
+            while (std::getline(cs, token, ':')) {
+                parts.push_back(token);
+            }
+
+            if (parts.empty()) continue;
+            icol.name = parts[0];
+            std::string type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
+
+            // Extract size from type (e.g., VARCHAR(255) -> size=255)
+            auto paren_pos = type_str.find('(');
+            if (paren_pos != std::string::npos) {
+                auto end_paren = type_str.find(')', paren_pos);
+                if (end_paren != std::string::npos) {
+                    std::string size_str = type_str.substr(paren_pos + 1, end_paren - paren_pos - 1);
+                    // Handle DECIMAL(M,D)
+                    auto comma_in_size = size_str.find(',');
+                    if (comma_in_size != std::string::npos) {
+                        try {
+                            icol.precision = std::stoul(size_str.substr(0, comma_in_size));
+                            icol.scale = std::stoul(size_str.substr(comma_in_size + 1));
+                            icol.col_length = icol.precision;
+                        } catch (...) {}
+                    } else {
+                        try {
+                            icol.col_length = std::stoul(size_str);
+                        } catch (...) {}
+                    }
+                    type_str = type_str.substr(0, paren_pos);
+                }
+            }
+
+            // Size from parts[2] if available
+            if (parts.size() > 2 && icol.col_length == 0) {
+                try {
+                    icol.col_length = std::stoul(parts[2]);
+                } catch (...) {}
+            }
+
+            // Convert type string to InnoDB internal type ID
+            std::string type_upper = type_str;
+            std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
+            icol.mb_maxlen = 4;  // UTF8MB4
+
+            // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
+            // Reference: ibd2sql column_type.py
+            if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
+            else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
+            else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }
+            else if (type_upper == "INT" || type_upper == "INTEGER") { icol.col_type = 4; icol.col_length = 4; }
+            else if (type_upper == "BIGINT") { icol.col_type = 9; icol.col_length = 8; }
+            else if (type_upper == "FLOAT") { icol.col_type = 5; icol.col_length = 4; }
+            else if (type_upper == "DOUBLE") { icol.col_type = 6; icol.col_length = 8; }
+            else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 21; }
+            else if (type_upper == "TIMESTAMP" || type_upper == "TIMESTAMP2") { icol.col_type = 18; icol.col_length = 4; }
+            else if (type_upper == "DATETIME" || type_upper == "DATETIME2") { icol.col_type = 19; icol.col_length = 5; }
+            else if (type_upper == "TIME" || type_upper == "TIME2") { icol.col_type = 20; icol.col_length = 3; }
+            else if (type_upper == "DATE") { icol.col_type = 15; icol.col_length = 3; }
+            else if (type_upper == "YEAR") { icol.col_type = 14; icol.col_length = 1; }
+            else if (type_upper == "VARCHAR") {
+                icol.col_type = 16;
+                icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
+            }
+            else if (type_upper == "CHAR") {
+                icol.col_type = 29;  // STRING type in InnoDB
+                icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
+            }
+            else if (type_upper == "TEXT") {
+                icol.col_type = 27;  // BLOB/TEXT type in InnoDB
+                icol.is_big = true;
+                icol.col_length = 65535;
+            }
+            else if (type_upper == "BLOB") {
+                icol.col_type = 27;
+                icol.is_big = true;
+                icol.col_length = 65535;
+            }
+            else if (type_upper == "JSON") {
+                icol.col_type = 31;  // JSON type in InnoDB
+                icol.is_big = true;
+                icol.col_length = 4294967295;
+            }
+            else {
+                icol.col_type = 15;  // Default to NEWDATE/unknown
+                icol.is_big = (icol.col_length > 255);
+            }
+
+            // Parse flags (pk, notnull, unsigned)
+            icol.is_nullable = true;  // Default nullable
+            for (size_t fi = 3; fi < parts.size(); fi++) {
+                std::string flag = parts[fi];
+                std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
+                if (flag == "pk" || flag == "primary") {
+                    n_pk++;
+                    icol.is_nullable = false;
+                }
+                else if (flag == "notnull" || flag == "not_null") {
+                    icol.is_nullable = false;
+                }
+                else if (flag == "unsigned") {
+                    icol.is_unsigned = true;
+                }
+            }
+
+            index_columns.push_back(icol);
+        }
+
+        if (n_pk == 0 && !index_columns.empty()) {
+            n_pk = 1;  // Default: first column is PK
+            index_columns[0].is_nullable = false;
+        }
+
+        if (verbose) {
+            std::cout << "[DEBUG] Column types from --schema:\n";
+            for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
+                std::cout << "  " << i+1 << ". " << index_columns[i].name
+                          << " type=" << static_cast<int>(index_columns[i].col_type)
+                          << " len=" << index_columns[i].col_length
+                          << " nullable=" << index_columns[i].is_nullable << "\n";
+            }
+        }
+
+        index_parser.set_columns(index_columns, false, n_pk);
+        std::cout << "[INFO] Schema set from --schema option (" << index_columns.size()
+                  << " columns, " << n_pk << " PK columns)\n";
+        return true;
+    };
+
     // Helper lambda: Convert IndexRecord to map with proper column names
     // Returns pair: {records, column_order}
     auto convert_records_to_map = [](const std::vector<dbrecovery::innodb::IndexRecord>& records,
@@ -935,11 +1106,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         index_parser.set_recover_deleted(true);
         index_parser.set_bad_page_mode(2);
 
-        // Try FRM schema first
-        bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
+        // Priority 1: Try --schema option first
+        bool has_schema = parse_schema_from_string(schema_str, index_parser, verbose);
 
-        // If no FRM, try SDI schema (MySQL 8.0+)
-        if (!has_frm_schema) {
+        // Priority 2: Try FRM schema
+        bool has_frm_schema = false;
+        if (!has_schema) {
+            has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
+        }
+
+        // Priority 3: If no schema, try SDI schema (MySQL 8.0+)
+        if (!has_schema && !has_frm_schema) {
             auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id);
             if (sdi_schema_opt.has_value()) {
                 std::cout << "[INFO] Using SDI schema: " << sdi_schema_opt->table_name
