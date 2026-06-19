@@ -292,8 +292,11 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
 
         size_t bytes_read = device.gcount();
 
-        // 扫描页 - 按页大小对齐
-        for (uint64_t offset = 0; offset + config_.page_size <= bytes_read; offset += config_.page_size) {
+        // 扫描页 - 使用较小的扫描步长以找到非对齐的页
+        // 文件系统块通常为 4KB，InnoDB 页可能不在页边界上
+        // 参考 ibd2sql 和 testdisk 的扫描策略
+        uint64_t scan_step = 512;  // 扫描步长 512 字节，确保找到所有可能的页
+        for (uint64_t offset = 0; offset + config_.page_size <= bytes_read; offset += scan_step) {
             const uint8_t* page_data = buffer.data() + offset;
 
             if (!is_valid_page(page_data, config_.page_size)) {
