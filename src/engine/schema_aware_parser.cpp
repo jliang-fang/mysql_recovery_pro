@@ -856,7 +856,11 @@ uint32_t TupleParser::get_fixed_field_size(const SchemaTemplate::Column& col) co
             uint8_t frac_digits = col.datetime_precision;
             return 5 + (frac_digits > 0 ? (frac_digits + 1) / 2 : 0);
         }
-        case mt::TIMESTAMP2: return 4;
+        case mt::TIMESTAMP2: {           // MySQL 5.6+ new format
+            // 4 bytes base + fractional seconds (0-3 bytes for TIMESTAMP(0-6))
+            uint8_t frac_digits = col.datetime_precision;
+            return 4 + (frac_digits > 0 ? (frac_digits + 1) / 2 : 0);
+        }
         case mt::TIME2: {                // MySQL 5.6+ new format
             // 3 bytes base + fractional seconds (0-3 bytes for TIME(0-6))
             uint8_t frac_digits = col.datetime_precision;

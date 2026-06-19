@@ -296,6 +296,12 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                         column_info.collation_id = col.value("collation_id", 255);
                     }
 
+                    // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
+                    // These are internal columns not part of user table schema
+                    if (column_info.name == "DB_TRX_ID" || column_info.name == "DB_ROLL_PTR" || column_info.name == "DB_ROW_ID") {
+                        continue;
+                    }
+
                     schema.columns[ordinal++] = column_info;
                 }
             }

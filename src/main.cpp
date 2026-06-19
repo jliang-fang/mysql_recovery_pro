@@ -2297,6 +2297,103 @@ int main(int argc, char** argv) {
                 std::cout << "[WARN] Failed to parse .frm file, using schemaless mode\n";
             }
         }
+        // Priority 3: SDI from IBD file (MySQL 8.0+)
+        else if (!schemaless_recovery) {
+            auto sdi_schema = parse_schema_from_sdi(actual_ibd_path, table_id);
+            if (sdi_schema.has_value()) {
+                std::cout << "[INFO] Schema obtained from SDI (" << sdi_schema->columns.size() << " columns)\n";
+
+                // Find PK columns from indexes
+                std::set<std::string> pk_column_names;
+                for (const auto& idx : sdi_schema->indexes) {
+                    if (idx.is_primary) {
+                        for (const auto& col_name : idx.columns) {
+                            pk_column_names.insert(col_name);
+                        }
+                    }
+                }
+
+                uint32_t n_pk = 0;
+
+                // SDI columns are stored as std::map<uint32_t, ColumnInfo> with ordinal position as key
+                // The map iterates in key order (1, 2, 3...) which is the correct physical column order
+                for (auto& [pos, col] : sdi_schema->columns) {
+                    dbrecovery::innodb::IndexColumnDef icol;
+                    icol.name = col.name;
+                    // mysql_type_id is already converted to InnoDB internal type in SDIManager
+                    icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
+                    icol.col_length = col.column_length;
+                    icol.is_nullable = col.is_nullable;
+                    icol.mb_maxlen = 4;  // UTF8MB4
+
+                    // Set datetime_precision for temporal types
+                    icol.datetime_precision = col.datetime_precision;
+
+                    // Set precision/scale for DECIMAL types (InnoDB type 21)
+                    if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
+                        icol.precision = col.numeric_precision;
+                        icol.scale = col.numeric_scale;
+                    }
+
+                    // Transfer ENUM/SET values
+                    icol.enum_values = col.enum_values;
+                    icol.set_values = col.set_values;
+
+                    // Determine if column is PK
+                    bool is_pk = pk_column_names.count(col.name) > 0 || (pos == 1 && pk_column_names.empty());
+                    if (is_pk) {
+                        n_pk++;
+                        icol.is_nullable = false;
+                    }
+
+                    // Determine if variable length based on InnoDB type
+                    // InnoDB types: 16=VARCHAR, 29=STRING/CHAR, 24-27=BLOB variants, 31=JSON
+                    // For multi-byte charsets (utf8/utf8mb4), CHAR (type 29) is stored as variable-length
+                    switch (col.mysql_type_id) {
+                        case 16:  // VARCHAR (InnoDB type)
+                            icol.is_big = (col.column_length * 4 > 255);
+                            break;
+                        case 29:  // STRING/CHAR (InnoDB type) - variable-length for utf8mb4!
+                            icol.is_big = (col.column_length * 4 > 255);
+                            break;
+                        case 24:  // TINY_BLOB
+                        case 25:  // MEDIUM_BLOB
+                        case 26:  // LONG_BLOB
+                        case 27:  // BLOB (TEXT in InnoDB)
+                            icol.is_big = true;
+                            break;
+                        case 31:  // JSON
+                            icol.is_big = true;
+                            break;
+                        default:
+                            // Fixed-length types (INT, DECIMAL, DATETIME, etc.)
+                            break;
+                    }
+
+                    index_columns.push_back(icol);
+                }
+
+                if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
+                n_pk_cols = n_pk;
+
+                // Debug: Print column types from SDI
+                if (verbose) {
+                    std::cout << "[DEBUG] Column types from SDI:\n";
+                    for (size_t i = 0; i < index_columns.size() && i < 20; i++) {
+                        std::cout << "  " << i+1 << ". " << index_columns[i].name
+                                  << " type=" << static_cast<int>(index_columns[i].col_type)
+                                  << " len=" << index_columns[i].col_length
+                                  << " nullable=" << index_columns[i].is_nullable
+                                  << " dt_prec=" << static_cast<int>(index_columns[i].datetime_precision) << "\n";
+                    }
+                }
+
+                index_parser.set_columns(index_columns, false, n_pk);
+                std::cout << "[INFO] Schema set from SDI (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
+            } else {
+                std::cout << "[INFO] No SDI found in file, using schemaless mode\n";
+            }
+        }
 
         // Phase 1: Run InnoDBIndexParser (ibd2sql-style force scan)
         auto scan_start = std::chrono::high_resolution_clock::now();
