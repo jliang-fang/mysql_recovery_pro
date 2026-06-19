@@ -47,6 +47,9 @@ public:
         bool auto_detect_page_size = true; // 自动检测页大小
         bool scan_frm_files = true;   // 扫描FRM文件签名
         bool scan_sdi_pages = true;   // 扫描SDI页
+        // TRUNCATE恢复支持: 指定要恢复的index_id列表
+        std::vector<uint64_t> target_index_ids;  // 只恢复指定的index_id
+        std::vector<uint64_t> exclude_index_ids; // 排除已知的系统表index_id
     };
 
     // 页类型枚举

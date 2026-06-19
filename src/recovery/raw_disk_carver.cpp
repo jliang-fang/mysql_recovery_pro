@@ -322,16 +322,35 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             if (is_index_page(page_data, config_.page_size)) {
                 uint64_t index_id = extract_index_id(page_data, config_.page_size);
 
-                // 提取页数据
-                std::vector<uint8_t> page_copy(config_.page_size);
-                std::memcpy(page_copy.data(), page_data, config_.page_size);
+                // index_id过滤逻辑 (支持TRUNCATE恢复)
+                bool should_collect = true;
 
-                {
-                    std::lock_guard<std::mutex> lock(pages_mutex_);
-                    collected_pages_[index_id].push_back(std::move(page_copy));
+                // 如果指定了目标index_id，只收集这些
+                if (!config_.target_index_ids.empty()) {
+                    should_collect = std::find(config_.target_index_ids.begin(),
+                                              config_.target_index_ids.end(),
+                                              index_id) != config_.target_index_ids.end();
                 }
 
-                pages_found_.fetch_add(1);
+                // 排除已知的系统表index_id
+                if (should_collect && !config_.exclude_index_ids.empty()) {
+                    should_collect = std::find(config_.exclude_index_ids.begin(),
+                                              config_.exclude_index_ids.end(),
+                                              index_id) == config_.exclude_index_ids.end();
+                }
+
+                if (should_collect) {
+                    // 提取页数据
+                    std::vector<uint8_t> page_copy(config_.page_size);
+                    std::memcpy(page_copy.data(), page_data, config_.page_size);
+
+                    {
+                        std::lock_guard<std::mutex> lock(pages_mutex_);
+                        collected_pages_[index_id].push_back(std::move(page_copy));
+                    }
+
+                    pages_found_.fetch_add(1);
+                }
             }
 
             // 也检测SDI页用于提取schema
