@@ -200,10 +200,13 @@ struct IndexColumnDef {
 
         uint32_t base = fixed_size();
         // Add fractional seconds storage for new temporal types
-        if (col_type == 17 || col_type == 18 || col_type == 19) {
-            if (scale > 0 && scale <= 2) base += 1;
-            else if (scale >= 3 && scale <= 4) base += 2;
-            else if (scale >= 5 && scale <= 6) base += 3;
+        // InnoDB types: 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2
+        // Fractional seconds: (precision+1)/2 bytes
+        if (col_type == 18 || col_type == 19 || col_type == 20) {
+            uint8_t prec = datetime_precision;  // Use datetime_precision, NOT scale
+            if (prec > 0 && prec <= 2) base += 1;
+            else if (prec >= 3 && prec <= 4) base += 2;
+            else if (prec >= 5 && prec <= 6) base += 3;
         }
         return base;
     }

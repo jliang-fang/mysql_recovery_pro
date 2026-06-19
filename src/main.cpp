@@ -1772,33 +1772,36 @@ int main(int argc, char** argv) {
                 icol.mb_maxlen = 4;  // utf8mb4
 
                 // MySQL type codes (from MySQL source, matching FRM file values):
-                // These are the standard MySQL type IDs stored in .frm files
-                // 1=TINYINT, 2=SMALLINT, 3=INT, 8=BIGINT, 9=MEDIUMINT
-                // 4=FLOAT, 5=DOUBLE, 246=NEWDECIMAL
-                // 7=TIMESTAMP, 12=DATETIME, 18=DATETIME2, 17=TIMESTAMP2
-                // 10=DATE, 13=YEAR, 15=VARCHAR, 252=BLOB/TEXT
-                if (type_upper == "TINYINT") { icol.col_type = 1; icol.col_length = 1; }
-                else if (type_upper == "SMALLINT") { icol.col_type = 2; icol.col_length = 2; }
-                else if (type_upper == "MEDIUMINT") { icol.col_type = 9; icol.col_length = 3; }
-                else if (type_upper == "INT" || type_upper == "INTEGER") { icol.col_type = 3; icol.col_length = 4; }
-                else if (type_upper == "BIGINT") { icol.col_type = 8; icol.col_length = 8; }
-                else if (type_upper == "FLOAT") { icol.col_type = 4; icol.col_length = 4; }
-                else if (type_upper == "DOUBLE") { icol.col_type = 5; icol.col_length = 8; }
-                else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 246; }
-                else if (type_upper == "TIMESTAMP") { icol.col_type = 7; icol.col_length = 4; }
-                else if (type_upper == "TIMESTAMP2") { icol.col_type = 17; icol.col_length = 4; }
-                else if (type_upper == "DATETIME") { icol.col_type = 12; icol.col_length = 8; }
-                else if (type_upper == "DATETIME2") { icol.col_type = 18; icol.col_length = 5; }
-                else if (type_upper == "DATE") { icol.col_type = 10; icol.col_length = 3; }
-                else if (type_upper == "YEAR") { icol.col_type = 13; icol.col_length = 1; }
+                // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
+                // InnoDB types: 2=TINY, 3=SHORT, 4=LONG, 9=LONGLONG, 10=INT24
+                // 5=FLOAT, 6=DOUBLE, 21=NEWDECIMAL
+                // 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2, 15=NEWDATE, 14=YEAR
+                // 16=VARCHAR, 29=STRING(CHAR), 27=BLOB, 31=JSON
+                // Reference: ibd2sql column_type.py
+                if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
+                else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
+                else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }
+                else if (type_upper == "INT" || type_upper == "INTEGER") { icol.col_type = 4; icol.col_length = 4; }
+                else if (type_upper == "BIGINT") { icol.col_type = 9; icol.col_length = 8; }
+                else if (type_upper == "FLOAT") { icol.col_type = 5; icol.col_length = 4; }
+                else if (type_upper == "DOUBLE") { icol.col_type = 6; icol.col_length = 8; }
+                else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 21; }
+                else if (type_upper == "TIMESTAMP") { icol.col_type = 18; icol.col_length = 4; }
+                else if (type_upper == "TIMESTAMP2") { icol.col_type = 18; icol.col_length = 4; }
+                else if (type_upper == "DATETIME") { icol.col_type = 19; icol.col_length = 5; }
+                else if (type_upper == "DATETIME2") { icol.col_type = 19; icol.col_length = 5; }
+                else if (type_upper == "TIME") { icol.col_type = 20; icol.col_length = 3; }
+                else if (type_upper == "TIME2") { icol.col_type = 20; icol.col_length = 3; }
+                else if (type_upper == "DATE") { icol.col_type = 15; icol.col_length = 3; }
+                else if (type_upper == "YEAR") { icol.col_type = 14; icol.col_length = 1; }
                 else if (type_upper == "VARCHAR") {
-                    icol.col_type = 15;
+                    icol.col_type = 16;
                     icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                 }
-                else if (type_upper == "CHAR") { icol.col_type = 254; }
-                else if (type_upper == "TEXT") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
-                else if (type_upper == "BLOB") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
-                else if (type_upper == "JSON") { icol.col_type = 245; icol.is_big = true; icol.col_length = 4294967295; }
+                else if (type_upper == "CHAR") { icol.col_type = 29; icol.is_big = (icol.col_length * icol.mb_maxlen > 255); }
+                else if (type_upper == "TEXT") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
+                else if (type_upper == "BLOB") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
+                else if (type_upper == "JSON") { icol.col_type = 31; icol.is_big = true; icol.col_length = 4294967295; }
                 else { icol.col_type = 15; icol.is_big = (icol.col_length > 255); }
 
                 // In MySQL, columns are nullable by default unless PRIMARY KEY or NOT NULL
@@ -2162,33 +2165,36 @@ int main(int argc, char** argv) {
                 icol.mb_maxlen = 4;
 
                 // MySQL type codes (from MySQL source, matching FRM file values):
-                // These are the standard MySQL type IDs stored in .frm files
-                // 1=TINYINT, 2=SMALLINT, 3=INT, 8=BIGINT, 9=MEDIUMINT
-                // 4=FLOAT, 5=DOUBLE, 246=NEWDECIMAL
-                // 7=TIMESTAMP, 12=DATETIME, 18=DATETIME2, 17=TIMESTAMP2
-                // 10=DATE, 13=YEAR, 15=VARCHAR, 252=BLOB/TEXT
-                if (type_upper == "TINYINT") { icol.col_type = 1; icol.col_length = 1; }
-                else if (type_upper == "SMALLINT") { icol.col_type = 2; icol.col_length = 2; }
-                else if (type_upper == "MEDIUMINT") { icol.col_type = 9; icol.col_length = 3; }
-                else if (type_upper == "INT" || type_upper == "INTEGER") { icol.col_type = 3; icol.col_length = 4; }
-                else if (type_upper == "BIGINT") { icol.col_type = 8; icol.col_length = 8; }
-                else if (type_upper == "FLOAT") { icol.col_type = 4; icol.col_length = 4; }
-                else if (type_upper == "DOUBLE") { icol.col_type = 5; icol.col_length = 8; }
-                else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 246; }
-                else if (type_upper == "TIMESTAMP") { icol.col_type = 7; icol.col_length = 4; }
-                else if (type_upper == "TIMESTAMP2") { icol.col_type = 17; icol.col_length = 4; }
-                else if (type_upper == "DATETIME") { icol.col_type = 12; icol.col_length = 8; }
-                else if (type_upper == "DATETIME2") { icol.col_type = 18; icol.col_length = 5; }
-                else if (type_upper == "DATE") { icol.col_type = 10; icol.col_length = 3; }
-                else if (type_upper == "YEAR") { icol.col_type = 13; icol.col_length = 1; }
+                // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
+                // InnoDB types: 2=TINY, 3=SHORT, 4=LONG, 9=LONGLONG, 10=INT24
+                // 5=FLOAT, 6=DOUBLE, 21=NEWDECIMAL
+                // 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2, 15=NEWDATE, 14=YEAR
+                // 16=VARCHAR, 29=STRING(CHAR), 27=BLOB, 31=JSON
+                // Reference: ibd2sql column_type.py
+                if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
+                else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
+                else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }
+                else if (type_upper == "INT" || type_upper == "INTEGER") { icol.col_type = 4; icol.col_length = 4; }
+                else if (type_upper == "BIGINT") { icol.col_type = 9; icol.col_length = 8; }
+                else if (type_upper == "FLOAT") { icol.col_type = 5; icol.col_length = 4; }
+                else if (type_upper == "DOUBLE") { icol.col_type = 6; icol.col_length = 8; }
+                else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 21; }
+                else if (type_upper == "TIMESTAMP") { icol.col_type = 18; icol.col_length = 4; }
+                else if (type_upper == "TIMESTAMP2") { icol.col_type = 18; icol.col_length = 4; }
+                else if (type_upper == "DATETIME") { icol.col_type = 19; icol.col_length = 5; }
+                else if (type_upper == "DATETIME2") { icol.col_type = 19; icol.col_length = 5; }
+                else if (type_upper == "TIME") { icol.col_type = 20; icol.col_length = 3; }
+                else if (type_upper == "TIME2") { icol.col_type = 20; icol.col_length = 3; }
+                else if (type_upper == "DATE") { icol.col_type = 15; icol.col_length = 3; }
+                else if (type_upper == "YEAR") { icol.col_type = 14; icol.col_length = 1; }
                 else if (type_upper == "VARCHAR") {
-                    icol.col_type = 15;
+                    icol.col_type = 16;
                     icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                 }
-                else if (type_upper == "CHAR") { icol.col_type = 254; }
-                else if (type_upper == "TEXT") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
-                else if (type_upper == "BLOB") { icol.col_type = 252; icol.is_big = true; icol.col_length = 65535; }
-                else if (type_upper == "JSON") { icol.col_type = 245; icol.is_big = true; icol.col_length = 4294967295; }
+                else if (type_upper == "CHAR") { icol.col_type = 29; icol.is_big = (icol.col_length * icol.mb_maxlen > 255); }
+                else if (type_upper == "TEXT") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
+                else if (type_upper == "BLOB") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
+                else if (type_upper == "JSON") { icol.col_type = 31; icol.is_big = true; icol.col_length = 4294967295; }
                 else { icol.col_type = 15; icol.is_big = (icol.col_length > 255); }
 
                 bool is_pk = false;

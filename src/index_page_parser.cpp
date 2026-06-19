@@ -603,9 +603,13 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         for (size_t i = 0; i < columns.size() && i < 20; i++) {
             std::cout << static_cast<int>(columns[i].col_type) << "(" << columns[i].name.substr(0,8) << ") ";
             if (columns[i].is_variable_length()) std::cout << "[VAR] ";
+            if (columns[i].is_big) std::cout << "[BIG] ";
             if (columns[i].is_system_column()) std::cout << "[SYS] ";
             if (columns[i].col_type == 21) { // DECIMAL
                 std::cout << "[prec=" << columns[i].precision << ",scale=" << columns[i].scale << "] ";
+            }
+            if (columns[i].col_type == 18 || columns[i].col_type == 19 || columns[i].col_type == 20) {
+                std::cout << "[dt_prec=" << static_cast<int>(columns[i].datetime_precision) << "] ";
             }
         }
         std::cout << "\n";
@@ -1515,6 +1519,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 val.str_value = "0000-00-00 00:00:00";
                 break;
             }
+
             // Read 5 bytes as 40-bit value
             uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(data, offset)) << 8) |
                          static_cast<uint64_t>(data[offset + 4]);
@@ -1689,14 +1694,48 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         // ==================== String Types ====================
         // 使用 InnoDB 类型 ID
-        case 16:   // VARCHAR - InnoDB type 16
-        case 28:   // VAR_STRING - InnoDB type 28
-        case 27:   // BLOB/TEXT - InnoDB type 27
-        case 24:   // TINY_BLOB
-        case 25:   // MEDIUM_BLOB
-        case 26: { // LONG_BLOB
+        // VARCHAR (type 16) and TEXT (type 27) are text columns - decode as UTF-8
+        // VAR_STRING (type 28) is also text
+        // BLOB variants (24, 25, 26) are binary - output as HEX
+        case 16:   // VARCHAR - InnoDB type 16 (TEXT data)
+        case 28: { // VAR_STRING - InnoDB type 28 (TEXT data)
             val.type = IndexFieldValue::Type::STRING_VAL;
+            // Decode as UTF-8 text
             val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+            break;
+        }
+        case 27: { // BLOB/TEXT - InnoDB type 27
+            // TEXT columns should be decoded as text, BLOB as binary
+            // We can't distinguish here, so check is_binary flag
+            if (col.is_binary) {
+                val.type = IndexFieldValue::Type::BINARY_VAL;
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
+                }
+                oss << "')";
+                val.str_value = oss.str();
+            } else {
+                // TEXT column - decode as UTF-8
+                val.type = IndexFieldValue::Type::STRING_VAL;
+                val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+            }
+            break;
+        }
+        case 24:   // TINY_BLOB (binary)
+        case 25:   // MEDIUM_BLOB (binary)
+        case 26: { // LONG_BLOB (binary)
+            val.type = IndexFieldValue::Type::BINARY_VAL;
+            std::ostringstream oss;
+            oss << "UNHEX('";
+            for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
+                oss << std::hex << std::setw(2) << std::setfill('0')
+                    << static_cast<int>(data[offset + i]);
+            }
+            oss << "')";
+            val.str_value = oss.str();
             break;
         }
         case 29: { // STRING/CHAR - InnoDB type 29
