@@ -2247,9 +2247,15 @@ int main(int argc, char** argv) {
                     icol.set_values = col.set_values;
 
                     // Determine if variable length based on InnoDB type
-                    // InnoDB types: 16=VARCHAR, 24-27=BLOB variants, 31=JSON
+                    // InnoDB types: 16=VARCHAR, 29=STRING/CHAR, 24-27=BLOB variants, 31=JSON
+                    // For multi-byte charsets (utf8/utf8mb4), CHAR is stored as variable-length
                     switch (col.mysql_type_id) {
                         case 16:  // VARCHAR (InnoDB type)
+                            icol.is_big = (col.column_length * 4 > 255);
+                            break;
+                        case 29:  // STRING/CHAR (InnoDB type 29)
+                            // CHAR(N) with utf8mb4 has byte length = N * 4
+                            // is_big = true when byte length > 255
                             icol.is_big = (col.column_length * 4 > 255);
                             break;
                         case 24:  // TINY_BLOB

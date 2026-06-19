@@ -479,6 +479,7 @@ uint32_t TupleParser::parse_page(
         if (col.is_nullable) num_nullable++;
         bool is_var = col.is_variable_length || col.mysql_type == mt::VARCHAR ||
                       col.mysql_type == mt::VAR_STRING ||
+                      col.mysql_type == mt::STRING ||  // STRING/CHAR (type 29) - variable for utf8mb4
                       col.mysql_type == mt::TINY_BLOB || col.mysql_type == mt::MEDIUM_BLOB ||
                       col.mysql_type == mt::LONG_BLOB || col.mysql_type == mt::BLOB ||
                       col.mysql_type == mt::JSON || col.mysql_type == mt::NEWDECIMAL;
@@ -565,6 +566,7 @@ uint32_t TupleParser::parse_page(
                 const auto& col = schema.columns[ci];
                 bool is_var = col.is_variable_length || col.mysql_type == mt::VARCHAR ||
                               col.mysql_type == mt::VAR_STRING ||
+                              col.mysql_type == mt::STRING ||  // STRING/CHAR (type 29) - variable for utf8mb4
                               col.mysql_type == mt::TINY_BLOB || col.mysql_type == mt::MEDIUM_BLOB ||
                               col.mysql_type == mt::LONG_BLOB || col.mysql_type == mt::BLOB ||
                               col.mysql_type == mt::JSON;
@@ -671,6 +673,7 @@ uint32_t TupleParser::parse_page(
                     // Determine if variable-length
                     bool is_var = col.is_variable_length || col.mysql_type == mt::VARCHAR ||
                                   col.mysql_type == mt::VAR_STRING ||
+                                  col.mysql_type == mt::STRING ||  // STRING/CHAR (type 29) - variable for utf8mb4
                                   col.mysql_type == mt::TINY_BLOB || col.mysql_type == mt::MEDIUM_BLOB ||
                                   col.mysql_type == mt::LONG_BLOB || col.mysql_type == mt::BLOB ||
                                   col.mysql_type == mt::JSON;
@@ -1377,7 +1380,8 @@ BinaryTupleParser::ParseResult BinaryTupleParser::parse(
 
     for (const auto& col : schema.columns) {
         if (col.is_variable_length || col.mysql_type == mt::VARCHAR ||
-            col.mysql_type == mt::VAR_STRING) {
+            col.mysql_type == mt::VAR_STRING ||
+            col.mysql_type == mt::STRING) {  // STRING/CHAR (type 29) - variable for utf8mb4
             num_variable++;
         }
         if (col.is_nullable) {
@@ -1447,7 +1451,8 @@ BinaryTupleParser::ParseResult BinaryTupleParser::parse(
         uint32_t field_len = 0;
 
         if (col.is_variable_length || col.mysql_type == mt::VARCHAR ||
-            col.mysql_type == mt::VAR_STRING) {
+            col.mysql_type == mt::VAR_STRING ||
+            col.mysql_type == mt::STRING) {  // STRING/CHAR (type 29) - variable for utf8mb4
             // Use the pre-read variable length
             if (var_idx < var_lengths.size()) {
                 field_len = var_lengths[var_idx++];
