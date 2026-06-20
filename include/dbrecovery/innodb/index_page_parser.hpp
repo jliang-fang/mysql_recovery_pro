@@ -92,6 +92,11 @@ struct IndexColumnDef {
     std::vector<std::string> enum_values;  // For ENUM type
     std::vector<std::string> set_values;   // For SET type
 
+    // ✅ 新增：用于正确处理 InnoDB 变长列大小字节的读取顺序
+    // InnoDB 按原始 SCHEMA 顺序（ordinal_position）存储大小字节和 NULL 位图
+    // 但数据按存储顺序（固定优先）存储
+    uint32_t ordinal_position = 0;  // 原始 SCHEMA 定义顺序（从 1 开始）
+
     /**
      * @brief Determine if this column uses variable-length storage in InnoDB
      * Uses InnoDB type IDs (参考 ibd2sql column_type.py)

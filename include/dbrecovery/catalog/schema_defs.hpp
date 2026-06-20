@@ -422,6 +422,12 @@ struct TableSchema {
                     col.physical_pos = col_json["ordinal_position"].get<uint32_t>();
                 }
 
+                // Debug: show physical_pos value for date/datetime columns
+                if (col.name == "col_date" || col.name == "col_datetime" || col.name == "col_decimal") {
+                    std::cerr << "[DEBUG POS] Column '" << col.name << "' physical_pos=" << col.physical_pos
+                              << " type=" << col.mysql_type_id << "\n";
+                }
+
                 // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
                 // These are internal columns not part of user table schema
                 if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
