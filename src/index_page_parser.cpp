@@ -971,26 +971,43 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         }
     }
 
-    // Step 3: Read remaining user columns (in physical order)
-    for (size_t col_idx = n_pk_cols_; col_idx < columns.size() && pos < data_end; col_idx++) {
-        const auto& col = columns[col_idx];
+    // Step 3: Read remaining user columns
+    // CRITICAL FIX: InnoDB DYNAMIC format stores VARIABLE columns FIRST, then FIXED columns!
+    // NOT the other way around!
+    // The columns array is sorted: fixed-first, then variable
+    // We need to read in reverse order: variable-first, then fixed
 
-        if (size_idx >= variable_sizes.size()) break;
-        uint32_t field_size = variable_sizes[size_idx++];
+    // Separate columns into variable and fixed groups
+    std::vector<size_t> var_col_indices;
+    std::vector<size_t> fixed_col_indices;
+    for (size_t i = n_pk_cols_; i < columns.size(); i++) {
+        if (columns[i].is_variable_length()) {
+            var_col_indices.push_back(i);
+        } else {
+            fixed_col_indices.push_back(i);
+        }
+    }
+
+    // Read variable columns first (in storage order, sorted by ordinal_position)
+    std::map<size_t, IndexFieldValue> results_map;
+
+    for (size_t col_idx : var_col_indices) {
+        const auto& col = columns[col_idx];
+        if (col_idx >= variable_sizes.size()) break;
+        uint32_t field_size = variable_sizes[col_idx];
 
         IndexFieldValue val;
-
-        // Check NULL status
-        // CRITICAL: InnoDB uses BIG-ENDIAN for NULL bitmap
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
-            uint32_t nullable_idx = 0;
-            for (size_t j = 0; j < col_idx; j++) {
-                if (columns[j].is_nullable) nullable_idx++;
+            uint32_t bit_pos = 0;
+            for (size_t j = 0; j < columns.size(); j++) {
+                if (!columns[j].is_system_column() && columns[j].is_nullable &&
+                    columns[j].ordinal_position < col.ordinal_position) {
+                    bit_pos++;
+                }
             }
-            // For big-endian: bit N → byte index = (size - 1) - (N / 8), bit pos = N % 8
-            size_t byte_idx = (null_bitmask.size() - 1) - (nullable_idx / 8);
-            uint8_t bit_idx = nullable_idx % 8;
+            size_t byte_idx = (null_bitmask.size() - 1) - (bit_pos / 8);
+            uint8_t bit_idx = bit_pos % 8;
             if (byte_idx < null_bitmask.size()) {
                 is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
             }
@@ -999,79 +1016,58 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         if (is_null || field_size == 0) {
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
-            result.push_back(val);
-            continue;
-        }
-
-        // CRITICAL FIX: If field_size exceeds remaining record, adjust it
-        // This can happen when size bytes were read from invalid memory (SUPREMUM area)
-        // or when the last variable-length field should use remaining record length
-        size_t remaining = data_end - pos;
-        if (field_size > remaining) {
-            // For variable-length columns at the end, calculate remaining size
-            // accounting for all subsequent fixed-length columns
-            if (col.is_variable_length()) {
-                // Calculate space needed for remaining columns (fixed-length only)
-                size_t fixed_remaining = 0;
-                for (size_t k = col_idx + 1; k < columns.size(); k++) {
-                    const auto& next_col = columns[k];
-                    if (!next_col.is_variable_length()) {
-                        // Check if this fixed column is NULL
-                        bool next_is_null = false;
-                        if (next_col.is_nullable && !null_bitmask.empty()) {
-                            uint32_t next_nullable_idx = 0;
-                            for (size_t j = 0; j < k; j++) {
-                                if (columns[j].is_nullable) next_nullable_idx++;
-                            }
-                            size_t byte_idx = (null_bitmask.size() - 1) - (next_nullable_idx / 8);
-                            uint8_t bit_idx = next_nullable_idx % 8;
-                            if (byte_idx < null_bitmask.size()) {
-                                next_is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
-                            }
-                        }
-                        if (!next_is_null) {
-                            fixed_remaining += next_col.storage_size();
-                        }
-                    }
-                }
-                // Use remaining minus space for fixed columns
-                if (remaining > fixed_remaining) {
-                    field_size = static_cast<uint32_t>(remaining - fixed_remaining);
-                }
-            }
-        }
-
-        // Handle overflow pointer
-        if (field_size == off_page_flag_ && pos + 20 <= data_end) {
-            val.is_overflow = true;
-            val.type = IndexFieldValue::Type::OVERFLOW_PTR;
-            val.overflow_space_id = read_be<uint32_t>(page_data, pos);
-            val.overflow_page_no = read_be<uint32_t>(page_data, pos + 4);
-            val.overflow_blob_header = read_be<uint32_t>(page_data, pos + 8);
-            val.overflow_real_size = read_be<uint64_t>(page_data, pos + 12);
-            val.raw_bytes.assign(page_data + pos, page_data + pos + 20);
-            pos += 20;
-            result.push_back(val);
-            continue;
-        }
-
-        if (pos + field_size <= data_end) {
-            // CRITICAL FIX: Limit field_size to prevent memory allocation errors
-            // If field_size is unreasonably large, skip this field
-            constexpr size_t MAX_FIELD_SIZE = 10000;  // 10KB max for inline fields
-            if (field_size > MAX_FIELD_SIZE) {
-                val.is_null = true;
-                val.type = IndexFieldValue::Type::NULL_VAL;
-                val.str_value = "<SKIPPED_LARGE_FIELD>";
-                result.push_back(val);
-                // Skip this field by advancing pos by a reasonable amount
-                // or just break since the record is likely corrupted
-                break;
-            }
+        } else if (pos + field_size <= data_end) {
             val = decode_column(page_data, pos, data_end, col, field_size);
             pos += field_size;
         }
-        result.push_back(val);
+        results_map[col_idx] = val;
+    }
+
+    // Read fixed columns after variable columns
+    for (size_t col_idx : fixed_col_indices) {
+        const auto& col = columns[col_idx];
+        if (col_idx >= variable_sizes.size()) break;
+        uint32_t field_size = variable_sizes[col_idx];
+
+        IndexFieldValue val;
+        bool is_null = false;
+        if (col.is_nullable && !null_bitmask.empty()) {
+            uint32_t bit_pos = 0;
+            for (size_t j = 0; j < columns.size(); j++) {
+                if (!columns[j].is_system_column() && columns[j].is_nullable &&
+                    columns[j].ordinal_position < col.ordinal_position) {
+                    bit_pos++;
+                }
+            }
+            size_t byte_idx = (null_bitmask.size() - 1) - (bit_pos / 8);
+            uint8_t bit_idx = bit_pos % 8;
+            if (byte_idx < null_bitmask.size()) {
+                is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
+            }
+        }
+
+        // Read fixed column value
+        if (is_null || field_size == 0) {
+            val.is_null = true;
+            val.type = IndexFieldValue::Type::NULL_VAL;
+        } else if (pos + field_size <= data_end) {
+            val = decode_column(page_data, pos, data_end, col, field_size);
+            pos += field_size;
+        }
+        results_map[col_idx] = val;
+    }
+
+    // Build result in columns array order
+    for (size_t col_idx = n_pk_cols_; col_idx < columns.size(); col_idx++) {
+        auto it = results_map.find(col_idx);
+        if (it != results_map.end()) {
+            result.push_back(it->second);
+        } else {
+            IndexFieldValue val;
+            val.is_null = true;
+            val.type = IndexFieldValue::Type::NULL_VAL;
+            result.push_back(val);
+        }
     }
 
     return result;

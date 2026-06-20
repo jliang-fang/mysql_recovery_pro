@@ -98,18 +98,18 @@ struct IndexColumnDef {
     uint32_t ordinal_position = 0;  // 原始 SCHEMA 定义顺序（从 1 开始）
 
     /**
-     * @brief Determine if this column uses variable-length storage in InnoDB
-     * Uses InnoDB type IDs (参考 ibd2sql column_type.py)
+     * @brief Determine if this column uses variable-length storage in InnoDB DYNAMIC format
+     *
+     * CRITICAL: In DYNAMIC format, columns are stored as:
+     * - VARIABLE columns FIRST (size stored in record): VARCHAR, BLOB, TEXT, JSON, CHAR(utf8mb4)
+     * - FIXED columns AFTER (pre-computed size): INT, DATE, DATETIME, DECIMAL, ENUM, SET
+     *
+     * DECIMAL, ENUM, SET have variable capacity but FIXED storage size for a given schema,
+     * so they are stored with fixed columns in DYNAMIC format!
      */
     bool is_variable_length() const {
-        // Variable-length InnoDB types:
-        // 16 = VARCHAR, 17 = BIT, 21 = NEWDECIMAL, 22 = ENUM, 23 = SET
-        // 24-27 = BLOB variants, 28 = VAR_STRING, 29 = STRING, 30 = GEOMETRY, 31 = JSON
+        // TRUE variable-length types (size stored in record):
         return col_type == 16 ||   // VARCHAR (InnoDB type 16)
-               col_type == 17 ||   // BIT (InnoDB type 17) - variable length
-               col_type == 21 ||   // NEWDECIMAL (InnoDB type 21) - variable length
-               col_type == 22 ||   // ENUM (InnoDB type 22) - variable length (1-2 bytes)
-               col_type == 23 ||   // SET (InnoDB type 23) - variable length (1-8 bytes)
                col_type == 24 ||   // TINY_BLOB (InnoDB type 24)
                col_type == 25 ||   // MEDIUM_BLOB (InnoDB type 25)
                col_type == 26 ||   // LONG_BLOB (InnoDB type 26)
@@ -118,6 +118,12 @@ struct IndexColumnDef {
                col_type == 29 ||   // STRING/CHAR (InnoDB type 29) - variable for utf8mb4
                col_type == 30 ||   // GEOMETRY (InnoDB type 30)
                col_type == 31;     // JSON (InnoDB type 31)
+
+        // NOTE: The following are FIXED-SIZE in DYNAMIC format (stored with fixed columns):
+        // - BIT (17): fixed size based on bit count
+        // - NEWDECIMAL (21): fixed size based on precision/scale
+        // - ENUM (22): fixed size (1-2 bytes) based on value count
+        // - SET (23): fixed size (1-8 bytes) based on value count
     }
 
     /**

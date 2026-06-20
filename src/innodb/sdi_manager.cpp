@@ -281,7 +281,8 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     schema.columns.clear();
                     uint32_t new_ordinal = 1;
                     for (const auto& p : cols_vec) {
-                        std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' ordinal=" << new_ordinal
+                        std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
+                                  << " physical_pos=" << p.second.physical_pos
                                   << " type=" << p.second.mysql_type_id
                                   << " is_fixed=" << catalog::TableSchema::is_fixed_length(p.second) << "\n";
                         schema.columns[new_ordinal++] = p.second;
