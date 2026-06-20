@@ -103,8 +103,13 @@ struct IndexColumnDef {
      */
     bool is_variable_length() const {
         // Variable-length InnoDB types:
-        // 16 = VARCHAR, 24-27 = BLOB variants, 28 = VAR_STRING, 29 = STRING, 31 = JSON
+        // 16 = VARCHAR, 17 = BIT, 21 = NEWDECIMAL, 22 = ENUM, 23 = SET
+        // 24-27 = BLOB variants, 28 = VAR_STRING, 29 = STRING, 30 = GEOMETRY, 31 = JSON
         return col_type == 16 ||   // VARCHAR (InnoDB type 16)
+               col_type == 17 ||   // BIT (InnoDB type 17) - variable length
+               col_type == 21 ||   // NEWDECIMAL (InnoDB type 21) - variable length
+               col_type == 22 ||   // ENUM (InnoDB type 22) - variable length (1-2 bytes)
+               col_type == 23 ||   // SET (InnoDB type 23) - variable length (1-8 bytes)
                col_type == 24 ||   // TINY_BLOB (InnoDB type 24)
                col_type == 25 ||   // MEDIUM_BLOB (InnoDB type 25)
                col_type == 26 ||   // LONG_BLOB (InnoDB type 26)

@@ -1196,6 +1196,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         // Always set datetime_precision, even if 0
                         col_def.datetime_precision = col.datetime_precision;
                         col_def.scale = col.datetime_precision;  // 同时设置 scale 用于显示
+                        // Debug
+                        static bool dt_debug = false;
+                        if (!dt_debug) {
+                            std::cerr << "[DEBUG DT] Column '" << col.name << "' datetime_precision="
+                                      << (int)col.datetime_precision << " -> col_def.datetime_precision="
+                                      << (int)col_def.datetime_precision << "\n";
+                            dt_debug = true;
+                        }
                     }
 
                     // Handle ENUM/SET elements
