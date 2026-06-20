@@ -179,15 +179,15 @@ TEST(HeaderCorruptionTest, DetectChecksumMismatch) {
 
 TEST(HeaderCorruptionTest, DetectPageChainBroken) {
     auto page = create_valid_page();
-    
-    // Corrupt next page pointer
-    write_le<uint32_t>(page.data(), 4, 0x12345678);
-    
+
+    // Corrupt next page pointer (FIL_PAGE_NEXT is at offset 12)
+    write_be<uint32_t>(page.data(), FIL_PAGE_NEXT_ABS, 0x12345678);
+
     CorruptionDetector detector;
     detector.set_page_size(16384);
-    
+
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     EXPECT_GT(corruptions.size(), 0);
     bool found_chain_broken = false;
     for (const auto& c : corruptions) {
