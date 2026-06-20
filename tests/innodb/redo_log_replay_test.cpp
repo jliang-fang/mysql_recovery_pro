@@ -304,36 +304,37 @@ TEST(RedoLogRecordTest, ParseRecordWithTransactionInfo) {
 TEST(RedoLogReplayTest, ReplayCompactFormat) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // Set page type to INDEX
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_INDEX);
+    // FIL Header (38 bytes, big-endian for type field)
+    // Set page type to INDEX at offset 24 (FIL_PAGE_TYPE_ABS)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
 
-    // Set page level to 0
-    write_le<uint16_t>(page_data.data(), 42, 0);
+    // BTR Header starts at FIL_HEADER_SIZE (38)
+    // Set page level to 0 (n_levels at offset 38)
+    write_le<uint32_t>(page_data.data(), FIL_HEADER_SIZE + 0, 0);
 
-    // Set flags with COMPACT format (bit 0-2 = 1)
-    // BTR header flags at offset 80 (FIL_HEADER_SIZE=38 + BTR_HEADER_SIZE=42)
-    write_le<uint16_t>(page_data.data(), 80, 0x0701);
+    // Set flags for COMPACT format (bit 0-2 = 1) at offset 38 + 10 = 48
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 10, 0x0001);
 
-    // Set heap_top
-    write_le<uint16_t>(page_data.data(), 40, 100);
+    // Set heap_top at offset 38 + 2 = 40
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 2, 100);
 
-    // Set n_dir_slots
-    write_le<uint16_t>(page_data.data(), 38, 2);
+    // Set n_dir_slots at offset 38 + 0 = 38 (PAGE_N_DIR_SLOTS)
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 0, 2);
 
-    // Set INFIMUM record
-    page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
+    // Set n_heap at offset 38 + 4 = 42
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 4, 3);
 
-    // Set SUPREMUM record
+    // Set INFIMUM record at offset 54 (PAGE_INFIMUM_REC_OFFSET_ABS)
+    page_data[PAGE_INFIMUM_REC_OFFSET_ABS] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), PAGE_INFIMUM_REC_OFFSET_ABS + 1, 97);  // next_offset = 97 (SUPREMUM)
+
+    // Set SUPREMUM record at offset 97
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
     write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
 
-    // Set n_heap
-    write_le<uint16_t>(page_data.data(), 42, 3);
-
     // Create parser
     BPlusTreeParser parser(page_data);
-    EXPECT_TRUE(parser.parse());
+    ASSERT_TRUE(parser.parse()) << "Parser failed to parse page";
     EXPECT_EQ(parser.btr_format(), 1);  // COMPACT format
 
     // Create redo log record for INSERT
@@ -353,36 +354,37 @@ TEST(RedoLogReplayTest, ReplayCompactFormat) {
 TEST(RedoLogReplayTest, ReplayRedundantFormat) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // Set page type to INDEX
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_INDEX);
+    // FIL Header (38 bytes, big-endian for type field)
+    // Set page type to INDEX at offset 24 (FIL_PAGE_TYPE_ABS)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
 
-    // Set page level to 0
-    write_le<uint16_t>(page_data.data(), 42, 0);
+    // BTR Header starts at FIL_HEADER_SIZE (38)
+    // Set page level to 0 (n_levels at offset 38)
+    write_le<uint32_t>(page_data.data(), FIL_HEADER_SIZE + 0, 0);
 
-    // Set flags with REDUNDANT format (bit 0-2 = 0)
-    // BTR header flags at offset 80 (FIL_HEADER_SIZE=38 + BTR_HEADER_SIZE=42)
-    write_le<uint16_t>(page_data.data(), 80, 0x0700);
+    // Set flags for REDUNDANT format (bit 0-2 = 0) at offset 38 + 10 = 48
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 10, 0x0000);
 
-    // Set heap_top
-    write_le<uint16_t>(page_data.data(), 40, 100);
+    // Set heap_top at offset 38 + 2 = 40
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 2, 100);
 
-    // Set n_dir_slots
-    write_le<uint16_t>(page_data.data(), 38, 2);
+    // Set n_dir_slots at offset 38 + 0 = 38 (PAGE_N_DIR_SLOTS)
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 0, 2);
 
-    // Set INFIMUM record
-    page_data[54] = dbrecovery::innodb::REC_STATUS_INFIMUM;
-    write_le<uint16_t>(page_data.data(), 55, 97);  // next_offset = 97 (SUPREMUM)
+    // Set n_heap at offset 38 + 4 = 42
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 4, 3);
 
-    // Set SUPREMUM record
+    // Set INFIMUM record at offset 54 (PAGE_INFIMUM_REC_OFFSET_ABS)
+    page_data[PAGE_INFIMUM_REC_OFFSET_ABS] = dbrecovery::innodb::REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page_data.data(), PAGE_INFIMUM_REC_OFFSET_ABS + 1, 97);  // next_offset = 97 (SUPREMUM)
+
+    // Set SUPREMUM record at offset 97
     page_data[97] = dbrecovery::innodb::REC_STATUS_SUPREMUM;
     write_le<uint16_t>(page_data.data(), 98, 0xFFFF);
 
-    // Set n_heap
-    write_le<uint16_t>(page_data.data(), 42, 3);
-
     // Create parser
     BPlusTreeParser parser(page_data);
-    EXPECT_TRUE(parser.parse());
+    ASSERT_TRUE(parser.parse()) << "Parser failed to parse page";
     EXPECT_EQ(parser.btr_format(), 0);  // REDUNDANT format
 
     // Create redo log record for INSERT

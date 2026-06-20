@@ -156,16 +156,15 @@ TEST(HeaderCorruptionTest, DetectInvalidPageType) {
 
 TEST(HeaderCorruptionTest, DetectChecksumMismatch) {
     auto page = create_valid_page();
-    
-    // Corrupt checksum
-    write_le<uint32_t>(page.data(), 4, 0xDEADBEEF);
-    write_le<uint32_t>(page.data(), 24, 0xDEADBEEF);
-    
+
+    // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM)
+    write_le<uint32_t>(page.data(), 0, 0xDEADBEEF);
+
     CorruptionDetector detector;
     detector.set_page_size(16384);
-    
+
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
-    
+
     EXPECT_GT(corruptions.size(), 0);
     bool found_checksum = false;
     for (const auto& c : corruptions) {
@@ -834,10 +833,11 @@ TEST(ComprehensiveTest, DetectAllCorruptionTypes) {
         } else if (name == "type") {
             write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
         } else if (name == "checksum") {
-            // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM)
-            write_be<uint32_t>(page.data(), 0, 0xDEADBEEF);
+            // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM) - checksum is little-endian
+            write_le<uint32_t>(page.data(), 0, 0xDEADBEEF);
         } else if (name == "chain") {
-            write_be<uint32_t>(page.data(), 8, 0x12345678);  // prev_page
+            // Corrupt next_page at offset 12 (FIL_PAGE_NEXT_ABS) to break the chain
+            write_be<uint32_t>(page.data(), FIL_PAGE_NEXT_ABS, 0x12345678);
         } else if (name == "infimum") {
             page[54] = 0x05;
         } else if (name == "supremum") {

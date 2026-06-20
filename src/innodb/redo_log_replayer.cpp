@@ -82,12 +82,12 @@ bool RedoLogReplayer::apply_redo_record(uint32_t page_no, const RedoLogRecord& r
 
     auto& page_data = it->second;
 
-    // Check page type
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 16);
+    // Check page type at offset 24 (FIL_PAGE_TYPE_ABS, big-endian)
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
     if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
         page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
         page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG) {
-        std::cerr << "[WARN] RedoLogReplayer: Page " << page_no << " is not a valid page type" << std::endl;
+        std::cerr << "[WARN] RedoLogReplayer: Page " << page_no << " is not a valid page type (type=" << page_type << ")" << std::endl;
         return false;
     }
 

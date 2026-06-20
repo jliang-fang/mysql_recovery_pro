@@ -45,8 +45,8 @@ PageHealth CorruptionDetector::analyze_page(const uint8_t* page_data,
         health.status_message = "Invalid page type: " + std::to_string(health.page_type);
     }
 
-    // Read checksum
-    health.checksum_expected = dbrecovery::innodb::read_le<uint32_t>(page_data, 24);
+    // Read checksum at offset 0 (FIL_PAGE_CHECKSUM)
+    health.checksum_expected = dbrecovery::innodb::read_le<uint32_t>(page_data, 0);
     health.checksum_actual = health.checksum_expected;
 
     // Check checksum
@@ -136,7 +136,7 @@ std::vector<CorruptionDetails> CorruptionDetector::detect_corruption(const uint8
 
     // Check checksum
     if (!check_page_checksum(page_data, page_size)) {
-        uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 24);
+        uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 0);
         CorruptionDetails detail;
         detail.type = CorruptionType::PAGE_CHECKSUM_MISMATCH;
         detail.page_no = page_no;
@@ -257,8 +257,8 @@ bool CorruptionDetector::check_page_checksum(const uint8_t* page_data,
         return false;
     }
 
-    // Read stored checksum
-    uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 24);
+    // Read stored checksum at offset 0 (FIL_PAGE_CHECKSUM)
+    uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 0);
 
     // Skip checksum validation for NONE checksum mode
     if (stored_checksum == 0xFFFFFFFF) {
@@ -269,7 +269,7 @@ bool CorruptionDetector::check_page_checksum(const uint8_t* page_data,
     // A real implementation would compute CRC32C and compare
     // For testing purposes, we check if the checksum is non-zero (unless explicitly set)
     // Note: This is a simplified check - in production, use proper CRC32C calculation
-    
+
     // If checksum is 0, it might be valid (some pages use this)
     // If checksum is clearly invalid (like 0xDEADBEEF), flag it
     if (stored_checksum == 0xDEADBEEF || stored_checksum == 0xBADC0DE) {
