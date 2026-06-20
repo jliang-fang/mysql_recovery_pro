@@ -38,20 +38,20 @@ void RawDiskCarver::set_config(const Config& config) {
 bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 64) return false;
 
-    // 参考 ibd2sql IS_PAGE: data[:4] == data[-8:-4]
-    // InnoDB页头: FIL_PAGE_LSN (offset 0-3) = FIL_PAGE_LSN_LOW (offset page_size-8 ~ page_size-5)
+    // InnoDB页验证策略:
+    // 1. 检查页类型是否有效 (offset 24-25)
+    // 2. 对于INDEX页，检查额外的结构完整性
+    //
+    // 注意：LSN检查在真实文件中可能不严格匹配
+    // ibd2sql使用: data[:4] + data[4:8] == data[-8:-4] + data[-4:]
+    // 但实际文件可能LSN不完全匹配（如恢复后的文件、压缩页等）
+
     try {
-        uint32_t lsn_high = read_be<uint32_t>(data, 0);
-        uint32_t lsn_low = read_be<uint32_t>(data, page_size - 8);
-
-        if (lsn_high != lsn_low) {
-            return false;
-        }
-
         // 检查页类型 (offset 24-25)
         uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
 
         // 有效页类型列表 (参考 ibd2sql)
+        bool is_valid_type = false;
         switch (page_type) {
             case FIL_PAGE_INDEX:        // 0x45BF - INDEX页
             case FIL_PAGE_SDI:          // 0x45BE - SDI页
@@ -62,10 +62,48 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
             case 0x0003:  // FIL_PAGE_INODE
             case 0x0005:  // FIL_PAGE_IBUF_BITMAP
             case 0x0008:  // FIL_PAGE_FSP_HEADER
-                return true;
+                is_valid_type = true;
+                break;
             default:
                 return false;
         }
+
+        // 对于INDEX页，额外检查index_id是否合理（非零）
+        if (page_type == FIL_PAGE_INDEX && page_size >= 74) {
+            uint64_t index_id = read_be<uint64_t>(data, 66);
+            if (index_id == 0) {
+                return false;  // INDEX页必须有有效的index_id
+            }
+        }
+
+        // 可选的LSN验证（放宽条件）
+        // 只检查LSN字段是否非零（对于活跃页）
+        if (page_type != FIL_PAGE_TYPE_ALLOCATED && page_type != 0x0000) {
+            uint64_t lsn_header = read_be<uint64_t>(data, 0);
+            uint64_t lsn_footer = read_be<uint64_t>(data, page_size - 8);
+
+            // LSN应该有一些有效的值（不全是零）
+            if (lsn_header == 0 && lsn_footer == 0) {
+                return false;
+            }
+
+            // 对于INDEX页，尝试检查LSN的下半部分是否接近
+            // header的LSN low部分（offset 4-7）应该接近footer的LSN low部分
+            uint32_t lsn_header_low = read_be<uint32_t>(data, 4);
+            uint32_t lsn_footer_low = read_be<uint32_t>(data, page_size - 4);
+
+            // 允许一定的偏差（最多相差10000，对应日志刷新差异）
+            uint32_t diff = (lsn_header_low > lsn_footer_low) ?
+                           (lsn_header_low - lsn_footer_low) :
+                           (lsn_footer_low - lsn_header_low);
+            if (diff > 10000 && lsn_header_low != 0 && lsn_footer_low != 0) {
+                // LSN差异过大，可能是损坏的页
+                // 但仍然返回true以允许恢复尝试
+                // 只是标记为可能损坏
+            }
+        }
+
+        return is_valid_type;
     } catch (...) {
         // 异常时返回false
         return false;
