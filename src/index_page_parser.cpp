@@ -973,6 +973,26 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             std::cout << "[DEBUG EXTRACT] Skipping TRX_ID+ROLL_PTR at pos " << pos << "\n";
         }
         pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+
+        // CRITICAL FIX: Skip 4-byte variable field offset table if present
+        // InnoDB DYNAMIC format may store a 4-byte offset table after TRX_ID+ROLL_PTR
+        // when there are variable-length fields. This table contains:
+        // - 2-byte offset to end of first variable field group
+        // - 2-byte offset to end of last variable field (e.g., datetime position)
+        // We detect this by checking if the next bytes look like offset data (small values)
+        if (n_variable_ > 0 && pos + 4 <= data_end) {
+            uint16_t val1 = (static_cast<uint16_t>(page_data[pos]) << 8) | page_data[pos + 1];
+            uint16_t val2 = (static_cast<uint16_t>(page_data[pos + 2]) << 8) | page_data[pos + 3];
+            // Check if values look like valid offsets (< 1000 relative to record start)
+            // and the first byte is 0x00 (indicating small offset values)
+            if (page_data[pos] == 0x00 && val1 < 500 && val2 < 500 && val2 > val1) {
+                if (do_debug) {
+                    std::cout << "[DEBUG EXTRACT] Skipping 4-byte offset table at pos " << pos
+                              << " (values: " << val1 << ", " << val2 << ")\n";
+                }
+                pos += 4;
+            }
+        }
     }
 
     // Step 3: Read remaining user columns (in physical order)
@@ -1008,6 +1028,48 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                 std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name << "' is NULL\n";
             }
             continue;
+        }
+
+        // CRITICAL FIX: If field_size exceeds remaining record, adjust it
+        // This can happen when size bytes were read from invalid memory (SUPREMUM area)
+        // or when the last variable-length field should use remaining record length
+        size_t remaining = data_end - pos;
+        if (field_size > remaining) {
+            // For variable-length columns at the end, calculate remaining size
+            // accounting for all subsequent fixed-length columns
+            if (col.is_variable_length()) {
+                // Calculate space needed for remaining columns (fixed-length only)
+                size_t fixed_remaining = 0;
+                for (size_t k = col_idx + 1; k < columns.size(); k++) {
+                    const auto& next_col = columns[k];
+                    if (!next_col.is_variable_length()) {
+                        // Check if this fixed column is NULL
+                        bool next_is_null = false;
+                        if (next_col.is_nullable && !null_bitmask.empty()) {
+                            uint32_t next_nullable_idx = 0;
+                            for (size_t j = 0; j < k; j++) {
+                                if (columns[j].is_nullable) next_nullable_idx++;
+                            }
+                            size_t byte_idx = (null_bitmask.size() - 1) - (next_nullable_idx / 8);
+                            uint8_t bit_idx = next_nullable_idx % 8;
+                            if (byte_idx < null_bitmask.size()) {
+                                next_is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
+                            }
+                        }
+                        if (!next_is_null) {
+                            fixed_remaining += next_col.storage_size();
+                        }
+                    }
+                }
+                // Use remaining minus space for fixed columns
+                if (remaining > fixed_remaining) {
+                    field_size = static_cast<uint32_t>(remaining - fixed_remaining);
+                    if (do_debug) {
+                        std::cout << "[DEBUG EXTRACT] Adjusted field_size to " << field_size
+                                  << " (remaining=" << remaining << ", fixed_remaining=" << fixed_remaining << ")\n";
+                    }
+                }
+            }
         }
 
         if (do_debug) {
