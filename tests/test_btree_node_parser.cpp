@@ -27,10 +27,9 @@ TEST(BPlusTreeNodeParserTest, ParseInvalidPageType) {
 TEST(BPlusTreeNodeParserTest, ParseValidIndexPage) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // NOTE: BPlusTreeNodeParser uses read_le at offset 16 for page_type (bug - should be offset 24, big-endian)
-    // Test matches current implementation behavior
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_INDEX);
-    write_le<uint32_t>(page_data.data(), 20, 100);  // 页号 (BPlusTreeNodeParser uses offset 20)
+    // BPlusTreeNodeParser uses read_be at offset FIL_PAGE_TYPE_ABS (24) for page_type (correct)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET, 100);  // 页号 at offset 4
 
     // 设置页头 (Page Header starts at offset 38, big-endian)
     write_be<uint16_t>(page_data.data(), 38 + 0, 10);  // n_dir_slots
@@ -49,9 +48,9 @@ TEST(BPlusTreeNodeParserTest, ParseValidIndexPage) {
 TEST(BPlusTreeNodeParserTest, ParseSDIPage) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // NOTE: BPlusTreeNodeParser uses read_le at offset 16 for page_type (bug)
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page_data.data(), 20, 50);
+    // BPlusTreeNodeParser uses read_be at offset FIL_PAGE_TYPE_ABS (24) (correct)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET, 50);
 
     // 设置页头 (big-endian)
     write_be<uint16_t>(page_data.data(), 38 + 2, 100); // heap_top
@@ -80,9 +79,9 @@ TEST(BPlusTreeNodeParserTest, ParseSDIPage) {
 TEST(BPlusTreeNodeParserTest, ParseUndoLogPage) {
     std::vector<uint8_t> page_data(16384, 0);
 
-    // NOTE: BPlusTreeNodeParser uses read_le at offset 16 for page_type (bug)
-    write_le<uint16_t>(page_data.data(), 16, FIL_PAGE_UNDO_LOG);
-    write_le<uint32_t>(page_data.data(), 20, 200);
+    // BPlusTreeNodeParser uses read_be at offset FIL_PAGE_TYPE_ABS (24) (correct)
+    write_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
+    write_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET, 200);
 
     // 设置页头 (big-endian)
     write_be<uint16_t>(page_data.data(), 38 + 2, 100); // heap_top

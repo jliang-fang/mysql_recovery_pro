@@ -546,21 +546,22 @@ TEST(BPlusTreeTraversalTest, PageScannerIntegration) {
     // 创建测试数据
     std::vector<uint8_t> buffer(3 * 16384, 0);
 
-    // 页1
-    write_le<uint32_t>(buffer.data(), 0, 0xFFFFFFFF);   // prev
-    write_le<uint32_t>(buffer.data(), 4, 101);          // next
-    write_le<uint64_t>(buffer.data(), 8, 1000);         // LSN
-    write_le<uint16_t>(buffer.data(), 16, FIL_PAGE_INDEX); // type
-    write_le<uint32_t>(buffer.data(), 20, 100);         // page_no
-    write_le<uint32_t>(buffer.data(), 24, 0);           // space_id
+    // 页1 - Use correct FIL header offsets (big-endian)
+    // PageScanner reads: space_id(0), page_no(4), prev(8), next(12), lsn(16), type(24)
+    write_be<uint32_t>(buffer.data(), 0, 0);              // space_id
+    write_be<uint32_t>(buffer.data(), 4, 100);            // page_no
+    write_be<uint32_t>(buffer.data(), 8, 0xFFFFFFFF);     // prev
+    write_be<uint32_t>(buffer.data(), 12, 101);           // next
+    write_be<uint64_t>(buffer.data(), 16, 1000);          // LSN
+    write_be<uint16_t>(buffer.data(), 24, FIL_PAGE_INDEX);// type
 
     // 页2
-    write_le<uint32_t>(buffer.data(), 16384 + 0, 100);  // prev
-    write_le<uint32_t>(buffer.data(), 16384 + 4, 0xFFFFFFFF); // next
-    write_le<uint64_t>(buffer.data(), 16384 + 8, 1001); // LSN
-    write_le<uint16_t>(buffer.data(), 16384 + 16, FIL_PAGE_INDEX); // type
-    write_le<uint32_t>(buffer.data(), 16384 + 20, 101); // page_no
-    write_le<uint32_t>(buffer.data(), 16384 + 24, 0);   // space_id
+    write_be<uint32_t>(buffer.data() + 16384, 0, 0);      // space_id
+    write_be<uint32_t>(buffer.data() + 16384, 4, 101);    // page_no
+    write_be<uint32_t>(buffer.data() + 16384, 8, 100);    // prev
+    write_be<uint32_t>(buffer.data() + 16384, 12, 0xFFFFFFFF); // next
+    write_be<uint64_t>(buffer.data() + 16384, 16, 1001);  // LSN
+    write_be<uint16_t>(buffer.data() + 16384, 24, FIL_PAGE_INDEX); // type
 
     // 使用 PageScanner 扫描
     PageScanner scanner(16384);

@@ -7,16 +7,14 @@ namespace dbrecovery {
 namespace innodb {
 
 // ==================== PageScanner Tests ====================
-// NOTE: PageScanner uses read_le (little-endian) for page type at offset FIL_PAGE_TYPE_ABS (24)
-// This differs from correct InnoDB format (big-endian), but tests match current implementation
+// PageScanner uses read_be (big-endian) for page type at offset FIL_PAGE_TYPE_ABS (24)
+// This matches correct InnoDB format
 
 TEST(PageScannerTest, ScanValidInnodbPage) {
     std::vector<uint8_t> page(16384, 0);
-    // PageScanner uses read_le at offset FIL_PAGE_TYPE_ABS (24)
-    write_le<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(page.data(), 4, 0);               // 页号
-    write_le<uint32_t>(page.data(), 8, 0xFFFFFFFF);      // prev
-    write_le<uint32_t>(page.data(), 12, 0xFFFFFFFF);     // next
+    // PageScanner uses read_be at offset FIL_PAGE_TYPE_ABS (24)
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 0);  // 页号 at offset 4
 
     EXPECT_TRUE(PageScanner::is_innodb_page(page.data()));
     EXPECT_TRUE(PageScanner::is_valid_page_type(FIL_PAGE_INDEX));
@@ -24,8 +22,8 @@ TEST(PageScannerTest, ScanValidInnodbPage) {
 
 TEST(PageScannerTest, ScanSDIPage) {
     std::vector<uint8_t> page(16384, 0);
-    // PageScanner uses read_le at offset FIL_PAGE_TYPE_ABS (24)
-    write_le<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    // PageScanner uses read_be at offset FIL_PAGE_TYPE_ABS (24)
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
 
     EXPECT_TRUE(PageScanner::is_innodb_page(page.data()));
     EXPECT_TRUE(PageScanner::is_valid_page_type(FIL_PAGE_SDI));
@@ -33,8 +31,8 @@ TEST(PageScannerTest, ScanSDIPage) {
 
 TEST(PageScannerTest, ScanInvalidPageType) {
     std::vector<uint8_t> page(16384, 0);
-    // PageScanner uses read_le at offset FIL_PAGE_TYPE_ABS (24)
-    write_le<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);  // Invalid
+    // PageScanner uses read_be at offset FIL_PAGE_TYPE_ABS (24)
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);  // Invalid
 
     EXPECT_FALSE(PageScanner::is_innodb_page(page.data()));
     EXPECT_FALSE(PageScanner::is_valid_page_type(0xFFFF));
@@ -43,13 +41,13 @@ TEST(PageScannerTest, ScanInvalidPageType) {
 TEST(PageScannerTest, ScanBufferMultiplePages) {
     std::vector<uint8_t> buffer(32768, 0);  // 2 pages
 
-    // Page 0: INDEX - PageScanner uses read_le
-    write_le<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data(), 4, 0);
+    // Page 0: INDEX - PageScanner uses read_be
+    write_be<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data(), FIL_PAGE_OFFSET, 0);
 
     // Page 1: SDI
-    write_le<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
-    write_le<uint32_t>(buffer.data() + 16384, 4, 1);
+    write_be<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(buffer.data() + 16384, FIL_PAGE_OFFSET, 1);
 
     PageScanner scanner(16384);
     auto pages = scanner.scan_buffer(buffer.data(), buffer.size());
@@ -64,16 +62,16 @@ TEST(PageScannerTest, ScanBufferMultiplePages) {
 TEST(PageScannerTest, ScanBufferWithInvalidPages) {
     std::vector<uint8_t> buffer(49152, 0);  // 3 pages
 
-    // Page 0: INDEX (valid) - PageScanner uses read_le
-    write_le<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data(), 4, 0);
+    // Page 0: INDEX (valid) - PageScanner uses read_be
+    write_be<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data(), FIL_PAGE_OFFSET, 0);
 
     // Page 1: Invalid type
-    write_le<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_be<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, 0xFFFF);
 
     // Page 2: UNDO_LOG (valid)
-    write_le<uint16_t>(buffer.data() + 32768, FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
-    write_le<uint32_t>(buffer.data() + 32768, 4, 2);
+    write_be<uint16_t>(buffer.data() + 32768, FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
+    write_be<uint32_t>(buffer.data() + 32768, FIL_PAGE_OFFSET, 2);
 
     PageScanner scanner(16384);
     auto pages = scanner.scan_buffer(buffer.data(), buffer.size());
@@ -88,19 +86,19 @@ TEST(PageScannerTest, ScanBufferWithInvalidPages) {
 TEST(PageScannerTest, ScanPageChain) {
     std::vector<uint8_t> buffer(49152, 0);  // 3 pages
 
-    // Page 0 -> Page 1 -> Page 2 - PageScanner uses read_le
-    write_le<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data(), 4, 0);
-    write_le<uint32_t>(buffer.data(), 12, 1);  // next = 1
+    // Page 0 -> Page 1 -> Page 2 - PageScanner uses read_be
+    write_be<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data(), FIL_PAGE_OFFSET, 0);
+    write_be<uint32_t>(buffer.data(), 12, 1);  // next = 1
 
-    write_le<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data() + 16384, 4, 1);
-    write_le<uint32_t>(buffer.data() + 16384, 8, 0);  // prev = 0
-    write_le<uint32_t>(buffer.data() + 16384, 12, 2);  // next = 2
+    write_be<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data() + 16384, FIL_PAGE_OFFSET, 1);
+    write_be<uint32_t>(buffer.data() + 16384, 8, 0);  // prev = 0
+    write_be<uint32_t>(buffer.data() + 16384, 12, 2);  // next = 2
 
     write_le<uint16_t>(buffer.data() + 32768, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data() + 32768, 4, 2);
-    write_le<uint32_t>(buffer.data() + 32768, 8, 1);  // prev = 1
+    write_be<uint32_t>(buffer.data() + 32768, FIL_PAGE_OFFSET, 2);
+    write_be<uint32_t>(buffer.data() + 32768, 8, 1);  // prev = 1
 
     PageScanner scanner(16384);
     auto pages = scanner.scan_buffer(buffer.data(), buffer.size());
@@ -115,17 +113,17 @@ TEST(PageScannerTest, ScanPageChain) {
 TEST(PageScannerTest, ScanStats) {
     std::vector<uint8_t> buffer(49152, 0);  // 3 pages
 
-    // Page 0: INDEX - PageScanner uses read_le
-    write_le<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data(), 4, 0);
+    // Page 0: INDEX - PageScanner uses read_be
+    write_be<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data(), FIL_PAGE_OFFSET, 0);
 
     // Page 1: SDI
-    write_le<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
-    write_le<uint32_t>(buffer.data() + 16384, 4, 1);
+    write_be<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(buffer.data() + 16384, FIL_PAGE_OFFSET, 1);
 
     // Page 2: UNDO_LOG
-    write_le<uint16_t>(buffer.data() + 32768, FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
-    write_le<uint32_t>(buffer.data() + 32768, 4, 2);
+    write_be<uint16_t>(buffer.data() + 32768, FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
+    write_be<uint32_t>(buffer.data() + 32768, FIL_PAGE_OFFSET, 2);
 
     PageScanner scanner(16384);
     auto pages = scanner.scan_buffer(buffer.data(), buffer.size());
@@ -144,9 +142,9 @@ TEST(PageScannerTest, ScanLargeFile) {
 
     for (int i = 0; i < 4; i++) {
         size_t offset = i * 16384;
-        // PageScanner uses read_le at FIL_PAGE_TYPE_ABS
-        write_le<uint16_t>(buffer.data() + offset, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-        write_le<uint32_t>(buffer.data() + offset, 4, i);
+        // PageScanner uses read_be at FIL_PAGE_TYPE_ABS
+        write_be<uint16_t>(buffer.data() + offset, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+        write_be<uint32_t>(buffer.data() + offset, FIL_PAGE_OFFSET, i);
     }
 
     PageScanner scanner(16384);
@@ -162,8 +160,8 @@ TEST(PageScannerTest, ScanLargeFile) {
 TEST(PageScannerTest, ScanWithDifferentPageSizes) {
     // 4KB 页
     std::vector<uint8_t> page4k(4096, 0);
-    write_le<uint16_t>(page4k.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(page4k.data(), 4, 0);
+    write_be<uint16_t>(page4k.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(page4k.data(), FIL_PAGE_OFFSET, 0);
 
     PageScanner scanner4k(4096);
     auto pages4k = scanner4k.scan_buffer(page4k.data(), page4k.size());
@@ -171,8 +169,8 @@ TEST(PageScannerTest, ScanWithDifferentPageSizes) {
 
     // 32KB 页
     std::vector<uint8_t> page32k(32768, 0);
-    write_le<uint16_t>(page32k.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
-    write_le<uint32_t>(page32k.data(), 4, 0);
+    write_be<uint16_t>(page32k.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(page32k.data(), FIL_PAGE_OFFSET, 0);
 
     PageScanner scanner32k(32768);
     auto pages32k = scanner32k.scan_buffer(page32k.data(), page32k.size());

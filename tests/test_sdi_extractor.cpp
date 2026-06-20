@@ -20,7 +20,7 @@ TEST(SDIExtractorTest, ExtractFromNonSDIPage) {
     SDIExtractor extractor;
 
     std::vector<uint8_t> page(16384, 0);
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_INDEX);  // 不是 SDI 页
+    write_le<uint16_t>(page.data(), 24, FIL_PAGE_INDEX);  // 不是 SDI 页 (correct offset is 24)
 
     auto results = extractor.extract_from_page(page.data(), page.size());
     EXPECT_EQ(results.size(), 0);
@@ -32,9 +32,9 @@ TEST(SDIExtractorTest, ExtractFromSDIPage) {
 
     std::vector<uint8_t> page(16384, 0);
 
-    // 设置页类型为 SDI
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page.data(), 20, 1);  // 页号
+    // 设置页类型为 SDI (at correct offset 24, big-endian)
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);  // 页号
 
     // 设置 SDI 头部（在偏移 70）
     size_t sdi_offset = 70;
@@ -49,7 +49,7 @@ TEST(SDIExtractorTest, ExtractFromSDIPage) {
     }
 
     auto results = extractor.extract_from_page(page.data(), page.size());
-    
+
     // 由于数据不是有效的压缩数据，应该失败
     // 注意：extract_sdi_at_offset 会尝试解压缩，如果失败会返回无效结果
     // 但由于我们设置了有效的头部，它可能会成功解压缩（即使数据无效）
@@ -62,12 +62,12 @@ TEST(SDIExtractorTest, ExtractFromBufferMultiplePages) {
 
     std::vector<uint8_t> buffer(32768, 0);  // 2 页
 
-    // Page 0: INDEX
-    write_le<uint16_t>(buffer.data(), 16, FIL_PAGE_INDEX);
+    // Page 0: INDEX (at correct offset 24, big-endian)
+    write_be<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
 
-    // Page 1: SDI
-    write_le<uint16_t>(buffer.data() + 16384, 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(buffer.data() + 16384, 20, 1);
+    // Page 1: SDI (at correct offset 24, big-endian)
+    write_be<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(buffer.data() + 16384, FIL_PAGE_OFFSET, 1);
 
     auto results = extractor.extract_from_buffer(buffer.data(), buffer.size());
 
@@ -110,21 +110,21 @@ TEST(SDIExtractorTest, ExtractFromLargeBuffer) {
     // 创建 64KB 缓冲区（4 页）
     std::vector<uint8_t> buffer(65536, 0);
 
-    // Page 0: INDEX
-    write_le<uint16_t>(buffer.data(), 16, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data(), 20, 0);
+    // Page 0: INDEX (at correct offset 24, big-endian)
+    write_be<uint16_t>(buffer.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data(), FIL_PAGE_OFFSET, 0);
 
     // Page 1: SDI
-    write_le<uint16_t>(buffer.data() + 16384, 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(buffer.data() + 16384, 20, 1);
+    write_be<uint16_t>(buffer.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(buffer.data() + 16384, FIL_PAGE_OFFSET, 1);
 
     // Page 2: INDEX
-    write_le<uint16_t>(buffer.data() + 32768, 16, FIL_PAGE_INDEX);
-    write_le<uint32_t>(buffer.data() + 32768, 20, 2);
+    write_be<uint16_t>(buffer.data() + 32768, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(buffer.data() + 32768, FIL_PAGE_OFFSET, 2);
 
     // Page 3: SDI
-    write_le<uint16_t>(buffer.data() + 49152, 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(buffer.data() + 49152, 20, 3);
+    write_be<uint16_t>(buffer.data() + 49152, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(buffer.data() + 49152, FIL_PAGE_OFFSET, 3);
 
     auto results = extractor.extract_from_buffer(buffer.data(), buffer.size());
 
@@ -135,8 +135,8 @@ TEST(SDIExtractorTest, ExtractFromLargeBuffer) {
 TEST(SDIExtractorTest, ExtractFromDifferentPageSizes) {
     // 4KB 页
     std::vector<uint8_t> page4k(4096, 0);
-    write_le<uint16_t>(page4k.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page4k.data(), 20, 0);
+    write_be<uint16_t>(page4k.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page4k.data(), FIL_PAGE_OFFSET, 0);
 
     SDIExtractor extractor4k(4096);
     auto results4k = extractor4k.extract_from_page(page4k.data(), page4k.size());
@@ -144,8 +144,8 @@ TEST(SDIExtractorTest, ExtractFromDifferentPageSizes) {
 
     // 32KB 页
     std::vector<uint8_t> page32k(32768, 0);
-    write_le<uint16_t>(page32k.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page32k.data(), 20, 0);
+    write_be<uint16_t>(page32k.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page32k.data(), FIL_PAGE_OFFSET, 0);
 
     SDIExtractor extractor32k(32768);
     auto results32k = extractor32k.extract_from_page(page32k.data(), page32k.size());
@@ -165,8 +165,8 @@ TEST(SDIExtractorTest, ExtractFromPageWithInvalidSDIHeader) {
     SDIExtractor extractor;
 
     std::vector<uint8_t> page(16384, 0);
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page.data(), 20, 1);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);
 
     // 设置无效的 SDI 头部
     size_t sdi_offset = 70;
@@ -184,8 +184,8 @@ TEST(SDIExtractorTest, ExtractFromPageWithZeroUncompressedLen) {
     SDIExtractor extractor;
 
     std::vector<uint8_t> page(16384, 0);
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page.data(), 20, 1);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);
 
     // 设置无效的 SDI 头部（uncompressed_len = 0）
     size_t sdi_offset = 70;
@@ -202,8 +202,8 @@ TEST(SDIExtractorTest, ExtractFromPageWithCompressedLenGreaterThanUncompressed) 
     SDIExtractor extractor;
 
     std::vector<uint8_t> page(16384, 0);
-    write_le<uint16_t>(page.data(), 16, FIL_PAGE_SDI);
-    write_le<uint32_t>(page.data(), 20, 1);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);
 
     // 设置无效的 SDI 头部（compressed_len > uncompressed_len）
     size_t sdi_offset = 70;
