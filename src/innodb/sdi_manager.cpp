@@ -2,6 +2,8 @@
 #include "nlohmann/json.hpp"
 #include <stdexcept>
 #include <iostream>
+#include <algorithm>
+#include <vector>
 
 using json = nlohmann::json;
 
@@ -237,13 +239,52 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                                       << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")\n";
                         }
 
+                        // Parse physical_pos - critical for column storage order
+                        // InnoDB stores columns by physical_pos, NOT schema definition order
+                        if (col.contains("physical_pos")) {
+                            column_info.physical_pos = col["physical_pos"].get<uint32_t>();
+                        } else if (col.contains("ordinal_position")) {
+                            // Fallback: some SDI versions use ordinal_position
+                            column_info.physical_pos = col["ordinal_position"].get<uint32_t>();
+                        }
+
                         // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
                         // These are internal columns not part of user table schema
                         if (column_info.name == "DB_TRX_ID" || column_info.name == "DB_ROLL_PTR" || column_info.name == "DB_ROW_ID") {
                             continue;
                         }
 
+                        column_info.ordinal = ordinal;
                         schema.columns[ordinal++] = column_info;
+                    }
+                }
+
+                // Sort columns by InnoDB DYNAMIC/COMPRESSED storage order
+                // InnoDB stores: 1) fixed-length columns first, 2) variable-length columns after
+                // Within each group, columns are in ordinal_position order
+                if (!schema.columns.empty()) {
+                    std::vector<std::pair<uint32_t, catalog::ColumnInfo>> cols_vec;
+                    for (const auto& p : schema.columns) {
+                        cols_vec.push_back(p);
+                    }
+                    // Sort by: fixed-length first, then by ordinal_position
+                    std::sort(cols_vec.begin(), cols_vec.end(),
+                        [](const auto& a, const auto& b) {
+                            bool a_fixed = catalog::TableSchema::is_fixed_length(a.second);
+                            bool b_fixed = catalog::TableSchema::is_fixed_length(b.second);
+                            if (a_fixed != b_fixed) {
+                                return a_fixed;  // Fixed columns come first
+                            }
+                            // Within same group, sort by ordinal_position
+                            return a.second.physical_pos < b.second.physical_pos;
+                        });
+                    schema.columns.clear();
+                    uint32_t new_ordinal = 1;
+                    for (const auto& p : cols_vec) {
+                        std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' ordinal=" << new_ordinal
+                                  << " type=" << p.second.mysql_type_id
+                                  << " is_fixed=" << catalog::TableSchema::is_fixed_length(p.second) << "\n";
+                        schema.columns[new_ordinal++] = p.second;
                     }
                 }
 

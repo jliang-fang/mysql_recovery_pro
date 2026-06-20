@@ -6,6 +6,7 @@
 #include <vector>
 #include <optional>
 #include <iostream>
+#include <algorithm>
 
 // ✅ P0-1 修复：使用系统 nlohmann/json 库
 #include <nlohmann/json.hpp>
@@ -27,31 +28,35 @@ struct ColumnInfo {
     uint32_t collation_id;
     std::optional<std::string> generated_expr;  // VIRTUAL/STORED 表达式
     bool is_auto_increment;
-    
+
     // MySQL 8.0 新增字段（用于精确解析）
     int datetime_precision = -1;   // DATETIME/TIMESTAMP 的小数位精度 (0-6)
     int numeric_scale = -1;        // DECIMAL 的小数位数
     int numeric_precision = -1;    // 数值类型的总位数
-    
+
     // 行格式相关（DYNAMIC/COMPRESSED）
     bool is_off_page = false;      // 是否存储在溢出页（BLOB）
     uint32_t virtual_gen_store_type = 0; // VIRTUAL/STORED 的存储类型 (mysql 8.0.13+)
-    
+
     // ✅ 新增：补充字段以支持完整解析
     uint32_t flags = 0;            // 列标志位（如 PRI_KEY, NOT_NULL 等）
     uint32_t col_flags = 0;        // MySQL 8.0 列标志
     std::optional<std::string> comment; // 列注释
-    
+
     // ✅ 新增：用于处理不同行格式的字段
     bool is_variable_length = false; // 是否变长字段（VARCHAR, VARBINARY等）
     uint32_t actual_column_size = 0; // 实际列大小（考虑编码，如utf8mb4可能占用3-4字节/字符）
-    
+
     // ✅ 新增：修复 btree.cpp 中的字段解析逻辑
     bool is_signed = true;         // 数值类型是否有符号（默认true，兼容INT等）
 
     // ✅ 新增：ENUM/SET 类型值列表
     std::vector<std::string> enum_values;  // ENUM 类型的可选值列表
     std::vector<std::string> set_values;   // SET 类型的可选值列表
+
+    // ✅ 关键：InnoDB物理存储顺序
+    uint32_t physical_pos = 0;     // InnoDB物理存储位置（不同于ordinal position）
+    uint32_t ordinal = 0;          // Schema定义顺序（用户看到的列顺序）
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）
@@ -153,7 +158,36 @@ struct TableSchema {
 
         return true;
     }
-    
+
+    // ✅ 新增：判断列是否为固定长度（用于 InnoDB DYNAMIC/COMPRESSED 存储顺序）
+    static bool is_fixed_length(const ColumnInfo& col) {
+        switch (col.mysql_type_id) {
+            case dbrecovery::innodb::mysql_types::TINY:
+            case dbrecovery::innodb::mysql_types::SHORT:
+            case dbrecovery::innodb::mysql_types::LONG:
+            case dbrecovery::innodb::mysql_types::LONGLONG:
+            case dbrecovery::innodb::mysql_types::INT24:
+            case dbrecovery::innodb::mysql_types::FLOAT:
+            case dbrecovery::innodb::mysql_types::DOUBLE:
+            case dbrecovery::innodb::mysql_types::DATE:
+            case dbrecovery::innodb::mysql_types::TIME:
+            case dbrecovery::innodb::mysql_types::DATETIME:
+            case dbrecovery::innodb::mysql_types::YEAR:
+            case dbrecovery::innodb::mysql_types::NEWDATE:      // MySQL 5.6+ DATE type
+            case dbrecovery::innodb::mysql_types::TIMESTAMP:
+            case dbrecovery::innodb::mysql_types::TIMESTAMP2:
+            case dbrecovery::innodb::mysql_types::DATETIME2:
+            case dbrecovery::innodb::mysql_types::TIME2:
+                return true;
+            // STRING (CHAR) is variable-length for utf8/utf8mb4
+            case dbrecovery::innodb::mysql_types::STRING:
+                return false;
+            default:
+                // VARCHAR, VAR_STRING, BLOB, TEXT, JSON, ENUM, SET, BIT, NEWDECIMAL are variable
+                return false;
+        }
+    }
+
     // ✅ 新增：计算列大小（用于行格式适配）
     uint32_t get_column_size(const ColumnInfo& col) const {
         switch (col.mysql_type_id) {
@@ -261,6 +295,16 @@ struct TableSchema {
                 if (col_json.contains("name")) {
                     col.name = col_json["name"].get<std::string>();
                 }
+
+                // Debug: print all column fields for the first few columns
+                if (!debug_schema) {
+                    std::cerr << "[DEBUG SDI FIELDS] Column '" << col.name << "' fields: ";
+                    for (auto it = col_json.begin(); it != col_json.end(); ++it) {
+                        std::cerr << it.key() << " ";
+                    }
+                    std::cerr << "\n";
+                }
+
                 if (col_json.contains("type")) {
                     // SDI stores InnoDB type IDs directly as numbers
                     // Reference: ibd2sql/ibd2sql/innodb_page/column_type.py
@@ -369,14 +413,53 @@ struct TableSchema {
                         }
                     }
                 }
+
+                // Parse physical_pos - critical for column storage order
+                // InnoDB stores columns by physical_pos, NOT schema definition order
+                if (col_json.contains("physical_pos")) {
+                    col.physical_pos = col_json["physical_pos"].get<uint32_t>();
+                } else if (col_json.contains("ordinal_position")) {
+                    col.physical_pos = col_json["ordinal_position"].get<uint32_t>();
+                }
+
                 // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
                 // These are internal columns not part of user table schema
                 if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
                     continue;
                 }
+                col.ordinal = ordinal;
                 columns[ordinal++] = col;
             }
             debug_schema = true;  // Only print debug once
+
+            // Sort columns by InnoDB DYNAMIC/COMPRESSED storage order
+            // InnoDB stores: 1) fixed-length columns first, 2) variable-length columns after
+            // Within each group, columns are in ordinal_position order
+            if (!columns.empty()) {
+                std::vector<std::pair<uint32_t, ColumnInfo>> cols_vec;
+                for (const auto& p : columns) {
+                    cols_vec.push_back(p);
+                }
+                // Sort by: fixed-length first (is_fixed=true), then by ordinal_position
+                std::sort(cols_vec.begin(), cols_vec.end(),
+                    [](const auto& a, const auto& b) {
+                        bool a_fixed = TableSchema::is_fixed_length(a.second);
+                        bool b_fixed = TableSchema::is_fixed_length(b.second);
+                        if (a_fixed != b_fixed) {
+                            return a_fixed;  // Fixed columns come first
+                        }
+                        // Within same group, sort by ordinal_position
+                        return a.second.physical_pos < b.second.physical_pos;
+                    });
+                columns.clear();
+                uint32_t new_ordinal = 1;
+                for (const auto& p : cols_vec) {
+                    std::cerr << "[DEBUG SORT] Column '" << p.second.name << "' ordinal=" << new_ordinal
+                              << " type=" << p.second.mysql_type_id
+                              << " is_fixed=" << TableSchema::is_fixed_length(p.second) << "\n";
+                    columns[new_ordinal++] = p.second;
+                }
+            }
         }
 
         return validate();
