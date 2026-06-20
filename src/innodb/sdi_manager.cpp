@@ -184,12 +184,16 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                         // Parse datetime_precision for temporal types (DATETIME2, TIMESTAMP2, TIME2)
                         // ✅ 修复：检查多个可能的字段名
                         // 注意: SDI JSON 中可能使用 datetime_precision 或其他名称
+
                         if (col.contains("datetime_precision")) {
                             if (!col["datetime_precision"].is_null()) {
                                 column_info.datetime_precision = col["datetime_precision"].get<int>();
                             }
                         } else if (col.contains("datetimePrec")) {
                             column_info.datetime_precision = col["datetimePrec"].get<int>();
+                        } else if (col.contains("decimals")) {
+                            // Some MySQL versions use "decimals" for fractional seconds precision
+                            column_info.datetime_precision = col["decimals"].get<int>();
                         }
 
                         // 检查 datetime_precision_null 标志
@@ -200,10 +204,6 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                                 column_info.datetime_precision = 0;
                             }
                         }
-
-                        std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type="
-                                  << static_cast<int>(column_info.mysql_type_id)
-                                  << " datetime_precision=" << static_cast<int>(column_info.datetime_precision) << "\n";
 
                         // Parse ENUM/SET elements (stored as base64 in SDI)
                         // ✅ 修复：区分 ENUM 和 SET，将元素放入正确的列表

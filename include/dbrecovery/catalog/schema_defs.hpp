@@ -329,6 +329,9 @@ struct TableSchema {
                 // Parse datetime_precision for temporal types
                 if (col_json.contains("datetime_precision")) {
                     col.datetime_precision = col_json["datetime_precision"].get<int>();
+                } else if (col_json.contains("decimals")) {
+                    // Some SDI versions use "decimals" for fractional seconds precision
+                    col.datetime_precision = col_json["decimals"].get<int>();
                 }
                 // Also parse char_length for VARCHAR
                 if (col_json.contains("char_length")) {

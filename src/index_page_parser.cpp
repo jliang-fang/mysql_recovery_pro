@@ -17,6 +17,7 @@
 #include <cmath>
 #include <numeric>
 #include <filesystem>
+#include <atomic>
 
 namespace dbrecovery {
 namespace innodb {
@@ -76,10 +77,12 @@ std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len
     } else {
         str_len = first;
     }
-    if (offset + len_bytes + str_len > max_len) {
-        str_len = max_len - offset - len_bytes;
+    // Sanity check: str_len should be reasonable
+    if (str_len > 65535 || offset + len_bytes + str_len > max_len) {
+        str_len = max_len > offset + len_bytes ? max_len - offset - len_bytes : 0;
+        if (str_len > 1000) str_len = 1000;  // Cap at 1KB
     }
-    std::string result(data + offset + len_bytes, data + offset + len_bytes + str_len);
+    std::string result(reinterpret_cast<const char*>(data + offset + len_bytes), str_len);
     // 转义特殊字符
     std::string escaped = "\"";
     for (char c : result) {
@@ -129,8 +132,13 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
             uint16_t key_offset = read_json_le16(data, key_entry_offset + i * 2);
             if (key_offset + 1 < data_size) {
                 uint8_t key_len = data[key_offset];
-                std::string key(reinterpret_cast<const char*>(data + key_offset + 1), key_len);
-                result += "\"" + key + "\":";
+                // Sanity check: key_len should be reasonable
+                if (key_len > 0 && key_len < 256 && key_offset + 1 + key_len <= data_size) {
+                    std::string key(reinterpret_cast<const char*>(data + key_offset + 1), key_len);
+                    result += "\"" + key + "\":";
+                } else {
+                    result += "\"key\":";
+                }
             }
         }
 
@@ -587,35 +595,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // Store the position after reading all sizes
     result.data_start_offset = origin;
 
-    // DEBUG: Print sizes for first record
-    static bool debug_printed = false;
-    if (!debug_printed && !result.variable_sizes.empty()) {
-        std::cout << "[DEBUG VAR_SIZES] Read " << result.variable_sizes.size() << " sizes: ";
-        for (size_t i = 0; i < result.variable_sizes.size(); i++) {
-            std::cout << result.variable_sizes[i] << " ";
-        }
-        std::cout << "\n";
-        std::cout << "[DEBUG NULL_BITMAP] real_n_nullable=" << real_n_nullable
-                  << ", real_n_variable=" << real_n_variable
-                  << ", null_bytes=" << null_bytes
-                  << ", var_sizes_read=" << var_col_sizes.size() << "\n";
-        std::cout << "[DEBUG COL_TYPES] Column types (InnoDB): ";
-        for (size_t i = 0; i < columns.size() && i < 20; i++) {
-            std::cout << static_cast<int>(columns[i].col_type) << "(" << columns[i].name.substr(0,8) << ") ";
-            if (columns[i].is_variable_length()) std::cout << "[VAR] ";
-            if (columns[i].is_big) std::cout << "[BIG] ";
-            if (columns[i].is_system_column()) std::cout << "[SYS] ";
-            if (columns[i].col_type == 21) { // DECIMAL
-                std::cout << "[prec=" << columns[i].precision << ",scale=" << columns[i].scale << "] ";
-            }
-            if (columns[i].col_type == 18 || columns[i].col_type == 19 || columns[i].col_type == 20) {
-                std::cout << "[dt_prec=" << static_cast<int>(columns[i].datetime_precision) << "] ";
-            }
-        }
-        std::cout << "\n";
-        debug_printed = true;
-    }
-
     return result;
 }
 
@@ -677,13 +656,6 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
 
     std::set<uint16_t> visited;
 
-    // DEBUG: Print first record info
-    static bool debug_chain = false;
-    bool do_debug = !debug_chain;
-    if (do_debug) {
-        std::cerr << "[DEBUG CHAIN] Starting at origin=" << current_origin << " header_size=" << header_size << "\n";
-    }
-
     for (uint32_t safety = 0; safety < MAX_RECORDS_PER_PAGE; safety++) {
         if (current_origin < header_size || current_origin >= page_hdr.heap_top) {
             break;
@@ -698,13 +670,6 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
         if (is_compact) {
             auto hdr = parse_new_record_header(page_data, header_start, page_size);
             if (!hdr) break;
-
-            if (do_debug && hdr->heap_no >= 2) {
-                std::cerr << "[DEBUG CHAIN] Record at origin=" << current_origin
-                          << " header_start=" << header_start
-                          << " heap_no=" << static_cast<int>(hdr->heap_no)
-                          << " next_offset=" << hdr->next_offset << "\n";
-            }
 
             // Skip INFIMUM (heap_no=0) and SUPREMUM (heap_no=1)
             if (hdr->heap_no >= 2) {
@@ -738,11 +703,6 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
                 break;
             }
             current_origin = hdr->next_offset;
-        }
-
-        // Only debug first record
-        if (do_debug) {
-            debug_chain = true;
         }
     }
 
@@ -805,9 +765,38 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
             // For COMPACT format, next_offset can be ANY positive value representing
             // the delta from current origin to next origin.
             // We trust the next_offset unless it's clearly out of bounds.
+
             if (next_origin > static_cast<ssize_t>(data_start) && static_cast<size_t>(next_origin) < page_size) {
                 // Valid next_offset - next record header is at next_origin - REC_HEADER_SIZE_NEW
                 data_end = static_cast<size_t>(next_origin) - REC_HEADER_SIZE_NEW;
+            } else if (next_origin > 0 && static_cast<size_t>(next_origin) < 150) {
+                // CRITICAL FIX: next_origin points backward to SUPREMUM (origin ~112)
+                // This is the last user record on the page
+                // Use heap_top but limit to reasonable record size based on schema
+                // Calculate expected record size based on schema to prevent reading garbage
+                size_t expected_size = 0;
+                if (!columns_.empty()) {
+                    // Calculate total fixed field sizes + estimate for variable fields
+                    for (const auto& col : columns_) {
+                        if (!col.is_variable_length()) {
+                            expected_size += col.storage_size();
+                        } else {
+                            // Use a reasonable max for variable fields (255 bytes average)
+                            expected_size += 255;  // Average estimate
+                        }
+                    }
+                    // Add overhead: NULL bitmap + variable size bytes + TRX_ID + ROLL_PTR
+                    expected_size += (n_nullable_ + 7) / 8 + n_variable_ + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+                }
+                // Cap data_end to expected_size if heap_top gives unreasonable length
+                size_t heap_top_len = page_hdr->heap_top - data_start;
+                // Use 2x expected_size as threshold (variable fields can be larger than estimate)
+                if (expected_size > 0 && heap_top_len > expected_size * 2) {
+                    // Use expected size instead of heap_top for last record
+                    data_end = data_start + expected_size * 2;  // Allow 2x buffer for variable fields
+                } else {
+                    data_end = page_hdr->heap_top;
+                }
             } else {
                 // Out of bounds - likely last record on page
                 data_end = page_hdr->heap_top;
@@ -897,20 +886,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     //
     // Each column reads 'size' bytes from the data stream.
 
-    // DEBUG: Print initial state for first record
-    static bool debug_extract = false;
-    bool do_debug = !debug_extract;
-    if (do_debug) {
-        std::cout << "[DEBUG EXTRACT] data_start=" << data_start << " data_end=" << data_end
-                  << " len=" << (data_end - data_start) << " n_pk_cols=" << n_pk_cols_
-                  << " n_cols=" << columns.size() << "\n";
-        std::cout << "[DEBUG EXTRACT] size_list (" << variable_sizes.size() << "): ";
-        for (size_t i = 0; i < variable_sizes.size(); i++) {
-            std::cout << variable_sizes[i] << " ";
-        }
-        std::cout << "\n";
-    }
-
     size_t pos = data_start;
     size_t size_idx = 0;  // Index into variable_sizes
 
@@ -943,24 +918,19 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
             result.push_back(val);
-            if (do_debug) {
-                std::cout << "[DEBUG EXTRACT] PK col " << col_idx << " '" << col.name << "' is NULL\n";
-            }
             continue;
         }
 
-        if (do_debug) {
-            std::cout << "[DEBUG EXTRACT] PK col " << col_idx << " '" << col.name
-                      << "' at pos " << pos << " size " << field_size
-                      << " is_unsigned=" << col.is_unsigned << "\n";
-            std::cerr << "[DEBUG PK] Raw bytes at pos " << pos << ": ";
-            for (size_t j = 0; j < field_size && pos + j < page_size; j++) {
-                fprintf(stderr, "%02X ", page_data[pos + j]);
-            }
-            std::cerr << "\n";
-        }
-
         if (pos + field_size <= data_end) {
+            // CRITICAL FIX: Limit field_size to prevent memory allocation errors
+            constexpr size_t MAX_FIELD_SIZE = 10000;  // 10KB max for inline fields
+            if (field_size > MAX_FIELD_SIZE) {
+                val.is_null = true;
+                val.type = IndexFieldValue::Type::NULL_VAL;
+                val.str_value = "<SKIPPED_LARGE_FIELD>";
+                result.push_back(val);
+                break;
+            }
             val = decode_column(page_data, pos, data_end, col, field_size);
             pos += field_size;
         }
@@ -969,9 +939,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
     // Step 2: Skip TRX_ID + ROLL_PTR for leaf pages (clustered index)
     if (is_leaf && pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
-        if (do_debug) {
-            std::cout << "[DEBUG EXTRACT] Skipping TRX_ID+ROLL_PTR at pos " << pos << "\n";
-        }
         pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
 
         // CRITICAL FIX: Skip 4-byte variable field offset table if present
@@ -986,10 +953,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             // Check if values look like valid offsets (< 1000 relative to record start)
             // and the first byte is 0x00 (indicating small offset values)
             if (page_data[pos] == 0x00 && val1 < 500 && val2 < 500 && val2 > val1) {
-                if (do_debug) {
-                    std::cout << "[DEBUG EXTRACT] Skipping 4-byte offset table at pos " << pos
-                              << " (values: " << val1 << ", " << val2 << ")\n";
-                }
                 pos += 4;
             }
         }
@@ -1024,9 +987,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
             result.push_back(val);
-            if (do_debug) {
-                std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name << "' is NULL\n";
-            }
             continue;
         }
 
@@ -1064,18 +1024,8 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                 // Use remaining minus space for fixed columns
                 if (remaining > fixed_remaining) {
                     field_size = static_cast<uint32_t>(remaining - fixed_remaining);
-                    if (do_debug) {
-                        std::cout << "[DEBUG EXTRACT] Adjusted field_size to " << field_size
-                                  << " (remaining=" << remaining << ", fixed_remaining=" << fixed_remaining << ")\n";
-                    }
                 }
             }
-        }
-
-        if (do_debug) {
-            std::cout << "[DEBUG EXTRACT] Col " << col_idx << " '" << col.name
-                      << "' at pos " << pos << " size " << field_size
-                      << " type=" << static_cast<int>(col.col_type) << "\n";
         }
 
         // Handle overflow pointer
@@ -1093,15 +1043,22 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         }
 
         if (pos + field_size <= data_end) {
+            // CRITICAL FIX: Limit field_size to prevent memory allocation errors
+            // If field_size is unreasonably large, skip this field
+            constexpr size_t MAX_FIELD_SIZE = 10000;  // 10KB max for inline fields
+            if (field_size > MAX_FIELD_SIZE) {
+                val.is_null = true;
+                val.type = IndexFieldValue::Type::NULL_VAL;
+                val.str_value = "<SKIPPED_LARGE_FIELD>";
+                result.push_back(val);
+                // Skip this field by advancing pos by a reasonable amount
+                // or just break since the record is likely corrupted
+                break;
+            }
             val = decode_column(page_data, pos, data_end, col, field_size);
             pos += field_size;
         }
         result.push_back(val);
-    }
-
-    // Disable debug after first record
-    if (do_debug) {
-        debug_extract = true;
     }
 
     return result;
@@ -1260,7 +1217,15 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
 
         if (printable_count >= sz * 2 / 3) {
             val.type = IndexFieldValue::Type::STRING_VAL;
-            val.str_value = std::string(reinterpret_cast<const char*>(page_data + var_pos), sz);
+            try {
+                if (sz > 0 && var_pos + sz <= page_size) {
+                    val.str_value = std::string(reinterpret_cast<const char*>(page_data + var_pos), sz);
+                } else {
+                    val.str_value = "<INVALID_SIZE>";
+                }
+            } catch (const std::length_error&) {
+                val.str_value = "<STRING_ALLOC_ERROR>";
+            }
         } else {
             val.type = IndexFieldValue::Type::BINARY_VAL;
         }
@@ -1416,19 +1381,27 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
 }
 
 // ==================== Column Value Decoding ====================
-// ==================== Column Value Decoding ====================
 
 IndexFieldValue InnoDBIndexParser::decode_column(
     const uint8_t* data, size_t offset, size_t max_size,
     const IndexColumnDef& col, size_t field_size) {
     IndexFieldValue val;
-    if (offset + field_size > max_size) {
+
+    // Additional sanity check: field_size shouldn't exceed remaining buffer
+    if (field_size > max_size - offset) {
         val.is_null = true;
         val.type = IndexFieldValue::Type::NULL_VAL;
         return val;
     }
 
-    val.raw_bytes.assign(data + offset, data + offset + field_size);
+    try {
+        val.raw_bytes.assign(data + offset, data + offset + field_size);
+    } catch (const std::length_error&) {
+        val.is_null = true;
+        val.type = IndexFieldValue::Type::NULL_VAL;
+        val.str_value = "<RAW_BYTES_ERROR>";
+        return val;
+    }
 
     switch (col.col_type) {
         // ==================== Integer Types (InnoDB storage type IDs) ====================
@@ -1693,8 +1666,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     }
                     char buf[32];
                     if (!fractional.empty()) {
-                        std::string frac_padded = std::string(pad - fractional.length(), '0') + fractional;
-                        frac_padded = frac_padded.substr(0, pad);
+                        // CRITICAL FIX: Prevent negative size when fractional.length() > pad
+                        size_t zeros_needed = (static_cast<size_t>(pad) > fractional.length())
+                            ? static_cast<size_t>(pad) - fractional.length() : 0;
+                        std::string frac_padded = std::string(zeros_needed, '0') + fractional;
+                        frac_padded = frac_padded.substr(0, static_cast<size_t>(pad));
                         snprintf(buf, sizeof(buf), "-%02u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
                     } else {
                         snprintf(buf, sizeof(buf), "-%02u:%02u:%02u", hour, minute, second);
@@ -1719,8 +1695,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
 
                     char buf[32];
                     if (!fractional.empty()) {
-                        std::string frac_padded = std::string(pad - fractional.length(), '0') + fractional;
-                        frac_padded = frac_padded.substr(0, pad);
+                        // CRITICAL FIX: Prevent negative size when fractional.length() > pad
+                        size_t zeros_needed = (static_cast<size_t>(pad) > fractional.length())
+                            ? static_cast<size_t>(pad) - fractional.length() : 0;
+                        std::string frac_padded = std::string(zeros_needed, '0') + fractional;
+                        frac_padded = frac_padded.substr(0, static_cast<size_t>(pad));
                         snprintf(buf, sizeof(buf), "%02u:%02u:%02u.%s", hour, minute, second, frac_padded.c_str());
                     } else {
                         snprintf(buf, sizeof(buf), "%02u:%02u:%02u", hour, minute, second);
@@ -1763,7 +1742,15 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 28: { // VAR_STRING - InnoDB type 28 (TEXT data)
             val.type = IndexFieldValue::Type::STRING_VAL;
             // Decode as UTF-8 text
-            val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+            try {
+                if (field_size > 0 && field_size <= max_size - offset) {
+                    val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                } else {
+                    val.str_value = "<INVALID_SIZE>";
+                }
+            } catch (const std::length_error&) {
+                val.str_value = "<STRING_ALLOC_ERROR>";
+            }
             break;
         }
         case 27: { // BLOB/TEXT - InnoDB type 27
@@ -1782,7 +1769,15 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             } else {
                 // TEXT column - decode as UTF-8
                 val.type = IndexFieldValue::Type::STRING_VAL;
-                val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                try {
+                    if (field_size > 0 && field_size <= max_size - offset) {
+                        val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                    } else {
+                        val.str_value = "<INVALID_SIZE>";
+                    }
+                } catch (const std::length_error&) {
+                    val.str_value = "<STRING_ALLOC_ERROR>";
+                }
             }
             break;
         }
@@ -1802,10 +1797,18 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         case 29: { // STRING/CHAR - InnoDB type 29
             val.type = IndexFieldValue::Type::STRING_VAL;
-            val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
-            // Trim trailing spaces
-            while (!val.str_value.empty() && val.str_value.back() == ' ') {
-                val.str_value.pop_back();
+            try {
+                if (field_size > 0 && field_size <= max_size - offset) {
+                    val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                    // Trim trailing spaces
+                    while (!val.str_value.empty() && val.str_value.back() == ' ') {
+                        val.str_value.pop_back();
+                    }
+                } else {
+                    val.str_value = "<INVALID_SIZE>";
+                }
+            } catch (const std::length_error&) {
+                val.str_value = "<STRING_ALLOC_ERROR>";
             }
             break;
         }
@@ -1825,28 +1828,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             uint32_t precision = col.precision > 0 ? col.precision : 10;
             uint32_t scale = col.scale;
             uint32_t int_digits = precision - scale;
-
-            // DEBUG: Print raw bytes for DECIMAL
-            static bool debug_decimal = false;
-            bool do_debug = !debug_decimal;
-            if (do_debug) {
-                std::cerr << "[DEBUG DECIMAL] Column '" << col.name << "' precision=" << precision
-                          << " scale=" << scale << " int_digits=" << int_digits
-                          << " field_size=" << field_size << "\n";
-                std::cerr << "[DEBUG DECIMAL] Raw bytes at offset " << offset << ": ";
-                for (size_t i = 0; i < field_size && i < 20; i++) {
-                    fprintf(stderr, "%02X ", data[offset + i]);
-                }
-                std::cerr << "\n";
-                // Also print as chars to see if it's string data
-                std::cerr << "[DEBUG DECIMAL] As chars: ";
-                for (size_t i = 0; i < field_size && i < 20; i++) {
-                    char c = static_cast<char>(data[offset + i]);
-                    if (c >= 32 && c < 127) fprintf(stderr, "%c", c);
-                    else fprintf(stderr, ".");
-                }
-                std::cerr << "\n";
-            }
 
             // map_decimal: [[4,9] for n//9 groups] + [[bytes,remainder_digits] if remainder>0]
             // bytes = ((remainder+1)//2) if remainder < 7, else 4
@@ -1872,11 +1853,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             // Check sign: 0x80 bit set = positive, not set = negative
             bool is_negative = (data[offset] & 0x80) == 0;
 
-            if (do_debug) {
-                std::cerr << "[DEBUG DECIMAL] is_negative=" << is_negative
-                          << " (first byte & 0x80 = " << (data[offset] & 0x80) << ")\n";
-            }
-
             // Copy data for processing
             std::vector<uint8_t> proc_data(data + offset, data + offset + field_size);
 
@@ -1889,14 +1865,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             // Subtract 128 from first byte (after inversion if negative)
             // This normalizes the sign bit
             proc_data[0] -= 128;
-
-            if (do_debug) {
-                std::cerr << "[DEBUG DECIMAL] After processing: ";
-                for (size_t i = 0; i < proc_data.size() && i < 20; i++) {
-                    fprintf(stderr, "%02X ", proc_data[i]);
-                }
-                std::cerr << "\n";
-            }
 
             // Read each group and build string representation
             // This matches ibd2sql's _READ_DECIMAL exactly:
@@ -1958,12 +1926,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
 
             // Build result: sign + int_str + "." + frac_str
             val.str_value = (is_negative ? "-" : "") + int_str + "." + frac_str;
-
-            if (do_debug) {
-                std::cerr << "[DEBUG DECIMAL] int_str='" << int_str << "' frac_str='" << frac_str
-                          << "' result='" << val.str_value << "'\n";
-                debug_decimal = true;
-            }
             break;
         }
         // ==================== JSON (InnoDB type 31, MySQL type 245) ====================
