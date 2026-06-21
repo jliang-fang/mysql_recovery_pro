@@ -1954,11 +1954,14 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 22:
         case 247: {
             val.type = IndexFieldValue::Type::STRING_VAL;
+            std::cerr << "[DEBUG DECODE] ENUM col.name='" << col.name << "' field_size=" << field_size
+                      << " enum_values.size()=" << col.enum_values.size() << "\n";
             if (field_size > 0 && !col.enum_values.empty()) {
                 uint64_t idx = 0;
                 for (size_t i = 0; i < field_size; i++) {
                     idx = (idx << 8) | data[offset + i];
                 }
+                std::cerr << "[DEBUG DECODE] ENUM idx=" << idx << " valid range=[1," << col.enum_values.size() << "]\n";
                 if (idx > 0 && idx <= col.enum_values.size()) {
                     val.str_value = col.enum_values[idx - 1];  // ENUM index is 1-based
                 } else {

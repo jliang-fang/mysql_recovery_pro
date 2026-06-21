@@ -1411,6 +1411,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     columns.push_back(icol);
                 }
                 if (!columns.empty()) {
+                    // Debug: print enum/set values being passed
+                    for (const auto& c : columns) {
+                        if (!c.enum_values.empty()) {
+                            std::cerr << "[DEBUG PASS] Column '" << c.name << "' passing "
+                                      << c.enum_values.size() << " enum_values to parser\n";
+                        }
+                        if (!c.set_values.empty()) {
+                            std::cerr << "[DEBUG PASS] Column '" << c.name << "' passing "
+                                      << c.set_values.size() << " set_values to parser\n";
+                        }
+                    }
                     index_parser.set_columns(columns);
                     if (verbose) {
                         std::cout << "[INFO] Loaded " << columns.size() << " columns from SDI schema\n";

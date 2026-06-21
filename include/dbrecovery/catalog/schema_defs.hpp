@@ -389,6 +389,8 @@ struct TableSchema {
                 if (col_json.contains("elements") && col_json["elements"].is_array()) {
                     std::vector<std::string>* target_values =
                         (col.mysql_type_id == 23) ? &col.set_values : &col.enum_values;
+                    std::cerr << "[DEBUG ENUM] Column '" << col.name << "' has "
+                              << col_json["elements"].size() << " elements\n";
                     for (const auto& elem : col_json["elements"]) {
                         if (elem.contains("name")) {
                             std::string encoded = elem["name"].get<std::string>();
@@ -409,9 +411,13 @@ struct TableSchema {
                                     valb -= 8;
                                 }
                             }
+                            std::cerr << "[DEBUG ENUM]  element: encoded='" << encoded
+                                      << "' decoded='" << decoded << "'\n";
                             target_values->push_back(decoded);
                         }
                     }
+                    std::cerr << "[DEBUG ENUM] Column '" << col.name << "' parsed "
+                              << target_values->size() << " values\n";
                 }
 
                 // Parse physical_pos - critical for column storage order
