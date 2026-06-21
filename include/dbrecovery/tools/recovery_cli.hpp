@@ -1164,6 +1164,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     // physical_pos = InnoDB storage order (from SDI physical_pos field)
                     col_def.ordinal_position = col.ordinal;  // Schema definition order for size bytes
 
+                    // Debug: show ordinal values being passed
+                    static bool ordinal_debug_printed = false;
+                    if (!ordinal_debug_printed) {
+                        std::cerr << "[DEBUG SDI PASS] Column '" << col.name << "' ordinal=" << col.ordinal
+                                  << " physical_pos=" << col.physical_pos << "\n";
+                        ordinal_debug_printed = true;
+                    }
+
                     // SDI already stores InnoDB internal types (not MySQL server types)
                     // No conversion needed - use directly
                     col_def.col_type = static_cast<uint8_t>(col.mysql_type_id);

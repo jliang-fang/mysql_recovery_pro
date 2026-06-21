@@ -160,30 +160,51 @@ struct TableSchema {
     }
 
     // ✅ 新增：判断列是否为固定长度（用于 InnoDB DYNAMIC/COMPRESSED 存储顺序）
+    // 参考 ibd2sql column_type.py 的 is_var 字段
+    // is_var=False 的类型: DECIMAL, TINY, SHORT, LONG, FLOAT, DOUBLE, LONGLONG, INT24,
+    //                       DATE, TIME, DATETIME, YEAR, NEWDATE, TIMESTAMP, TIMESTAMP2, DATETIME2, TIME2,
+    //                       BIT, NEWDECIMAL, ENUM, SET
+    // is_var=True 的类型: VARCHAR, TINY_BLOB, MEDIUM_BLOB, LONG_BLOB, BLOB, VAR_STRING, STRING, GEOMETRY, JSON, VECTOR
     static bool is_fixed_length(const ColumnInfo& col) {
         switch (col.mysql_type_id) {
-            case dbrecovery::innodb::mysql_types::TINY:
-            case dbrecovery::innodb::mysql_types::SHORT:
-            case dbrecovery::innodb::mysql_types::LONG:
-            case dbrecovery::innodb::mysql_types::LONGLONG:
-            case dbrecovery::innodb::mysql_types::INT24:
-            case dbrecovery::innodb::mysql_types::FLOAT:
-            case dbrecovery::innodb::mysql_types::DOUBLE:
-            case dbrecovery::innodb::mysql_types::DATE:
-            case dbrecovery::innodb::mysql_types::TIME:
-            case dbrecovery::innodb::mysql_types::DATETIME:
-            case dbrecovery::innodb::mysql_types::YEAR:
-            case dbrecovery::innodb::mysql_types::NEWDATE:      // MySQL 5.6+ DATE type
-            case dbrecovery::innodb::mysql_types::TIMESTAMP:
-            case dbrecovery::innodb::mysql_types::TIMESTAMP2:
-            case dbrecovery::innodb::mysql_types::DATETIME2:
-            case dbrecovery::innodb::mysql_types::TIME2:
+            // Integer types - fixed size
+            case dbrecovery::innodb::mysql_types::TINY:       // 2
+            case dbrecovery::innodb::mysql_types::SHORT:      // 3
+            case dbrecovery::innodb::mysql_types::LONG:       // 4
+            case dbrecovery::innodb::mysql_types::LONGLONG:   // 9
+            case dbrecovery::innodb::mysql_types::INT24:      // 10
                 return true;
-            // STRING (CHAR) is variable-length for utf8/utf8mb4
-            case dbrecovery::innodb::mysql_types::STRING:
-                return false;
+            // Floating point types - fixed size
+            case dbrecovery::innodb::mysql_types::FLOAT:      // 5
+            case dbrecovery::innodb::mysql_types::DOUBLE:     // 6
+                return true;
+            // Date and time types - fixed size
+            case dbrecovery::innodb::mysql_types::DATE:       // 11
+            case dbrecovery::innodb::mysql_types::TIME:       // 12 (old format, 3 bytes)
+            case dbrecovery::innodb::mysql_types::DATETIME:   // 13 (old format, 8 bytes)
+            case dbrecovery::innodb::mysql_types::YEAR:       // 14
+            case dbrecovery::innodb::mysql_types::NEWDATE:    // 15
+            case dbrecovery::innodb::mysql_types::TIMESTAMP:  // 7
+            case dbrecovery::innodb::mysql_types::TIMESTAMP2: // 18
+            case dbrecovery::innodb::mysql_types::DATETIME2:  // 19
+            case dbrecovery::innodb::mysql_types::TIME2:      // 20
+                return true;
+            // BIT - fixed size based on bit count
+            case dbrecovery::innodb::mysql_types::BIT:        // 17
+                return true;
+            // DECIMAL/NEWDECIMAL - fixed size based on precision/scale
+            case dbrecovery::innodb::mysql_types::NEWDECIMAL: // 21
+                return true;
+            // ENUM - fixed size (1-2 bytes based on value count)
+            case dbrecovery::innodb::mysql_types::ENUM:       // 22
+                return true;
+            // SET - fixed size (1-8 bytes based on member count)
+            case dbrecovery::innodb::mysql_types::SET:        // 23
+                return true;
+            // Variable-length types
+            // VARCHAR (16), VAR_STRING (28), STRING/CHAR (29) - variable for utf8mb4
+            // BLOB variants (24, 25, 26, 27), GEOMETRY (30), JSON (31), VECTOR (32)
             default:
-                // VARCHAR, VAR_STRING, BLOB, TEXT, JSON, ENUM, SET, BIT, NEWDECIMAL are variable
                 return false;
         }
     }
@@ -421,10 +442,18 @@ struct TableSchema {
                 }
 
                 // Parse physical_pos - critical for column storage order
-                // InnoDB stores columns by physical_pos, NOT schema definition order
+                // InnoDB stores column DATA by physical_pos
+                // But variable-length SIZES are stored by ordinal_position (schema definition order)
                 if (col_json.contains("physical_pos")) {
                     col.physical_pos = col_json["physical_pos"].get<uint32_t>();
-                } else if (col_json.contains("ordinal_position")) {
+                }
+                // Also read ordinal_position for variable-length size byte ordering
+                // This is the schema definition order (CREATE TABLE column order)
+                if (col_json.contains("ordinal_position")) {
+                    col.ordinal = col_json["ordinal_position"].get<uint32_t>();
+                }
+                // Fallback: if physical_pos not present, use ordinal_position
+                if (col.physical_pos == 0 && col_json.contains("ordinal_position")) {
                     col.physical_pos = col_json["ordinal_position"].get<uint32_t>();
                 }
 
@@ -439,28 +468,25 @@ struct TableSchema {
                 if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
                     continue;
                 }
-                col.ordinal = ordinal;
+                // If ordinal wasn't set from SDI, use the iteration counter
+                if (col.ordinal == 0) {
+                    col.ordinal = ordinal;
+                }
                 columns[ordinal++] = col;
             }
             debug_schema = true;  // Only print debug once
 
-            // Sort columns by InnoDB DYNAMIC/COMPRESSED storage order
-            // InnoDB stores: 1) fixed-length columns first, 2) variable-length columns after
-            // Within each group, columns are in ordinal_position order
+            // Sort columns by physical_pos (InnoDB storage order)
+            // CRITICAL: InnoDB stores columns in physical_pos order, NOT grouped by fixed/variable!
+            // Each column is stored in its physical_pos position regardless of whether it's fixed or variable length.
             if (!columns.empty()) {
                 std::vector<std::pair<uint32_t, ColumnInfo>> cols_vec;
                 for (const auto& p : columns) {
                     cols_vec.push_back(p);
                 }
-                // Sort by: fixed-length first (is_fixed=true), then by ordinal_position
+                // Sort by physical_pos (this is the InnoDB storage order)
                 std::sort(cols_vec.begin(), cols_vec.end(),
                     [](const auto& a, const auto& b) {
-                        bool a_fixed = TableSchema::is_fixed_length(a.second);
-                        bool b_fixed = TableSchema::is_fixed_length(b.second);
-                        if (a_fixed != b_fixed) {
-                            return a_fixed;  // Fixed columns come first
-                        }
-                        // Within same group, sort by ordinal_position
                         return a.second.physical_pos < b.second.physical_pos;
                     });
                 columns.clear();
@@ -468,6 +494,7 @@ struct TableSchema {
                 for (const auto& p : cols_vec) {
                     std::cerr << "[DEBUG SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
                               << " physical_pos=" << p.second.physical_pos
+                              << " ordinal=" << p.second.ordinal
                               << " type=" << p.second.mysql_type_id
                               << " is_fixed=" << TableSchema::is_fixed_length(p.second) << "\n";
                     columns[new_ordinal++] = p.second;
