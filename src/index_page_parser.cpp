@@ -972,31 +972,32 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     }
 
     // Step 3: Read remaining user columns
-    // CRITICAL FIX: InnoDB DYNAMIC format stores VARIABLE columns FIRST, then FIXED columns!
-    // NOT the other way around!
-    // The columns array is sorted: fixed-first, then variable
-    // We need to read in reverse order: variable-first, then fixed
+    // CRITICAL FIX: InnoDB DYNAMIC/COMPRESSED format stores ALL columns in physical_pos order!
+    // NOT "fixed columns first, variable columns after"!
+    // The columns array is already sorted by physical_pos (done in schema parsing)
+    // For each column: variable-length → get size from variable_sizes[], fixed-length → use fixed_size()
 
-    // Separate columns into variable and fixed groups
-    std::vector<size_t> var_col_indices;
-    std::vector<size_t> fixed_col_indices;
-    for (size_t i = n_pk_cols_; i < columns.size(); i++) {
-        if (columns[i].is_variable_length()) {
-            var_col_indices.push_back(i);
-        } else {
-            fixed_col_indices.push_back(i);
-        }
-    }
-
-    // Read variable columns first (in storage order, sorted by ordinal_position)
     std::map<size_t, IndexFieldValue> results_map;
 
-    for (size_t col_idx : var_col_indices) {
-        const auto& col = columns[col_idx];
-        if (col_idx >= variable_sizes.size()) break;
-        uint32_t field_size = variable_sizes[col_idx];
+    std::cerr << "[DEBUG READ] Starting user columns, pos=" << pos << " data_end=" << data_end << "\n";
 
-        IndexFieldValue val;
+    // Read ALL columns in columns array order (which is physical_pos order)
+    for (size_t col_idx = n_pk_cols_; col_idx < columns.size(); col_idx++) {
+        const auto& col = columns[col_idx];
+
+        // Determine field size
+        uint32_t field_size = 0;
+        if (col.is_variable_length()) {
+            // Variable-length column: get size from variable_sizes
+            if (col_idx < variable_sizes.size()) {
+                field_size = variable_sizes[col_idx];
+            }
+        } else {
+            // Fixed-length column: use fixed_size()
+            field_size = col.fixed_size();
+        }
+
+        // Check NULL status
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
             uint32_t bit_pos = 0;
@@ -1013,40 +1014,14 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             }
         }
 
-        if (is_null || field_size == 0) {
-            val.is_null = true;
-            val.type = IndexFieldValue::Type::NULL_VAL;
-        } else if (pos + field_size <= data_end) {
-            val = decode_column(page_data, pos, data_end, col, field_size);
-            pos += field_size;
-        }
-        results_map[col_idx] = val;
-    }
-
-    // Read fixed columns after variable columns
-    for (size_t col_idx : fixed_col_indices) {
-        const auto& col = columns[col_idx];
-        if (col_idx >= variable_sizes.size()) break;
-        uint32_t field_size = variable_sizes[col_idx];
+        std::cerr << "[DEBUG READ] Col " << col_idx << " '" << col.name
+                  << "' type=" << (int)col.col_type
+                  << " is_var=" << col.is_variable_length()
+                  << " field_size=" << field_size
+                  << " pos=" << pos
+                  << " is_null=" << is_null << "\n";
 
         IndexFieldValue val;
-        bool is_null = false;
-        if (col.is_nullable && !null_bitmask.empty()) {
-            uint32_t bit_pos = 0;
-            for (size_t j = 0; j < columns.size(); j++) {
-                if (!columns[j].is_system_column() && columns[j].is_nullable &&
-                    columns[j].ordinal_position < col.ordinal_position) {
-                    bit_pos++;
-                }
-            }
-            size_t byte_idx = (null_bitmask.size() - 1) - (bit_pos / 8);
-            uint8_t bit_idx = bit_pos % 8;
-            if (byte_idx < null_bitmask.size()) {
-                is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
-            }
-        }
-
-        // Read fixed column value
         if (is_null || field_size == 0) {
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
@@ -1954,20 +1929,23 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 22:
         case 247: {
             val.type = IndexFieldValue::Type::STRING_VAL;
-            std::cerr << "[DEBUG DECODE] ENUM col.name='" << col.name << "' field_size=" << field_size
-                      << " enum_values.size()=" << col.enum_values.size() << "\n";
             if (field_size > 0 && !col.enum_values.empty()) {
                 uint64_t idx = 0;
                 for (size_t i = 0; i < field_size; i++) {
                     idx = (idx << 8) | data[offset + i];
                 }
-                std::cerr << "[DEBUG DECODE] ENUM idx=" << idx << " valid range=[1," << col.enum_values.size() << "]\n";
+                std::cerr << "[DEBUG DECODE] ENUM col.name='" << col.name << "' field_size=" << field_size
+                          << " enum_values.size()=" << col.enum_values.size()
+                          << " idx=" << idx << " valid_range=[1," << col.enum_values.size() << "]"
+                          << " offset=" << offset << " byte=" << (int)data[offset] << "\n";
                 if (idx > 0 && idx <= col.enum_values.size()) {
                     val.str_value = col.enum_values[idx - 1];  // ENUM index is 1-based
                 } else {
                     val.str_value = "<ENUM_" + std::to_string(idx) + ">";
                 }
             } else {
+                std::cerr << "[DEBUG DECODE] ENUM col.name='" << col.name << "' field_size=" << field_size
+                          << " enum_values.size()=" << col.enum_values.size() << " SKIPPED\n";
                 val.str_value = "<ENUM>";
             }
             break;
