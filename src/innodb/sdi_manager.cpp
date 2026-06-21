@@ -240,11 +240,18 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                         }
 
                         // Parse physical_pos - critical for column storage order
-                        // InnoDB stores columns by physical_pos, NOT schema definition order
+                        // InnoDB stores column DATA by physical_pos
+                        // But variable-length SIZES are stored by ordinal_position (schema definition order)
                         if (col.contains("physical_pos")) {
                             column_info.physical_pos = col["physical_pos"].get<uint32_t>();
-                        } else if (col.contains("ordinal_position")) {
-                            // Fallback: some SDI versions use ordinal_position
+                        }
+                        // Also read ordinal_position for variable-length size byte ordering
+                        // This is the schema definition order (CREATE TABLE column order)
+                        if (col.contains("ordinal_position")) {
+                            column_info.ordinal = col["ordinal_position"].get<uint32_t>();
+                        }
+                        // Fallback: if physical_pos not present, use ordinal_position
+                        if (column_info.physical_pos == 0 && col.contains("ordinal_position")) {
                             column_info.physical_pos = col["ordinal_position"].get<uint32_t>();
                         }
 
@@ -254,7 +261,10 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                             continue;
                         }
 
-                        column_info.ordinal = ordinal;
+                        // If ordinal wasn't set from SDI, use the iteration counter
+                        if (column_info.ordinal == 0) {
+                            column_info.ordinal = ordinal;
+                        }
                         schema.columns[ordinal++] = column_info;
                     }
                 }
@@ -278,6 +288,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     for (const auto& p : cols_vec) {
                         std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
                                   << " physical_pos=" << p.second.physical_pos
+                                  << " ordinal=" << p.second.ordinal
                                   << " type=" << p.second.mysql_type_id
                                   << " is_fixed=" << catalog::TableSchema::is_fixed_length(p.second) << "\n";
                         schema.columns[new_ordinal++] = p.second;

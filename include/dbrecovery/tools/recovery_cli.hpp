@@ -1157,10 +1157,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     dbrecovery::innodb::IndexColumnDef col_def;
                     col_def.name = col.name;
 
-                    // ✅ 关键：保存原始 ordinal_position 用于变长大小字节读取
-                    // InnoDB 按 SCHEMA 顺序（ordinal_position）存储大小字节
-                    // 排序后 ordinal 会被重新赋值，physical_pos 保存原始位置
-                    col_def.ordinal_position = col.physical_pos;  // 原始 SCHEMA 位置
+                    // ✅ 关键：保存原始 ordinal (schema定义顺序) 用于变长大小字节读取
+                    // InnoDB 按 SCHEMA 定义顺序（ordinal）存储变长字段大小字节
+                    // 但数据按 physical_pos 顺序存储
+                    // ordinal = schema definition order (from SDI ordinal_position field)
+                    // physical_pos = InnoDB storage order (from SDI physical_pos field)
+                    col_def.ordinal_position = col.ordinal;  // Schema definition order for size bytes
 
                     // SDI already stores InnoDB internal types (not MySQL server types)
                     // No conversion needed - use directly
