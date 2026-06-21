@@ -259,23 +259,18 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     }
                 }
 
-                // Sort columns by InnoDB DYNAMIC/COMPRESSED storage order
-                // InnoDB stores: 1) fixed-length columns first, 2) variable-length columns after
-                // Within each group, columns are in ordinal_position order
+                // Sort columns by physical_pos (InnoDB storage order)
+                // CRITICAL: InnoDB stores columns by physical_pos, NOT by "fixed-first then variable"!
+                // The physical_pos field already reflects the actual storage order determined by InnoDB.
+                // We must NOT reorder fixed/variable columns - just sort by physical_pos.
                 if (!schema.columns.empty()) {
                     std::vector<std::pair<uint32_t, catalog::ColumnInfo>> cols_vec;
                     for (const auto& p : schema.columns) {
                         cols_vec.push_back(p);
                     }
-                    // Sort by: fixed-length first, then by ordinal_position
+                    // Sort by physical_pos only (this is the actual InnoDB storage order)
                     std::sort(cols_vec.begin(), cols_vec.end(),
                         [](const auto& a, const auto& b) {
-                            bool a_fixed = catalog::TableSchema::is_fixed_length(a.second);
-                            bool b_fixed = catalog::TableSchema::is_fixed_length(b.second);
-                            if (a_fixed != b_fixed) {
-                                return a_fixed;  // Fixed columns come first
-                            }
-                            // Within same group, sort by ordinal_position
                             return a.second.physical_pos < b.second.physical_pos;
                         });
                     schema.columns.clear();
