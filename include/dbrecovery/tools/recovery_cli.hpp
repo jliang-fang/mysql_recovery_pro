@@ -1390,6 +1390,35 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Try FRM schema if provided
         bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
 
+        // If no FRM schema, try SDI schema extraction for column names
+        if (!has_frm_schema) {
+            auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+            if (sdi_schema_opt.has_value()) {
+                const auto& schema = sdi_schema_opt.value();
+                std::vector<dbrecovery::innodb::IndexColumnDef> columns;
+                for (const auto& [pos, col] : schema.columns) {
+                    dbrecovery::innodb::IndexColumnDef icol;
+                    icol.name = col.name;
+                    icol.col_type = col.mysql_type_id;
+                    icol.col_length = col.column_length;
+                    icol.is_nullable = col.is_nullable;
+                    icol.is_unsigned = !col.is_signed;  // Convert is_signed to is_unsigned
+                    icol.precision = col.numeric_precision;
+                    icol.scale = col.numeric_scale;
+                    icol.ordinal_position = pos;
+                    icol.enum_values = col.enum_values;
+                    icol.set_values = col.set_values;
+                    columns.push_back(icol);
+                }
+                if (!columns.empty()) {
+                    index_parser.set_columns(columns);
+                    if (verbose) {
+                        std::cout << "[INFO] Loaded " << columns.size() << " columns from SDI schema\n";
+                    }
+                }
+            }
+        }
+
         auto records = index_parser.parse_ibd_force(ibd_path);
 
         if (!records.empty()) {

@@ -1,4 +1,5 @@
 #include "dbrecovery/tools/progress_cli.hpp"
+#include "dbrecovery/innodb/sdi_extractor.hpp"
 #include <thread>
 #include <map>
 #include <string>
@@ -531,30 +532,31 @@ std::optional<catalog::TableSchema> ProgressRecoveryCLI::parse_schema_from_sdi(
     if (!reader.is_valid()) return std::nullopt;
 
     uint32_t total_pages = reader.get_total_pages();
+    uint32_t page_size = reader.get_page_size();
+
+    innodb::SDIExtractor sdi_extractor(page_size);
 
     for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
         auto page_data = reader.read_page_raw(page_no);
         if (page_data.empty()) continue;
 
-        uint16_t page_type = innodb::read_le<uint16_t>(
-            page_data.data(), innodb::FIL_PAGE_TYPE_ABS);
+        // Check if this is an SDI page (supports both compressed 0x45BD and uncompressed 0x45BE)
+        if (!sdi_extractor.is_sdi_page(page_data.data())) continue;
 
-        if (page_type == innodb::FIL_PAGE_SDI) {
-            const uint8_t* sdi_payload = page_data.data() + 38;
-            auto json_opt = innodb::SDIManager::extract_sdi_json(
-                sdi_payload, page_data.size() - 38);
+        // Extract SDI payload (handles both compressed and uncompressed)
+        auto sdi_payload = sdi_extractor.extract_sdi_payload(page_data.data(), page_data.size());
+        if (!sdi_payload.has_value() || sdi_payload->empty()) continue;
 
-            if (json_opt.has_value()) {
-                try {
-                    auto json = nlohmann::json::parse(json_opt.value());
-                    catalog::TableSchema schema;
-                    if (schema.from_json(json)) {
-                        return schema;
-                    }
-                } catch (const nlohmann::json::parse_error& e) {
-                    // Ignore parse errors
-                }
+        // Parse as JSON string
+        std::string json_str(reinterpret_cast<const char*>(sdi_payload->data()), sdi_payload->size());
+        try {
+            auto json = nlohmann::json::parse(json_str);
+            catalog::TableSchema schema;
+            if (schema.from_json(json)) {
+                return schema;
             }
+        } catch (const nlohmann::json::parse_error& e) {
+            // Ignore parse errors, try next page
         }
     }
 

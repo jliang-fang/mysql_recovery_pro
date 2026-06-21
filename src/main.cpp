@@ -1704,6 +1704,44 @@ int main(int argc, char** argv) {
 
         // Parse schema from --schema option if provided
         std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;  // Moved outside for scope
+
+        // First try to extract schema from SDI (MySQL 8.0+)
+        if (schema_str.empty()) {
+            std::cout << "[INFO] Attempting to extract schema from SDI pages...\\n";
+            auto schema_opt = parse_schema_from_sdi(effective_ibd, table_id);
+            if (schema_opt.has_value()) {
+                const auto& schema = schema_opt.value();
+                uint32_t n_pk = 0;
+                for (const auto& [ord, col] : schema.columns) {
+                    dbrecovery::innodb::IndexColumnDef icol;
+                    icol.name = col.name;
+                    icol.col_type = col.mysql_type_id;
+                    icol.col_length = col.column_length;
+                    icol.is_nullable = col.is_nullable;
+                    icol.is_unsigned = col.is_unsigned;
+                    icol.precision = col.numeric_precision;
+                    icol.scale = col.numeric_scale;
+                    icol.datetime_precision = col.datetime_precision;
+                    icol.ordinal_position = col.ordinal_position;
+                    icol.mb_maxlen = 4;  // utf8mb4
+                    icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
+                    icol.enum_values = col.enum_values;
+                    icol.set_values = col.set_values;
+
+                    // Check if this is a PK column
+                    if (col.column_key == "PRI") {
+                        n_pk++;
+                    }
+
+                    index_columns.push_back(icol);
+                }
+                if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
+                index_parser.set_columns(index_columns, false, n_pk);
+                std::cout << "[INFO] Schema extracted from SDI (" << index_columns.size()
+                          << " columns, " << n_pk << " PK columns)\\n";
+            }
+        }
+
         if (!schema_str.empty()) {
             uint32_t n_pk = 0;
             // Fix: Don't split on commas inside parentheses (e.g., DECIMAL(10,2))

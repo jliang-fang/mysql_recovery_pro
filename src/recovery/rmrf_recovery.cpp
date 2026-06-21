@@ -343,10 +343,25 @@ RmrfRecovery::extract_records_heuristic(const std::vector<uint8_t>& page_data,
         }
 
         // Build record from schemaless fields
-        // Use zero-padded field names for correct alphabetical sorting
+        // Use schema column names if available, otherwise use generic names
         for (size_t i = 0; i < sa_rec.fields.size(); i++) {
-            char key[16];
-            snprintf(key, sizeof(key), "field_%04zu", i);
+            std::string key;
+
+            // Try to get column name from schema (1-indexed in schema.columns)
+            if (schema.columns.size() > i) {
+                auto it = schema.columns.find(static_cast<int>(i + 1));
+                if (it != schema.columns.end()) {
+                    key = it->second.name;
+                }
+            }
+
+            // Fallback to generic field name if no schema column found
+            if (key.empty()) {
+                char keybuf[16];
+                snprintf(keybuf, sizeof(keybuf), "field_%04zu", i);
+                key = keybuf;
+            }
+
             std::string value = sa_rec.fields[i].to_string();
 
             // Skip garbage values
