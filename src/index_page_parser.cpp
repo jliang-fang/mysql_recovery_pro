@@ -1090,18 +1090,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         return result;
     }
 
-    // === Improved Schemaless Parsing Strategy ===
-    // For DYNAMIC row format, the record structure is:
-    // [PK (8 bytes)] [TRX_ID (6 bytes)] [ROLL_PTR (7 bytes)] [User fields...]
-    //
-    // User fields are stored in a specific order:
-    // - Variable-length fields FIRST (VARCHAR, TEXT, BLOB, JSON, etc.)
-    // - Fixed-length fields AFTER variable fields
-    //
-    // The key insight: we can use the record end boundary to work backwards
-    // and detect fixed-length fields by their alignment and value patterns.
-
-    // Step 1: Extract Primary Key (always first, 8 bytes)
+    // === Step 1: Extract Primary Key (always first, 8 bytes) ===
     size_t pk_pos = origin;
     uint64_t raw_pk = read_be<uint64_t>(page_data, pk_pos);
 
@@ -1118,7 +1107,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     pk_val.raw_bytes.assign(page_data + pk_pos, page_data + pk_pos + 8);
     result.push_back(pk_val);
 
-    // Step 2: Skip system columns (TRX_ID + ROLL_PTR) for leaf pages
+    // === Step 2: Skip system columns (TRX_ID + ROLL_PTR) for leaf pages ===
     size_t user_data_start = origin + 8;
     if (is_leaf) {
         user_data_start += 6 + 7;  // TRX_ID + ROLL_PTR = 13 bytes
@@ -1130,34 +1119,107 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
 
     size_t user_data_len = rec_end - user_data_start;
 
-    // Step 3: Parse remaining data as raw bytes
-    // Since we don't have schema, we output the entire user data as one blob
-    // This is more honest than trying to guess field boundaries incorrectly
+    // === Step 3: Try to read variable field sizes from before the header ===
+    // Layout: [size bytes][NULL bitmap][header 5B][data...]
+    // The size bytes encode variable-length field sizes
 
-    // However, we can try to detect some obvious patterns:
+    std::vector<uint32_t> var_sizes;
 
-    // Strategy: Work backwards from rec_end to detect fixed-length fields
-    // Common fixed-length types: TINYINT(1), SMALLINT(2), INT(4), BIGINT(8)
-    // FLOAT(4), DOUBLE(8), DATE(3), DATETIME(5), TIMESTAMP(4)
+    // Try to read size bytes before the header
+    if (rec_offset >= 6) {  // Need at least 1 byte before header
+        // Read bytes before header
+        size_t max_pre_bytes = std::min(rec_offset, (size_t)20);
+        std::vector<uint8_t> pre_bytes;
+        for (size_t i = 0; i < max_pre_bytes; i++) {
+            pre_bytes.push_back(page_data[rec_offset - max_pre_bytes + i]);
+        }
 
+        // Try to decode sizes
+        // The NULL bitmap is at the end of pre_bytes (closest to header)
+        // Size bytes are before NULL bitmap
+
+        // Estimate NULL bitmap size (1 byte for up to 8 nullable columns)
+        size_t estimated_null_bytes = 1;
+
+        // Read sizes from before NULL bitmap
+        size_t size_end = pre_bytes.size() - estimated_null_bytes;
+        size_t size_pos = 0;
+
+        while (size_pos < size_end && var_sizes.size() < 15) {
+            uint8_t byte = pre_bytes[size_pos];
+
+            // Check for 1-byte size (no high bit, values 1-127)
+            if (byte >= 1 && byte <= 127) {
+                var_sizes.push_back(byte);
+                size_pos++;
+            }
+            // Check for 2-byte size (high bit set in second byte)
+            else if (size_pos + 1 < size_end && pre_bytes[size_pos + 1] >= 128) {
+                // 2-byte encoding: low 7 bits from each byte
+                uint16_t size = ((byte & 0x7F) << 7) | (pre_bytes[size_pos + 1] & 0x7F);
+                if (size > 127 && size < 16384) {
+                    var_sizes.push_back(size);
+                    size_pos += 2;
+                } else {
+                    size_pos++;
+                }
+            }
+            else {
+                // Not a valid size, might be NULL bitmap boundary
+                break;
+            }
+        }
+    }
+
+    // === Step 4: Parse user data based on detected sizes ===
     size_t parse_pos = user_data_start;
+
+    // Calculate total variable field size
+    size_t total_var_size = 0;
+    for (auto sz : var_sizes) {
+        total_var_size += sz;
+    }
+
+    // If we detected variable sizes, use them
+    if (!var_sizes.empty() && total_var_size <= user_data_len) {
+        // Parse variable-length fields
+        for (size_t i = 0; i < var_sizes.size() && parse_pos < user_data_start + total_var_size; i++) {
+            uint32_t sz = var_sizes[i];
+            if (sz == 0 || parse_pos + sz > rec_end) continue;
+
+            IndexFieldValue val;
+            val.raw_bytes.assign(page_data + parse_pos, page_data + parse_pos + sz);
+
+            // Check if it looks like string data
+            size_t printable = 0;
+            for (size_t j = 0; j < sz; j++) {
+                uint8_t b = page_data[parse_pos + j];
+                if (b >= 32 && b < 127) printable++;
+            }
+
+            if (printable >= sz * 2 / 3) {
+                val.type = IndexFieldValue::Type::STRING_VAL;
+                val.str_value.assign(reinterpret_cast<const char*>(page_data + parse_pos), sz);
+            } else {
+                val.type = IndexFieldValue::Type::BINARY_VAL;
+            }
+
+            result.push_back(val);
+            parse_pos += sz;
+        }
+    }
+
+    // === Step 5: Parse fixed-length fields from the END backwards ===
     size_t parse_end = rec_end;
-
-    // Try to detect and extract obvious fixed-length integer fields from the END
-    // In DYNAMIC format, fixed fields are at the END after variable fields
-
     std::vector<IndexFieldValue> fixed_fields;
 
-    // Work backwards from the end
     while (parse_end > parse_pos + 8) {
         size_t remaining = parse_end - parse_pos;
 
-        // Check for 8-byte BIGINT with sign bit (0x80...)
+        // Check for 8-byte BIGINT with sign bit
         if (remaining >= 8) {
             uint64_t val8 = read_be<uint64_t>(page_data, parse_end - 8);
-            // Check for signed BIGINT pattern
             if ((val8 >> 56) == 0x80 || (val8 >> 56) == 0x7F) {
-                // Likely a BIGINT
                 IndexFieldValue fval;
                 fval.type = IndexFieldValue::Type::INT_VAL;
                 if ((val8 >> 56) == 0x80) {
@@ -1173,10 +1235,11 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
             }
         }
 
-        // Check for 4-byte INT with sign bit (0x80...)
+        // Check for 4-byte INT or TIMESTAMP
         if (remaining >= 4) {
             uint32_t val4 = read_be<uint32_t>(page_data, parse_end - 4);
-            // Check for signed INT pattern (0x80xxxxxx for positive)
+
+            // INT with sign bit
             if ((val4 >> 24) == 0x80 || (val4 >> 24) == 0x7F) {
                 IndexFieldValue fval;
                 fval.type = IndexFieldValue::Type::INT_VAL;
@@ -1192,7 +1255,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
                 continue;
             }
 
-            // Check for TIMESTAMP (Unix timestamp in reasonable range)
+            // TIMESTAMP
             if (val4 >= 1577836800 && val4 <= 4102444800) {
                 time_t t = static_cast<time_t>(val4);
                 struct tm tm_buf;
@@ -1220,7 +1283,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
             uint32_t month = (date_val >> 5) & 0x0F;
             uint32_t day = date_val & 0x1F;
 
-            // Validate date range
             if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
                 IndexFieldValue fval;
                 fval.type = IndexFieldValue::Type::DATE_VAL;
@@ -1237,8 +1299,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         // Check for 2-byte SMALLINT
         if (remaining >= 2) {
             uint16_t val2 = read_be<uint16_t>(page_data, parse_end - 2);
-            // SMALLINT with sign bit adjustment
-            if (val2 >= 0x8000 || val2 <= 0x100) {  // Reasonable SMALLINT range
+            if (val2 >= 0x8000 || val2 <= 0x100) {
                 IndexFieldValue fval;
                 fval.type = IndexFieldValue::Type::INT_VAL;
                 fval.int_value = static_cast<int64_t>(val2) - 32768;
@@ -1250,33 +1311,25 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
             }
         }
 
-        // No recognizable fixed-length field, stop
         break;
     }
 
-    // Reverse fixed_fields to get correct order (we parsed backwards)
-    std::reverse(fixed_fields.begin(), fixed_fields.end());
+    // If no variable sizes were detected, output remaining data as one blob
+    if (var_sizes.empty() && parse_pos < parse_end) {
+        size_t remaining_len = parse_end - parse_pos;
 
-    // The remaining data between parse_pos and parse_end is likely variable-length fields
-    // Output as raw data or try to detect strings
-
-    if (parse_end > parse_pos) {
-        size_t var_len = parse_end - parse_pos;
-
-        // Try to detect if this looks like string data
-        size_t printable_count = 0;
-        for (size_t i = 0; i < var_len && i < 1000; i++) {
+        size_t printable = 0;
+        for (size_t i = 0; i < remaining_len && i < 1000; i++) {
             uint8_t b = page_data[parse_pos + i];
             if ((b >= 32 && b < 127) || b == '\n' || b == '\r' || b == '\t') {
-                printable_count++;
+                printable++;
             }
         }
 
         IndexFieldValue var_val;
-        if (printable_count >= var_len * 2 / 3) {
-            // Looks like string data
+        if (printable >= remaining_len * 2 / 3) {
             var_val.type = IndexFieldValue::Type::STRING_VAL;
-            var_val.str_value.assign(reinterpret_cast<const char*>(page_data + parse_pos), var_len);
+            var_val.str_value.assign(reinterpret_cast<const char*>(page_data + parse_pos), remaining_len);
         } else {
             var_val.type = IndexFieldValue::Type::BINARY_VAL;
         }
@@ -1284,7 +1337,8 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
         result.push_back(var_val);
     }
 
-    // Add detected fixed fields
+    // Add detected fixed fields (reverse order since we parsed backwards)
+    std::reverse(fixed_fields.begin(), fixed_fields.end());
     for (const auto& f : fixed_fields) {
         result.push_back(f);
     }
