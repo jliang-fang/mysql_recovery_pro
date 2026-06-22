@@ -1103,7 +1103,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     // - Each small VARCHAR field has 1 byte size (< 128 bytes)
     // - Larger VARCHAR fields have 2 byte size
     //
-    // Strategy: Try to find the size byte right before NULL bitmap
+    // Strategy: Try to find the size bytes right before NULL bitmap
     // NULL bitmap typically has value 0-15 (for up to 15 nullable columns)
     // Size byte should be 1-127 for small fields
 
@@ -1111,25 +1111,88 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     constexpr uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;
 
     // Read backward from header position (rec_offset)
-    // Try to find a pattern: [valid size byte][small NULL bitmap value]
-    if (rec_offset >= 2) {
-        // Check offset rec_offset-1 and rec_offset-2
-        uint8_t byte_at_minus1 = page_data[rec_offset - 1];  // Likely NULL bitmap
-        uint8_t byte_at_minus2 = page_data[rec_offset - 2];  // Likely size
+    // Try to find ALL size bytes before NULL bitmap
+    // Pattern: [size1][size2][...][NULL bitmap][header 5B][data...]
 
-        // Pattern: [size (1-127)][NULL bitmap (0-15)]
-        if (byte_at_minus1 <= 15 && byte_at_minus2 >= 1 && byte_at_minus2 <= REC_N_FIELDS_ONE_BYTE_MAX) {
-            var_sizes.push_back(byte_at_minus2);
+    if (rec_offset >= 2) {
+        // Start scanning backward from rec_offset - 1
+        size_t scan_pos = rec_offset - 1;
+
+        // First, find NULL bitmap (typically small value 0-15)
+        uint8_t null_bitmap_candidate = page_data[scan_pos];
+
+        // Try to find the end of size bytes (where NULL bitmap starts)
+        size_t null_bitmap_pos = rec_offset - 1;
+
+        // Scan backward to find NULL bitmap boundary
+        // NULL bitmap should be a small value (< 32 for most tables)
+        // Size bytes are typically 1-127 for small fields, or 128+ for larger fields (high bit set)
+        while (null_bitmap_pos > 0 && null_bitmap_pos >= rec_offset - 20) {
+            uint8_t byte_val = page_data[null_bitmap_pos];
+
+            // NULL bitmap detection: small value (< 32) that doesn't look like a size
+            // Size bytes are either 1-127 (small field) or have high bit set (128+) for large fields
+            if (byte_val < 32 && byte_val != 0) {
+                // This could be NULL bitmap, check if previous bytes are valid sizes
+                break;
+            }
+            null_bitmap_pos--;
         }
-        // Alternative: size might be at rec_offset-1 if there's no NULL bitmap
-        else if (byte_at_minus1 >= 1 && byte_at_minus1 <= REC_N_FIELDS_ONE_BYTE_MAX) {
-            var_sizes.push_back(byte_at_minus1);
+
+        // Now read size bytes from after NULL bitmap (if found) to header position
+        // Actually: sizes are BEFORE NULL bitmap
+        // [size bytes][NULL bitmap (1-2 bytes)][header 5 bytes][data]
+
+        // Try multiple size bytes
+        size_t size_scan_start = null_bitmap_pos > 0 ? null_bitmap_pos - 1 : rec_offset - 2;
+
+        // Read sizes backward from NULL bitmap position
+        int max_sizes = 10;  // Maximum variable-length fields to detect
+        while (size_scan_start > 0 && size_scan_start >= rec_offset - 20 && max_sizes > 0) {
+            uint8_t size_byte = page_data[size_scan_start];
+
+            // Valid size: 1-127 for small fields
+            if (size_byte >= 1 && size_byte <= REC_N_FIELDS_ONE_BYTE_MAX) {
+                var_sizes.push_back(size_byte);
+                size_scan_start--;
+                max_sizes--;
+            }
+            // Check for 2-byte size (high bit set in first byte)
+            else if (size_byte & 0x80) {
+                // High bit set: this is part of a 2-byte size
+                if (size_scan_start > 0) {
+                    uint8_t prev_byte = page_data[size_scan_start - 1];
+                    uint16_t two_byte_size = ((prev_byte & 0x7F) << 7) | (size_byte & 0x7F);
+                    if (two_byte_size > 127 && two_byte_size < 16384) {
+                        var_sizes.push_back(two_byte_size);
+                        size_scan_start -= 2;
+                        max_sizes--;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+            else {
+                // Not a valid size byte, stop
+                break;
+            }
         }
-        // Try checking further back for more size bytes
-        else if (rec_offset >= 3) {
-            uint8_t byte_at_minus3 = page_data[rec_offset - 3];
-            if (byte_at_minus3 >= 1 && byte_at_minus3 <= REC_N_FIELDS_ONE_BYTE_MAX) {
-                var_sizes.push_back(byte_at_minus3);
+
+        // Reverse sizes to get correct order (we read backward)
+        std::reverse(var_sizes.begin(), var_sizes.end());
+
+        // Fallback: if no sizes found, try simple pattern
+        if (var_sizes.empty() && rec_offset >= 2) {
+            uint8_t byte_at_minus1 = page_data[rec_offset - 1];
+            uint8_t byte_at_minus2 = page_data[rec_offset - 2];
+
+            if (byte_at_minus1 <= 15 && byte_at_minus2 >= 1 && byte_at_minus2 <= REC_N_FIELDS_ONE_BYTE_MAX) {
+                var_sizes.push_back(byte_at_minus2);
+            }
+            else if (byte_at_minus1 >= 1 && byte_at_minus1 <= REC_N_FIELDS_ONE_BYTE_MAX) {
+                var_sizes.push_back(byte_at_minus1);
             }
         }
     }
