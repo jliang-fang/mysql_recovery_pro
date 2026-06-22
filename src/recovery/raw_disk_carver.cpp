@@ -421,6 +421,9 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 {
                     std::lock_guard<std::mutex> lock(pages_mutex_);
                     // 存储SDI页用于后续schema提取
+                    last_scan_result_.sdi_pages[space_id] = sdi_copy;
+                    last_scan_result_.sdi_pages_found++;
+                    pages_found_.fetch_add(1);
                 }
             }
 
@@ -479,6 +482,28 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
         return result;
     }
 
+    // Step 1: 从SDI页提取schema (如果有)
+    std::map<uint64_t, catalog::TableSchema> schemas_by_index_id;
+
+    if (!scan_result.sdi_pages.empty()) {
+        for (const auto& [space_id, sdi_data] : scan_result.sdi_pages) {
+            auto schema_opt = extract_schema_from_sdi(sdi_data);
+            if (schema_opt.has_value()) {
+                // 假设每个表的主键index_id可以从schema推断
+                // 这里简化处理，将schema应用到所有index_id
+                // 实际应该根据index_id匹配
+                if (schema_opt->columns.size() > 0) {
+                    // 计算index_id (简化：使用第一个列的table信息)
+                    // 实际应该从SDI中提取index信息
+                    std::cerr << "[INFO] Extracted schema from SDI for space_id " << space_id
+                              << ": " << schema_opt->columns.size() << " columns" << std::endl;
+                    // 暂存schema，后续根据index_id匹配
+                    result.inferred_schemas[space_id] = *schema_opt;
+                }
+            }
+        }
+    }
+
     size_t total_index_ids = scan_result.pages_by_index_id.size();
     size_t processed = 0;
 
@@ -488,7 +513,7 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
             progress(pct, "Recovering index_id " + std::to_string(index_id));
         }
 
-        // 对每个index_id的页进行Schema-less解析
+        // 对每个index_id的页进行解析
         std::vector<std::map<std::string, std::string>> all_records;
 
         for (const auto& page_data : pages) {
@@ -791,6 +816,87 @@ std::vector<std::pair<size_t, size_t>> RawDiskCarver::detect_field_boundaries(
     }
 
     return boundaries;
+}
+
+std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
+    const std::vector<uint8_t>& page_data) {
+
+    if (page_data.size() < 100) return std::nullopt;
+
+    const uint8_t* data = page_data.data();
+    size_t page_size = page_data.size();
+
+    // 检查是否是SDI页
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    if (page_type != FIL_PAGE_SDI && page_type != FIL_PAGE_SDI_ZIP) {
+        return std::nullopt;
+    }
+
+    // SDI页格式:
+    // - FIL_HEADER (24 bytes)
+    // - SDI数据 (压缩或未压缩)
+    // - FIL_TRAILER (8 bytes)
+
+    // 对于FIL_PAGE_SDI (0x45BE): 数据未压缩
+    // 对于FIL_PAGE_SDI_ZIP (0x45BD): 数据使用zlib压缩
+
+    constexpr size_t FIL_TRAILER_SIZE = 8;
+
+    size_t sdi_offset = FIL_HEADER_SIZE;  // 38 bytes (FIL_PAGE_DATA)
+    size_t sdi_len = page_size - FIL_HEADER_SIZE - FIL_TRAILER_SIZE;
+
+    if (page_type == FIL_PAGE_SDI_ZIP) {
+        // 需要解压缩
+        // 参考 ibd2sql innodb_page/page.py
+        // 压缩数据从offset 38开始
+
+        // 使用zlib解压 (简化实现)
+        // 实际需要完整实现zlib解压
+        std::cerr << "[INFO] SDI page is compressed (0x45BD), attempting decompression" << std::endl;
+
+        // TODO: 实现zlib解压缩
+        return std::nullopt;
+    }
+
+    // 未压缩的SDI数据
+    // SDI格式是JSON，需要解析JSON来获取schema
+
+    try {
+        // 跳过SDI header (参考 ibd2sql)
+        // SDI header structure:
+        // - type (1 byte)
+        // - compressed_len (4 bytes LE)
+        // - uncompressed_len (4 bytes LE)
+
+        if (sdi_offset + 9 > page_size) return std::nullopt;
+
+        uint8_t sdi_type = data[sdi_offset];
+        uint32_t compressed_len = read_le<uint32_t>(data, sdi_offset + 1);
+        uint32_t uncompressed_len = read_le<uint32_t>(data, sdi_offset + 5);
+
+        size_t json_start = sdi_offset + 9;
+        size_t json_len = uncompressed_len;
+
+        if (json_start + json_len > page_size) {
+            json_len = page_size - json_start;
+        }
+
+        // 解析JSON数据
+        std::string json_str(reinterpret_cast<const char*>(data + json_start), json_len);
+
+        // 使用nlohmann::json解析 (如果可用)
+        // 简化实现：返回空schema
+        // 实际应该解析JSON提取列信息
+
+        std::cerr << "[INFO] SDI JSON length: " << json_len << " bytes" << std::endl;
+
+        // TODO: 完整的JSON解析和schema提取
+        return std::nullopt;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to extract schema from SDI: " << e.what() << std::endl;
+        return std::nullopt;
+    }
 }
 
 } // namespace recovery
