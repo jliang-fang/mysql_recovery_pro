@@ -302,12 +302,17 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
         return;
     }
 
-    // 使用更小的扫描块大小（匹配页大小的倍数）
-    uint64_t scan_chunk_size = std::min(static_cast<uint64_t>(config_.chunk_size),
-                                        static_cast<uint64_t>(16) * config_.page_size); // 最大16页
+    // 优化大磁盘扫描：使用更大的缓冲区和智能扫描步长
+    uint64_t scan_chunk_size = config_.chunk_size;
     std::vector<uint8_t> buffer(scan_chunk_size + config_.page_size);
 
-    uint64_t last_progress_time = 0;
+    // 智能选择扫描步长：
+    // - 页对齐扫描（4KB步长）用于正常情况
+    // - 细粒度扫描（512字节）用于非对齐页恢复
+    uint64_t scan_step = config_.use_page_aligned_scan ? config_.scan_step : 512;
+
+    auto last_progress_time = std::chrono::steady_clock::now();
+    uint64_t pages_in_chunk = 0;
 
     while (!should_stop_.load()) {
         // 获取下一个扫描块
@@ -329,23 +334,37 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
         }
 
         size_t bytes_read = device.gcount();
+        pages_in_chunk = 0;
 
-        // 扫描页 - 使用较小的扫描步长以找到非对齐的页
-        // 文件系统块通常为 4KB，InnoDB 页可能不在页边界上
-        // 参考 ibd2sql 和 testdisk 的扫描策略
-        uint64_t scan_step = 512;  // 扫描步长 512 字节，确保找到所有可能的页
+        // 扫描页
         for (uint64_t offset = 0; offset + config_.page_size <= bytes_read; offset += scan_step) {
             const uint8_t* page_data = buffer.data() + offset;
+
+            // 快速预检查：先检查页类型再验证完整页
+            uint16_t ptype = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+
+            // 快速过滤无效页类型
+            bool quick_valid = (ptype == FIL_PAGE_INDEX ||
+                               ptype == FIL_PAGE_SDI ||
+                               ptype == FIL_PAGE_SDI_ZIP ||
+                               ptype == FIL_PAGE_UNDO_LOG ||
+                               ptype == FIL_PAGE_COMPRESSED ||
+                               ptype == FIL_PAGE_TYPE_ALLOCATED ||
+                               ptype == 0x0003 || ptype == 0x0005 || ptype == 0x0008);
+
+            if (!quick_valid) {
+                continue;
+            }
 
             if (!is_valid_page(page_data, config_.page_size)) {
                 continue;
             }
 
             pages_scanned_.fetch_add(1);
+            pages_in_chunk++;
 
             // 检测页类型并收集
             PageType page_type = PageType::UNKNOWN;
-            uint16_t ptype = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
 
             if (ptype == FIL_PAGE_INDEX) {
                 page_type = PageType::INDEX;
@@ -402,29 +421,39 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 {
                     std::lock_guard<std::mutex> lock(pages_mutex_);
                     // 存储SDI页用于后续schema提取
-                    // sdi_pages_[space_id] = sdi_copy; // 需要在类中添加sdi_pages_成员
                 }
             }
 
-            // 检测FRM签名（可能在页内任何位置）
+            // 检测FRM签名
             if (config_.scan_frm_files) {
                 for (size_t frm_offset = 0; frm_offset + 10 <= config_.page_size; frm_offset++) {
                     if (is_frm_signature(page_data + frm_offset, config_.page_size - frm_offset)) {
-                        // 找到FRM签名
                         pages_found_.fetch_add(1);
                     }
                 }
             }
         }
 
-        // 进度报告 (每10秒)
-        auto now = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::system_clock::now().time_since_epoch()).count();
-        if (progress && now - last_progress_time >= 10) {
+        // 进度报告（优化：使用毫秒级间隔）
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_progress_time).count();
+
+        if (progress && elapsed_ms >= config_.progress_interval_ms) {
             double pct = static_cast<double>(chunk_start - config_.offset_start) /
-                        static_cast<double>(config_.offset_stop - config_.offset_start) * 100.0;
+                        static_cast<double>(actual_scan_stop_ - config_.offset_start) * 100.0;
+
+            // 计算扫描速度
+            double speed_mbps = 0.0;
+            if (elapsed_ms > 0) {
+                speed_mbps = (chunk_size / 1024.0 / 1024.0) / (elapsed_ms / 1000.0);
+            }
+
             std::ostringstream oss;
-            oss << "Worker " << worker_id << ": " << std::fixed << std::setprecision(1) << pct << "%";
+            oss << std::fixed << std::setprecision(1) << pct << "%"
+                << " (" << std::setprecision(0) << speed_mbps << " MB/s)"
+                << " pages=" << pages_scanned_.load()
+                << " found=" << pages_found_.load();
             progress(pct / 100.0, oss.str());
             last_progress_time = now;
         }

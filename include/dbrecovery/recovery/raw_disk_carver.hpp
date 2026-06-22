@@ -37,16 +37,19 @@ public:
         std::string device_path;      // 原始设备路径 (如 /dev/sda, /dev/nvme0n1)
         std::string output_dir;       // 输出目录
         uint32_t page_size = 16384;   // InnoDB页大小 (默认16KB)
-        uint32_t chunk_size = 64 * 1024 * 1024; // 每次读取块大小 (64MB)
-        uint32_t num_workers = 4;     // 工作进程数
+        uint32_t chunk_size = 256 * 1024 * 1024; // 每次读取块大小 (256MB，优化大磁盘)
+        uint32_t num_workers = 8;     // 工作进程数（默认8，支持更多并行）
         uint64_t offset_start = 0;    // 扫描起始偏移
         uint64_t offset_stop = UINT64_MAX; // 扫描结束偏移
+        uint32_t scan_step = 4096;    // 扫描步长（默认4KB，优化性能）
         bool scan_all_index = true;   // 扫描所有INDEX页
         bool recover_deleted = true;  // 恢复已删除记录
         bool verbose = false;         // 详细输出
         bool auto_detect_page_size = true; // 自动检测页大小
         bool scan_frm_files = true;   // 扫描FRM文件签名
         bool scan_sdi_pages = true;   // 扫描SDI页
+        bool use_page_aligned_scan = true; // 使用页对齐扫描（提升性能）
+        uint32_t progress_interval_ms = 1000; // 进度报告间隔（毫秒）
         // TRUNCATE恢复支持: 指定要恢复的index_id列表
         std::vector<uint64_t> target_index_ids;  // 只恢复指定的index_id
         std::vector<uint64_t> exclude_index_ids; // 排除已知的系统表index_id
