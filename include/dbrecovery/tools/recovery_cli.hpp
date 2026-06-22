@@ -131,6 +131,9 @@ private:
     // 导出数据
     bool export_data(const std::string& output_path, const std::string& format,
                     const std::vector<std::map<std::string, std::string>>& records);
+
+    // 从JSON文件加载schema
+    std::optional<catalog::TableSchema> load_schema_from_file(const std::string& schema_file_path);
 };
 
 // ==================== 实现 ====================
@@ -163,6 +166,7 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--ibd=<path>\033[0m               Path to .ibd file (required for single file mode)\n";
     std::cout << "  \033[1m--frm=<path>\033[0m               Path to .frm file for schema (MySQL 5.6/5.7)\n";
     std::cout << "  \033[1m--schema=<def>\033[0m            Manual schema definition (format: col:type:size:pk,...)\n";
+    std::cout << "  \033[1m--schema-file=<path>\033[0m       Path to JSON schema file for schema-aware recovery\n";
     std::cout << "  \033[1m--output=<dir>\033[0m             Output directory (default: /tmp/recovered)\n";
     std::cout << "  \033[1m--table-id=<id>\033[0m            Table ID for SDI lookup (default: 0)\n";
     std::cout << "  \033[1m--page-size=<size>\033[0m         Page size: 4096/8192/16384/32768/65536 (default: 16384)\n";
@@ -411,6 +415,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // Manual schema option (format: col_name:type:size:pk,...)
     std::string schema_str = parser_.get_option("schema", "");
 
+    // Schema file option (JSON format)
+    std::string schema_file_path = parser_.get_option("schema-file", "");
+
     // Disk carving recovery mode - raw device scanning (no backup needed)
     if (disk_carving) {
         if (device_path.empty()) {
@@ -434,11 +441,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.recover_deleted = true;
         carver.set_config(config);
 
+        // Load external schema if provided
+        std::optional<catalog::TableSchema> external_schema = load_schema_from_file(schema_file_path);
+
         auto result = carver.scan_and_recover([&](double progress, const std::string& msg) {
             if (verbose) {
                 std::cout << "[" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
             }
         });
+
+        // If external schema was provided and SDI didn't find schema, apply external schema
+        if (external_schema.has_value() && result.inferred_schemas.empty()) {
+            std::cout << "[INFO] Applying external schema to recovered records\n";
+            result.inferred_schemas[0] = *external_schema;
+        }
 
         if (result.success) {
             std::cout << "[INFO] Disk carving completed.\n";
@@ -1539,6 +1555,131 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 inline void RecoveryCLI::show_stats(const RecoveryStats& stats) {
     std::cout << "\n=== Recovery Statistics ===\n";
     std::cout << stats.to_string() << "\n";
+}
+
+inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_from_file(
+    const std::string& schema_file_path) {
+
+    if (schema_file_path.empty()) {
+        return std::nullopt;
+    }
+
+    std::ifstream file(schema_file_path);
+    if (!file) {
+        std::cerr << "[ERROR] Cannot open schema file: " << schema_file_path << "\n";
+        return std::nullopt;
+    }
+
+    try {
+        std::string content((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+
+        auto json = nlohmann::json::parse(content);
+
+        catalog::TableSchema schema;
+
+        // Support multiple JSON formats
+        // Format 1: SDI format with dd_object
+        if (json.contains("dd_object") && json["dd_object_type"] == "Table") {
+            auto& table_json = json["dd_object"];
+            schema.table_name = table_json.value("name", "");
+
+            if (table_json.contains("columns")) {
+                uint32_t ordinal = 1;
+                for (const auto& col : table_json["columns"]) {
+                    catalog::ColumnInfo col_info;
+                    col_info.name = col.value("name", "");
+                    col_info.mysql_type_id = col.value("type", 0);
+                    col_info.is_nullable = col.value("is_nullable", true);
+                    col_info.column_length = col.value("char_length", col.value("length", 0));
+                    col_info.is_signed = !col.value("is_unsigned", false);
+                    col_info.ordinal = col.value("ordinal_position", ordinal);
+                    col_info.physical_pos = col.value("ordinal_position", ordinal);
+
+                    // Skip system columns
+                    if (col_info.name == "DB_TRX_ID" ||
+                        col_info.name == "DB_ROLL_PTR" ||
+                        col_info.name == "DB_ROW_ID") {
+                        continue;
+                    }
+
+                    // Parse ENUM/SET elements if present
+                    if (col.contains("elements") && col["elements"].is_array()) {
+                        static const std::string base64_chars =
+                            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                        std::vector<std::string>* target_values =
+                            (col_info.mysql_type_id == 23) ? &col_info.set_values : &col_info.enum_values;
+                        for (const auto& elem : col["elements"]) {
+                            if (elem.contains("name")) {
+                                std::string encoded = elem["name"].get<std::string>();
+                                // Base64 decode
+                                std::string decoded;
+                                std::vector<int> T(256, -1);
+                                for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+                                int val = 0, valb = -8;
+                                for (unsigned char c : encoded) {
+                                    if (T[c] == -1) break;
+                                    val = (val << 6) + T[c];
+                                    valb += 6;
+                                    if (valb >= 0) {
+                                        decoded.push_back(char((val >> valb) & 0xFF));
+                                        valb -= 8;
+                                    }
+                                }
+                                target_values->push_back(decoded);
+                            }
+                        }
+                    }
+
+                    schema.columns[ordinal++] = col_info;
+                }
+            }
+        }
+        // Format 2: Simple format with columns array
+        else if (json.contains("columns")) {
+            schema.table_name = json.value("table_name", json.value("name", ""));
+            uint32_t ordinal = 1;
+            for (const auto& col : json["columns"]) {
+                catalog::ColumnInfo col_info;
+                col_info.name = col.value("name", "");
+                col_info.mysql_type_id = col.value("type", col.value("mysql_type_id", 0));
+                col_info.is_nullable = col.value("is_nullable", col.value("nullable", true));
+                col_info.column_length = col.value("length", col.value("column_length", 0));
+                col_info.is_signed = !col.value("is_unsigned", col.value("unsigned", false));
+                col_info.ordinal = ordinal;
+                col_info.physical_pos = ordinal;
+
+                // Skip system columns
+                if (col_info.name == "DB_TRX_ID" ||
+                    col_info.name == "DB_ROLL_PTR" ||
+                    col_info.name == "DB_ROW_ID") {
+                    continue;
+                }
+
+                schema.columns[ordinal++] = col_info;
+            }
+        }
+        // Format 3: Try from_json method
+        else {
+            if (!schema.from_json(json)) {
+                std::cerr << "[ERROR] Cannot parse schema JSON format\n";
+                return std::nullopt;
+            }
+        }
+
+        if (schema.columns.empty()) {
+            std::cerr << "[WARN] Schema file contains no columns\n";
+            return std::nullopt;
+        }
+
+        std::cout << "[INFO] Loaded schema from file: " << schema.table_name
+                  << " (" << schema.columns.size() << " columns)\n";
+        return schema;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[ERROR] Failed to parse schema file: " << e.what() << "\n";
+        return std::nullopt;
+    }
 }
 
 } // namespace tools
