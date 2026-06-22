@@ -216,6 +216,13 @@ private:
         const std::vector<uint8_t>& page_data);
 
     /**
+     * @brief 使用Schema进行schema-aware记录解析
+     */
+    std::vector<std::map<std::string, std::string>> parse_records_with_schema(
+        const std::vector<uint8_t>& page_data,
+        const catalog::TableSchema& schema);
+
+    /**
      * @brief 启发式字段边界检测
      */
     std::vector<std::pair<size_t, size_t>> detect_field_boundaries(
@@ -226,6 +233,11 @@ private:
      */
     std::optional<catalog::TableSchema> extract_schema_from_sdi(
         const std::vector<uint8_t>& page_data);
+
+    /**
+     * @brief 从JSON对象解析表结构 (内部辅助函数)
+     */
+    static catalog::TableSchema parse_sdi_json_to_schema(const nlohmann::json& json_obj);
 
     /**
      * @brief 从FRM数据提取表结构 (MySQL 5.6/5.7)

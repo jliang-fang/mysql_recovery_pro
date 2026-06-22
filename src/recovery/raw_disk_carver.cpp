@@ -3,6 +3,8 @@
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
+#include "dbrecovery/innodb/sdi_manager.hpp"
+#include "nlohmann/json.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -275,6 +277,10 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
         result.index_pages_found += pages.size();
     }
 
+    // 从 last_scan_result_ 复制 SDI 页（工作线程已经存储到这里）
+    result.sdi_pages = last_scan_result_.sdi_pages;
+    result.sdi_pages_found = last_scan_result_.sdi_pages_found;
+
     auto end_time = std::chrono::high_resolution_clock::now();
     result.elapsed_seconds = std::chrono::duration<double>(end_time - start_time).count();
     result.success = true;
@@ -284,6 +290,7 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
         std::cout << "  Pages scanned: " << result.total_pages_scanned << "\n";
         std::cout << "  Valid pages: " << result.valid_pages_found << "\n";
         std::cout << "  INDEX pages: " << result.index_pages_found << "\n";
+        std::cout << "  SDI pages: " << result.sdi_pages_found << "\n";
         std::cout << "  Unique index_ids: " << result.pages_by_index_id.size() << "\n";
         std::cout << "  Time: " << result.elapsed_seconds << "s\n";
     }
@@ -513,12 +520,30 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
             progress(pct, "Recovering index_id " + std::to_string(index_id));
         }
 
-        // 对每个index_id的页进行解析
+        // 查找是否有匹配的schema
+        std::optional<catalog::TableSchema> matched_schema;
+        for (const auto& [space_id, schema] : result.inferred_schemas) {
+            // 简化匹配: 如果schema有列，就使用它
+            // 实际应该根据index_id匹配
+            if (!schema.columns.empty()) {
+                matched_schema = schema;
+                break;
+            }
+        }
+
+        // 对每个inex_id的页进行解析
         std::vector<std::map<std::string, std::string>> all_records;
 
         for (const auto& page_data : pages) {
-            auto records = parse_records_schemaless(page_data);
-            all_records.insert(all_records.end(), records.begin(), records.end());
+            if (matched_schema.has_value()) {
+                // 使用schema-aware解析
+                auto records = parse_records_with_schema(page_data, *matched_schema);
+                all_records.insert(all_records.end(), records.begin(), records.end());
+            } else {
+                // 使用schemaless解析
+                auto records = parse_records_schemaless(page_data);
+                all_records.insert(all_records.end(), records.begin(), records.end());
+            }
         }
 
         if (!all_records.empty()) {
@@ -781,6 +806,79 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_sch
     return records;
 }
 
+std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_with_schema(
+    const std::vector<uint8_t>& page_data,
+    const catalog::TableSchema& schema) {
+
+    std::vector<std::map<std::string, std::string>> records;
+
+    if (page_data.size() < 100 || schema.columns.empty()) return records;
+
+    const uint8_t* data = page_data.data();
+    size_t page_size = page_data.size();
+
+    // INDEX页格式验证
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    if (page_type != FIL_PAGE_INDEX) return records;
+
+    // 将TableSchema转换为IndexColumnDef列表
+    std::vector<innodb::IndexColumnDef> columns;
+    for (const auto& [ordinal, col] : schema.columns) {
+        innodb::IndexColumnDef col_def;
+        col_def.name = col.name;
+        col_def.col_type = col.mysql_type_id;
+        col_def.col_length = col.column_length;
+        col_def.is_nullable = col.is_nullable;
+        col_def.is_unsigned = !col.is_signed;  // is_signed = true means signed, so is_unsigned = !is_signed
+        col_def.precision = col.numeric_precision;
+        col_def.scale = col.numeric_scale;
+        col_def.datetime_precision = col.datetime_precision;
+        col_def.char_set_id = col.charset_id;
+        col_def.ordinal_position = col.ordinal;
+        col_def.enum_values = col.enum_values;
+        col_def.set_values = col.set_values;
+
+        // 计算mb_maxlen from charset
+        // utf8mb4 = 4, utf8 = 3, latin1 = 1
+        if (col.charset_id == 45 || col.charset_id == 46) {  // utf8mb4
+            col_def.mb_maxlen = 4;
+        } else if (col.charset_id == 33 || col.charset_id == 83) {  // utf8
+            col_def.mb_maxlen = 3;
+        }
+
+        columns.push_back(col_def);
+    }
+
+    // 使用InnoDBIndexParser进行schema-aware解析
+    innodb::InnoDBIndexParser parser;
+    parser.set_columns(columns);
+    parser.set_recover_deleted(config_.recover_deleted);
+    parser.set_bad_page_mode(2);
+
+    auto index_records = parser.parse_page(data, page_size, 0);
+
+    // 转换为map格式
+    for (const auto& rec : index_records) {
+        if (rec.is_deleted && !config_.recover_deleted) continue;
+
+        std::map<std::string, std::string> record;
+        for (size_t i = 0; i < rec.fields.size() && i < columns.size(); i++) {
+            const auto& col = columns[i];
+            if (rec.fields[i].is_null) {
+                record[col.name] = "NULL";
+            } else {
+                record[col.name] = rec.fields[i].str_value;
+            }
+        }
+        if (!record.empty()) {
+            records.push_back(record);
+        }
+    }
+
+    std::cerr << "[DEBUG] Schema-aware parsing found " << records.size() << " records" << std::endl;
+    return records;
+}
+
 std::vector<std::pair<size_t, size_t>> RawDiskCarver::detect_field_boundaries(
     const uint8_t* record_start, size_t max_len) {
     // 启发式字段边界检测
@@ -818,6 +916,196 @@ std::vector<std::pair<size_t, size_t>> RawDiskCarver::detect_field_boundaries(
     return boundaries;
 }
 
+// Helper function to parse SDI JSON to TableSchema
+// static
+catalog::TableSchema RawDiskCarver::parse_sdi_json_to_schema(const nlohmann::json& json_obj) {
+    catalog::TableSchema schema;
+
+    // MySQL 8.0+ SDI format: dd_object contains the table definition
+    // Format 1: {"dd_object_type":"Table", "dd_object": {...}}
+    // Format 2: {"dictionary": {"table": {...}}}
+
+    nlohmann::json table_json;
+
+    // Check for dd_object format (MySQL 8.0.46+ SDI format)
+    if (json_obj.contains("dd_object") && json_obj["dd_object_type"] == "Table") {
+        table_json = json_obj["dd_object"];
+        std::cerr << "[DEBUG SDI] Using dd_object format" << std::endl;
+    }
+    // Check for dictionary format
+    else if (json_obj.contains("dictionary")) {
+        auto dict = json_obj["dictionary"];
+        if (dict.contains("table")) {
+            table_json = dict["table"];
+            std::cerr << "[DEBUG SDI] Using dictionary format" << std::endl;
+        }
+    }
+    // Skip Tablespace entries (not table schema)
+    else if (json_obj.contains("dd_object_type") && json_obj["dd_object_type"] == "Tablespace") {
+        std::cerr << "[DEBUG SDI] Skipping Tablespace entry" << std::endl;
+        return schema;  // Empty schema
+    }
+
+    if (!table_json.is_null() && table_json.contains("columns")) {
+        schema.table_name = table_json.value("name", "");
+
+        uint32_t ordinal = 1;
+        for (const auto& col : table_json["columns"]) {
+            catalog::ColumnInfo column_info;
+            column_info.name = col.value("name", "");
+
+            // Handle type field - can be string or number
+            if (col.contains("type")) {
+                if (col["type"].is_number()) {
+                    // Type is numeric (MySQL 8.0 SDI format)
+                    column_info.mysql_type_id = col["type"].get<int>();
+                } else if (col["type"].is_string()) {
+                    std::string type_str = col["type"].get<std::string>();
+                    // Map InnoDB type strings to internal IDs
+                    if (type_str == "DECIMAL") column_info.mysql_type_id = 1;
+                    else if (type_str == "TINY") column_info.mysql_type_id = 2;
+                    else if (type_str == "SHORT") column_info.mysql_type_id = 3;
+                    else if (type_str == "LONG") column_info.mysql_type_id = 4;
+                    else if (type_str == "FLOAT") column_info.mysql_type_id = 5;
+                    else if (type_str == "DOUBLE") column_info.mysql_type_id = 6;
+                    else if (type_str == "TIMESTAMP") column_info.mysql_type_id = 8;
+                    else if (type_str == "LONGLONG") column_info.mysql_type_id = 9;
+                    else if (type_str == "INT24") column_info.mysql_type_id = 10;
+                    else if (type_str == "DATE") column_info.mysql_type_id = 11;
+                    else if (type_str == "TIME") column_info.mysql_type_id = 12;
+                    else if (type_str == "DATETIME") column_info.mysql_type_id = 13;
+                    else if (type_str == "YEAR") column_info.mysql_type_id = 14;
+                    else if (type_str == "NEWDATE") column_info.mysql_type_id = 15;
+                    else if (type_str == "VARCHAR") column_info.mysql_type_id = 16;
+                    else if (type_str == "BIT") column_info.mysql_type_id = 17;
+                    else if (type_str == "TIMESTAMP2") column_info.mysql_type_id = 18;
+                    else if (type_str == "DATETIME2") column_info.mysql_type_id = 19;
+                    else if (type_str == "TIME2") column_info.mysql_type_id = 20;
+                    else if (type_str == "NEWDECIMAL") column_info.mysql_type_id = 21;
+                    else if (type_str == "ENUM") column_info.mysql_type_id = 22;
+                    else if (type_str == "SET") column_info.mysql_type_id = 23;
+                    else if (type_str == "TINY_BLOB") column_info.mysql_type_id = 24;
+                    else if (type_str == "MEDIUM_BLOB") column_info.mysql_type_id = 25;
+                    else if (type_str == "LONG_BLOB") column_info.mysql_type_id = 26;
+                    else if (type_str == "BLOB") column_info.mysql_type_id = 27;
+                    else if (type_str == "VAR_STRING") column_info.mysql_type_id = 28;
+                    else if (type_str == "STRING") column_info.mysql_type_id = 29;
+                    else if (type_str == "GEOMETRY") column_info.mysql_type_id = 30;
+                    else if (type_str == "JSON") column_info.mysql_type_id = 31;
+                    else if (type_str == "VECTOR") column_info.mysql_type_id = 32;
+                }
+            }
+
+            column_info.is_nullable = col.value("is_nullable", true);
+
+            if (col.contains("length")) {
+                column_info.column_length = col["length"];
+            }
+
+            if (col.contains("char_length")) {
+                column_info.column_length = col["char_length"];
+            }
+
+            if (col.contains("charset_id")) {
+                column_info.charset_id = col["charset_id"];
+                column_info.collation_id = col.value("collation_id", 255);
+            }
+
+            if (col.contains("numeric_precision")) {
+                column_info.numeric_precision = col["numeric_precision"];
+            }
+            if (col.contains("numeric_scale")) {
+                column_info.numeric_scale = col["numeric_scale"];
+            }
+
+            if (col.contains("datetime_precision")) {
+                if (!col["datetime_precision"].is_null()) {
+                    column_info.datetime_precision = col["datetime_precision"].get<int>();
+                }
+            }
+
+            // Parse is_unsigned flag for numeric types (stored as is_signed in ColumnInfo)
+            if (col.contains("is_unsigned")) {
+                column_info.is_signed = !col["is_unsigned"].get<bool>();
+            }
+
+            // Parse ENUM/SET elements (stored as base64 in "elements" array)
+            // MySQL 8.0 SDI stores enum elements as base64 encoded names
+            if (col.contains("elements") && col["elements"].is_array()) {
+                static const std::string base64_chars =
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                std::vector<std::string>* target_values =
+                    (column_info.mysql_type_id == 23) ? &column_info.set_values : &column_info.enum_values;
+                for (const auto& elem : col["elements"]) {
+                    if (elem.contains("name")) {
+                        std::string encoded = elem["name"].get<std::string>();
+                        // Simple base64 decode
+                        std::string decoded;
+                        std::vector<int> T(256, -1);
+                        for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+                        int val = 0, valb = -8;
+                        for (unsigned char c : encoded) {
+                            if (T[c] == -1) break;
+                            val = (val << 6) + T[c];
+                            valb += 6;
+                            if (valb >= 0) {
+                                decoded.push_back(char((val >> valb) & 0xFF));
+                                valb -= 8;
+                            }
+                        }
+                        target_values->push_back(decoded);
+                    }
+                }
+                std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
+                          << target_values->size() << " elements (type="
+                          << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")" << std::endl;
+            }
+
+            // Parse physical_pos and ordinal_position
+            if (col.contains("physical_pos")) {
+                column_info.physical_pos = col["physical_pos"].get<uint32_t>();
+            }
+            if (col.contains("ordinal_position")) {
+                column_info.ordinal = col["ordinal_position"].get<uint32_t>();
+            }
+            if (column_info.physical_pos == 0 && col.contains("ordinal_position")) {
+                column_info.physical_pos = col["ordinal_position"].get<uint32_t>();
+            }
+
+            // Skip system columns
+            if (column_info.name == "DB_TRX_ID" ||
+                column_info.name == "DB_ROLL_PTR" ||
+                column_info.name == "DB_ROW_ID") {
+                continue;
+            }
+
+            if (column_info.ordinal == 0) {
+                column_info.ordinal = ordinal;
+            }
+            schema.columns[ordinal++] = column_info;
+        }
+
+        // Sort columns by physical_pos
+        if (!schema.columns.empty()) {
+            std::vector<std::pair<uint32_t, catalog::ColumnInfo>> cols_vec;
+            for (const auto& p : schema.columns) {
+                cols_vec.push_back(p);
+            }
+            std::sort(cols_vec.begin(), cols_vec.end(),
+                [](const auto& a, const auto& b) {
+                    return a.second.physical_pos < b.second.physical_pos;
+                });
+            schema.columns.clear();
+            uint32_t new_ordinal = 1;
+            for (const auto& p : cols_vec) {
+                schema.columns[new_ordinal++] = p.second;
+            }
+        }
+    }
+
+    return schema;
+}
+
 std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
     const std::vector<uint8_t>& page_data) {
 
@@ -832,71 +1120,153 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
         return std::nullopt;
     }
 
+    std::cerr << "[INFO] Found SDI page (type=0x" << std::hex << page_type << std::dec << ")" << std::endl;
+
     // SDI页格式:
-    // - FIL_HEADER (24 bytes)
-    // - SDI数据 (压缩或未压缩)
-    // - FIL_TRAILER (8 bytes)
+    // 对于 FIL_PAGE_SDI_ZIP (0x45BD):
+    //   - FIL_HEADER (38 bytes)
+    //   - BTR_PAGE_HEADER (36 bytes at offset 38)
+    //   - Record area with SDI records
+    //
+    // SDI记录存储在INDEX页格式中，每条记录包含压缩的SDI JSON
 
-    // 对于FIL_PAGE_SDI (0x45BE): 数据未压缩
-    // 对于FIL_PAGE_SDI_ZIP (0x45BD): 数据使用zlib压缩
+    // 对于 FIL_PAGE_SDI (0x45BE):
+    //   - FIL_HEADER (38 bytes)
+    //   - SDI data directly
 
-    constexpr size_t FIL_TRAILER_SIZE = 8;
-
-    size_t sdi_offset = FIL_HEADER_SIZE;  // 38 bytes (FIL_PAGE_DATA)
-    size_t sdi_len = page_size - FIL_HEADER_SIZE - FIL_TRAILER_SIZE;
+    size_t sdi_payload_start = FIL_HEADER_SIZE;
+    size_t sdi_payload_len = page_size - FIL_HEADER_SIZE - 8;  // FIL_TRAILER = 8
 
     if (page_type == FIL_PAGE_SDI_ZIP) {
-        // 需要解压缩
-        // 参考 ibd2sql innodb_page/page.py
-        // 压缩数据从offset 38开始
+        // FIL_PAGE_SDI_ZIP 使用 INDEX 页格式存储 SDI 记录
+        // 但 InnoDBIndexParser 可能无法正确解析（SDI 记录格式特殊）
+        // 直接搜索 zlib 签名 (78 9c) 并解压
 
-        // 使用zlib解压 (简化实现)
-        // 实际需要完整实现zlib解压
-        std::cerr << "[INFO] SDI page is compressed (0x45BD), attempting decompression" << std::endl;
+        std::cerr << "[INFO] SDI page is compressed (0x45BD), searching for zlib signatures" << std::endl;
 
-        // TODO: 实现zlib解压缩
-        return std::nullopt;
-    }
+        // 搜索 zlib 压缩数据签名 (78 9c 或 78 da 等)
+        // SDI 记录存储在 INDEX 页格式的 record area 中
+        // 从 offset 100 开始搜索（跳过 FIL header 和 BTR header）
+        const size_t search_start = 100;
+        const size_t search_end = page_size - 8;  // 跳过 FIL trailer
 
-    // 未压缩的SDI数据
-    // SDI格式是JSON，需要解析JSON来获取schema
+        for (size_t offset = search_start; offset + 2 < search_end; offset++) {
+            // 检查 zlib 签名: 78 9c (default compression), 78 da (best compression), 78 01 (no compression)
+            if (data[offset] == 0x78 && (data[offset + 1] == 0x9c || data[offset + 1] == 0xda ||
+                                          data[offset + 1] == 0x01 || data[offset + 1] == 0x5e)) {
 
-    try {
-        // 跳过SDI header (参考 ibd2sql)
-        // SDI header structure:
-        // - type (1 byte)
-        // - compressed_len (4 bytes LE)
-        // - uncompressed_len (4 bytes LE)
+                std::cerr << "[DEBUG] Found zlib signature at offset " << offset << std::endl;
 
-        if (sdi_offset + 9 > page_size) return std::nullopt;
+                // 直接解压 zlib 数据（不包含 SDI header）
+                const uint8_t* zlib_data = data + offset;
+                size_t max_zlib_len = search_end - offset;
 
-        uint8_t sdi_type = data[sdi_offset];
-        uint32_t compressed_len = read_le<uint32_t>(data, sdi_offset + 1);
-        uint32_t uncompressed_len = read_le<uint32_t>(data, sdi_offset + 5);
+                // 使用 raw deflate 解压
+                std::vector<uint8_t> decompressed;
+                z_stream strm = {};
+                strm.next_in = const_cast<Bytef*>(zlib_data);
+                strm.avail_in = static_cast<uInt>(max_zlib_len);
 
-        size_t json_start = sdi_offset + 9;
-        size_t json_len = uncompressed_len;
+                // 初始缓冲区大小 64KB
+                decompressed.resize(64 * 1024);
+                strm.next_out = decompressed.data();
+                strm.avail_out = static_cast<uInt>(decompressed.size());
 
-        if (json_start + json_len > page_size) {
-            json_len = page_size - json_start;
+                // 使用自动检测窗口大小 (32 + 15 = 47) 自动检测 zlib/gzip 头
+                int ret = inflateInit2(&strm, 47);
+                if (ret != Z_OK) {
+                    std::cerr << "[DEBUG] inflateInit2 failed: " << ret << std::endl;
+                    continue;
+                }
+
+                bool decompress_ok = false;
+                do {
+                    ret = inflate(&strm, Z_NO_FLUSH);
+                    if (ret == Z_STREAM_END) {
+                        decompress_ok = true;
+                        break;
+                    }
+                    if (ret == Z_BUF_ERROR) {
+                        // 扩展缓冲区
+                        size_t new_size = decompressed.size() * 2;
+                        if (new_size > 16 * 1024 * 1024) break;  // 最大 16MB
+                        decompressed.resize(new_size);
+                        strm.next_out = decompressed.data() + strm.total_out;
+                        strm.avail_out = static_cast<uInt>(new_size - strm.total_out);
+                    } else if (ret != Z_OK) {
+                        break;
+                    }
+                } while (strm.avail_in > 0);
+
+                inflateEnd(&strm);
+
+                if (!decompress_ok || strm.total_out == 0) {
+                    std::cerr << "[DEBUG] Decompression failed at offset " << offset << std::endl;
+                    continue;
+                }
+
+                decompressed.resize(strm.total_out);
+                std::cerr << "[DEBUG] Decompressed " << strm.total_out << " bytes from zlib" << std::endl;
+
+                // 解析 JSON
+                try {
+                    auto json_obj = nlohmann::json::parse(decompressed.begin(), decompressed.end());
+
+                    catalog::TableSchema schema;
+                    schema = parse_sdi_json_to_schema(json_obj);
+
+                    if (!schema.columns.empty()) {
+                        std::cerr << "[INFO] Successfully extracted schema from zlib compressed SDI: "
+                                  << schema.columns.size() << " columns" << std::endl;
+                        return schema;
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[DEBUG] JSON parse failed: " << e.what() << std::endl;
+                    // 继续搜索下一个 zlib 签名
+                }
+            }
         }
 
-        // 解析JSON数据
-        std::string json_str(reinterpret_cast<const char*>(data + json_start), json_len);
+        // 如果直接搜索失败，尝试使用 InnoDBIndexParser
+        std::cerr << "[INFO] Direct zlib search failed, trying InnoDBIndexParser" << std::endl;
 
-        // 使用nlohmann::json解析 (如果可用)
-        // 简化实现：返回空schema
-        // 实际应该解析JSON提取列信息
+        innodb::InnoDBIndexParser parser;
+        auto records = parser.parse_page(data, page_size, 0);
 
-        std::cerr << "[INFO] SDI JSON length: " << json_len << " bytes" << std::endl;
+        std::cerr << "[INFO] Found " << records.size() << " records in SDI page" << std::endl;
 
-        // TODO: 完整的JSON解析和schema提取
-        return std::nullopt;
+        // 每条记录包含一个 SDI payload
+        for (const auto& rec : records) {
+            if (rec.fields.size() >= 1 && !rec.fields[0].raw_bytes.empty()) {
+                const auto& raw_bytes = rec.fields[0].raw_bytes;
 
-    } catch (const std::exception& e) {
-        std::cerr << "[ERROR] Failed to extract schema from SDI: " << e.what() << std::endl;
+                std::cerr << "[DEBUG] SDI record field size: " << raw_bytes.size() << std::endl;
+
+                auto schema = innodb::SDIManager::parse_sdi_record(raw_bytes.data(), raw_bytes.size());
+                if (!schema.columns.empty()) {
+                    std::cerr << "[INFO] Successfully extracted schema from SDI record: "
+                              << schema.columns.size() << " columns" << std::endl;
+                    return schema;
+                }
+            }
+        }
+
+        std::cerr << "[WARN] No valid SDI schema found in SDI page" << std::endl;
         return std::nullopt;
     }
+
+    // 对于未压缩的 SDI 页，直接解析
+    std::cerr << "[INFO] SDI page is uncompressed (0x45BE)" << std::endl;
+
+    auto schema = innodb::SDIManager::parse_sdi_record(data + sdi_payload_start, sdi_payload_len);
+
+    if (schema.columns.empty()) {
+        std::cerr << "[WARN] No columns extracted from SDI" << std::endl;
+        return std::nullopt;
+    }
+
+    std::cerr << "[INFO] Successfully extracted schema with " << schema.columns.size() << " columns from SDI" << std::endl;
+    return schema;
 }
 
 } // namespace recovery
