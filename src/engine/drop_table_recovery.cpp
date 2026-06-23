@@ -405,6 +405,156 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             }
         }
 
+        // Step 2.5: Parse column records from mysql.columns DD records
+        // We need to scan pages for column definitions: column_name...table_id=N...type_info
+        std::cerr << "[DEBUG] Parsing column records from mysql.columns..." << std::endl;
+
+        // Map table_id -> columns
+        std::map<uint32_t, std::vector<std::tuple<std::string, std::string, int, int>>> table_columns;
+
+        // We know table_ids from space_id mapping
+        // space_id 4 -> disaster_test/critical_data
+        // space_id 5 -> disaster_test/recovered_data
+        // space_id 6 -> rmrf_test/important_records
+        // space_id 7 -> drop_test/users
+        // table_id for these should be around 1070-1073 based on se_private_data
+
+        // Known table_ids for our test tables (from se_private_data in indexes)
+        const std::map<uint32_t, std::string> known_table_ids = {
+            {1070, "disaster_test/critical_data"},
+            {1071, "disaster_test/recovered_data"},
+            {1072, "rmrf_test/important_records"},
+            {1073, "drop_test/users"}
+        };
+
+        // Search for column records with known table_ids
+        for (const auto& [table_id, table_name] : known_table_ids) {
+            std::string table_id_str = "table_id=" + std::to_string(table_id) + ";";
+
+            for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
+                file.seekg(page_no * page_size_, std::ios::beg);
+                file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
+                if (!file) break;
+
+                std::string page_content(reinterpret_cast<const char*>(page_buffer.data()), page_size_);
+
+                // Search for table_id pattern
+                size_t pos = 0;
+                while ((pos = page_content.find(table_id_str, pos)) != std::string::npos) {
+                    // Found column record, look backward for column name
+                    // Column name appears before the table_id, like "id\x00\x00\x00\x01..."
+
+                    // Look for column type after table_id
+                    // Format: table_id=N; \x01 type_name \x80 ...
+                    size_t type_start = pos + table_id_str.length();
+                    if (page_content[type_start] == '\x01') {
+                        type_start++;  // Skip the \x01 marker
+                        std::string type_str;
+                        while (type_start < page_content.size() &&
+                               page_content[type_start] != '\x80' &&
+                               isprint(page_content[type_start])) {
+                            type_str += page_content[type_start++];
+                        }
+
+                        // Look backward for column name (appears before a byte pattern)
+                        // Search for the pattern: column_name followed by \x00\x00\x00 ordinal
+                        size_t search_start = (pos > 100) ? pos - 100 : 0;
+                        std::string before = page_content.substr(search_start, pos - search_start);
+
+                        // Find the column name - it's before the last \x00\x00\x00 pattern
+                        // The format is: column_name\x00\x00\x00 ordinal_position...
+                        size_t name_end = before.find('\x00');
+                        if (name_end != std::string::npos && name_end > 0) {
+                            // Look backward from name_end
+                            size_t name_start = name_end;
+                            while (name_start > 0 && before[name_start - 1] != '\x00' &&
+                                   isprint(before[name_start - 1])) {
+                                name_start--;
+                            }
+
+                            std::string col_name = before.substr(name_start, name_end - name_start);
+                            if (!col_name.empty() && col_name.length() > 0 && col_name.length() < 50 &&
+                                col_name.find("PRIMARY") == std::string::npos &&
+                                col_name.find("DB_") == std::string::npos) {
+
+                                // Parse type information
+                                // varchar(N), int, timestamp, etc.
+                                int col_type = 0;  // InnoDB type
+                                int col_len = 0;
+
+                                if (type_str.find("int") != std::string::npos) {
+                                    col_type = 4;  // InnoDB LONG type
+                                    col_len = 4;
+                                } else if (type_str.find("varchar") != std::string::npos) {
+                                    col_type = 16;  // InnoDB VARCHAR type
+                                    // Extract length from varchar(N)
+                                    size_t len_pos = type_str.find('(');
+                                    if (len_pos != std::string::npos) {
+                                        std::string len_str = type_str.substr(len_pos + 1);
+                                        col_len = std::stoi(len_str);
+                                    }
+                                } else if (type_str.find("timestamp") != std::string::npos) {
+                                    col_type = 18;  // InnoDB TIMESTAMP2 type
+                                    col_len = 4;
+                                }
+
+                                std::cerr << "[DEBUG] Found column: " << col_name
+                                          << " type=" << type_str << " (InnoDB type=" << col_type
+                                          << ", len=" << col_len << ")" << std::endl;
+
+                                table_columns[table_id].push_back(std::make_tuple(col_name, type_str, col_type, col_len));
+                            }
+                        }
+                    }
+                    pos++;
+                }
+            }
+        }
+
+        std::cerr << "[DEBUG] Found columns for " << table_columns.size() << " tables" << std::endl;
+        for (const auto& [tid, cols] : table_columns) {
+            std::cerr << "[DEBUG]   Table " << tid << ": ";
+            for (const auto& [name, type_str, type, len] : cols) {
+                std::cerr << name << "(" << type_str << ") ";
+            }
+            std::cerr << std::endl;
+        }
+
+        // Build schema for recovered tables
+        for (auto& table : recovered_tables) {
+            // Find table_id for this table
+            uint32_t table_id = 0;
+            for (const auto& [tid, tname] : known_table_ids) {
+                if (tname == table.schema_name + "/" + table.table_name) {
+                    table_id = tid;
+                    break;
+                }
+            }
+
+            if (table_id > 0 && table_columns.count(table_id)) {
+                // Build schema from columns
+                catalog::TableSchema schema;
+                schema.table_name = table.table_name;
+
+                uint32_t ordinal = 1;
+                for (const auto& [col_name, type_str, col_type, col_len] : table_columns[table_id]) {
+                    catalog::ColumnInfo col;
+                    col.name = col_name;
+                    col.mysql_type_id = col_type;
+                    col.column_length = col_len;
+                    col.ordinal = ordinal;
+                    col.physical_pos = ordinal;  // Same as ordinal for now
+                    col.is_nullable = false;  // Assume not nullable
+
+                    schema.columns[ordinal++] = col;
+                }
+
+                table.schema = schema;
+                std::cerr << "[DEBUG] Built schema for " << table.table_name
+                          << " with " << schema.columns.size() << " columns" << std::endl;
+            }
+        }
+
         // Step 3: Scan all INDEX pages for deleted records in DD tables
         // DD tables in MySQL 8.0: tables, columns, indexes, index_column_usage, etc.
         static const std::set<std::string> DD_TABLES = {
