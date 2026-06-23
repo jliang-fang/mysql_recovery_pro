@@ -331,38 +331,55 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                     pos++;
                 }
 
-                // Also look for space_id in mysql.tables-like records
-                // Format: "schema/tableautoextend_size=0;...;id=N"
-                for (const auto& table_name : {"drop_test/users", "rmrf_test/important_records",
-                                                "disaster_test/critical_data", "disaster_test/recovered_data"}) {
-                    size_t tpos = page_content.find(table_name);
-                    if (tpos != std::string::npos) {
-                        // Look for "id=N" pattern within next 300 bytes
-                        size_t search_end = std::min(tpos + 300, page_content.size());
-                        std::string after = page_content.substr(tpos + strlen(table_name), search_end - tpos - strlen(table_name));
+                // Dynamically search for all user tables (not hardcoded list)
+                // Look for pattern: schema/table_name followed by "id=N" for space_id
+                // MySQL 8.0 DD format: "./schema/table_name.ibd id=N;"
+                size_t tbl_pos = 0;
+                while ((tbl_pos = page_content.find(".ibd", tbl_pos)) != std::string::npos) {
+                    // Look backward for "/" to find schema/table pattern
+                    if (tbl_pos > 50) {
+                        size_t slash_pos = page_content.rfind('/', tbl_pos);
+                        if (slash_pos != std::string::npos && slash_pos > tbl_pos - 100) {
+                            // Find the start of table name (look for "/" before schema name)
+                            size_t prev_slash = page_content.rfind('/', slash_pos - 1);
+                            size_t name_start = (prev_slash != std::string::npos && prev_slash > slash_pos - 50)
+                                ? prev_slash + 1 : slash_pos - 50;
 
-                        // Look for ";id=N" pattern (this is space_id in tables DD record)
-                        size_t id_pos = after.find(";id=");
-                        if (id_pos == std::string::npos) {
-                            id_pos = after.find("id=");
-                        }
+                            // Extract schema/table name
+                            std::string potential_table = page_content.substr(name_start, tbl_pos - name_start);
 
-                        if (id_pos != std::string::npos) {
-                            size_t id_start = id_pos + 4;  // Skip ";id="
-                            if (id_pos == 0) id_start = 3;  // Skip "id="
-                            std::string id_str;
-                            while (id_start < after.size() && isdigit(after[id_start])) {
-                                id_str += after[id_start++];
-                            }
-                            if (!id_str.empty()) {
-                                uint32_t space_id = std::stoul(id_str);
-                                table_to_space_id[table_name] = space_id;
-                                space_id_to_table[space_id] = table_name;
-                                std::cerr << "[DEBUG] Found table record: " << table_name
-                                          << " -> space_id=" << space_id << std::endl;
+                            // Validate it looks like a table name (has "/" and no special chars)
+                            size_t table_slash = potential_table.find('/');
+                            if (table_slash != std::string::npos &&
+                                potential_table.find("mysql/") == std::string::npos &&
+                                potential_table.find("sys/") == std::string::npos &&
+                                potential_table.find("performance_schema/") == std::string::npos &&
+                                potential_table.find("information_schema/") == std::string::npos) {
+
+                                // Look for "id=N" after ".ibd"
+                                size_t id_search_start = tbl_pos + 4;
+                                size_t id_search_end = std::min(id_search_start + 100, page_content.size());
+                                std::string after_ibd = page_content.substr(id_search_start, id_search_end - id_search_start);
+
+                                size_t id_pos = after_ibd.find("id=");
+                                if (id_pos != std::string::npos) {
+                                    size_t id_start = id_pos + 3;
+                                    std::string id_str;
+                                    while (id_start < after_ibd.size() && isdigit(after_ibd[id_start])) {
+                                        id_str += after_ibd[id_start++];
+                                    }
+                                    if (!id_str.empty()) {
+                                        uint32_t space_id = std::stoul(id_str);
+                                        table_to_space_id[potential_table] = space_id;
+                                        space_id_to_table[space_id] = potential_table;
+                                        std::cerr << "[DEBUG] Found table: " << potential_table
+                                                  << " -> space_id=" << space_id << std::endl;
+                                    }
+                                }
                             }
                         }
                     }
+                    tbl_pos++;
                 }
             }
 
