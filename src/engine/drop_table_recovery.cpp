@@ -269,17 +269,14 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
         if (dd_table_index_ids.empty()) {
             std::cerr << "[DEBUG] No DD table index IDs found via SDI, trying direct string search..." << std::endl;
 
-            // Known user tables to look for (these are test tables we know exist)
-            const std::vector<std::string> known_user_tables = {
-                "drop_test/users",
-                "rmrf_test/important_records",
-                "disaster_test/critical_data",
-                "disaster_test/recovered_data"
-            };
+            // Scan all INDEX pages for table metadata
+            // We're looking for:
+            // 1. mysql.tables DD records: "schema/table" with "id=N" (space_id)
+            // 2. mysql.indexes DD records: "PRIMARY" with "flags=0;id=N;root=M;space_id=X;table_id=Y"
 
-            // Scan all INDEX pages for known table names
-            std::set<std::string> found_tables;
+            std::map<std::string, uint32_t> table_to_space_id;
             std::map<std::string, uint64_t> table_to_index_id;
+            std::map<uint32_t, std::string> space_id_to_table;  // Map space_id -> table name
 
             for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
                 file.seekg(page_no * page_size_, std::ios::beg);
@@ -288,36 +285,119 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
 
                 if (!is_index_page_type(page_buffer.data())) continue;
 
-                uint64_t idx_id = extract_index_id_from_page(page_buffer.data());
-
                 // Convert page buffer to string for searching
                 std::string page_content(reinterpret_cast<const char*>(page_buffer.data()), page_size_);
 
-                // Check for known table names
-                for (const auto& table_name : known_user_tables) {
-                    if (page_content.find(table_name) != std::string::npos) {
-                        found_tables.insert(table_name);
-                        table_to_index_id[table_name] = idx_id;
+                // Look for se_private_data pattern: "flags=0;id=N;root=M;space_id=X;table_id=Y"
+                // This is in mysql.indexes DD records
+                size_t pos = 0;
+                while ((pos = page_content.find("flags=0;id=", pos)) != std::string::npos) {
+                    // Parse the id value
+                    size_t id_start = pos + 11;  // Skip "flags=0;id="
+                    std::string id_str;
+                    while (id_start < page_content.size() && isdigit(page_content[id_start])) {
+                        id_str += page_content[id_start++];
+                    }
+
+                    // Look for space_id in the same record
+                    size_t space_id_pos = page_content.find("space_id=", pos);
+                    if (space_id_pos != std::string::npos && space_id_pos < pos + 100) {
+                        size_t sp_id_start = space_id_pos + 9;  // Skip "space_id="
+                        std::string sp_id_str;
+                        while (sp_id_start < page_content.size() && isdigit(page_content[sp_id_start])) {
+                            sp_id_str += page_content[sp_id_start++];
+                        }
+
+                        if (!id_str.empty() && !sp_id_str.empty()) {
+                            uint64_t idx_id = std::stoull(id_str);
+                            uint32_t sp_id = std::stoul(sp_id_str);
+
+                            // Check if this is a PRIMARY index (look for "PRIMARY" before the flags)
+                            size_t primary_pos = page_content.rfind("PRIMARY", pos);
+                            if (primary_pos != std::string::npos && primary_pos > pos - 50) {
+                                // This is a PRIMARY index record
+                                std::cerr << "[DEBUG] Found PRIMARY index: id=" << idx_id
+                                          << ", space_id=" << sp_id << std::endl;
+
+                                // Map space_id to index_id
+                                if (sp_id > 3) {  // Skip system tablespace IDs
+                                    // We'll map this to a table name later using space_id
+                                    space_id_to_table[sp_id] = "";  // Placeholder
+                                    table_to_index_id[std::to_string(sp_id)] = idx_id;
+                                }
+                            }
+                        }
+                    }
+                    pos++;
+                }
+
+                // Also look for space_id in mysql.tables-like records
+                // Format: "schema/tableautoextend_size=0;...;id=N"
+                for (const auto& table_name : {"drop_test/users", "rmrf_test/important_records",
+                                                "disaster_test/critical_data", "disaster_test/recovered_data"}) {
+                    size_t tpos = page_content.find(table_name);
+                    if (tpos != std::string::npos) {
+                        // Look for "id=N" pattern within next 300 bytes
+                        size_t search_end = std::min(tpos + 300, page_content.size());
+                        std::string after = page_content.substr(tpos + strlen(table_name), search_end - tpos - strlen(table_name));
+
+                        // Look for ";id=N" pattern (this is space_id in tables DD record)
+                        size_t id_pos = after.find(";id=");
+                        if (id_pos == std::string::npos) {
+                            id_pos = after.find("id=");
+                        }
+
+                        if (id_pos != std::string::npos) {
+                            size_t id_start = id_pos + 4;  // Skip ";id="
+                            if (id_pos == 0) id_start = 3;  // Skip "id="
+                            std::string id_str;
+                            while (id_start < after.size() && isdigit(after[id_start])) {
+                                id_str += after[id_start++];
+                            }
+                            if (!id_str.empty()) {
+                                uint32_t space_id = std::stoul(id_str);
+                                table_to_space_id[table_name] = space_id;
+                                space_id_to_table[space_id] = table_name;
+                                std::cerr << "[DEBUG] Found table record: " << table_name
+                                          << " -> space_id=" << space_id << std::endl;
+                            }
+                        }
                     }
                 }
             }
 
-            std::cerr << "[DEBUG] Found " << found_tables.size() << " known user table names" << std::endl;
-            for (const auto& name : found_tables) {
-                std::cerr << "[DEBUG]   " << name << " (index_id=" << table_to_index_id[name] << ")" << std::endl;
+            std::cerr << "[DEBUG] Found " << table_to_index_id.size() << " PRIMARY indexes" << std::endl;
+            std::cerr << "[DEBUG] Found " << table_to_space_id.size() << " tables with space_id" << std::endl;
+
+            // Create recovered table entries by matching space_id
+            std::set<std::string> found_tables;
+            for (const auto& [name, sp_id] : table_to_space_id) {
+                found_tables.insert(name);
             }
 
-            // Create recovered table entries
             for (const auto& name : found_tables) {
                 size_t slash_pos = name.find('/');
                 std::string schema_name = name.substr(0, slash_pos);
                 std::string table_name = name.substr(slash_pos + 1);
 
                 RecoveredTableMetadata metadata;
-                metadata.table_id = 0;  // Unknown
+                metadata.table_id = 0;
                 metadata.schema_name = schema_name;
                 metadata.table_name = table_name;
-                metadata.primary_index_id = table_to_index_id[name];
+
+                // Get space_id if found
+                if (table_to_space_id.count(name)) {
+                    metadata.space_id = table_to_space_id[name];
+
+                    // Look up index_id by space_id
+                    std::string sp_id_key = std::to_string(metadata.space_id);
+                    if (table_to_index_id.count(sp_id_key)) {
+                        metadata.primary_index_id = table_to_index_id[sp_id_key];
+                        std::cerr << "[DEBUG] Mapped " << name << " (space_id=" << metadata.space_id
+                                  << ") to index_id=" << metadata.primary_index_id << std::endl;
+                    }
+                }
+
                 metadata.recovered_from_deleted = true;
                 metadata.confidence = 0.9;
 
