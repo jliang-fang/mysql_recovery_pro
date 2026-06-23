@@ -822,8 +822,18 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
     if (page_type != FIL_PAGE_INDEX) return records;
 
     // 将TableSchema转换为IndexColumnDef列表
+    // CRITICAL: 必须按physical_pos顺序排列，与InnoDB存储顺序一致
     std::vector<innodb::IndexColumnDef> columns;
+
+    // 先提取并按physical_pos排序
+    std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_cols;
     for (const auto& [ordinal, col] : schema.columns) {
+        sorted_cols.push_back({col.physical_pos > 0 ? col.physical_pos : ordinal, col});
+    }
+    std::sort(sorted_cols.begin(), sorted_cols.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [phys_pos, col] : sorted_cols) {
         innodb::IndexColumnDef col_def;
         col_def.name = col.name;
         col_def.col_type = col.mysql_type_id;
@@ -835,6 +845,7 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
         col_def.datetime_precision = col.datetime_precision;
         col_def.char_set_id = col.charset_id;
         col_def.ordinal_position = col.ordinal;
+        col_def.physical_pos = phys_pos;  // CRITICAL: 设置physical_pos
         col_def.enum_values = col.enum_values;
         col_def.set_values = col.set_values;
 
