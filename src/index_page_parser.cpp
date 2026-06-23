@@ -497,35 +497,38 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     }
 
     // Step 2: Read variable sizes (they are before NULL bitmap, at lower addresses)
-    // CRITICAL FIX: InnoDB stores size bytes in SCHEMA order (ordinal_position),
-    // NOT in storage order (fixed-first, then variable)!
-    // We must read sizes in ordinal_position order, then map them to storage order.
+    // CRITICAL FIX: InnoDB stores size bytes in physical_pos order!
+    // Reference: ibd2sql table.py line 747-748:
+    //   colid_list.append([col['physical_pos'],colid,col['name']])
+    //   colid_list.sort() # for physical_pos
+    //
+    // NULL bitmap bits and variable sizes are BOTH ordered by physical_pos!
 
-    // Create a vector sorted by ordinal_position for reading sizes
-    std::vector<size_t> schema_order_indices;
+    // Create a vector sorted by physical_pos for reading sizes
+    std::vector<size_t> physical_order_indices;
     for (size_t i = 0; i < columns.size(); i++) {
         if (!columns[i].is_system_column() && columns[i].is_variable_length()) {
-            schema_order_indices.push_back(i);
+            physical_order_indices.push_back(i);
         }
     }
-    // Sort by ordinal_position (ascending)
-    std::sort(schema_order_indices.begin(), schema_order_indices.end(),
+    // Sort by physical_pos (ascending)
+    std::sort(physical_order_indices.begin(), physical_order_indices.end(),
         [&columns](size_t a, size_t b) {
-            return columns[a].ordinal_position < columns[b].ordinal_position;
+            return columns[a].physical_pos < columns[b].physical_pos;
         });
 
-    // Map: ordinal_position -> size (for variable columns)
-    std::map<uint32_t, uint32_t> var_size_by_ordinal;
+    // Map: physical_pos -> size (for variable columns)
+    std::map<uint32_t, uint32_t> var_size_by_physical;
 
-    // Read sizes in SCHEMA order (ordinal_position)
-    for (size_t schema_idx : schema_order_indices) {
-        const auto& col = columns[schema_idx];
+    // Read sizes in physical_pos order
+    for (size_t phys_idx : physical_order_indices) {
+        const auto& col = columns[phys_idx];
 
-        // Calculate NULL bit position in SCHEMA order
+        // Calculate NULL bit position in physical_pos order
         uint32_t bit_pos = 0;
         for (size_t j = 0; j < columns.size(); j++) {
             if (!columns[j].is_system_column() && columns[j].is_nullable &&
-                columns[j].ordinal_position < col.ordinal_position) {
+                columns[j].physical_pos < col.physical_pos) {
                 bit_pos++;
             }
         }
@@ -533,7 +536,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         bool is_null = (null_bit_value & (1 << bit_pos)) != 0;
 
         if (is_null) {
-            var_size_by_ordinal[col.ordinal_position] = 0;
+            var_size_by_physical[col.physical_pos] = 0;
         } else {
             // Read size byte(s) from the current position (going backward)
             if (pos >= 1) {
@@ -545,26 +548,24 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                     if (pos >= 1) {
                         pos--;
                         uint8_t byte2 = page_data[pos];
-                        var_size_by_ordinal[col.ordinal_position] =
+                        var_size_by_physical[col.physical_pos] =
                             (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
                         result.var_size_bytes_read += 2;
                     } else {
-                        var_size_by_ordinal[col.ordinal_position] = byte1;
+                        var_size_by_physical[col.physical_pos] = byte1;
                     }
                 } else {
-                    var_size_by_ordinal[col.ordinal_position] = byte1;
+                    var_size_by_physical[col.physical_pos] = byte1;
                     result.var_size_bytes_read += 1;
                 }
             } else {
-                var_size_by_ordinal[col.ordinal_position] = 0;
+                var_size_by_physical[col.physical_pos] = 0;
             }
         }
     }
 
     // Now build the final size list in STORAGE order (columns vector order)
     // System columns get their fixed sizes, other columns get appropriate sizes
-    uint32_t nullable_bit_pos2 = 0;  // Bit position for NULL check (in SCHEMA order)
-
     for (size_t col_idx = 0; col_idx < columns.size(); col_idx++) {
         const auto& col = columns[col_idx];
 
@@ -574,14 +575,14 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         if (col.is_system_column()) {
             vsize = col.storage_size();  // DB_TRX_ID=6, DB_ROLL_PTR=7, DB_ROW_ID=6
         } else {
-            // Regular column: check NULL status in SCHEMA order
+            // Regular column: check NULL status in physical_pos order
             bool is_null = false;
             if (col.is_nullable) {
-                // Calculate bit position in SCHEMA order (ordinal_position)
+                // Calculate bit position in physical_pos order
                 uint32_t bit_pos = 0;
                 for (size_t j = 0; j < columns.size(); j++) {
                     if (!columns[j].is_system_column() && columns[j].is_nullable &&
-                        columns[j].ordinal_position < col.ordinal_position) {
+                        columns[j].physical_pos < col.physical_pos) {
                         bit_pos++;
                     }
                 }
@@ -591,9 +592,9 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
             if (is_null) {
                 vsize = 0;
             } else if (col.is_variable_length()) {
-                // Get size from the map (by ordinal_position)
-                auto it = var_size_by_ordinal.find(col.ordinal_position);
-                if (it != var_size_by_ordinal.end()) {
+                // Get size from the map (by physical_pos)
+                auto it = var_size_by_physical.find(col.physical_pos);
+                if (it != var_size_by_physical.end()) {
                     vsize = it->second;
                 }
             } else {
@@ -997,13 +998,13 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             field_size = col.fixed_size();
         }
 
-        // Check NULL status
+        // Check NULL status - use physical_pos order!
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
             uint32_t bit_pos = 0;
             for (size_t j = 0; j < columns.size(); j++) {
                 if (!columns[j].is_system_column() && columns[j].is_nullable &&
-                    columns[j].ordinal_position < col.ordinal_position) {
+                    columns[j].physical_pos < col.physical_pos) {
                     bit_pos++;
                 }
             }

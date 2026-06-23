@@ -817,6 +817,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
         uint32_t n_pk = 0;
+        uint32_t ordinal = 1;  // ordinal_position starts from 1
 
         for (auto& [pos, col] : frm_schema->columns) {
             dbrecovery::innodb::IndexColumnDef icol;
@@ -826,6 +827,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             icol.is_nullable = col.is_nullable;
             icol.is_unsigned = !col.is_signed;
             icol.mb_maxlen = 4;  // UTF8MB4
+
+            // ✅ 关键：设置 ordinal_position 和 physical_pos
+            // 对于 MySQL 5.6/5.7 FRM 文件，physical_pos 通常等于 ordinal_position
+            icol.ordinal_position = ordinal;
+            icol.physical_pos = ordinal;  // For FRM, physical_pos = ordinal_position
+            ordinal++;
 
             // Set precision/scale for DECIMAL types (InnoDB type 21)
             if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
@@ -1173,14 +1180,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     dbrecovery::innodb::IndexColumnDef col_def;
                     col_def.name = col.name;
 
-                    // ✅ 关键：保存原始 ordinal (schema定义顺序) 用于变长大小字节读取
-                    // InnoDB 按 SCHEMA 定义顺序（ordinal）存储变长字段大小字节
-                    // 但数据按 physical_pos 顺序存储
-                    // ordinal = schema definition order (from SDI ordinal_position field)
-                    // physical_pos = InnoDB storage order (from SDI physical_pos field)
-                    col_def.ordinal_position = col.ordinal;  // Schema definition order for size bytes
+                    // ✅ 关键：保存原始 ordinal (schema定义顺序) 和 physical_pos (存储顺序)
+                    // InnoDB 按 physical_pos 顺序存储 NULL 位图和变长大小字节
+                    // 数据也按 physical_pos 顺序存储
+                    col_def.ordinal_position = col.ordinal;  // Schema definition order
+                    col_def.physical_pos = col.physical_pos; // InnoDB storage order
 
-                    // Debug: show ordinal values being passed
+                    // Debug: show ordinal/physical_pos values being passed
                     static bool ordinal_debug_printed = false;
                     if (!ordinal_debug_printed) {
                         std::cerr << "[DEBUG SDI PASS] Column '" << col.name << "' ordinal=" << col.ordinal
