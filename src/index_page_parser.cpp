@@ -860,8 +860,28 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         // Data starts at record origin (rec_offset + 5)
         size_t actual_data_start = rec_origin;
 
+        // CRITICAL FIX: Calculate expected data_end based on variable_sizes
+        // The variable_sizes array contains sizes for ALL columns (PK + user columns)
+        // Sum them up to get the actual record data length
+        size_t expected_total_size = 0;
+        for (size_t i = 0; i < field_meta.variable_sizes.size(); i++) {
+            expected_total_size += field_meta.variable_sizes[i];
+        }
+        // Add TRX_ID + ROLL_PTR for leaf pages
+        if (is_leaf) {
+            expected_total_size += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+        }
+        // Use the calculated data_end for bounds checking
+        size_t calculated_data_end = actual_data_start + expected_total_size;
+        // Use calculated_data_end when data_end seems incorrect (smaller than actual_data_start + reasonable_size)
+        // The passed data_end might be based on next record offset which could be wrong
+        // We trust the calculated size from variable_sizes more
+        size_t safe_data_end = std::max(calculated_data_end, data_end);
+        // But don't read past the page
+        safe_data_end = std::min(safe_data_end, page_size - 8);
+
         record.fields = extract_fields_with_schema(
-            page_data, page_size, actual_data_start, data_end,
+            page_data, page_size, actual_data_start, safe_data_end,
             columns_, field_meta.null_bitmask, field_meta.variable_sizes,
             is_leaf);
     } else {
@@ -952,8 +972,10 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     }
 
     // Step 2: Skip TRX_ID + ROLL_PTR for leaf pages (clustered index)
+    std::cerr << "[DEBUG] Step 2: is_leaf=" << is_leaf << " pos=" << pos << " data_end=" << data_end << "\n";
     if (is_leaf && pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
         pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+        std::cerr << "[DEBUG] After TRX_ID+ROLL_PTR skip: pos=" << pos << "\n";
 
         // CRITICAL FIX: Skip 4-byte variable field offset table if present
         // InnoDB DYNAMIC format may store a 4-byte offset table after TRX_ID+ROLL_PTR
@@ -968,6 +990,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             // and the first byte is 0x00 (indicating small offset values)
             if (page_data[pos] == 0x00 && val1 < 500 && val2 < 500 && val2 > val1) {
                 pos += 4;
+                std::cerr << "[DEBUG] Skipped 4-byte offset table: pos=" << pos << "\n";
             }
         }
     }
@@ -982,7 +1005,12 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
     std::cerr << "[DEBUG READ] Starting user columns, pos=" << pos << " data_end=" << data_end << "\n";
 
-    // Read ALL columns in columns array order (which is physical_pos order)
+    // Read ALL user columns in physical_pos order (columns[] is already sorted)
+    // Reference: ibd2sql table.py line 747-748:
+    //   colid_list.append([col['physical_pos'],colid,col['name']])
+    //   colid_list.sort() # for physical_pos
+    // Then _read_field() reads columns in colid_list order (physical_pos sorted)
+
     for (size_t col_idx = n_pk_cols_; col_idx < columns.size(); col_idx++) {
         const auto& col = columns[col_idx];
 
@@ -994,8 +1022,8 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                 field_size = variable_sizes[col_idx];
             }
         } else {
-            // Fixed-length column: use fixed_size()
-            field_size = col.fixed_size();
+            // Fixed-length column: use storage_size() (includes fractional parts)
+            field_size = col.storage_size();
         }
 
         // Check NULL status - use physical_pos order!
