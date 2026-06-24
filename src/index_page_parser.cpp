@@ -533,6 +533,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
             }
         }
 
+
         bool is_null = (null_bit_value & (1 << bit_pos)) != 0;
 
         if (is_null) {
@@ -543,18 +544,31 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                 pos--;
                 uint8_t byte1 = page_data[pos];
 
-                if (col.is_big && byte1 > 0x7F) {
-                    // 2-byte encoding for is_big field with large size
+                // CRITICAL: Check 2-byte encoding FIRST (before is_big check)
+                // High bit set (byte1 >= 0x80) means 2-byte encoding
+                if (byte1 >= 0x80) {
+                    // 2-byte encoding: read second byte
                     if (pos >= 1) {
                         pos--;
                         uint8_t byte2 = page_data[pos];
-                        var_size_by_physical[col.physical_pos] =
-                            (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+                        uint32_t size = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+
+                        // Check if this is an off-page blob pointer
+                        // DYNAMIC format: off_page_flag = 16384 (0x4000)
+                        // COMPACT format: off_page_flag = 17172 (0x4314)
+                        if (size >= off_page_flag_) {
+                            // Data is stored externally, inline is 20-byte pointer
+                            var_size_by_physical[col.physical_pos] = 20;  // blob pointer size
+                        } else {
+                            var_size_by_physical[col.physical_pos] = size;
+                        }
                         result.var_size_bytes_read += 2;
                     } else {
-                        var_size_by_physical[col.physical_pos] = byte1;
+                        var_size_by_physical[col.physical_pos] = byte1 & 0x7F;
+                        result.var_size_bytes_read += 1;
                     }
                 } else {
+                    // 1-byte encoding: size is byte1 directly
                     var_size_by_physical[col.physical_pos] = byte1;
                     result.var_size_bytes_read += 1;
                 }
@@ -597,6 +611,8 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                 if (it != var_size_by_physical.end()) {
                     vsize = it->second;
                 }
+                std::cerr << "[DEBUG VSIZE] col_idx=" << col_idx << " '" << col.name
+                          << "' physical_pos=" << col.physical_pos << " vsize=" << vsize << std::endl;
             } else {
                 // Fixed column: use pre-computed storage size
                 vsize = col.storage_size();
@@ -833,6 +849,12 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         return std::nullopt;
     }
 
+    // CRITICAL FIX: data_end should not exceed heap_top!
+    // heap_top is the end of record data area - reading past it means wrong record chain
+    if (data_end > page_hdr->heap_top) {
+        data_end = page_hdr->heap_top;
+    }
+
     if (data_end - data_start <= 65536) {
         record.raw_data.assign(page_data + data_start, page_data + data_end);
     }
@@ -929,6 +951,10 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
         if (size_idx >= variable_sizes.size()) break;
         uint32_t field_size = variable_sizes[size_idx++];
+
+        std::cerr << "[DEBUG PK] Col_idx=" << col_idx << " '" << col.name
+                  << "' size_idx=" << (size_idx-1) << " field_size=" << field_size
+                  << " pos=" << pos << "\n";
 
         IndexFieldValue val;
 
@@ -2204,6 +2230,19 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
 
         // Validate REC_TYPE - must be <= 1 for data records
         if (hdr->rec_type > 1) continue;
+
+        // CRITICAL FIX: next_offset must point forward within heap_top
+        // For valid records, next_offset is typically small positive (pointing to next record)
+        // Large values or negative values indicate this is NOT a valid record header
+        ssize_t next_origin = static_cast<ssize_t>(offset) + hdr->next_offset;
+        if (hdr->next_offset <= 0 || hdr->next_offset > 500) {
+            // Invalid next_offset - skip this false positive
+            continue;
+        }
+        if (next_origin <= static_cast<ssize_t>(offset) || static_cast<size_t>(next_origin) >= heap_top) {
+            // next_offset points outside valid range
+            continue;
+        }
 
         // Check if this looks like a valid record
         // - next_offset should point within the page
