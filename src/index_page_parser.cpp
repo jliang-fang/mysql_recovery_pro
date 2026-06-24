@@ -943,17 +943,17 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     // Each column reads 'size' bytes from the data stream.
 
     size_t pos = data_start;
-    size_t size_idx = 0;  // Index into variable_sizes
 
     // Step 1: Read PK columns first
     for (size_t col_idx = 0; col_idx < n_pk_cols_ && col_idx < columns.size() && pos < data_end; col_idx++) {
         const auto& col = columns[col_idx];
 
-        if (size_idx >= variable_sizes.size()) break;
-        uint32_t field_size = variable_sizes[size_idx++];
+        // CRITICAL FIX: Use col_idx to index into variable_sizes, not a separate size_idx!
+        if (col_idx >= variable_sizes.size()) break;
+        uint32_t field_size = variable_sizes[col_idx];
 
         std::cerr << "[DEBUG PK] Col_idx=" << col_idx << " '" << col.name
-                  << "' size_idx=" << (size_idx-1) << " field_size=" << field_size
+                  << "' field_size=" << field_size
                   << " pos=" << pos << "\n";
 
         IndexFieldValue val;
@@ -2048,9 +2048,14 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
     // 检查是否恢复率过低（记录数远少于预期）
     // 如果 n_recs > 0 但恢复记录数 < n_recs/2，尝试损坏页恢复
     uint16_t expected_recs = page_hdr->n_recs;
+
+    std::cerr << "[DEBUG PARSE] page_no=" << page_no << " n_recs=" << expected_recs
+              << " follow_chain=" << records.size() << " heap_top=" << page_hdr->heap_top << std::endl;
+
     if (expected_recs > 0 && records.size() < expected_recs / 2) {
         // 记录链可能断裂，尝试页目录扫描
         auto fast_records = parse_page_fast(page_data, page_size, page_no);
+        std::cerr << "[DEBUG PARSE] fast_records=" << fast_records.size() << std::endl;
         if (fast_records.size() > records.size()) {
             // 合并结果，去重
             std::set<uint16_t> seen_heap_no;
@@ -2439,10 +2444,19 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
 
         stats_.pages_index_leaf++;
 
+        auto page_hdr = parse_page_header(page_data.page_data.data(), page_size);
+        if (!page_hdr) continue;
+
+        std::cerr << "[DEBUG IBDFORCE] page_no=" << page_data.page_no
+                  << " n_recs=" << page_hdr->n_recs
+                  << " heap_top=" << page_hdr->heap_top << std::endl;
+
         auto page_records = follow_record_chain(
             page_data.page_data.data(), page_size,
-            *parse_page_header(page_data.page_data.data(), page_size),
+            *page_hdr,
             page_data.page_no, page_data.is_compact);
+
+        std::cerr << "[DEBUG IBDFORCE] follow_chain returned " << page_records.size() << " records" << std::endl;
 
         for (auto& rec : page_records) {
             auto key = std::make_pair(rec.page_no, rec.heap_no);
