@@ -325,6 +325,13 @@ void InnoDBIndexParser::set_columns(const std::vector<IndexColumnDef>& columns,
     has_row_id_ = has_row_id;
     n_pk_cols_ = n_pk_cols;
 
+    // CRITICAL: Sort columns by physical_pos (InnoDB storage order)
+    // Reference: ibd2sql table.py line 747-748
+    std::sort(columns_.begin(), columns_.end(),
+        [](const IndexColumnDef& a, const IndexColumnDef& b) {
+            return a.physical_pos < b.physical_pos;
+        });
+
     // Count nullable and variable-length columns
     n_nullable_ = 0;
     n_variable_ = 0;

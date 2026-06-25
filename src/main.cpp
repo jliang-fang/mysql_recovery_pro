@@ -1723,6 +1723,7 @@ int main(int argc, char** argv) {
                     icol.scale = col.numeric_scale;
                     icol.datetime_precision = col.datetime_precision;
                     icol.ordinal_position = col.ordinal_position;
+                    icol.physical_pos = col.physical_pos;  // CRITICAL: InnoDB storage order
                     icol.mb_maxlen = 4;  // utf8mb4
                     icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                     icol.enum_values = col.enum_values;
@@ -1869,6 +1870,9 @@ int main(int argc, char** argv) {
                 } else {
                     icol.is_nullable = true;  // Default for non-PK columns
                 }
+
+                // Set physical_pos to ordinal position in the list (1-based)
+                icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);
 
                 index_columns.push_back(icol);
             }
@@ -2245,6 +2249,7 @@ int main(int argc, char** argv) {
                     else if (flag == "unsigned") { icol.is_unsigned = true; }
                 }
                 icol.is_nullable = is_pk ? false : !explicit_notnull;
+                icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);  // CRITICAL: InnoDB storage order
                 index_columns.push_back(icol);
             }
             if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
@@ -2318,6 +2323,9 @@ int main(int argc, char** argv) {
                     if (pk_column_names.count(col.name) > 0) {
                         n_pk++;
                     }
+
+                    // Set physical_pos from FRM (FRM stores columns in physical order)
+                    icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);
 
                     index_columns.push_back(icol);
                 }
@@ -2413,6 +2421,9 @@ int main(int argc, char** argv) {
                             // Fixed-length types (INT, DECIMAL, DATETIME, etc.)
                             break;
                     }
+
+                    // Set physical_pos from SDI (columns are already sorted by physical_pos)
+                    icol.physical_pos = col.physical_pos > 0 ? col.physical_pos : static_cast<uint32_t>(index_columns.size() + 1);
 
                     index_columns.push_back(icol);
                 }
