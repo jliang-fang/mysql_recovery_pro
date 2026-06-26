@@ -659,6 +659,102 @@ bool verify_checksum(const uint8_t* page, uint32_t page_size) {
 
 ---
 
+## Disaster Recovery Technology
+
+### 1. Disk Carving
+
+Disk carving is a backup-less data recovery technique that scans raw disks for valid data pages:
+
+```cpp
+class RawDiskCarver {
+    // Multi-threaded device scanning
+    void scan_device(const std::string& device_path);
+
+    // Identify InnoDB page signature
+    bool is_index_page(const uint8_t* data) {
+        return read_be<uint16_t>(data, 24) == 0x45BF;
+    }
+
+    // Relaxed LSN validation (accept partially corrupted pages)
+    bool is_valid_page_relaxed(const uint8_t* data) {
+        uint64_t lsn = read_be<uint64_t>(data, 16);
+        return lsn > 0;  // Only check LSN is non-zero
+    }
+};
+```
+
+### 2. Schema Extraction Strategy
+
+The tool attempts multiple Schema sources by priority:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. External Schema File (--schema-file)                     │
+│    - JSON format, full control                              │
+├─────────────────────────────────────────────────────────────┤
+│ 2. FRM File (--frm)                                         │
+│    - MySQL 5.6/5.7 specific                                 │
+│    - Auto type mapping (MySQL → InnoDB)                     │
+├─────────────────────────────────────────────────────────────┤
+│ 3. SDI Extraction (automatic)                               │
+│    - MySQL 8.0+ auto-detection                              │
+│    - Supports compressed SDI (zlib decompression)           │
+├─────────────────────────────────────────────────────────────┤
+│ 4. Manual Schema (--schema)                                 │
+│    - Direct command-line specification                      │
+├─────────────────────────────────────────────────────────────┤
+│ 5. Heuristic Inference (fallback)                           │
+│    - Field boundary detection when no Schema available      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3. FRM File Parsing
+
+MySQL 5.6/5.7 uses FRM files to store table structure:
+
+```cpp
+struct FRMHeader {
+    uint16_t frm_type;      // 0x01FE = TABLE
+    uint16_t frm_version;   // minimum 9
+    uint32_t frm_length;    // file length
+    uint16_t key_info_length;
+    // ...
+};
+
+// MySQL type to InnoDB type mapping
+InnoDBType map_mysql_to_innodb(uint8_t mysql_type) {
+    switch (mysql_type) {
+        case 0x03: return InnoDBType::INT;       // INT
+        case 0x05: return InnoDBType::DOUBLE;    // DOUBLE
+        case 0x0F: return InnoDBType::VARCHAR;   // VARCHAR
+        case 0xF6: return InnoDBType::DOUBLE;    // DOUBLE (alternate encoding)
+        case 0xF7: return InnoDBType::ENUM;      // ENUM
+        // ...
+    }
+}
+```
+
+### 4. Compressed SDI Parsing
+
+MySQL 8.0+ SDI pages may be compressed (0x45BD):
+
+```cpp
+std::optional<TableSchema> extract_compressed_sdi(const uint8_t* page) {
+    // Find zlib signature (0x78 0x9C or 0x78 0xDA)
+    size_t zlib_offset = find_zlib_signature(page);
+
+    // zlib decompression
+    std::vector<uint8_t> decompressed;
+    zlib_decompress(page + zlib_offset, decompressed);
+
+    // Parse JSON format SDI
+    auto json = nlohmann::json::parse(decompressed);
+    return parse_sdi_json(json);
+}
+```
+
+---
+
 ## Version Compatibility
 
 | Feature | MySQL 5.6 | MySQL 5.7 | MySQL 8.0 | MySQL 8.4 | MySQL 9.0 |
@@ -668,3 +764,4 @@ bool verify_checksum(const uint8_t* page, uint32_t page_size) {
 | DYNAMIC | ✅ | ✅ | ✅ | ✅ | ✅ |
 | COMPRESSED | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Instant ADD COLUMN | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Disk Carving + FRM | ✅ | ✅ | ✅ | ✅ | ✅ |

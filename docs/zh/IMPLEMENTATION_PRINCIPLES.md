@@ -659,6 +659,102 @@ bool verify_checksum(const uint8_t* page, uint32_t page_size) {
 
 ---
 
+## 灾难恢复技术
+
+### 1. 磁盘雕刻 (Disk Carving)
+
+磁盘雕刻是一种无需备份的数据恢复技术，通过扫描原始磁盘寻找有效的数据页：
+
+```cpp
+class RawDiskCarver {
+    // 多线程扫描设备
+    void scan_device(const std::string& device_path);
+
+    // 识别 InnoDB 页面签名
+    bool is_index_page(const uint8_t* data) {
+        return read_be<uint16_t>(data, 24) == 0x45BF;
+    }
+
+    // 放宽 LSN 验证（允许部分损坏页面）
+    bool is_valid_page_relaxed(const uint8_t* data) {
+        uint64_t lsn = read_be<uint64_t>(data, 16);
+        return lsn > 0;  // 仅检查 LSN 非零
+    }
+};
+```
+
+### 2. Schema 提取策略
+
+工具按优先级尝试多种 Schema 来源：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ 1. 外部 Schema 文件 (--schema-file)                         │
+│    - JSON 格式，完全控制                                     │
+├─────────────────────────────────────────────────────────────┤
+│ 2. FRM 文件 (--frm)                                         │
+│    - MySQL 5.6/5.7 专用                                     │
+│    - 自动类型映射 (MySQL → InnoDB)                          │
+├─────────────────────────────────────────────────────────────┤
+│ 3. SDI 提取 (自动)                                          │
+│    - MySQL 8.0+ 自动识别                                    │
+│    - 支持压缩 SDI (zlib 解压)                               │
+├─────────────────────────────────────────────────────────────┤
+│ 4. 手动 Schema (--schema)                                   │
+│    - 命令行直接指定                                          │
+├─────────────────────────────────────────────────────────────┤
+│ 5. 启发式推断 (fallback)                                    │
+│    - 无 Schema 时尝试字段边界检测                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 3. FRM 文件解析
+
+MySQL 5.6/5.7 使用 FRM 文件存储表结构：
+
+```cpp
+struct FRMHeader {
+    uint16_t frm_type;      // 0x01FE = TABLE
+    uint16_t frm_version;   // 最低 9
+    uint32_t frm_length;    // 文件长度
+    uint16_t key_info_length;
+    // ...
+};
+
+// MySQL 类型到 InnoDB 类型映射
+InnoDBType map_mysql_to_innodb(uint8_t mysql_type) {
+    switch (mysql_type) {
+        case 0x03: return InnoDBType::INT;       // INT
+        case 0x05: return InnoDBType::DOUBLE;    // DOUBLE
+        case 0x0F: return InnoDBType::VARCHAR;   // VARCHAR
+        case 0xF6: return InnoDBType::DOUBLE;    // DOUBLE (另一种编码)
+        case 0xF7: return InnoDBType::ENUM;      // ENUM
+        // ...
+    }
+}
+```
+
+### 4. 压缩 SDI 解析
+
+MySQL 8.0+ SDI 页可能是压缩格式 (0x45BD)：
+
+```cpp
+std::optional<TableSchema> extract_compressed_sdi(const uint8_t* page) {
+    // 查找 zlib 签名 (0x78 0x9C 或 0x78 0xDA)
+    size_t zlib_offset = find_zlib_signature(page);
+
+    // zlib 解压
+    std::vector<uint8_t> decompressed;
+    zlib_decompress(page + zlib_offset, decompressed);
+
+    // 解析 JSON 格式的 SDI
+    auto json = nlohmann::json::parse(decompressed);
+    return parse_sdi_json(json);
+}
+```
+
+---
+
 ## 版本兼容性
 
 | 特性 | MySQL 5.6 | MySQL 5.7 | MySQL 8.0 | MySQL 8.4 | MySQL 9.0 |
@@ -668,3 +764,4 @@ bool verify_checksum(const uint8_t* page, uint32_t page_size) {
 | DYNAMIC | ✅ | ✅ | ✅ | ✅ | ✅ |
 | COMPRESSED | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Instant ADD COLUMN | ❌ | ❌ | ✅ | ✅ | ✅ |
+| Disk Carving + FRM | ✅ | ✅ | ✅ | ✅ | ✅ |
