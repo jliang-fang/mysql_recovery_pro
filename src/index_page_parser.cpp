@@ -43,6 +43,11 @@ constexpr uint8_t JSON_TYPE_UINT64 = 0x0A;
 constexpr uint8_t JSON_TYPE_DOUBLE = 0x0B;
 constexpr uint8_t JSON_TYPE_STRING = 0x0C;
 
+// Variable length field size encoding constant
+// For is_big columns (BLOB, JSON): byte > 127 means 2-byte encoding
+// Reference: ibd2sql index.py line 12
+constexpr uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;  // 127
+
 // 递归解析 JSON 二进制数据
 std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_size, uint8_t type, size_t& consumed);
 
@@ -569,19 +574,35 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                       << " is_null=1 vsize=0" << std::endl;
         } else {
             // Read size byte(s) from the current position (going backward)
+            // CRITICAL FIX: Different handling for is_big vs non-is_big columns!
+            // Reference: ibd2sql index.py lines 347-354:
+            //   if col['is_big']:
+            //     tsize = read_reverse(1)
+            //     if tsize > REC_N_FIELDS_ONE_BYTE_MAX (127):  # 2-byte encoding
+            //       vsize = read_reverse(1) + (tsize-128)*256
+            //     else:
+            //       vsize = tsize
+            //   else:  # non-is_big: just read 1 byte
+            //     vsize = read_reverse(1)
+            //
+            // is_big=True for: BLOB, TINY_BLOB, MEDIUM_BLOB, LONG_BLOB, JSON
+            // is_big=False for: VARCHAR, VAR_STRING, STRING (CHAR with multi-byte charset)
+
             if (pos >= 1) {
                 pos--;
                 uint8_t byte1 = page_data[pos];
                 size_t byte_pos = pos;  // Remember position for debug
 
-                // CRITICAL: Check 2-byte encoding FIRST (before is_big check)
-                // High bit set (byte1 >= 0x80) means 2-byte encoding
-                if (byte1 >= 0x80) {
-                    // 2-byte encoding: read second byte
+                // CRITICAL: Only use 2-byte encoding for is_big columns!
+                // For is_big columns: byte1 > 127 means 2-byte encoding
+                // For non-is_big columns: always 1-byte size (even if >= 128)
+                if (col.is_big && byte1 > REC_N_FIELDS_ONE_BYTE_MAX) {
+                    // 2-byte encoding for is_big column: read second byte
                     if (pos >= 1) {
                         pos--;
                         uint8_t byte2 = page_data[pos];
-                        uint32_t size = (static_cast<uint32_t>(byte1 & 0x7F) << 8) | byte2;
+                        // vsize = byte2 + (byte1 - 128) * 256
+                        uint32_t size = byte2 + (static_cast<uint32_t>(byte1 - 128) * 256);
 
                         // Check if this is an off-page blob pointer
                         // DYNAMIC format: off_page_flag = 16384 (0x4000)
@@ -594,22 +615,28 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                         }
                         result.var_size_bytes_read += 2;
                         std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                                  << " is_big=" << col.is_big
                                   << " byte1=0x" << std::hex << (int)byte1 << " byte2=0x" << (int)byte2
                                   << " (2-byte encoding) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
                                   << " pos=" << byte_pos << std::endl;
                     } else {
-                        var_size_by_physical[col.physical_pos] = byte1 & 0x7F;
+                        var_size_by_physical[col.physical_pos] = byte1;
                         result.var_size_bytes_read += 1;
                         std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                                  << " is_big=" << col.is_big
                                   << " byte1=0x" << std::hex << (int)byte1
                                   << " (2-byte encoding, no byte2) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
                                   << " pos=" << byte_pos << std::endl;
                     }
                 } else {
                     // 1-byte encoding: size is byte1 directly
+                    // This applies to:
+                    // - non-is_big columns (always 1 byte)
+                    // - is_big columns with byte1 <= 127
                     var_size_by_physical[col.physical_pos] = byte1;
                     result.var_size_bytes_read += 1;
                     std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                              << " is_big=" << col.is_big
                               << " byte1=0x" << std::hex << (int)byte1 << " (1-byte) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
                               << " pos=" << byte_pos << std::endl;
                 }
