@@ -37,6 +37,10 @@ void RawDiskCarver::set_config(const Config& config) {
     config_ = config;
 }
 
+void RawDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
+    external_schema_ = schema;
+}
+
 bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 64) return false;
 
@@ -522,12 +526,21 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
 
         // 查找是否有匹配的schema
         std::optional<catalog::TableSchema> matched_schema;
-        for (const auto& [space_id, schema] : result.inferred_schemas) {
-            // 简化匹配: 如果schema有列，就使用它
-            // 实际应该根据index_id匹配
-            if (!schema.columns.empty()) {
-                matched_schema = schema;
-                break;
+
+        // 优先使用外部提供的schema (如FRM文件解析)
+        if (external_schema_.has_value() && !external_schema_->columns.empty()) {
+            matched_schema = external_schema_;
+            std::cerr << "[DEBUG] Using external schema with " << matched_schema->columns.size()
+                      << " columns for index_id " << index_id << std::endl;
+        } else {
+            // 尝试从SDI提取的schema中匹配
+            for (const auto& [space_id, schema] : result.inferred_schemas) {
+                // 简化匹配: 如果schema有列，就使用它
+                // 实际应该根据index_id匹配
+                if (!schema.columns.empty()) {
+                    matched_schema = schema;
+                    break;
+                }
             }
         }
 

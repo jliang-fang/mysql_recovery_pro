@@ -444,6 +444,23 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Load external schema if provided
         std::optional<catalog::TableSchema> external_schema = load_schema_from_file(schema_file_path);
 
+        // Also try FRM file if provided (for MySQL 5.6/5.7)
+        if (!external_schema.has_value() && !frm_path.empty()) {
+            std::cout << "[INFO] Attempting to parse schema from FRM file: " << frm_path << "\n";
+            auto frm_schema = dbrecovery::innodb::FRMParser::parse(frm_path);
+            if (frm_schema.has_value()) {
+                std::cout << "[INFO] Successfully parsed schema from FRM file (" << frm_schema->columns.size() << " columns)\n";
+                external_schema = frm_schema;
+            } else {
+                std::cout << "[WARN] Failed to parse FRM file\n";
+            }
+        }
+
+        // Set external schema before scanning if provided
+        if (external_schema.has_value()) {
+            carver.set_external_schema(*external_schema);
+        }
+
         auto result = carver.scan_and_recover([&](double progress, const std::string& msg) {
             if (verbose) {
                 std::cout << "[" << static_cast<int>(progress * 100) << "%] " << msg << "\n";

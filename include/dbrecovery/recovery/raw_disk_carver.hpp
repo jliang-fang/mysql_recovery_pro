@@ -138,9 +138,15 @@ public:
      */
     const ScanResult& get_last_scan_result() const;
 
+    /**
+     * @brief 设置外部schema (用于MySQL 5.6/5.7等无SDI的场景)
+     */
+    void set_external_schema(const catalog::TableSchema& schema);
+
 private:
     Config config_;
     ScanResult last_scan_result_;
+    std::optional<catalog::TableSchema> external_schema_;  // 外部提供的schema
     uint64_t actual_scan_stop_ = 0;  // 实际扫描结束位置
 
     // 进程间共享的原子变量
