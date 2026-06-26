@@ -329,7 +329,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     catalog::ColumnInfo column_info;
                     column_info.name = col.value("name", "");
                     column_info.mysql_type_id = col.value("type", 0);
-                    column_info.is_nullable = !col.value("is_nullable", true); // Invert
+                    column_info.is_nullable = col.value("is_nullable", true); // SDI stores true when nullable
 
                     if (col.contains("default_value")) {
                         column_info.default_value = col["default_value"].get<std::string>();

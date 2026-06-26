@@ -21,7 +21,7 @@ namespace catalog {
 struct ColumnInfo {
     std::string name;
     uint32_t mysql_type_id;       // 如: MYSQL_TYPE_VARCHAR=15, MYSQL_TYPE_JSON=245
-    bool is_nullable;             // NULL / NOT NULL
+    bool is_nullable = true;        // NULL / NOT NULL (default to nullable for safety)
     std::optional<std::string> default_value;  // DEFAULT 'x' 或 DEFAULT NOW()
     uint32_t column_length;       // 字符长度（VARCHAR）或字节长度（INT）
     uint32_t charset_id;          // 如: utf8mb4_0900_ai_ci=255
@@ -373,6 +373,9 @@ struct TableSchema {
                 }
                 if (col_json.contains("is_nullable")) {
                     col.is_nullable = col_json["is_nullable"].get<bool>();
+                }
+                if (!debug_schema) {
+                    std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' is_nullable=" << col.is_nullable << std::endl;
                 }
                 // Parse is_signed for numeric types (affects unsigned handling)
                 if (col_json.contains("is_signed")) {

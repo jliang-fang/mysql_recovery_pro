@@ -472,11 +472,13 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         }
         if (col.is_nullable) {
             real_n_nullable++;
+            std::cerr << "[DEBUG NULLABLE] Column '" << col.name << "' is_nullable=" << col.is_nullable << std::endl;
         }
         if (col.is_variable_length()) {
             real_n_variable++;
         }
     }
+    std::cerr << "[DEBUG NULLABLE] Total nullable columns: " << real_n_nullable << std::endl;
 
     // Use recalculated counts instead of passed values
     size_t null_bytes = (real_n_nullable + 7) / 8;
@@ -488,10 +490,14 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     size_t pos = origin - REC_HEADER_SIZE_NEW;  // After header, pos = origin - 5
 
     // Read NULL bitmap from pos-null_bytes to pos
+    std::cerr << "[DEBUG NULL] origin=" << origin << " initial_pos=" << pos << " null_bytes=" << null_bytes << std::endl;
     if (null_bytes > 0 && pos >= null_bytes) {
         pos -= null_bytes;
         result.null_bitmask.assign(page_data + pos, page_data + pos + null_bytes);
         result.null_bytes_read = null_bytes;
+        std::cerr << "[DEBUG NULL] After bitmap subtraction: pos=" << pos << " null_bitmask=";
+        for (auto b : result.null_bitmask) std::cerr << std::hex << (int)b << " ";
+        std::cerr << std::dec << std::endl;
     }
 
     // Read null bitmask as integer for bit testing
@@ -512,13 +518,22 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // NULL bitmap bits and variable sizes are BOTH ordered by physical_pos!
 
     // Create a vector sorted by physical_pos for reading sizes
+    // CRITICAL: Sizes are read in physical_pos ASCENDING order!
+    // Layout: [size for last var col (highest phys_pos)]...[size for first var col (lowest phys_pos)][NULL bitmap][Header]
+    // But we READ in ascending order, starting closest to NULL bitmap.
+    // Reference: ibd2sql index.py _read_nullbitmask_varsize_new():
+    //   - Reads NULL bitmap first (closest to header)
+    //   - Then for each column in colid_list (sorted ascending by physical_pos):
+    //     reads size via read_reverse() which moves backward
+    //   - So first var column (lowest phys_pos) has size closest to NULL bitmap
+
     std::vector<size_t> physical_order_indices;
     for (size_t i = 0; i < columns.size(); i++) {
         if (!columns[i].is_system_column() && columns[i].is_variable_length()) {
             physical_order_indices.push_back(i);
         }
     }
-    // Sort by physical_pos (ascending)
+    // Sort by physical_pos (ascending) - matches ibd2sql's colid_list.sort()
     std::sort(physical_order_indices.begin(), physical_order_indices.end(),
         [&columns](size_t a, size_t b) {
             return columns[a].physical_pos < columns[b].physical_pos;
@@ -527,7 +542,12 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // Map: physical_pos -> size (for variable columns)
     std::map<uint32_t, uint32_t> var_size_by_physical;
 
-    // Read sizes in physical_pos order
+    // Read sizes in physical_pos order (ascending)
+    // ibd2sql iterates through colid_list (sorted by physical_pos ascending)
+    // and calls read_reverse() for each variable column.
+    // Each read_reverse() reads backward and advances _offset backward.
+    // So first column reads closest to NULL bitmap, last column reads furthest.
+    // Layout: [sizes in reverse physical_pos order][NULL bitmap][Header][origin]
     for (size_t phys_idx : physical_order_indices) {
         const auto& col = columns[phys_idx];
 
@@ -545,11 +565,14 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
 
         if (is_null) {
             var_size_by_physical[col.physical_pos] = 0;
+            std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                      << " is_null=1 vsize=0" << std::endl;
         } else {
             // Read size byte(s) from the current position (going backward)
             if (pos >= 1) {
                 pos--;
                 uint8_t byte1 = page_data[pos];
+                size_t byte_pos = pos;  // Remember position for debug
 
                 // CRITICAL: Check 2-byte encoding FIRST (before is_big check)
                 // High bit set (byte1 >= 0x80) means 2-byte encoding
@@ -570,17 +593,30 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                             var_size_by_physical[col.physical_pos] = size;
                         }
                         result.var_size_bytes_read += 2;
+                        std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                                  << " byte1=0x" << std::hex << (int)byte1 << " byte2=0x" << (int)byte2
+                                  << " (2-byte encoding) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
+                                  << " pos=" << byte_pos << std::endl;
                     } else {
                         var_size_by_physical[col.physical_pos] = byte1 & 0x7F;
                         result.var_size_bytes_read += 1;
+                        std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                                  << " byte1=0x" << std::hex << (int)byte1
+                                  << " (2-byte encoding, no byte2) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
+                                  << " pos=" << byte_pos << std::endl;
                     }
                 } else {
                     // 1-byte encoding: size is byte1 directly
                     var_size_by_physical[col.physical_pos] = byte1;
                     result.var_size_bytes_read += 1;
+                    std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                              << " byte1=0x" << std::hex << (int)byte1 << " (1-byte) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
+                              << " pos=" << byte_pos << std::endl;
                 }
             } else {
                 var_size_by_physical[col.physical_pos] = 0;
+                std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
+                          << " pos=0 (out of bounds) vsize=0" << std::endl;
             }
         }
     }
