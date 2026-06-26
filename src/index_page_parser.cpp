@@ -449,14 +449,27 @@ std::optional<OldRecordHeader> InnoDBIndexParser::parse_old_record_header(
 
 // ==================== Null Bitmask and Variable-Size Reading ====================
 
+// CRITICAL: For ROW_FORMAT=COMPRESSED, sizes are read FORWARD (from low address to high)
+// For DYNAMIC/COMPACT/REDUNDANT, sizes are read BACKWARD (from high address to low)
+// Reference: ibd2sql index_compressed.py lines 248-284:
+//   _read_null_compressed: read() (forward)
+//   _read_varsize_compressed: read(1) (forward)
+//   _read_null_new: read_reverse() (backward)
+//   _read_varsize_new: read_reverse(1) (backward)
+
 InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     const uint8_t* page_data, size_t page_size,
     size_t origin, size_t data_end,
     uint32_t n_nullable, uint32_t n_variable,
-    const std::vector<IndexColumnDef>& columns) {
+    const std::vector<IndexColumnDef>& columns,
+    uint8_t row_format) {  // NEW: row_format parameter
 
     FieldMetadata result;
     if (origin > page_size || data_end > page_size) return result;
+
+    // Determine if this is COMPRESSED row format (format == 3)
+    // For COMPRESSED: read sizes FORWARD instead of BACKWARD
+    bool is_compressed = (row_format == 3);
 
     // CRITICAL FIX: Match ibd2sql's _read_nullbitmask_varsize_new() exactly!
     //
@@ -2822,10 +2835,30 @@ uint8_t detect_row_format_from_fsp(const uint8_t* page_data) {
 
     uint32_t flags = read_be<uint32_t>(page_data, 54);
 
-    // Bits 6-7: row format
-    // 0 = REDUNDANT, 1 = COMPACT, 2 = DYNAMIC, 3 = COMPRESSED
-    uint8_t format = (flags >> 6) & 0x03;
-    return format;
+    // Reference: ibd2sql fsp.py GET_FSP_STATUS_FROM_FLAGS
+    // POST_ANTELOPE: bit 0 - 1=DYNAMIC/COMPRESSED, 0=REDUNDANT/COMPACT
+    // ZIP_SSIZE: bits 1-4 - if != 0, table is compressed
+    // ATOMIC_BLOBS: bit 5 - 1 means atomic BLOBs (DYNAMIC)
+    //
+    // Row format determination:
+    // - If ZIP_SSIZE != 0: COMPRESSED (3)
+    // - If POST_ANTELOPE == 1 and ATOMIC_BLOBS == 1: DYNAMIC (2)
+    // - If POST_ANTELOPE == 1 and ATOMIC_BLOBS == 0: COMPACT (1)
+    // - If POST_ANTELOPE == 0: REDUNDANT (0)
+
+    bool post_antelope = (flags & 1) != 0;        // bit 0
+    uint8_t zip_ssize = (flags >> 1) & 0x0F;      // bits 1-4
+    bool atomic_blobs = (flags & 32) != 0;        // bit 5
+
+    if (zip_ssize != 0) {
+        return 3;  // COMPRESSED
+    } else if (post_antelope && atomic_blobs) {
+        return 2;  // DYNAMIC
+    } else if (post_antelope) {
+        return 1;  // COMPACT
+    } else {
+        return 0;  // REDUNDANT
+    }
 }
 
 bool is_antelope_format(const uint8_t* page_data) {

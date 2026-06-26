@@ -808,7 +808,8 @@ private:
         const uint8_t* page_data, size_t page_size,
         size_t rec_start, size_t rec_end,
         uint32_t n_nullable, uint32_t n_variable,
-        const std::vector<IndexColumnDef>& columns);
+        const std::vector<IndexColumnDef>& columns,
+        uint8_t row_format = 2);  // Default to DYNAMIC (2)
 
     /**
      * @brief Read null bitmask and field offsets for REDUNDANT format
