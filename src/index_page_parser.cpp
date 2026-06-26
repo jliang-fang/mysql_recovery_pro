@@ -477,13 +477,11 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         }
         if (col.is_nullable) {
             real_n_nullable++;
-            std::cerr << "[DEBUG NULLABLE] Column '" << col.name << "' is_nullable=" << col.is_nullable << std::endl;
         }
         if (col.is_variable_length()) {
             real_n_variable++;
         }
     }
-    std::cerr << "[DEBUG NULLABLE] Total nullable columns: " << real_n_nullable << std::endl;
 
     // Use recalculated counts instead of passed values
     size_t null_bytes = (real_n_nullable + 7) / 8;
@@ -494,15 +492,11 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
 
     size_t pos = origin - REC_HEADER_SIZE_NEW;  // After header, pos = origin - 5
 
-    // Read NULL bitmap from pos-null_bytes to pos
-    std::cerr << "[DEBUG NULL] origin=" << origin << " initial_pos=" << pos << " null_bytes=" << null_bytes << std::endl;
+    // Read NULL bitmap
     if (null_bytes > 0 && pos >= null_bytes) {
         pos -= null_bytes;
         result.null_bitmask.assign(page_data + pos, page_data + pos + null_bytes);
         result.null_bytes_read = null_bytes;
-        std::cerr << "[DEBUG NULL] After bitmap subtraction: pos=" << pos << " null_bitmask=";
-        for (auto b : result.null_bitmask) std::cerr << std::hex << (int)b << " ";
-        std::cerr << std::dec << std::endl;
     }
 
     // Read null bitmask as integer for bit testing
@@ -570,8 +564,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
 
         if (is_null) {
             var_size_by_physical[col.physical_pos] = 0;
-            std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
-                      << " is_null=1 vsize=0" << std::endl;
         } else {
             // Read size byte(s) from the current position (going backward)
             // CRITICAL FIX: Different handling for is_big vs non-is_big columns!
@@ -614,19 +606,9 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                             var_size_by_physical[col.physical_pos] = size;
                         }
                         result.var_size_bytes_read += 2;
-                        std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
-                                  << " is_big=" << col.is_big
-                                  << " byte1=0x" << std::hex << (int)byte1 << " byte2=0x" << (int)byte2
-                                  << " (2-byte encoding) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
-                                  << " pos=" << byte_pos << std::endl;
                     } else {
                         var_size_by_physical[col.physical_pos] = byte1;
                         result.var_size_bytes_read += 1;
-                        std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
-                                  << " is_big=" << col.is_big
-                                  << " byte1=0x" << std::hex << (int)byte1
-                                  << " (2-byte encoding, no byte2) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
-                                  << " pos=" << byte_pos << std::endl;
                     }
                 } else {
                     // 1-byte encoding: size is byte1 directly
@@ -635,15 +617,9 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                     // - is_big columns with byte1 <= 127
                     var_size_by_physical[col.physical_pos] = byte1;
                     result.var_size_bytes_read += 1;
-                    std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
-                              << " is_big=" << col.is_big
-                              << " byte1=0x" << std::hex << (int)byte1 << " (1-byte) vsize=" << std::dec << var_size_by_physical[col.physical_pos]
-                              << " pos=" << byte_pos << std::endl;
                 }
             } else {
                 var_size_by_physical[col.physical_pos] = 0;
-                std::cerr << "[DEBUG SIZE] col=" << col.name << " physical_pos=" << col.physical_pos
-                          << " pos=0 (out of bounds) vsize=0" << std::endl;
             }
         }
     }
@@ -681,8 +657,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                 if (it != var_size_by_physical.end()) {
                     vsize = it->second;
                 }
-                std::cerr << "[DEBUG VSIZE] col_idx=" << col_idx << " '" << col.name
-                          << "' physical_pos=" << col.physical_pos << " vsize=" << vsize << std::endl;
             } else {
                 // Fixed column: use pre-computed storage size
                 vsize = col.storage_size();
@@ -1022,10 +996,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         if (col_idx >= variable_sizes.size()) break;
         uint32_t field_size = variable_sizes[col_idx];
 
-        std::cerr << "[DEBUG PK] Col_idx=" << col_idx << " '" << col.name
-                  << "' field_size=" << field_size
-                  << " pos=" << pos << "\n";
-
         IndexFieldValue val;
 
         // Check NULL status
@@ -1068,10 +1038,9 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     }
 
     // Step 2: Skip TRX_ID + ROLL_PTR for leaf pages (clustered index)
-    std::cerr << "[DEBUG] Step 2: is_leaf=" << is_leaf << " pos=" << pos << " data_end=" << data_end << "\n";
+    size_t pos_after_pk = pos;  // Store position after PK for debugging
     if (is_leaf && pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
         pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
-        std::cerr << "[DEBUG] After TRX_ID+ROLL_PTR skip: pos=" << pos << "\n";
 
         // CRITICAL FIX: Skip 4-byte variable field offset table if present
         // InnoDB DYNAMIC format may store a 4-byte offset table after TRX_ID+ROLL_PTR
@@ -1086,7 +1055,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             // and the first byte is 0x00 (indicating small offset values)
             if (page_data[pos] == 0x00 && val1 < 500 && val2 < 500 && val2 > val1) {
                 pos += 4;
-                std::cerr << "[DEBUG] Skipped 4-byte offset table: pos=" << pos << "\n";
             }
         }
     }
@@ -1099,15 +1067,13 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
     std::map<size_t, IndexFieldValue> results_map;
 
-    std::cerr << "[DEBUG READ] Starting user columns, pos=" << pos << " data_end=" << data_end << "\n";
-
     // Read ALL user columns in physical_pos order (columns[] is already sorted)
     // Reference: ibd2sql table.py line 747-748:
     //   colid_list.append([col['physical_pos'],colid,col['name']])
     //   colid_list.sort() # for physical_pos
     // Then _read_field() reads columns in colid_list order (physical_pos sorted)
 
-    for (size_t col_idx = n_pk_cols_; col_idx < columns.size(); col_idx++) {
+    for (size_t col_idx = n_pk_cols_; col_idx < columns.size() && pos < data_end; col_idx++) {
         const auto& col = columns[col_idx];
 
         // Determine field size
@@ -1138,13 +1104,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                 is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
             }
         }
-
-        std::cerr << "[DEBUG READ] Col " << col_idx << " '" << col.name
-                  << "' type=" << (int)col.col_type
-                  << " is_var=" << col.is_variable_length()
-                  << " field_size=" << field_size
-                  << " pos=" << pos
-                  << " is_null=" << is_null << "\n";
 
         IndexFieldValue val;
         if (is_null || field_size == 0) {
@@ -2041,18 +2000,12 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 for (size_t i = 0; i < field_size; i++) {
                     idx = (idx << 8) | data[offset + i];
                 }
-                std::cerr << "[DEBUG DECODE] ENUM col.name='" << col.name << "' field_size=" << field_size
-                          << " enum_values.size()=" << col.enum_values.size()
-                          << " idx=" << idx << " valid_range=[1," << col.enum_values.size() << "]"
-                          << " offset=" << offset << " byte=" << (int)data[offset] << "\n";
                 if (idx > 0 && idx <= col.enum_values.size()) {
                     val.str_value = col.enum_values[idx - 1];  // ENUM index is 1-based
                 } else {
                     val.str_value = "<ENUM_" + std::to_string(idx) + ">";
                 }
             } else {
-                std::cerr << "[DEBUG DECODE] ENUM col.name='" << col.name << "' field_size=" << field_size
-                          << " enum_values.size()=" << col.enum_values.size() << " SKIPPED\n";
                 val.str_value = "<ENUM>";
             }
             break;
@@ -2119,13 +2072,9 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
     // 如果 n_recs > 0 但恢复记录数 < n_recs/2，尝试损坏页恢复
     uint16_t expected_recs = page_hdr->n_recs;
 
-    std::cerr << "[DEBUG PARSE] page_no=" << page_no << " n_recs=" << expected_recs
-              << " follow_chain=" << records.size() << " heap_top=" << page_hdr->heap_top << std::endl;
-
     if (expected_recs > 0 && records.size() < expected_recs / 2) {
         // 记录链可能断裂，尝试页目录扫描
         auto fast_records = parse_page_fast(page_data, page_size, page_no);
-        std::cerr << "[DEBUG PARSE] fast_records=" << fast_records.size() << std::endl;
         if (fast_records.size() > records.size()) {
             // 合并结果，去重
             std::set<uint16_t> seen_heap_no;
@@ -2517,16 +2466,10 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
         auto page_hdr = parse_page_header(page_data.page_data.data(), page_size);
         if (!page_hdr) continue;
 
-        std::cerr << "[DEBUG IBDFORCE] page_no=" << page_data.page_no
-                  << " n_recs=" << page_hdr->n_recs
-                  << " heap_top=" << page_hdr->heap_top << std::endl;
-
         auto page_records = follow_record_chain(
             page_data.page_data.data(), page_size,
             *page_hdr,
             page_data.page_no, page_data.is_compact);
-
-        std::cerr << "[DEBUG IBDFORCE] follow_chain returned " << page_records.size() << " records" << std::endl;
 
         for (auto& rec : page_records) {
             auto key = std::make_pair(rec.page_no, rec.heap_no);
