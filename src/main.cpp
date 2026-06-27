@@ -1729,6 +1729,13 @@ int main(int argc, char** argv) {
                     icol.enum_values = col.enum_values;
                     icol.set_values = col.set_values;
 
+                    // CRITICAL FIX: Set is_binary based on charset_id
+                    // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
+                    // Reference: ibd2sql uses charset.collation.is_binary to detect binary columns
+                    // EXCEPTION: JSON type (31) also uses binary charset but should NOT be treated as binary data
+                    // JSON is stored in MySQL's internal binary format but is decoded as text
+                    icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
+
                     // Check if this is a PK column
                     if (col.column_key == "PRI") {
                         n_pk++;

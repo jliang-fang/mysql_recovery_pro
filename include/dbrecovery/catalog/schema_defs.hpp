@@ -407,6 +407,20 @@ struct TableSchema {
                 } else if (col_json.contains("length")) {
                     col.column_length = col_json["length"].get<uint32_t>();
                 }
+
+                // CRITICAL FIX: Parse collation_id to detect binary columns
+                // collation_id=63 indicates BINARY charset (BINARY, VARBINARY, BLOB)
+                if (col_json.contains("collation_id")) {
+                    col.collation_id = col_json["collation_id"].get<uint32_t>();
+                    if (col.collation_id == 63) {
+                        std::cerr << "[DEBUG SDI] Binary column detected: " << col.name
+                                  << " collation_id=" << col.collation_id << "\n";
+                    }
+                }
+                if (col_json.contains("charset_id")) {
+                    col.charset_id = col_json["charset_id"].get<uint32_t>();
+                }
+
                 // Parse ENUM/SET elements
                 // SDI stores element names in base64 encoding (MySQL 8.0+)
                 // ✅ 修复：区分 ENUM 和 SET，将元素放入正确的列表

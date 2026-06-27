@@ -1801,18 +1801,32 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         // VARCHAR (type 16) and TEXT (type 27) are text columns - decode as UTF-8
         // VAR_STRING (type 28) is also text
         // BLOB variants (24, 25, 26) are binary - output as HEX
-        case 16:   // VARCHAR - InnoDB type 16 (TEXT data)
-        case 28: { // VAR_STRING - InnoDB type 28 (TEXT data)
-            val.type = IndexFieldValue::Type::STRING_VAL;
-            // Decode as UTF-8 text
-            try {
-                if (field_size > 0 && field_size <= max_size - offset) {
-                    val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
-                } else {
-                    val.str_value = "<INVALID_SIZE>";
+        // CRITICAL FIX: VARBINARY uses type 16 but contains binary data!
+        case 16:   // VARCHAR/VARBINARY - InnoDB type 16
+        case 28: { // VAR_STRING - InnoDB type 28
+            // Check is_binary flag to handle VARBINARY correctly
+            if (col.is_binary) {
+                val.type = IndexFieldValue::Type::BINARY_VAL;
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
                 }
-            } catch (const std::length_error&) {
-                val.str_value = "<STRING_ALLOC_ERROR>";
+                oss << "')";
+                val.str_value = oss.str();
+            } else {
+                val.type = IndexFieldValue::Type::STRING_VAL;
+                // Decode as UTF-8 text
+                try {
+                    if (field_size > 0 && field_size <= max_size - offset) {
+                        val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                    } else {
+                        val.str_value = "<INVALID_SIZE>";
+                    }
+                } catch (const std::length_error&) {
+                    val.str_value = "<STRING_ALLOC_ERROR>";
+                }
             }
             break;
         }
@@ -1858,20 +1872,34 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.str_value = oss.str();
             break;
         }
-        case 29: { // STRING/CHAR - InnoDB type 29
-            val.type = IndexFieldValue::Type::STRING_VAL;
-            try {
-                if (field_size > 0 && field_size <= max_size - offset) {
-                    val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
-                    // Trim trailing spaces
-                    while (!val.str_value.empty() && val.str_value.back() == ' ') {
-                        val.str_value.pop_back();
-                    }
-                } else {
-                    val.str_value = "<INVALID_SIZE>";
+        case 29: { // STRING/CHAR/BINARY - InnoDB type 29
+            // CRITICAL FIX: BINARY columns use type 29 but contain binary data!
+            // Check is_binary flag to determine encoding
+            if (col.is_binary) {
+                val.type = IndexFieldValue::Type::BINARY_VAL;
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
                 }
-            } catch (const std::length_error&) {
-                val.str_value = "<STRING_ALLOC_ERROR>";
+                oss << "')";
+                val.str_value = oss.str();
+            } else {
+                val.type = IndexFieldValue::Type::STRING_VAL;
+                try {
+                    if (field_size > 0 && field_size <= max_size - offset) {
+                        val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                        // Trim trailing spaces for CHAR columns
+                        while (!val.str_value.empty() && val.str_value.back() == ' ') {
+                            val.str_value.pop_back();
+                        }
+                    } else {
+                        val.str_value = "<INVALID_SIZE>";
+                    }
+                } catch (const std::length_error&) {
+                    val.str_value = "<STRING_ALLOC_ERROR>";
+                }
             }
             break;
         }

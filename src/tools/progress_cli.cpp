@@ -450,16 +450,44 @@ bool ProgressRecoveryCLI::export_to_csv(const std::string& path,
         return true;
     }
 
-    // 写入列名
+    // 写入列名 - 列名不需要引号（它们是简单的标识符）
+    bool first_col = true;
     for (const auto& kv : records[0]) {
-        file << kv.first << ",";
+        if (!first_col) file << ",";
+        file << kv.first;
+        first_col = false;
     }
     file << "\n";
 
-    // 写入数据
+    // 写入数据 - 正确转义包含逗号、引号、换行符的字段
     for (const auto& record : records) {
+        first_col = true;
         for (const auto& kv : record) {
-            file << kv.second << ",";
+            if (!first_col) file << ",";
+
+            const std::string& value = kv.second;
+            // CSV RFC 4180: 如果字段包含逗号、引号或换行符，必须用双引号包裹
+            // 并且内部的引号必须通过双写来转义
+            bool needs_quote = (value.find(',') != std::string::npos ||
+                                value.find('"') != std::string::npos ||
+                                value.find('\n') != std::string::npos ||
+                                value.find('\r') != std::string::npos);
+
+            if (needs_quote) {
+                file << "\"";
+                // 转义内部引号：每个 " 变成 ""
+                std::string escaped = value;
+                size_t pos = 0;
+                while ((pos = escaped.find('"', pos)) != std::string::npos) {
+                    escaped.insert(pos, 1, '"');
+                    pos += 2;
+                }
+                file << escaped;
+                file << "\"";
+            } else {
+                file << value;
+            }
+            first_col = false;
         }
         file << "\n";
     }

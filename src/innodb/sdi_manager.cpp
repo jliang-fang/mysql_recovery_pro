@@ -162,9 +162,18 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                             column_info.column_length = col["length"];
                         }
 
+                        // CRITICAL FIX: Read charset_id and collation_id independently
+                        // collation_id=63 indicates BINARY charset (for BINARY, VARBINARY, BLOB)
                         if (col.contains("charset_id")) {
                             column_info.charset_id = col["charset_id"];
-                            column_info.collation_id = col.value("collation_id", 255);
+                        }
+                        if (col.contains("collation_id")) {
+                            column_info.collation_id = col["collation_id"];
+                            // Debug output for binary columns
+                            if (column_info.collation_id == 63) {
+                                std::cerr << "[DEBUG SDI] Binary column detected: " << column_info.name
+                                          << " collation_id=" << column_info.collation_id << "\n";
+                            }
                         }
 
                         // Parse numeric precision/scale for DECIMAL types
