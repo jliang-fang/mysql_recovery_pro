@@ -109,13 +109,27 @@ bool TruncateRecovery::is_truncated_file(const std::string& ibd_path) {
     uint32_t total_pages = static_cast<uint32_t>(file_size / page_size_);
     uint32_t index_pages = 0;
     uint32_t zero_pages = 0;
+    uint32_t blob_pages = 0;
+    uint32_t sdi_pages = 0;
     uint32_t pages_checked = 0;
 
-    // Check up to 500 pages for accurate detection (or all pages if file is small)
-    uint32_t max_pages_to_check = std::min(total_pages, std::max(500u, total_pages / 10));
+    // Check all pages for accurate detection
+    // For large files, sample up to 1000 pages distributed across the file
+    uint32_t pages_to_check;
+    if (total_pages <= 1000) {
+        pages_to_check = total_pages;
+    } else {
+        // Sample 1000 pages spread across the file
+        pages_to_check = 1000;
+    }
 
-    for (uint32_t page_no = 1; page_no < max_pages_to_check; page_no++) {
-        file.seekg(page_no * page_size_, std::ios::beg);
+    uint32_t page_step = (total_pages > 1000) ? (total_pages / 1000) : 1;
+
+    for (uint32_t i = 0; i < pages_to_check && i < total_pages; i++) {
+        uint32_t page_no = (total_pages > 1000) ? (i * page_step) : i;
+        if (page_no == 0) continue;  // Skip FSP header
+
+        file.seekg(static_cast<uint64_t>(page_no) * page_size_, std::ios::beg);
         std::vector<uint8_t> page(page_size_);
         file.read(reinterpret_cast<char*>(page.data()), page_size_);
 
@@ -126,12 +140,16 @@ bool TruncateRecovery::is_truncated_file(const std::string& ibd_path) {
 
         if (page_type == FIL_PAGE_INDEX) {
             index_pages++;
+        } else if (page_type == FIL_PAGE_TYPE_BLOB) {
+            blob_pages++;
+        } else if (page_type == FIL_PAGE_SDI_BLOB) {
+            sdi_pages++;
         }
 
-        // Check if page is all zeros
+        // Check if page is all zeros (check more thoroughly)
         bool all_zero = true;
-        for (size_t i = 0; i < 64; i++) {  // Check first 64 bytes
-            if (page[i] != 0) {
+        for (size_t j = 0; j < page_size_; j++) {
+            if (page[j] != 0) {
                 all_zero = false;
                 break;
             }
@@ -142,18 +160,29 @@ bool TruncateRecovery::is_truncated_file(const std::string& ibd_path) {
     }
 
     // TRUNCATE detection:
-    // - INDEX pages count is very low (0-2)
-    // - Most data pages are zeroed (>80% of checked pages)
-    // - File still has reasonable size
-    bool is_truncated = (index_pages <= 2) &&
-                        (pages_checked > 0 && zero_pages > pages_checked * 0.8) &&
-                        (file_size > page_size_ * 3);
+    // - File has valid structure but NO INDEX pages
+    // - No BLOB/SDI pages with data (these indicate active table)
+    // - Most data pages are zeroed (>90% of checked pages)
+    // - File has reasonable size (at least 4 pages)
+    //
+    // Important: A file with even 1 INDEX page and/or BLOB pages is NOT truncated
+    // A truly truncated file will have:
+    // - 0 INDEX pages (or just empty root page)
+    // - 0 BLOB/SDI pages
+    // - Almost all pages zeroed
+    bool is_truncated = (index_pages == 0) &&
+                        (blob_pages == 0) &&
+                        (sdi_pages == 0) &&
+                        (pages_checked > 0 && zero_pages >= pages_checked * 0.9) &&
+                        (total_pages >= 4);
 
     if (is_truncated) {
         std::cout << "[INFO] Detected TRUNCATED file: " << ibd_path << "\n";
         std::cout << "  Total pages: " << total_pages << "\n";
         std::cout << "  Pages checked: " << pages_checked << "\n";
         std::cout << "  INDEX pages: " << index_pages << "\n";
+        std::cout << "  BLOB pages: " << blob_pages << "\n";
+        std::cout << "  SDI pages: " << sdi_pages << "\n";
         std::cout << "  Zero pages: " << zero_pages << "\n";
     }
 
