@@ -874,6 +874,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     break;
             }
 
+            // CRITICAL FIX: Set is_binary based on charset_id/collation_id
+            // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
+            // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
+            icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
+
             // Check if this column is part of PK
             if (pk_column_names.count(col.name) > 0) {
                 n_pk++;
@@ -948,6 +953,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::string type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
 
             // Extract size from type (e.g., VARCHAR(255) -> size=255)
+            // Also extract ENUM/SET values
             auto paren_pos = type_str.find('(');
             if (paren_pos != std::string::npos) {
                 auto end_paren = type_str.find(')', paren_pos);
@@ -956,15 +962,62 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     // Handle DECIMAL(M,D)
                     auto comma_in_size = size_str.find(',');
                     if (comma_in_size != std::string::npos) {
-                        try {
-                            icol.precision = std::stoul(size_str.substr(0, comma_in_size));
-                            icol.scale = std::stoul(size_str.substr(comma_in_size + 1));
-                            icol.col_length = icol.precision;
-                        } catch (...) {}
+                        // Check if this is DECIMAL or ENUM/SET with multiple values
+                        std::string type_upper_check = type_str.substr(0, paren_pos);
+                        std::transform(type_upper_check.begin(), type_upper_check.end(), type_upper_check.begin(), ::toupper);
+                        if (type_upper_check == "ENUM" || type_upper_check == "SET") {
+                            // This is ENUM or SET with comma-separated values like ENUM('a','b','c')
+                            // The comma in size_str is part of the values, not DECIMAL precision
+                            std::cerr << "[DEBUG TYPE] type_str='" << type_str << "' paren_pos=" << paren_pos << " type_upper='" << type_upper_check << "'\n";
+                            // Parse the values
+                            std::string values_str = size_str;
+                            std::vector<std::string> values;
+                            size_t start = 0;
+                            while (start < values_str.size()) {
+                                while (start < values_str.size() && isspace(values_str[start])) start++;
+                                if (start >= values_str.size()) break;
+                                char quote = values_str[start];
+                                if (quote != '\'' && quote != '"') {
+                                    size_t end = values_str.find(',', start);
+                                    if (end == std::string::npos) end = values_str.size();
+                                    std::string val = values_str.substr(start, end - start);
+                                    while (!val.empty() && isspace(val.back())) val.pop_back();
+                                    if (!val.empty()) values.push_back(val);
+                                    start = end + 1;
+                                } else {
+                                    size_t end = values_str.find(quote, start + 1);
+                                    if (end != std::string::npos) {
+                                        values.push_back(values_str.substr(start + 1, end - start - 1));
+                                        start = end + 1;
+                                        while (start < values_str.size() && (values_str[start] == ',' || isspace(values_str[start]))) start++;
+                                    } else {
+                                        start++;
+                                    }
+                                }
+                            }
+                            std::cerr << "[DEBUG VALUES] Parsed " << values.size() << " values for " << type_upper_check << "\n";
+                            if (type_upper_check == "ENUM") {
+                                icol.enum_values = values;
+                            } else {
+                                icol.set_values = values;
+                            }
+                        } else {
+                            // DECIMAL(M,D)
+                            try {
+                                icol.precision = std::stoul(size_str.substr(0, comma_in_size));
+                                icol.scale = std::stoul(size_str.substr(comma_in_size + 1));
+                                icol.col_length = icol.precision;
+                            } catch (...) {}
+                        }
                     } else {
+                        // No comma in size_str - could be regular size or non-comma ENUM/SET
+                        // Try to parse as regular size first
                         try {
                             icol.col_length = std::stoul(size_str);
-                        } catch (...) {}
+                        } catch (...) {
+                            // If parsing fails, it might be a single-value ENUM/SET
+                            // Just use default size
+                        }
                     }
                     type_str = type_str.substr(0, paren_pos);
                 }
@@ -1019,7 +1072,18 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             else if (type_upper == "BLOB") {
                 icol.col_type = 27;
                 icol.is_big = true;
+                icol.is_binary = true;  // BLOB is binary
                 icol.col_length = 65535;
+            }
+            else if (type_upper == "VARBINARY") {
+                icol.col_type = 16;  // Same as VARCHAR but binary
+                icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
+                icol.is_binary = true;  // VARBINARY is binary
+            }
+            else if (type_upper == "BINARY") {
+                icol.col_type = 29;  // Same as CHAR but binary
+                icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
+                icol.is_binary = true;  // BINARY is binary
             }
             else if (type_upper == "JSON") {
                 icol.col_type = 31;  // JSON type in InnoDB
@@ -1055,6 +1119,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     icol.is_unsigned = true;
                 }
             }
+
+            // CRITICAL: Set physical_pos to ordinal position (InnoDB storage order)
+            // For schema-defined columns, physical_pos should equal ordinal_position
+            // InnoDB stores columns in physical_pos order, which typically matches
+            // the order columns are defined in CREATE TABLE
+            icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);
 
             index_columns.push_back(icol);
         }
@@ -1102,7 +1172,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         for (const auto& rec : records) {
             std::map<std::string, std::string> record_map;
-            for (size_t i = 0; i < rec.fields.size(); i++) {
+            // DEBUG: Check if rec.fields has more than cols.size()
+            static int field_size_debug = 0;
+            if (field_size_debug < 5 && rec.fields.size() != cols.size()) {
+                std::cerr << "[DEBUG FIELD SIZE] rec.fields.size()=" << rec.fields.size()
+                          << " cols.size()=" << cols.size() << "\n";
+                field_size_debug++;
+            }
+            // CRITICAL FIX: Only iterate over columns defined in schema (cols.size())
+            // NOT rec.fields.size() which could be larger due to parsing artifacts
+            for (size_t i = 0; i < cols.size() && i < rec.fields.size(); i++) {
                 // Use column name if available, otherwise use field_NNNN
                 std::string field_name;
                 if (i < cols.size() && !cols[i].name.empty()) {
@@ -1114,19 +1193,46 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
 
                 const auto& field = rec.fields[i];
+
+                // DEBUG: Check specific column value
+                static int col_debug = 0;
+                if (col_debug < 3 && field_name == "default_value") {
+                    std::cerr << "[DEBUG COL] default_value field type=" << static_cast<int>(field.type)
+                              << " str_value.size()=" << field.str_value.size()
+                              << " str_value first 50=";
+                    for (size_t j = 0; j < 50 && j < field.str_value.size(); j++) {
+                        char c = field.str_value[j];
+                        if (c >= 32 && c < 127) std::cerr << c;
+                        else std::cerr << "[" << std::hex << (int)(unsigned char)c << "]";
+                    }
+                    std::cerr << " raw_bytes.size()=" << field.raw_bytes.size() << "\n";
+                    col_debug++;
+                }
+
                 if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
                     record_map[field_name] = "NULL";
+                } else if (!field.str_value.empty()) {
+                    // str_value contains the decoded value (text, UNHEX format, etc.)
+                    record_map[field_name] = field.str_value;
                 } else if (!field.raw_bytes.empty()) {
-                    if (!field.str_value.empty()) {
-                        record_map[field_name] = field.str_value;
-                    } else {
-                        std::ostringstream hex_ss;
-                        for (uint8_t b : field.raw_bytes) {
-                            hex_ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
-                        }
-                        record_map[field_name] = hex_ss.str();
+                    // raw_bytes fallback (should rarely happen now)
+                    std::ostringstream hex_ss;
+                    hex_ss << "UNHEX('";
+                    for (uint8_t b : field.raw_bytes) {
+                        hex_ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
                     }
+                    hex_ss << "')";
+                    record_map[field_name] = hex_ss.str();
+                } else {
+                    // Numeric types - use to_string()
+                    record_map[field_name] = field.to_string();
                 }
+            }
+            // DEBUG: Check record map size
+            static int map_debug = 0;
+            if (map_debug < 3) {
+                std::cerr << "[DEBUG MAP] record_map has " << record_map.size() << " entries, cols.size()=" << cols.size() << "\n";
+                map_debug++;
             }
             result.push_back(record_map);
         }
@@ -1268,6 +1374,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     if (col_def.is_variable_length()) {
                         col_def.is_big = (col_def.col_length * col_def.mb_maxlen > 255);
                     }
+
+                    // CRITICAL FIX: Set is_binary based on charset_id/collation_id
+                    // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
+                    // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
+                    col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (col_def.col_type != 31);
 
                     // Check if PK column
                     if (pk_col_names.count(col.name) > 0) {

@@ -1142,6 +1142,29 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         }
     }
 
+    // DEBUG: Check field count and variable_sizes
+    static int field_count_debug = 0;
+    if (field_count_debug < 3) {
+        std::cerr << "[DEBUG FIELDS] Result has " << result.size() << " fields, columns.size()=" << columns.size()
+                  << ", n_pk_cols_=" << n_pk_cols_ << "\n";
+        // Print ALL variable_sizes
+        std::cerr << "[DEBUG VARSIZES] All " << variable_sizes.size() << " sizes: ";
+        for (size_t i = 0; i < variable_sizes.size(); i++) {
+            std::cerr << "[" << i << "]=" << variable_sizes[i] << " ";
+        }
+        std::cerr << "\n";
+        // Print column names and their expected sizes
+        for (size_t i = 0; i < columns.size(); i++) {
+            std::cerr << "  col[" << i << "] name=" << columns[i].name
+                      << " type=" << (int)columns[i].col_type
+                      << " phys_pos=" << columns[i].physical_pos
+                      << " varlen=" << columns[i].is_variable_length()
+                      << " is_big=" << columns[i].is_big
+                      << " storage=" << columns[i].storage_size() << "\n";
+        }
+        field_count_debug++;
+    }
+
     return result;
 }
 
@@ -1805,7 +1828,15 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 16:   // VARCHAR/VARBINARY - InnoDB type 16
         case 28: { // VAR_STRING - InnoDB type 28
             // Check is_binary flag to handle VARBINARY correctly
+            // DEBUG: Log is_binary state for binary columns
             if (col.is_binary) {
+                // DEBUG output for first few records
+                static int binary_debug_count = 0;
+                if (binary_debug_count < 3) {
+                    std::cerr << "[DEBUG DECODE] Column '" << col.name << "' type=" << col.col_type
+                              << " is_binary=" << col.is_binary << " field_size=" << field_size << "\n";
+                    binary_debug_count++;
+                }
                 val.type = IndexFieldValue::Type::BINARY_VAL;
                 std::ostringstream oss;
                 oss << "UNHEX('";
@@ -1833,6 +1864,13 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 27: { // BLOB/TEXT - InnoDB type 27
             // TEXT columns should be decoded as text, BLOB as binary
             // We can't distinguish here, so check is_binary flag
+            // DEBUG: Log blob column decoding
+            static int blob_debug_count = 0;
+            if (blob_debug_count < 3 && col.name == "blob_col") {
+                std::cerr << "[DEBUG DECODE BLOB] Column '" << col.name << "' type=" << col.col_type
+                          << " is_binary=" << col.is_binary << " field_size=" << field_size << "\n";
+                blob_debug_count++;
+            }
             if (col.is_binary) {
                 val.type = IndexFieldValue::Type::BINARY_VAL;
                 std::ostringstream oss;
