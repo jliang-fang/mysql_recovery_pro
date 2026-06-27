@@ -53,7 +53,15 @@ public:
             return false;
         }
 
-        file << get_result();
+        std::string result = get_result();
+        // DEBUG: Check result size
+        static int export_debug = 0;
+        if (export_debug < 3) {
+            std::cerr << "[DEBUG EXPORT_FILE] result size=" << result.size() << "\n";
+            export_debug++;
+        }
+
+        file << result;
         file.close();
 
         return true;

@@ -2432,6 +2432,11 @@ int main(int argc, char** argv) {
                     // Set physical_pos from SDI (columns are already sorted by physical_pos)
                     icol.physical_pos = col.physical_pos > 0 ? col.physical_pos : static_cast<uint32_t>(index_columns.size() + 1);
 
+                    // CRITICAL FIX: Set is_binary based on charset_id/collation_id
+                    // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
+                    // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
+                    icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
+
                     index_columns.push_back(icol);
                 }
 
@@ -2446,6 +2451,7 @@ int main(int argc, char** argv) {
                                   << " type=" << static_cast<int>(index_columns[i].col_type)
                                   << " len=" << index_columns[i].col_length
                                   << " nullable=" << index_columns[i].is_nullable
+                                  << " is_binary=" << index_columns[i].is_binary
                                   << " dt_prec=" << static_cast<int>(index_columns[i].datetime_precision) << "\n";
                     }
                 }

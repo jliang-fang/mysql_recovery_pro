@@ -330,12 +330,36 @@ void InnoDBIndexParser::set_columns(const std::vector<IndexColumnDef>& columns,
     has_row_id_ = has_row_id;
     n_pk_cols_ = n_pk_cols;
 
+    // DEBUG: Print column types BEFORE sorting
+    static int set_cols_debug = 0;
+    if (set_cols_debug < 1) {
+        std::cerr << "[DEBUG SET_COLUMNS] Received " << columns_.size() << " columns:\n";
+        for (size_t i = 0; i < columns_.size(); i++) {
+            std::cerr << "  [" << i << "] name=" << columns_[i].name
+                      << " type=" << (int)columns_[i].col_type
+                      << " phys_pos=" << columns_[i].physical_pos << "\n";
+        }
+        set_cols_debug++;
+    }
+
     // CRITICAL: Sort columns by physical_pos (InnoDB storage order)
     // Reference: ibd2sql table.py line 747-748
     std::sort(columns_.begin(), columns_.end(),
         [](const IndexColumnDef& a, const IndexColumnDef& b) {
             return a.physical_pos < b.physical_pos;
         });
+
+    // DEBUG: Print column types AFTER sorting
+    static int sort_debug = 0;
+    if (sort_debug < 1) {
+        std::cerr << "[DEBUG SET_COLUMNS] After sorting by physical_pos:\n";
+        for (size_t i = 0; i < columns_.size(); i++) {
+            std::cerr << "  [" << i << "] name=" << columns_[i].name
+                      << " type=" << (int)columns_[i].col_type
+                      << " phys_pos=" << columns_[i].physical_pos << "\n";
+        }
+        sort_debug++;
+    }
 
     // Count nullable and variable-length columns
     n_nullable_ = 0;
@@ -505,11 +529,28 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
 
     size_t pos = origin - REC_HEADER_SIZE_NEW;  // After header, pos = origin - 5
 
+    // DEBUG: Show initial position
+    static int pos_init_debug = 0;
+    if (pos_init_debug < 3) {
+        std::cerr << "[DEBUG POS_INIT] origin=" << std::hex << origin << std::dec
+                  << " (" << origin << ") REC_HEADER_SIZE_NEW=" << REC_HEADER_SIZE_NEW
+                  << " pos=" << std::hex << pos << std::dec << " (" << pos << ")\n";
+        pos_init_debug++;
+    }
+
     // Read NULL bitmap
     if (null_bytes > 0 && pos >= null_bytes) {
         pos -= null_bytes;
         result.null_bitmask.assign(page_data + pos, page_data + pos + null_bytes);
         result.null_bytes_read = null_bytes;
+    }
+
+    // DEBUG: Show position after NULL bitmap
+    static int null_pos_debug = 0;
+    if (null_pos_debug < 3) {
+        std::cerr << "[DEBUG NULL_POS] null_bytes=" << null_bytes
+                  << " pos after null=" << std::hex << pos << std::dec << " (" << pos << ")\n";
+        null_pos_debug++;
     }
 
     // Read null bitmask as integer for bit testing
@@ -816,6 +857,15 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
     size_t rec_origin = rec_offset + header_size;
 
+    // DEBUG: Show record offset and origin
+    static int rec_debug = 0;
+    if (rec_debug < 5) {
+        std::cerr << "[DEBUG REC] rec_offset=" << std::hex << rec_offset << std::dec
+                  << " (" << rec_offset << ") rec_origin=" << std::hex << rec_origin << std::dec
+                  << " (" << rec_origin << ") header_size=" << header_size << "\n";
+        rec_debug++;
+    }
+
     if (rec_origin >= page_size) return std::nullopt;
 
     IndexRecord record;
@@ -1083,54 +1133,39 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     }
 
     // Step 3: Read remaining user columns
-    // CRITICAL FIX: InnoDB DYNAMIC/COMPRESSED format stores columns as:
-    // - Variable-length columns FIRST (in physical_pos order among variable columns)
-    // - Fixed-length columns AFTER (in physical_pos order among fixed columns)
-    // NOT all columns in physical_pos order mixed together!
+    // CRITICAL FIX: InnoDB DYNAMIC format stores ALL columns in physical_pos order!
+    // Reference: ibd2sql table.py line 747-748:
+    //   colid_list.append([col['physical_pos'],colid,col['name']])
+    //   colid_list.sort() # for physical_pos
+    // Then _read_field() reads columns in colid_list order (physical_pos sorted)
     //
-    // Reference: ibd2sql table.py _read_field():
-    //   - First reads variable columns (size from record)
-    //   - Then reads fixed columns (size from column definition)
-    //   - Each group is sorted by physical_pos within that group
+    // This means ALL columns (both variable and fixed) are interleaved by physical_pos!
+    // NOT "variable columns first, then fixed columns"!
 
     std::map<size_t, IndexFieldValue> results_map;
 
-    // Step 3a: Read VARIABLE columns first (in physical_pos order)
-    std::vector<size_t> var_col_indices;
-    for (size_t col_idx = n_pk_cols_; col_idx < columns.size(); col_idx++) {
-        if (columns[col_idx].is_variable_length()) {
-            var_col_indices.push_back(col_idx);
-        }
-    }
-    // Sort variable columns by physical_pos
-    std::sort(var_col_indices.begin(), var_col_indices.end(),
-        [&columns](size_t a, size_t b) {
-            return columns[a].physical_pos < columns[b].physical_pos;
-        });
+    // Read ALL user columns in physical_pos order (columns[] is already sorted)
+    // Reference: ibd2sql index.py _read_row_pk_leaf():
+    //   row = self._read_field(self.table.pk,...)  # Read PK
+    //   row.update(self._read_trx_id_rollptr())    # Skip TRX_ID + ROLL_PTR
+    //   row.update(self._read_field(the_rest_of_field,null_list,size_list))  # Read rest in colid_list order
 
-    // DEBUG: Print variable column order
-    static int var_order_debug_count = 0;
-    if (var_order_debug_count < 1) {
-        std::cerr << "[DEBUG VAR ORDER] " << var_col_indices.size() << " variable columns to read (sorted by physical_pos):\n";
-        for (size_t col_idx : var_col_indices) {
-            std::cerr << "  col[" << col_idx << "] '" << columns[col_idx].name
-                      << "' phys_pos=" << columns[col_idx].physical_pos
-                      << " size=" << (col_idx < variable_sizes.size() ? variable_sizes[col_idx] : 0) << "\n";
-        }
-        var_order_debug_count++;
-    }
-
-    for (size_t col_idx : var_col_indices) {
-        if (pos >= data_end) break;
+    for (size_t col_idx = n_pk_cols_; col_idx < columns.size() && pos < data_end; col_idx++) {
         const auto& col = columns[col_idx];
 
-        // Variable-length column: get size from variable_sizes
+        // Determine field size
         uint32_t field_size = 0;
-        if (col_idx < variable_sizes.size()) {
-            field_size = variable_sizes[col_idx];
+        if (col.is_variable_length()) {
+            // Variable-length column: get size from variable_sizes
+            if (col_idx < variable_sizes.size()) {
+                field_size = variable_sizes[col_idx];
+            }
+        } else {
+            // Fixed-length column: use storage_size() (includes fractional parts)
+            field_size = col.storage_size();
         }
 
-        // Check NULL status
+        // Check NULL status - use physical_pos order!
         bool is_null = false;
         if (col.is_nullable && !null_bitmask.empty()) {
             uint32_t bit_pos = 0;
@@ -1152,12 +1187,14 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
         } else if (pos + field_size <= data_end) {
-            // DEBUG: Track position for all variable columns (first record only)
-            static int var_pos_debug_count = 0;
-            if (var_pos_debug_count < 10) {
-                std::cerr << "[DEBUG VAR POS] Column '" << col.name << "' phys_pos=" << col.physical_pos
+            // DEBUG: Track position for first few columns
+            static int pos_debug_count = 0;
+            if (pos_debug_count < 10) {
+                std::cerr << "[DEBUG READ] Column '" << col.name << "' phys_pos=" << col.physical_pos
+                          << " col_idx=" << col_idx
                           << " pos=" << std::hex << pos << std::dec
                           << " field_size=" << field_size
+                          << " varlen=" << col.is_variable_length()
                           << " data: ";
                 size_t print_len = (field_size < 30) ? field_size : 30;
                 for (size_t j = 0; j < print_len && pos + j < data_end; j++) {
@@ -1166,56 +1203,8 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                     else std::cerr << "[" << std::hex << (int)(unsigned char)c << std::dec << "]";
                 }
                 std::cerr << "\n";
-                var_pos_debug_count++;
+                pos_debug_count++;
             }
-            val = decode_column(page_data, pos, data_end, col, field_size);
-            pos += field_size;
-        }
-        results_map[col_idx] = val;
-    }
-
-    // Step 3b: Read FIXED columns after (in physical_pos order)
-    std::vector<size_t> fixed_col_indices;
-    for (size_t col_idx = n_pk_cols_; col_idx < columns.size(); col_idx++) {
-        if (!columns[col_idx].is_variable_length()) {
-            fixed_col_indices.push_back(col_idx);
-        }
-    }
-    // Sort fixed columns by physical_pos
-    std::sort(fixed_col_indices.begin(), fixed_col_indices.end(),
-        [&columns](size_t a, size_t b) {
-            return columns[a].physical_pos < columns[b].physical_pos;
-        });
-
-    for (size_t col_idx : fixed_col_indices) {
-        if (pos >= data_end) break;
-        const auto& col = columns[col_idx];
-
-        // Fixed-length column: use storage_size()
-        uint32_t field_size = col.storage_size();
-
-        // Check NULL status
-        bool is_null = false;
-        if (col.is_nullable && !null_bitmask.empty()) {
-            uint32_t bit_pos = 0;
-            for (size_t j = 0; j < columns.size(); j++) {
-                if (!columns[j].is_system_column() && columns[j].is_nullable &&
-                    columns[j].physical_pos < col.physical_pos) {
-                    bit_pos++;
-                }
-            }
-            size_t byte_idx = (null_bitmask.size() - 1) - (bit_pos / 8);
-            uint8_t bit_idx = bit_pos % 8;
-            if (byte_idx < null_bitmask.size()) {
-                is_null = (null_bitmask[byte_idx] & (1 << bit_idx)) != 0;
-            }
-        }
-
-        IndexFieldValue val;
-        if (is_null || field_size == 0) {
-            val.is_null = true;
-            val.type = IndexFieldValue::Type::NULL_VAL;
-        } else if (pos + field_size <= data_end) {
             val = decode_column(page_data, pos, data_end, col, field_size);
             pos += field_size;
         }

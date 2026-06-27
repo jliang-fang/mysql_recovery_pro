@@ -905,8 +905,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     };
 
     // 辅助函数：从字符串解析 schema 并设置到 InnoDBIndexParser
-    // Format: col_name:type:size:flags, col_name2:type2:size2:flags2, ...
-    // Example: id:INT:pk, name:VARCHAR:255, email:VARCHAR:100, created_at:DATETIME
+    // Supports two formats:
+    // 1. Colon-separated: col_name:type:size:flags, col_name2:type2:size2:flags2
+    //    Example: id:INT:pk, name:VARCHAR:255, email:VARCHAR:100
+    // 2. SQL-style: col_name TYPE[(size)] [flags], col_name2 TYPE2 [(size2)] [flags2]
+    //    Example: id INT PRIMARY KEY, name VARCHAR(100), age INT NOT NULL
     auto parse_schema_from_string = [&](const std::string& schema_str,
                                           dbrecovery::innodb::InnoDBIndexParser& index_parser,
                                           bool verbose) -> bool {
@@ -940,17 +943,80 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         for (const auto& col_def : col_defs) {
             dbrecovery::innodb::IndexColumnDef icol;
 
-            // Split by ':'
-            std::istringstream cs(col_def);
-            std::string token;
-            std::vector<std::string> parts;
-            while (std::getline(cs, token, ':')) {
-                parts.push_back(token);
+            // Trim whitespace from col_def
+            std::string trimmed_def = col_def;
+            while (!trimmed_def.empty() && isspace(trimmed_def.front())) trimmed_def.erase(0, 1);
+            while (!trimmed_def.empty() && isspace(trimmed_def.back())) trimmed_def.pop_back();
+
+            // Detect format: check if it contains ':' (colon-separated format)
+            bool has_colon = trimmed_def.find(':') != std::string::npos;
+
+            std::string name_str, type_str;
+            std::vector<std::string> flag_parts;
+
+            if (has_colon) {
+                // Colon-separated format: name:type:size:flags
+                std::istringstream cs(trimmed_def);
+                std::string token;
+                std::vector<std::string> parts;
+                while (std::getline(cs, token, ':')) {
+                    parts.push_back(token);
+                }
+
+                if (parts.empty()) continue;
+                name_str = parts[0];
+                type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
+                for (size_t fi = 2; fi < parts.size(); fi++) {
+                    flag_parts.push_back(parts[fi]);
+                }
+            } else {
+                // SQL-style format: name TYPE[(size)] [flags...]
+                // Parse: split by whitespace, handle TYPE(size) as one token
+                std::istringstream ss(trimmed_def);
+                std::vector<std::string> tokens;
+                std::string tok;
+                while (ss >> tok) {
+                    tokens.push_back(tok);
+                }
+
+                if (tokens.empty()) continue;
+                name_str = tokens[0];
+
+                // Find type (first non-keyword after name)
+                size_t type_idx = 1;
+                if (tokens.size() > 1) {
+                    type_str = tokens[1];
+                    // Check if type has (size) attached
+                    // Handle DECIMAL(M,D), VARCHAR(255), ENUM('a','b'), etc.
+                } else {
+                    type_str = "VARCHAR";  // default
+                }
+
+                // Remaining tokens are flags
+                for (size_t fi = 2; fi < tokens.size(); fi++) {
+                    flag_parts.push_back(tokens[fi]);
+                }
+
+                // Handle case where type and size are separate tokens: VARCHAR ( 255 )
+                // If type_str doesn't have parentheses but next token starts with '('
+                if (type_str.find('(') == std::string::npos && !flag_parts.empty() && !flag_parts[0].empty() && flag_parts[0][0] == '(') {
+                    // Merge type with size tokens
+                    type_str += flag_parts[0];
+                    flag_parts.erase(flag_parts.begin());
+                    // Continue merging if there's more parts of the size spec
+                    while (!flag_parts.empty() && type_str.back() != ')') {
+                        type_str += " " + flag_parts[0];
+                        flag_parts.erase(flag_parts.begin());
+                    }
+                }
             }
 
-            if (parts.empty()) continue;
-            icol.name = parts[0];
-            std::string type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
+            // Trim name
+            while (!name_str.empty() && isspace(name_str.front())) name_str.erase(0, 1);
+            while (!name_str.empty() && isspace(name_str.back())) name_str.pop_back();
+
+            icol.name = name_str;
+            icol.col_type = 16;  // default to VARCHAR
 
             // Extract size from type (e.g., VARCHAR(255) -> size=255)
             // Also extract ENUM/SET values
@@ -1014,6 +1080,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         // Try to parse as regular size first
                         try {
                             icol.col_length = std::stoul(size_str);
+                            // DEBUG
+                            static int size_debug = 0;
+                            if (size_debug < 5) {
+                                std::cerr << "[DEBUG SIZE_PARSE] type_str='" << type_str << "' size_str='" << size_str
+                                          << "' -> col_length=" << icol.col_length << "\n";
+                                size_debug++;
+                            }
                         } catch (...) {
                             // If parsing fails, it might be a single-value ENUM/SET
                             // Just use default size
@@ -1023,16 +1096,26 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
             }
 
-            // Size from parts[2] if available
-            if (parts.size() > 2 && icol.col_length == 0) {
+            // Size from flag_parts if colon-separated format (e.g., name:VARCHAR:255)
+            if (has_colon && flag_parts.size() > 0 && icol.col_length == 0) {
                 try {
-                    icol.col_length = std::stoul(parts[2]);
+                    icol.col_length = std::stoul(flag_parts[0]);
                 } catch (...) {}
             }
 
             // Convert type string to InnoDB internal type ID
+            // First, extract the base type name (strip parentheses if any)
             std::string type_upper = type_str;
             std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
+
+            // Strip any (size) or (precision,scale) from type name
+            auto paren_in_type = type_upper.find('(');
+            if (paren_in_type != std::string::npos) {
+                type_upper = type_upper.substr(0, paren_in_type);
+            }
+            // Trim whitespace
+            while (!type_upper.empty() && isspace(type_upper.back())) type_upper.pop_back();
+
             icol.mb_maxlen = 4;  // UTF8MB4
 
             // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
@@ -1105,19 +1188,44 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             // Parse flags (pk, notnull, unsigned)
             icol.is_nullable = true;  // Default nullable
-            for (size_t fi = 3; fi < parts.size(); fi++) {
-                std::string flag = parts[fi];
-                std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
-                if (flag == "pk" || flag == "primary") {
-                    n_pk++;
+            bool is_pk_col = false;
+            for (const auto& flag : flag_parts) {
+                std::string flag_lower = flag;
+                std::transform(flag_lower.begin(), flag_lower.end(), flag_lower.begin(), ::tolower);
+                // Trim flag
+                while (!flag_lower.empty() && isspace(flag_lower.front())) flag_lower.erase(0, 1);
+                while (!flag_lower.empty() && isspace(flag_lower.back())) flag_lower.pop_back();
+
+                if (flag_lower == "pk" || flag_lower == "key") {
+                    is_pk_col = true;
                     icol.is_nullable = false;
                 }
-                else if (flag == "notnull" || flag == "not_null") {
+                else if (flag_lower == "notnull" || flag_lower == "not_null") {
                     icol.is_nullable = false;
                 }
-                else if (flag == "unsigned") {
+                else if (flag_lower == "unsigned") {
                     icol.is_unsigned = true;
                 }
+            }
+
+            // Handle multi-word flags: "PRIMARY KEY", "NOT NULL"
+            std::string def_lower = trimmed_def;
+            std::transform(def_lower.begin(), def_lower.end(), def_lower.begin(), ::tolower);
+            if (def_lower.find("primary key") != std::string::npos) {
+                is_pk_col = true;
+                icol.is_nullable = false;
+            }
+            if (def_lower.find("not null") != std::string::npos ||
+                def_lower.find("not_null") != std::string::npos) {
+                icol.is_nullable = false;
+            }
+            if (def_lower.find("unsigned") != std::string::npos) {
+                icol.is_unsigned = true;
+            }
+
+            // Count PK columns
+            if (is_pk_col) {
+                n_pk++;
             }
 
             // CRITICAL: Set physical_pos to ordinal position (InnoDB storage order)
