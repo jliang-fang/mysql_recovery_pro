@@ -793,18 +793,44 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
     // Start at the INFIMUM record origin
     size_t current_origin = is_compact ? INFIMUM_OFFSET : INFIMUM_OFFSET_OLD;
 
+    // DEBUG: Show initial state
+    static int chain_debug = 0;
+    if (chain_debug < 2) {
+        std::cerr << "[DEBUG CHAIN] Starting at INFIMUM origin=" << current_origin
+                  << " heap_top=" << page_hdr.heap_top << " is_compact=" << is_compact << "\n";
+        chain_debug++;
+    }
+
     std::set<uint16_t> visited;
 
     for (uint32_t safety = 0; safety < MAX_RECORDS_PER_PAGE; safety++) {
         if (current_origin < header_size || current_origin >= page_hdr.heap_top) {
+            // DEBUG: Show why loop ended
+            static int end_debug = 0;
+            if (end_debug < 2) {
+                std::cerr << "[DEBUG END] Loop ended: current_origin=" << current_origin
+                          << " header_size=" << header_size
+                          << " heap_top=" << page_hdr.heap_top << "\n";
+                end_debug++;
+            }
             break;
         }
         if (visited.count(static_cast<uint16_t>(current_origin))) {
+            std::cerr << "[DEBUG END] Circular reference at origin=" << current_origin << "\n";
             break;  // Circular reference detected
         }
         visited.insert(static_cast<uint16_t>(current_origin));
 
         size_t header_start = current_origin - header_size;
+
+        // DEBUG: Show each iteration
+        static int iter_debug = 0;
+        if (iter_debug < 10) {
+            std::cerr << "[DEBUG ITER] iteration=" << safety
+                      << " current_origin=" << current_origin
+                      << " header_start=" << header_start << "\n";
+            iter_debug++;
+        }
 
         if (is_compact) {
             auto hdr = parse_new_record_header(page_data, header_start, page_size);
@@ -820,8 +846,27 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
             }
 
             // Move to next record
+            // CRITICAL: REC_NEXT in InnoDB is a relative offset from current position
+            // The value read from header (next_offset) is added to current_origin
+            // to get the next record's origin position.
+            // ibd2sql: REC_NEXT = rec_next + self._offset + 5
+            // where self._offset after read_reverse(5) is (original_offset - 5)
+            // So: REC_NEXT = rec_next + (original_offset - 5) + 5 = rec_next + original_offset
+            // And original_offset = current_origin
+            // Therefore: next_origin = current_origin + next_offset
             if (hdr->next_offset == 0) break;
             ssize_t next_origin = static_cast<ssize_t>(current_origin) + hdr->next_offset;
+
+            // DEBUG: Show next record calculation
+            static int next_debug = 0;
+            if (next_debug < 5) {
+                std::cerr << "[DEBUG NEXT] current_origin=" << current_origin
+                          << " next_offset=" << hdr->next_offset
+                          << " -> next_origin=" << next_origin
+                          << " heap_no=" << hdr->heap_no << "\n";
+                next_debug++;
+            }
+
             if (next_origin <= 0 || static_cast<size_t>(next_origin) >= page_size) {
                 break;
             }
@@ -2344,6 +2389,18 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_fast(
     for (uint16_t i = 0; i < n_dir_slots && dir_offset + 2 * i + 2 <= page_size - 8; i++) {
         uint16_t slot = read_be<uint16_t>(page_data, dir_offset + 2 * i);
         slot_offsets.push_back(slot);
+    }
+
+    // DEBUG: Show raw slot values
+    static int slot_debug = 0;
+    if (slot_debug < 3) {
+        std::cerr << "[DEBUG SLOTS] page_no=" << page_no << " n_dir_slots=" << n_dir_slots
+                  << " dir_offset=" << dir_offset << " raw slots:";
+        for (auto s : slot_offsets) {
+            std::cerr << " " << std::hex << s << std::dec << "(" << s << ")";
+        }
+        std::cerr << "\n";
+        slot_debug++;
     }
 
     // Reverse the slots (ibd2sql reverses them)
