@@ -545,14 +545,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         result.null_bytes_read = null_bytes;
     }
 
-    // DEBUG: Show position after NULL bitmap
-    static int null_pos_debug = 0;
-    if (null_pos_debug < 3) {
-        std::cerr << "[DEBUG NULL_POS] null_bytes=" << null_bytes
-                  << " pos after null=" << std::hex << pos << std::dec << " (" << pos << ")\n";
-        null_pos_debug++;
-    }
-
     // Read null bitmask as integer for bit testing
     // CRITICAL: InnoDB uses BIG-ENDIAN for NULL bitmap (ibd2sql line 332)
     uint32_t null_bit_value = 0;
@@ -560,6 +552,15 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         for (size_t i = 0; i < null_bytes; i++) {
             null_bit_value |= (static_cast<uint32_t>(result.null_bitmask[i]) << ((null_bytes - 1 - i) * 8));
         }
+    }
+
+    // DEBUG: Show position after NULL bitmap
+    static int null_pos_debug = 0;
+    if (null_pos_debug < 3) {
+        std::cerr << "[DEBUG NULL_POS] null_bytes=" << null_bytes
+                  << " pos after null=" << std::hex << pos << std::dec << " (" << pos << ")"
+                  << " null_bit_value=" << null_bit_value << "\n";
+        null_pos_debug++;
     }
 
     // Step 2: Read variable sizes (they are before NULL bitmap, at lower addresses)
@@ -860,9 +861,11 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     // DEBUG: Show record offset and origin
     static int rec_debug = 0;
     if (rec_debug < 5) {
-        std::cerr << "[DEBUG REC] rec_offset=" << std::hex << rec_offset << std::dec
+        std::cerr << "[DEBUG REC] page_no=" << page_no
+                  << " rec_offset=" << std::hex << rec_offset << std::dec
                   << " (" << rec_offset << ") rec_origin=" << std::hex << rec_origin << std::dec
-                  << " (" << rec_origin << ") header_size=" << header_size << "\n";
+                  << " (" << rec_origin << ") header_size=" << header_size
+                  << " is_leaf=" << is_leaf << "\n";
         rec_debug++;
     }
 
@@ -999,6 +1002,14 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         // Data starts at record origin (rec_offset + 5)
         size_t actual_data_start = rec_origin;
 
+        // DEBUG: Show actual_data_start
+        static int data_start_debug = 0;
+        if (data_start_debug < 3) {
+            std::cerr << "[DEBUG DATA_START] actual_data_start=" << std::hex << actual_data_start << std::dec
+                      << " (" << actual_data_start << ")\n";
+            data_start_debug++;
+        }
+
         // CRITICAL FIX: Calculate expected data_end based on variable_sizes
         // The variable_sizes array contains sizes for ALL columns (PK + user columns)
         // Sum them up to get the actual record data length
@@ -1061,6 +1072,14 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
     size_t pos = data_start;
 
+    // DEBUG: Show initial position
+    static int pos_init_debug = 0;
+    if (pos_init_debug < 3) {
+        std::cerr << "[DEBUG EXTRACT_START] data_start=" << std::hex << data_start << std::dec
+                  << " (" << data_start << ") n_pk_cols_=" << n_pk_cols_ << "\n";
+        pos_init_debug++;
+    }
+
     // Step 1: Read PK columns first
     for (size_t col_idx = 0; col_idx < n_pk_cols_ && col_idx < columns.size() && pos < data_end; col_idx++) {
         const auto& col = columns[col_idx];
@@ -1114,6 +1133,15 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     size_t pos_after_pk = pos;  // Store position after PK for debugging
     if (is_leaf && pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
         pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
+
+        // DEBUG: Show position after TRX_ID + ROLL_PTR
+        static int trx_debug = 0;
+        if (trx_debug < 3) {
+            std::cerr << "[DEBUG AFTER_TRX] pos_after_pk=" << std::hex << pos_after_pk << std::dec
+                      << " pos after TRX+ROLL=" << std::hex << pos << std::dec
+                      << " (" << pos << ")\n";
+            trx_debug++;
+        }
 
         // CRITICAL FIX: Skip 4-byte variable field offset table if present
         // InnoDB DYNAMIC format may store a 4-byte offset table after TRX_ID+ROLL_PTR
