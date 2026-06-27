@@ -102,6 +102,9 @@ std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len
 }
 
 // 解析JSON对象/数组的元素
+// 参考 ibd2sql/utils/mysql_json.py 实现
+// KEY_ENTRY格式: KEY_OFFSET(2/4) + KEY_LENGTH(2) = entry_size + 2 字节
+// VALUE_ENTRY格式: TYPE(1) + OFFSET/VALUE(2/4) = entry_size + 1 字节
 std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_size,
                                 size_t element_count, bool is_object, size_t entry_size) {
     if (element_count == 0) return is_object ? "{}" : "[]";
@@ -112,35 +115,90 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
     }
 
     std::string result = is_object ? "{" : "[";
-    size_t key_entry_offset = offset;
-    size_t value_entry_offset = offset + element_count * entry_size;
 
-    for (size_t i = 0; i < element_count && value_entry_offset + entry_size <= data_size; i++) {
+    // ibd2sql格式:
+    // OBJECT: KEY_ENTRY(element_count * (entry_size+2)) + VALUE_ENTRY(element_count * (entry_size+1)) + KEYS + VALUES
+    // ARRAY:  VALUE_ENTRY(element_count * (entry_size+1)) + VALUES
+
+    // KEY_ENTRY大小: entry_size + 2 (offset + length)
+    // VALUE_ENTRY大小: entry_size + 1 (type + offset/value)
+    size_t key_entry_size = entry_size + 2;
+    size_t value_entry_size = entry_size + 1;
+
+    size_t key_entry_offset = offset;  // 第一个KEY_ENTRY开始位置
+    size_t value_entry_offset = offset;
+    if (is_object) {
+        // 对于object，KEY_ENTRY在VALUE_ENTRY之前
+        value_entry_offset = offset + element_count * key_entry_size;
+    }
+    // 对于array，VALUE_ENTRY直接开始于offset
+
+    for (size_t i = 0; i < element_count; i++) {
         if (i > 0) result += ",";
 
-        // 读取值类型和偏移
-        size_t type_offset = value_entry_offset + (is_object ? element_count * entry_size : 0) + i * entry_size;
-        uint8_t val_type = 0;
-        size_t val_offset = 0;
+        // 读取VALUE_ENTRY: TYPE(1) + OFFSET/VALUE
+        size_t ve_pos = value_entry_offset + i * value_entry_size;
+        if (ve_pos + value_entry_size > data_size) {
+            result += "null";
+            continue;
+        }
 
-        if (entry_size == 2) {
-            uint16_t entry = read_json_le16(data, value_entry_offset + i * entry_size);
-            val_type = entry >> 4;
-            val_offset = entry & 0x0F;
-        } else {
-            uint32_t entry = read_json_le32(data, value_entry_offset + i * entry_size);
-            val_type = (entry >> 20) & 0xFF;
-            val_offset = entry & 0xFFFFF;
+        uint8_t val_type = data[ve_pos];  // TYPE是第一个字节
+
+        // 根据类型读取值或偏移
+        size_t val_offset = 0;
+        if (val_type < 0x04) {  // object/array类型，读取偏移
+            if (entry_size == 2) {
+                val_offset = read_json_le16(data, ve_pos + 1);
+            } else {
+                val_offset = read_json_le32(data, ve_pos + 1);
+            }
+        } else if (val_type == 0x04) {  // literal: true/false/null
+            uint8_t literal_val = (entry_size == 2) ?
+                static_cast<uint8_t>(read_json_le16(data, ve_pos + 1)) :
+                static_cast<uint8_t>(read_json_le32(data, ve_pos + 1));
+            if (literal_val == 1) result += (is_object ? "\"_literal\":true" : "true");
+            else if (literal_val == 2) result += (is_object ? "\"_literal\":false" : "false");
+            else result += (is_object ? "\"_literal\":null" : "null");
+            continue;
+        } else if (val_type >= 0x05 && val_type <= 0x06) {  // int16/uint16 inline
+            uint16_t inline_val = (entry_size == 2) ?
+                read_json_le16(data, ve_pos + 1) : read_json_le32(data, ve_pos + 1);
+            if (is_object) result += "\"_inline\":";
+            result += std::to_string(inline_val);
+            continue;
+        } else if (val_type >= 0x07 && val_type <= 0x08) {  // int32/uint32
+            if (entry_size == 2) {
+                val_offset = read_json_le16(data, ve_pos + 1);
+            } else {
+                val_offset = read_json_le32(data, ve_pos + 1);
+            }
+        } else if (val_type == 0x0b) {  // double
+            if (entry_size == 2) {
+                val_offset = read_json_le16(data, ve_pos + 1);
+            } else {
+                val_offset = read_json_le32(data, ve_pos + 1);
+            }
+        } else if (val_type == 0x0c) {  // string, 读取偏移
+            if (entry_size == 2) {
+                val_offset = read_json_le16(data, ve_pos + 1);
+            } else {
+                val_offset = read_json_le32(data, ve_pos + 1);
+            }
         }
 
         if (is_object) {
-            // 解析键
-            uint16_t key_offset = read_json_le16(data, key_entry_offset + i * 2);
-            if (key_offset + 1 < data_size) {
-                uint8_t key_len = data[key_offset];
-                // Sanity check: key_len should be reasonable
-                if (key_len > 0 && key_len < 256 && key_offset + 1 + key_len <= data_size) {
-                    std::string key(reinterpret_cast<const char*>(data + key_offset + 1), key_len);
+            // 解析键: KEY_ENTRY = KEY_OFFSET(2/4) + KEY_LENGTH(2)
+            size_t ke_pos = key_entry_offset + i * key_entry_size;
+            if (ke_pos + key_entry_size > data_size) {
+                result += "\"key\":";
+            } else {
+                uint16_t key_offset_val = (entry_size == 2) ?
+                    read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
+                uint16_t key_length = read_json_le16(data, ke_pos + entry_size);
+
+                if (key_offset_val + key_length <= data_size && key_length > 0 && key_length < 256) {
+                    std::string key(reinterpret_cast<const char*>(data + key_offset_val), key_length);
                     result += "\"" + key + "\":";
                 } else {
                     result += "\"key\":";
@@ -256,61 +314,151 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
                                 size_t element_count, bool is_object, size_t entry_size);
 
 // 解析完整 JSON 文档
+// 参考 ibd2sql/utils/mysql_json.py 的实现
+// JSON数据格式: [TYPE] + [COUNT(ssize)] + [SIZE(ssize)] + [KEY_ENTRIES] + [VALUE_ENTRIES] + [KEYS] + [VALUES]
+// 注意: 数据不包含长度前缀，field_size就是JSON数据大小
 std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size) {
     if (field_size < 1) return "null";
 
-    // JSON 数据格式：[长度前缀] [类型字节] [数据]
-    // MySQL JSON二进制格式参考：
-    // https://dev.mysql.com/doc/dev/mysql-server/latest/page_json_binary_representation.html
-
-    size_t json_offset = offset;
-    uint16_t json_len = 0;
-    size_t len_bytes = 0;
-
-    // 检查长度前缀（小端序）
-    if (field_size >= 2) {
-        json_len = read_json_le16(data, offset);
-        len_bytes = 2;
-        json_offset = offset + 2;
-        if (json_len > field_size - 2) {
-            json_len = field_size - 2;
-        }
-    } else {
-        json_len = field_size;
-    }
-
-    if (json_len == 0 || json_offset >= offset + field_size) {
-        return "null";
-    }
-
-    // 读取类型字节
-    uint8_t type = data[json_offset];
+    // JSON数据从offset开始，第一个字节是TYPE
+    uint8_t type = data[offset];
     size_t consumed = 0;
 
-    // 对于复杂类型（对象和数组），尝试完整解析
-    if (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT ||
-        type == JSON_TYPE_SMALL_ARRAY || type == JSON_TYPE_LARGE_ARRAY) {
-        bool is_object = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT);
-        bool is_small = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_SMALL_ARRAY);
-        size_t entry_size = is_small ? 2 : 4;
+    // 确定ssize: small用2字节，large用4字节
+    size_t ssize = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_SMALL_ARRAY ||
+                    type == 0x00 || type == 0x02) ? 2 : 4;
 
-        size_t data_start = json_offset + 1;
-        if (data_start + entry_size * 2 > offset + field_size) {
-            return is_object ? "{}" : "[]";
-        }
+    // data_start指向TYPE之后的位置（COUNT开始）
+    size_t data_start = offset + 1;
 
-        size_t element_count = is_small ? read_json_le16(data, data_start) : read_json_le32(data, data_start);
-        size_t total_size = is_small ? read_json_le16(data, data_start + entry_size)
-                                     : read_json_le32(data, data_start + entry_size);
-
-        if (element_count == 0) return is_object ? "{}" : "[]";
-
-        // 尝试解析元素
-        return parse_json_elements(data, data_start + entry_size * 2, offset + field_size,
-                                   element_count, is_object, entry_size);
+    if (data_start + ssize * 2 > offset + field_size) {
+        return type <= 0x01 ? "{}" : "[]";
     }
 
-    std::string result = parse_json_value(data, json_offset + 1, offset + field_size, type, consumed);
+    // 读取element_count和total_size (从data_start开始)
+    size_t element_count = ssize == 2 ? read_json_le16(data, data_start) : read_json_le32(data, data_start);
+    size_t total_size = ssize == 2 ? read_json_le16(data, data_start + ssize) : read_json_le32(data, data_start + ssize);
+
+    // 验证total_size
+    if (total_size != field_size) {
+        // size不匹配，可能是数据损坏或格式不同
+        // 继续尝试解析，使用实际field_size
+        total_size = field_size;
+    }
+
+    if (element_count == 0) {
+        return (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT) ? "{}" : "[]";
+    }
+
+    if (element_count > 1000) {
+        return (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT) ?
+               "{\"_error\":\"too_large\"}" : "[\"_error\":\"too_large\"]";
+    }
+
+    // KEY_ENTRIES和VALUE_ENTRIES开始位置
+    // KEY_ENTRY: offset(ssize) + length(2) = ssize+2 bytes each
+    // VALUE_ENTRY: type(1) + offset(ssize) = ssize+1 bytes each
+    size_t key_entry_start = data_start + ssize * 2;  // 跳过COUNT和SIZE
+    size_t value_entry_size = ssize + 1;
+    size_t key_entry_size = ssize + 2;
+
+    // 计算VALUE_ENTRIES开始位置
+    // OBJECT: KEY_ENTRIES + VALUE_ENTRIES
+    // ARRAY: 只有VALUE_ENTRIES
+    bool is_object = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT);
+    size_t value_entry_start;
+    if (is_object) {
+        value_entry_start = key_entry_start + element_count * key_entry_size;
+    } else {
+        value_entry_start = key_entry_start;  // Array没有KEY_ENTRY
+        key_entry_start = 0;  // 标记为无效
+    }
+
+    // 解析JSON
+    std::string result = is_object ? "{" : "[";
+
+    for (size_t i = 0; i < element_count; i++) {
+        if (i > 0) result += ",";
+
+        // 解析KEY (仅对object)
+        if (is_object) {
+            size_t ke_pos = key_entry_start + i * key_entry_size;
+            if (ke_pos + key_entry_size <= offset + field_size) {
+                // KEY_OFFSET和KEY_LENGTH
+                // KEY_OFFSET是相对于TYPE字节之后的数据的偏移
+                size_t key_offset_val = ssize == 2 ? read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
+                size_t key_length = read_json_le16(data, ke_pos + ssize);
+
+                // KEY_OFFSET是相对于TYPE之后的偏移，所以要加1
+                // key_abs_offset = offset + 1 + key_offset_val
+                size_t key_abs_offset = offset + 1 + key_offset_val;
+                if (key_abs_offset + key_length <= offset + field_size && key_length > 0 && key_length < 256) {
+                    std::string key(reinterpret_cast<const char*>(data + key_abs_offset), key_length);
+                    result += "\"" + key + "\":";
+                } else {
+                    result += "\"_key\":";
+                }
+            }
+        }
+
+        // 解析VALUE
+        size_t ve_pos = value_entry_start + i * value_entry_size;
+        if (ve_pos + value_entry_size <= offset + field_size) {
+            uint8_t val_type = data[ve_pos];
+            size_t val_offset = ssize == 2 ? read_json_le16(data, ve_pos + 1) : read_json_le32(data, ve_pos + 1);
+
+            // 根据类型处理值
+            // val_offset是相对于TYPE之后的偏移，所以要加1
+            size_t val_abs_offset = offset + 1 + val_offset;
+
+            if (val_type == 0x0c) {  // STRING
+                if (val_abs_offset < offset + field_size) {
+                    // 读取变长字符串
+                    size_t str_len = data[val_abs_offset];
+                    size_t str_start = val_abs_offset + 1;
+                    if (str_len >= 128) {
+                        // 2字节长度编码
+                        str_len = (data[val_abs_offset + 1] << 7) | (str_len & 0x7f);
+                        str_start = val_abs_offset + 2;
+                    }
+                    if (str_start + str_len <= offset + field_size) {
+                        std::string str_val(reinterpret_cast<const char*>(data + str_start), str_len);
+                        result += "\"" + str_val + "\"";
+                    } else {
+                        result += "\"_str\"";
+                    }
+                }
+            } else if (val_type == 0x04) {  // LITERAL
+                if (val_offset == 1) result += "true";
+                else if (val_offset == 2) result += "false";
+                else result += "null";
+            } else if (val_type >= 0x05 && val_type <= 0x06) {  // INT16 inline
+                result += std::to_string(val_offset);
+            } else if (val_type >= 0x07 && val_type <= 0x08) {  // INT32/UINT32
+                if (val_abs_offset + 4 <= offset + field_size) {
+                    int32_t int_val = static_cast<int32_t>(read_json_le32(data, val_abs_offset));
+                    result += std::to_string(int_val);
+                }
+            } else if (val_type == 0x0b) {  // DOUBLE
+                if (val_abs_offset + 8 <= offset + field_size) {
+                    uint64_t bits = read_json_le64(data, val_abs_offset);
+                    double dbl_val;
+                    std::memcpy(&dbl_val, &bits, 8);
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%.15g", dbl_val);
+                    result += buf;
+                }
+            } else if (val_type <= 0x03) {  // 嵌套JSON对象/数组
+                result += val_type <= 0x01 ? "{}" : "[]";
+            } else {
+                result += "null";
+            }
+        } else {
+            result += "null";
+        }
+    }
+
+    result += is_object ? "}" : "]";
     return result;
 }
 
