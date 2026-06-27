@@ -103,28 +103,47 @@ struct IndexColumnDef {
      *
      * CRITICAL: In DYNAMIC format, columns are stored as:
      * - VARIABLE columns FIRST (size stored in record): VARCHAR, BLOB, TEXT, JSON, CHAR(utf8mb4)
-     * - FIXED columns AFTER (pre-computed size): INT, DATE, DATETIME, DECIMAL, ENUM, SET
+     * - FIXED columns AFTER (pre-computed size): INT, DATE, DATETIME, DECIMAL, ENUM, SET, BINARY
      *
      * DECIMAL, ENUM, SET have variable capacity but FIXED storage size for a given schema,
      * so they are stored with fixed columns in DYNAMIC format!
+     *
+     * CRITICAL FIX: Type 29 (STRING) is used for both CHAR and BINARY!
+     * - CHAR with multi-byte charset (utf8mb4): variable-length (is_binary=false)
+     * - BINARY: fixed-length (is_binary=true)
      */
     bool is_variable_length() const {
         // TRUE variable-length types (size stored in record):
-        return col_type == 16 ||   // VARCHAR (InnoDB type 16)
-               col_type == 24 ||   // TINY_BLOB (InnoDB type 24)
-               col_type == 25 ||   // MEDIUM_BLOB (InnoDB type 25)
-               col_type == 26 ||   // LONG_BLOB (InnoDB type 26)
-               col_type == 27 ||   // BLOB/TEXT (InnoDB type 27)
-               col_type == 28 ||   // VAR_STRING (InnoDB type 28)
-               col_type == 29 ||   // STRING/CHAR (InnoDB type 29) - variable for utf8mb4
-               col_type == 30 ||   // GEOMETRY (InnoDB type 30)
-               col_type == 31;     // JSON (InnoDB type 31)
+        if (col_type == 16 ||   // VARCHAR/VARBINARY (InnoDB type 16)
+            col_type == 24 ||   // TINY_BLOB (InnoDB type 24)
+            col_type == 25 ||   // MEDIUM_BLOB (InnoDB type 25)
+            col_type == 26 ||   // LONG_BLOB (InnoDB type 26)
+            col_type == 27 ||   // BLOB/TEXT (InnoDB type 27)
+            col_type == 28 ||   // VAR_STRING (InnoDB type 28)
+            col_type == 30 ||   // GEOMETRY (InnoDB type 30)
+            col_type == 31) {   // JSON (InnoDB type 31)
+            return true;
+        }
+
+        // CRITICAL FIX: Type 29 (STRING) is used for both CHAR and BINARY
+        // - CHAR with multi-byte charset (utf8mb4): stored as variable-length
+        // - BINARY: stored as fixed-length (always N bytes)
+        // - CHAR with single-byte charset (latin1): stored as fixed-length
+        // We use is_binary flag to distinguish:
+        // - is_binary=true: BINARY type -> fixed-length
+        // - is_binary=false: CHAR type with multi-byte charset -> variable-length
+        if (col_type == 29) {
+            return !is_binary;  // CHAR is variable, BINARY is fixed
+        }
+
+        return false;
 
         // NOTE: The following are FIXED-SIZE in DYNAMIC format (stored with fixed columns):
         // - BIT (17): fixed size based on bit count
         // - NEWDECIMAL (21): fixed size based on precision/scale
         // - ENUM (22): fixed size (1-2 bytes) based on value count
         // - SET (23): fixed size (1-8 bytes) based on value count
+        // - BINARY (29 with is_binary=true): fixed size (always col_length bytes)
     }
 
     /**
@@ -149,7 +168,14 @@ struct IndexColumnDef {
             case 21: return decimal_storage_size(); // NEWDECIMAL (InnoDB type 21)
             case 22: return enum_storage_size();    // ENUM (InnoDB type 22)
             case 23: return set_storage_size();     // SET (InnoDB type 23)
-            // VARCHAR (16) and STRING (29) are variable-length
+            case 29:
+                // CRITICAL FIX: Type 29 is used for both CHAR and BINARY
+                // - BINARY (is_binary=true): fixed-length = col_length bytes
+                // - CHAR (is_binary=false): variable-length = 0 (size stored in record)
+                if (is_binary) {
+                    return col_length > 0 ? col_length : 1;  // BINARY is fixed-length
+                }
+                return 0;  // CHAR is variable-length for utf8mb4
             default: return 0;   // Variable-length
         }
     }
@@ -293,12 +319,18 @@ struct IndexFieldValue {
             case Type::DATETIME_VAL: return str_value;
             case Type::TIMESTAMP_VAL: return str_value;
             case Type::BINARY_VAL: {
-                std::string hex = "0x";
+                // str_value contains UNHEX('...') format
+                if (!str_value.empty() && str_value.substr(0, 7) == "UNHEX('") {
+                    return str_value;
+                }
+                // If raw_bytes is used instead, convert to hex
+                std::string hex = "UNHEX('";
                 for (uint8_t b : raw_bytes) {
                     char buf[3];
                     snprintf(buf, sizeof(buf), "%02x", b);
                     hex += buf;
                 }
+                hex += "')";
                 return hex;
             }
             case Type::OVERFLOW_PTR:
@@ -345,7 +377,8 @@ struct IndexRecord {
         // Pre-calculate approximate size to reduce allocations
         size_t estimated_size = fields.size() * 16;  // rough estimate
         for (const auto& f : fields) {
-            if (!f.is_null && f.type == IndexFieldValue::Type::STRING_VAL) {
+            if (!f.is_null && (f.type == IndexFieldValue::Type::STRING_VAL ||
+                               f.type == IndexFieldValue::Type::BINARY_VAL)) {
                 estimated_size += f.str_value.size();
             }
         }
@@ -358,7 +391,8 @@ struct IndexRecord {
             const auto& f = fields[i];
             if (f.is_null) {
                 result += "NULL";
-            } else if (f.type == IndexFieldValue::Type::STRING_VAL) {
+            } else if (f.type == IndexFieldValue::Type::STRING_VAL ||
+                       f.type == IndexFieldValue::Type::BINARY_VAL) {
                 const std::string& escaped = f.str_value;
                 // Check if quoting needed
                 bool needs_quote = escaped.find(',') != std::string::npos ||
