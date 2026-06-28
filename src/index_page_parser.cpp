@@ -982,7 +982,12 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
 
         if (is_compact) {
             auto hdr = parse_new_record_header(page_data, header_start, page_size);
-            if (!hdr) break;
+            if (!hdr) {
+                // Header parse failed, try to skip this record and continue
+                // Move forward by a minimum record size estimate
+                current_origin += 20;  // Minimum estimate for record header + data
+                continue;
+            }
 
             // Skip INFIMUM (heap_no=0) and SUPREMUM (heap_no=1)
             if (hdr->heap_no >= 2) {
@@ -2450,15 +2455,14 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
     bool is_compact = page_hdr->is_compact_format;
     records = follow_record_chain(page_data, page_size, *page_hdr, page_no, is_compact);
 
-    // 检查是否恢复率过低（记录数远少于预期）
-    // 如果 n_recs > 0 但恢复记录数 < n_recs/2，尝试损坏页恢复
+    // Check if recovery rate is low (recovered records < expected * 0.8)
+    // For 100K row tests, chains may break more often due to page splits
     uint16_t expected_recs = page_hdr->n_recs;
-
-    if (expected_recs > 0 && records.size() < expected_recs / 2) {
-        // 记录链可能断裂，尝试页目录扫描
+    if (expected_recs > 0 && records.size() < expected_recs * 4 / 5) {
+        // Record chain may be broken, try page directory scan
         auto fast_records = parse_page_fast(page_data, page_size, page_no);
         if (fast_records.size() > records.size()) {
-            // 合并结果，去重
+            // Merge results, deduplicate by heap_no
             std::set<uint16_t> seen_heap_no;
             for (const auto& rec : records) {
                 seen_heap_no.insert(rec.heap_no);
@@ -2471,8 +2475,8 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
         }
     }
 
-    // 如果仍然恢复不足，尝试暴力扫描
-    if (expected_recs > 0 && records.size() < expected_recs / 3) {
+    // If still recovering less than expected, try brute force scan
+    if (expected_recs > 0 && records.size() < expected_recs * 2 / 3) {
         auto try_records = parse_page_try(page_data, page_size, page_no);
         if (try_records.size() > records.size()) {
             std::set<uint16_t> seen_heap_no;
@@ -2633,7 +2637,9 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
     std::set<uint16_t> visited_origins;
 
     // Start from INFIMUM offset (99) and scan forward
-    for (size_t offset = INFIMUM_OFFSET; offset < heap_top - REC_HEADER_SIZE_NEW; offset++) {
+    // Use page_size - 8 as upper limit (like ibd2sql)
+    size_t scan_limit = page_size - 8;
+    for (size_t offset = INFIMUM_OFFSET; offset < scan_limit - REC_HEADER_SIZE_NEW; offset++) {
         // Skip if already processed
         if (visited_origins.count(static_cast<uint16_t>(offset))) continue;
 
@@ -2649,15 +2655,15 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
         // Validate REC_TYPE - must be <= 1 for data records
         if (hdr->rec_type > 1) continue;
 
-        // CRITICAL FIX: next_offset must point forward within heap_top
+        // CRITICAL FIX: next_offset must point forward within page
         // For valid records, next_offset is typically small positive (pointing to next record)
-        // Large values or negative values indicate this is NOT a valid record header
+        // Allow larger values since records can span more than 500 bytes
         ssize_t next_origin = static_cast<ssize_t>(offset) + hdr->next_offset;
-        if (hdr->next_offset <= 0 || hdr->next_offset > 500) {
+        if (hdr->next_offset <= 0 || hdr->next_offset > 2000) {
             // Invalid next_offset - skip this false positive
             continue;
         }
-        if (next_origin <= static_cast<ssize_t>(offset) || static_cast<size_t>(next_origin) >= heap_top) {
+        if (next_origin <= static_cast<ssize_t>(offset) || static_cast<size_t>(next_origin) >= page_size - 8) {
             // next_offset points outside valid range
             continue;
         }
@@ -2700,7 +2706,60 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_free_chain(
     const InnoDBPageHeader& page_hdr, uint32_t page_no,
     bool is_compact) {
     std::vector<IndexRecord> records;
-    // Follow PAGE_FREE chain
+
+    // Follow PAGE_FREE chain (deleted records)
+    // Reference: undrop-for-innodb/page0page.ic:804-807
+    // PAGE_FREE points to the first deleted record in the free list
+    // Each deleted record has REC_NEXT pointing to the next deleted record
+
+    if (page_hdr.page_free == 0) {
+        return records;  // No deleted records
+    }
+
+    size_t current_origin = page_hdr.page_free;
+    size_t heap_top = page_hdr.heap_top;
+    if (heap_top == 0 || heap_top > page_size - 8) {
+        heap_top = page_size - 8;
+    }
+
+    // Track visited origins to prevent infinite loops
+    std::set<uint16_t> visited_origins;
+    uint16_t max_iterations = 1000;  // Safety limit
+
+    while (current_origin >= REC_HEADER_SIZE_NEW &&
+           current_origin < heap_top &&
+           visited_origins.size() < max_iterations) {
+
+        if (visited_origins.count(static_cast<uint16_t>(current_origin))) {
+            break;  // Already visited, prevent loop
+        }
+        visited_origins.insert(static_cast<uint16_t>(current_origin));
+
+        size_t header_start = current_origin - REC_HEADER_SIZE_NEW;
+
+        auto hdr = parse_new_record_header(page_data, header_start, page_size);
+        if (!hdr) {
+            break;  // Invalid header
+        }
+
+        // Parse the deleted record
+        auto rec = parse_user_record(page_data, page_size, header_start, page_no, true, true);
+        if (rec) {
+            rec->is_deleted = true;
+            records.push_back(std::move(*rec));
+        }
+
+        // Move to next deleted record
+        if (hdr->next_offset == 0) {
+            break;  // End of free chain
+        }
+        ssize_t next_origin = static_cast<ssize_t>(current_origin) + hdr->next_offset;
+        if (next_origin <= 0 || static_cast<size_t>(next_origin) >= heap_top) {
+            break;  // Invalid next offset
+        }
+        current_origin = static_cast<size_t>(next_origin);
+    }
+
     return records;
 }
 
@@ -3053,6 +3112,37 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
 
         bool is_compact = ph->is_compact_format;
         auto page_records = follow_record_chain(page_buf.data(), page_size, *ph, page_no, is_compact);
+
+        // Check if record chain broke prematurely - use fallback if needed
+        uint16_t expected = ph->n_recs;
+
+        if (expected > 0 && page_records.size() < expected * 4 / 5) {
+            // Try parse_page_fast for page directory scan
+            auto fast_records = parse_page_fast(page_buf.data(), page_size, page_no);
+            if (fast_records.size() > page_records.size()) {
+                std::set<uint16_t> seen_heap;
+                for (const auto& r : page_records) seen_heap.insert(r.heap_no);
+                for (const auto& r : fast_records) {
+                    if (seen_heap.insert(r.heap_no).second) {
+                        page_records.push_back(r);
+                    }
+                }
+            }
+        }
+
+        // If still not enough, try brute force
+        if (expected > 0 && page_records.size() < expected * 2 / 3) {
+            auto try_records = parse_page_try(page_buf.data(), page_size, page_no);
+            if (try_records.size() > page_records.size()) {
+                std::set<uint16_t> seen_heap;
+                for (const auto& r : page_records) seen_heap.insert(r.heap_no);
+                for (const auto& r : try_records) {
+                    if (seen_heap.insert(r.heap_no).second) {
+                        page_records.push_back(r);
+                    }
+                }
+            }
+        }
 
         for (const auto& rec : page_records) {
             if (rec.is_infimum || rec.is_supremum) continue;
