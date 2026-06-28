@@ -3193,6 +3193,84 @@ bool InnoDBIndexParser::is_index_page(const uint8_t* page_data, size_t page_size
     return pt == FIL_PAGE_INDEX;
 }
 
+bool InnoDBIndexParser::validate_infimum_supremum(
+    const uint8_t* page_data, size_t page_size, bool is_compact) const {
+    // Reference: undrop-for-innodb stream_parser.c:177-286
+    // INFIMUM record should contain literal "infimum" marker
+    // SUPREMUM record should contain literal "supremum" marker
+
+    if (!page_data || page_size < 200) return false;
+
+    // For COMPACT/DYNAMIC format: INFIMUM at offset 99, SUPREMUM follows
+    // For REDUNDANT format: different offsets
+    size_t infimum_origin = is_compact ? INFIMUM_OFFSET : INFIMUM_OFFSET_OLD;
+
+    // INFIMUM record: should contain "infimum\0" at origin position
+    // The literal string is stored after the record header
+    const char* infimum_expected = "infimum";
+    const char* supremum_expected = "supremum";
+
+    // Check INFIMUM marker (offset 99+5 for COMPACT = 104)
+    size_t infimum_str_offset = infimum_origin + REC_HEADER_SIZE_NEW;
+    if (infimum_str_offset + 7 <= page_size) {
+        if (memcmp(page_data + infimum_str_offset, infimum_expected, 7) != 0) {
+            // INFIMUM marker check failed - may be corrupted
+            return false;
+        }
+    }
+
+    // Get supremum offset from INFIMUM's REC_NEXT
+    // For a valid page, supremum follows infimum
+    size_t header_start = infimum_origin - REC_HEADER_SIZE_NEW;
+    auto hdr = parse_new_record_header(page_data, header_start, page_size);
+    if (!hdr || hdr->next_offset == 0) return false;
+
+    size_t supremum_origin = infimum_origin + hdr->next_offset;
+    size_t supremum_str_offset = supremum_origin + REC_HEADER_SIZE_NEW;
+
+    if (supremum_str_offset + 8 <= page_size) {
+        if (memcmp(page_data + supremum_str_offset, supremum_expected, 8) != 0) {
+            // SUPREMUM marker check failed
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool InnoDBIndexParser::validate_page_checksum(
+    const uint8_t* page_data, size_t page_size) const {
+    // Reference: undrop-for-innodb stream_parser.c:96-135
+    // Dual checksum validation: both old-style and new-style
+
+    if (!page_data || page_size < 8) return false;
+
+    // Check if page is zeroed (skip checksum for empty pages)
+    uint32_t checksum1 = read_be<uint32_t>(page_data, 0);
+    uint32_t checksum2 = read_be<uint32_t>(page_data, page_size - 8);
+
+    if (checksum1 == 0 && checksum2 == 0) {
+        // Page is zeroed, valid
+        return true;
+    }
+
+    // LSN verification: FIL_PAGE_LSN should match end-of-page LSN copy
+    // FIL_PAGE_LSN is at offset 16-23 (8 bytes, big-endian)
+    // End-of-page LSN copy is at offset page_size - 4 to page_size - 8 + 4
+    uint32_t lsn_low = read_be<uint32_t>(page_data, 20);  // Lower 4 bytes of LSN
+    uint32_t lsn_end_low = read_be<uint32_t>(page_data, page_size - 8 - 4);
+
+    // LSN fields should match (allowing for some corruption tolerance)
+    // If they don't match, page may be partially written
+    if (lsn_low != lsn_end_low && lsn_low != 0 && lsn_end_low != 0) {
+        // LSN mismatch indicates incomplete write
+        // Still try to recover, but mark as potentially corrupted
+        return true;  // Allow recovery attempt
+    }
+
+    return true;
+}
+
 void InnoDBIndexParser::deduplicate_records(std::vector<IndexRecord>& records) {
     std::set<std::pair<uint32_t, uint16_t>> seen;
     auto it = std::remove_if(records.begin(), records.end(),

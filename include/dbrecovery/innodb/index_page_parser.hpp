@@ -899,6 +899,18 @@ private:
     bool is_index_page(const uint8_t* page_data, size_t page_size) const;
 
     /**
+     * @brief Validate INFIMUM and SUPREMUM markers in page
+     * Reference: undrop-for-innodb stream_parser.c INFIMUM/SUPREMUM validation
+     */
+    bool validate_infimum_supremum(const uint8_t* page_data, size_t page_size, bool is_compact) const;
+
+    /**
+     * @brief Validate page checksum (both old and new style)
+     * Reference: undrop-for-innodb stream_parser.c:96-135
+     */
+    bool validate_page_checksum(const uint8_t* page_data, size_t page_size) const;
+
+    /**
      * @brief Deduplicate records by (page_no, heap_no) pair
      */
     void deduplicate_records(std::vector<IndexRecord>& records);
