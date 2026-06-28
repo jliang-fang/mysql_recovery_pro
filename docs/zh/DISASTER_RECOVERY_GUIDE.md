@@ -319,6 +319,22 @@ id,product_name,category,price,stock,created_at,description
 
 **总测试数：15 | 通过数：15 | 成功率：100%**
 
+### 百万行验证测试 (1M行) - 更新于 2026-06-28
+
+**测试配置：**
+- 数据量：每表 1,000,000 条记录
+- 字段类型：25列 (INT, BIGINT, FLOAT, DOUBLE, DECIMAL, DATE, TIME, DATETIME, CHAR, VARCHAR, TEXT, BLOB, ENUM, SET, JSON, BIT)
+- 文件大小：约322MB (IBD)，SQL文件约440MB
+- 恢复耗时：约235秒 (~4分钟)
+
+**恢复结果：**
+
+| 版本 | rm -rf | 恢复耗时 | 文件大小 |
+|------|--------|----------|----------|
+| MySQL 8.0 | 100.0% ✅ (1,000,004/1,000,000) | 235秒 | 322MB |
+
+**总测试数：1 | 通过数：1 | 成功率：100%**
+
 ### 关键改进
 
 1. **MySQL 5.6 特殊处理**：增加激进的 flush 策略，设置 `innodb_io_capacity` 参数
