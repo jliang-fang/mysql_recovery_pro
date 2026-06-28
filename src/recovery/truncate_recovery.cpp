@@ -201,22 +201,51 @@ TruncateRecovery::Result TruncateRecovery::recover(
 
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Step 1: Check if file is truncated
+    // Step 1: Check if file is truncated or empty
     if (progress) progress(0.1, "Checking file status...");
 
     bool is_truncated = is_truncated_file(ibd_path);
 
-    if (!is_truncated) {
-        // Not a truncated file - use normal recovery
-        if (progress) progress(0.5, "File not truncated, using normal recovery...");
+    // For MySQL 5.7 style TRUNCATE (DELETE all rows), file is NOT empty
+    // but records are marked as deleted. We should still try undo log recovery.
+    // For MySQL 8.0+ style TRUNCATE (DROP + CREATE), file IS empty.
 
-        // TODO: Delegate to normal recovery
-        result.method_used = "normal_recovery";
-        result.success = true;
+    // Always try undo log recovery if system_tablespace is provided,
+    // regardless of whether file appears truncated
+    if (use_undo_log_ && !system_tablespace_.empty()) {
+        if (progress) progress(0.2, "Attempting undo log recovery...");
+
+        auto undo_records = recover_from_undo_log(system_tablespace_, schema);
+
+        if (!undo_records.empty()) {
+            result.records_recovered = undo_records.size();
+            result.method_used = "undo_log";
+            result.recovered_records = undo_records;
+            result.success = true;
+
+            std::cout << "[INFO] Recovered " << undo_records.size()
+                      << " records from undo log\n";
+        }
+    }
+
+    // If file appears truncated and no undo log records found, continue with other methods
+    if (!is_truncated && result.success) {
+        // Found records from undo log, file is NOT physically truncated
+        // This is MySQL 5.7 style TRUNCATE (DELETE)
+        if (progress) progress(0.8, "Recovery from undo log completed...");
 
         auto end_time = std::chrono::high_resolution_clock::now();
         result.recovery_time_seconds = std::chrono::duration<double>(end_time - start_time).count();
         return result;
+    }
+
+    // If file is NOT truncated and no undo log records found,
+    // this might be a normal file with no deleted records
+    if (!is_truncated) {
+        if (progress) progress(0.5, "File not truncated, no undo log records found...");
+
+        // Still try disk carving and heuristic detection as fallback
+        // This handles cases where TRUNCATE detection missed the file state
     }
 
     // Check if the file has any residual data at all

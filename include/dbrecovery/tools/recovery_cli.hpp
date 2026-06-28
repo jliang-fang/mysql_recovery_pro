@@ -175,12 +175,16 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--help\033[0m                     Show this help message\n\n";
     std::cout << "\033[1mRecovery Modes:\033[0m\n";
     std::cout << "  \033[1m--truncate-recovery\033[0m        Recover from truncated table\n";
-    std::cout << "  \033[1m--rmrf-recovery\033[0m            Recover from rm -rf scenario\n";
+    std::cout << "                                 (MySQL 5.6/5.7: undo log + disk carving)\n";
+    std::cout << "                                 (MySQL 8.0+: disk carving only, data lost after TRUNCATE)\n";
+    std::cout << "                                 Use --system-tablespace for undo log recovery\n";
+    std::cout << "  \033[1m--rmrf-recovery\033[0m            Recover from rm -rf scenario (disk carving)\n";
     std::cout << "  \033[1m--drop-table-recovery\033[0m      Recover from DROP TABLE (scan system tablespace)\n";
     std::cout << "  \033[1m--disk-carving\033[0m             Raw disk carving (PhotoRec style, no backup needed)\n";
     std::cout << "  \033[1m--device-path=<path>\033[0m       Raw device path for disk carving (e.g., /dev/sda)\n";
     std::cout << "  \033[1m--num-workers=<n>\033[0m          Number of worker threads for disk carving (default: 4)\n";
-    std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1 or mysql.ibd)\n";
+    std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1/mysql.ibd)\n";
+    std::cout << "                                 Required for undo log recovery (MySQL 5.6/5.7)\n";
     std::cout << "  \033[1m--data-dir=<path>\033[0m           MySQL data directory for DROP TABLE recovery\n";
     std::cout << "  \033[1m--header-repair\033[0m            Repair corrupted page headers\n";
     std::cout << "  \033[1m--blob-recovery\033[0m            Enable BLOB recovery\n";
