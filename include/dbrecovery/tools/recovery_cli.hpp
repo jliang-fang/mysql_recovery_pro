@@ -448,6 +448,82 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Load external schema if provided
         std::optional<catalog::TableSchema> external_schema = load_schema_from_file(schema_file_path);
 
+        // Also try --schema command line string if no schema file
+        if (!external_schema.has_value() && !schema_str.empty()) {
+            std::cout << "[INFO] Parsing schema from --schema option: " << schema_str << "\n";
+            catalog::TableSchema parsed_schema;
+            parsed_schema.table_name = "recovered_table";
+            parsed_schema.page_size = page_size;
+
+            // Parse schema string: "col1:type[:size][:pk],col2:type..."
+            std::istringstream ss(schema_str);
+            std::string col_def;
+            int ordinal = 1;
+            while (std::getline(ss, col_def, ',')) {
+                catalog::ColumnInfo col;
+                std::istringstream cs(col_def);
+                std::string token;
+                std::vector<std::string> parts;
+                while (std::getline(cs, token, ':')) {
+                    parts.push_back(token);
+                }
+                if (parts.empty()) continue;
+
+                col.name = parts[0];
+                col.is_nullable = true;
+                col.column_length = 0;
+
+                if (parts.size() > 1) {
+                    std::string type_str = parts[1];
+                    std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
+
+                    // Parse type
+                    if (type_str == "INT" || type_str == "INTEGER") {
+                        col.mysql_type_id = 3;  // LONG
+                        col.column_length = 4;
+                    } else if (type_str == "BIGINT") {
+                        col.mysql_type_id = 8;  // LONGLONG
+                        col.column_length = 8;
+                    } else if (type_str == "VARCHAR") {
+                        col.mysql_type_id = 253;  // VAR_STRING
+                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 255;
+                    } else if (type_str == "TEXT") {
+                        col.mysql_type_id = 252;  // BLOB
+                        col.column_length = 65535;
+                    } else if (type_str == "DATETIME") {
+                        col.mysql_type_id = 12;  // DATETIME
+                        col.column_length = 8;
+                    } else if (type_str == "DATE") {
+                        col.mysql_type_id = 10;  // DATE
+                        col.column_length = 3;
+                    } else if (type_str == "DOUBLE") {
+                        col.mysql_type_id = 5;  // DOUBLE
+                        col.column_length = 8;
+                    } else if (type_str == "FLOAT") {
+                        col.mysql_type_id = 4;  // FLOAT
+                        col.column_length = 4;
+                    } else {
+                        col.mysql_type_id = 253;  // Default to VARCHAR
+                        col.column_length = 255;
+                    }
+                }
+
+                // Check for PK flag
+                for (size_t i = 2; i < parts.size(); i++) {
+                    std::string flag = parts[i];
+                    std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
+                    if (flag == "PK" || flag == "PRIMARY") {
+                        col.is_nullable = false;
+                    }
+                }
+
+                parsed_schema.columns[ordinal++] = col;
+            }
+
+            external_schema = parsed_schema;
+            std::cout << "[INFO] Successfully parsed " << parsed_schema.columns.size() << " columns from --schema\n";
+        }
+
         // Also try FRM file if provided (for MySQL 5.6/5.7)
         if (!external_schema.has_value() && !frm_path.empty()) {
             std::cout << "[INFO] Attempting to parse schema from FRM file: " << frm_path << "\n";
