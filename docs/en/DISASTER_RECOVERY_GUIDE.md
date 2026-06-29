@@ -308,18 +308,21 @@ The following 100K and 1M row test results were performed using **pre-disaster b
 
 ### No-Backup Disaster Recovery Validation - Updated 2026-06-29
 
-**True no-backup scenario tests (recovery from filesystem/raw disk):**
+**True no-backup scenario tests (recovery from container volume directory):**
 
-| Version | Scenario | Data Size | Recovery Result | Notes |
-|---------|----------|-----------|-----------------|-------|
-| MySQL 8.0 | TRUNCATE | 5,000 | 0.04% (2/5000) | TRUNCATE=DROP+CREATE, data pages cleared |
-| MySQL 8.0 | DROP TABLE | 5,000 | 0% | File deleted, need raw disk carving |
-| MySQL 8.0 | rm -rf | 5,000 | 0% | Need to scan block device (/dev/sda) |
+| Version | DROP TABLE | TRUNCATE | rm -rf |
+|---------|------------|----------|--------|
+| MySQL 5.6 | 0.0% | 0.0% | 0.0% |
+| MySQL 5.7 | 0.0% | 0.9% | 0.0% |
+| MySQL 8.0 | 0.0% | 0.0% | 0.0% |
+| MySQL 8.4 | 0.0% | 0.0% | 0.0% |
+| MySQL 9.0 | 0.0% | 0.0% | 0.0% |
 
 **Key Points for No-Backup Recovery:**
-1. **MySQL 8.0+ TRUNCATE = DROP + CREATE**: Original data pages are completely released, cannot recover from residual files
+1. **Container Volume Directory Scanning**: Cannot recover deleted files due to container overlay filesystem immediately cleaning up
 2. **DROP TABLE**: File deleted, must recover from block device level
 3. **rm -rf**: Filesystem-level deletion, need access to original storage device
+4. **TRUNCATE (MySQL 8.0+)**: TRUNCATE = DROP + CREATE, original data pages completely released
 
 **Correct No-Backup Recovery Procedure:**
 ```bash
@@ -329,6 +332,11 @@ The following 100K and 1M row test results were performed using **pre-disaster b
     --output=/recovery/output \
     --num-workers=8
 ```
+
+**Important Notes**:
+- Scanning from **volume directory** cannot recover deleted files (container overlay filesystem behavior)
+- Must use **block device** (/dev/sda1) or **bind-mount directory** for disk carving
+- Production environments should use **FLUSH TABLES + backup** strategy instead of relying on no-backup recovery
 
 ### Million-Row Validation (1M rows) - Updated 2026-06-28
 

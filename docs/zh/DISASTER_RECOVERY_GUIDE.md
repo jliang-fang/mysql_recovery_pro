@@ -309,18 +309,21 @@ id,product_name,category,price,stock,created_at,description
 
 ### 无备份灾难恢复验证 - 更新于 2026-06-29
 
-**真实无备份场景测试（从文件系统/原始磁盘恢复）：**
+**真实无备份场景测试（从容器volume目录恢复）：**
 
-| 版本 | 场景 | 数据量 | 恢复结果 | 说明 |
-|------|------|--------|----------|------|
-| MySQL 8.0 | TRUNCATE | 5,000 | 0.04% (2/5000) | TRUNCATE=DROP+CREATE，数据页已清空 |
-| MySQL 8.0 | DROP TABLE | 5,000 | 0% | 文件删除后需从原始磁盘设备雕刻 |
-| MySQL 8.0 | rm -rf | 5,000 | 0% | 需要从块设备(/dev/sda)进行磁盘雕刻 |
+| 版本 | DROP TABLE | TRUNCATE | rm -rf |
+|------|------------|----------|--------|
+| MySQL 5.6 | 0.0% | 0.0% | 0.0% |
+| MySQL 5.7 | 0.0% | 0.9% | 0.0% |
+| MySQL 8.0 | 0.0% | 0.0% | 0.0% |
+| MySQL 8.4 | 0.0% | 0.0% | 0.0% |
+| MySQL 9.0 | 0.0% | 0.0% | 0.0% |
 
 **无备份恢复关键点：**
-1. **MySQL 8.0+ TRUNCATE = DROP + CREATE**：原数据页被完全释放，无法从残留文件恢复
-2. **DROP TABLE**：文件被删除，需从块设备层面恢复
+1. **容器Volume目录扫描**：无法恢复已删除文件，因为容器overlay文件系统会立即清理
+2. **DROP TABLE**：文件被删除后，需要从块设备层面恢复
 3. **rm -rf**：文件系统层删除，需访问原始存储设备
+4. **TRUNCATE (MySQL 8.0+)**：TRUNCATE = DROP + CREATE，原数据页被完全释放
 
 **正确的无备份恢复流程：**
 ```bash
@@ -330,6 +333,11 @@ id,product_name,category,price,stock,created_at,description
     --output=/recovery/output \
     --num-workers=8
 ```
+
+**重要说明**：
+- 从**volume目录**扫描无法恢复已删除文件（容器overlay文件系统特性）
+- 必须从**块设备**（/dev/sda1）或**bind-mount目录**进行磁盘雕刻
+- 建议生产环境使用**FLUSH TABLES + 备份**策略，而非依赖无备份恢复
 
 ### 大规模验证测试 (100K行) - 更新于 2026-06-28
 
