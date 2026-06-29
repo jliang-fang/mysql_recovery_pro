@@ -309,28 +309,48 @@ id,product_name,category,price,stock,created_at,description
 
 ### 无备份灾难恢复验证 - 更新于 2026-06-29
 
-**测试结论：从文件系统目录扫描无法恢复已删除数据**
+**完整测试结果：块设备级磁盘雕刻也无法恢复已删除数据**
 
-| 扫描方式 | DROP TABLE | TRUNCATE | rm -rf | 原因 |
-|----------|------------|----------|--------|------|
-| Container Volume目录 | 0% | 0-0.9% | 0% | Overlay文件系统立即清理 |
-| Bind-Mount目录 | 0% | 0% | 0% | Ext4文件系统释放block |
-| **块设备(/dev/sda)** | **可恢复** | **可恢复** | **可恢复** | 扫描原始磁盘block |
+| 测试方式 | DROP TABLE | TRUNCATE | rm -rf | 测试环境 |
+|----------|------------|----------|--------|----------|
+| Container Volume目录 | 0% | 0-0.9% | 0% | OverlayFS |
+| Bind-Mount目录 | 0% | 0% | 0% | Ext4/XFS |
+| **块设备(/dev/mapper/rl-root)** | **0%** | **0%** | **0%** | XFS + NVMe SSD |
 
-**无备份恢复的唯一可行方案：**
+**测试配置：**
+- 数据量：100,000 行 × 25种字段类型
+- MySQL版本：5.6, 5.7, 8.0, 8.4, 9.0
+- 块设备：191GB NVMe SSD (XFS文件系统)
+- 总测试数：15个场景
+
+**失败原因分析：**
+1. **XFS文件系统特性**：删除文件后立即释放block并清空元数据
+2. **SSD TRIM命令**：NVMe SSD收到TRIM后立即清零物理block
+3. **系统运行干扰**：其他进程覆写了已释放的block
+
+**无备份恢复的可行性条件：**
+- ❌ 现代SSD + TRIM：数据被物理清零，无法恢复
+- ❌ XFS/Ext4日志文件系统：元数据立即清理
+- ✅ **机械硬盘(HDD)**：数据可能残留直到被覆写
+- ✅ **立即卸载文件系统**：阻止TRIM执行和数据覆写
+- ✅ **使用快照/备份**：唯一可靠的恢复方案
+
+**生产环境建议：**
 ```bash
-# 必须从块设备扫描，不能从目录扫描
-./mysql_recovery_pro --disk-carving \
-    --device-path=/dev/sda1 \    # 块设备，非目录
-    --output=/recovery/output \
-    --num-workers=8
+# 唯一可靠的灾难恢复方案：定期备份
+# 1. 逻辑备份
+mysqldump --all-databases > backup.sql
+
+# 2. 物理备份（推荐）
+# 停止MySQL后复制数据文件
+systemctl stop mysqld
+tar -czf /backup/mysql_$(date +%Y%m%d).tar.gz /var/lib/mysql
+
+# 3. 使用LVM快照（最佳）
+lvcreate -L 10G -s -n mysql_snap /dev/vg/mysql_lv
 ```
 
-**测试验证结论：**
-1. 目录扫描（volume/bind-mount）无法恢复已删除文件
-2. 文件系统（ext4/xfs）删除文件后会立即释放block
-3. 只有块设备级别的磁盘雕刻才能恢复已删除数据
-4. 生产环境强烈建议使用**FLUSH TABLES + 定期备份**策略
+**结论：在SSD+XFS环境下，无备份灾难恢复不可行，必须依赖备份策略。**
 
 ### 大规模验证测试 (100K行) - 更新于 2026-06-28
 
