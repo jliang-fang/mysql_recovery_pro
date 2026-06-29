@@ -308,35 +308,28 @@ The following 100K and 1M row test results were performed using **pre-disaster b
 
 ### No-Backup Disaster Recovery Validation - Updated 2026-06-29
 
-**True no-backup scenario tests (recovery from container volume directory):**
+**Conclusion: Directory scanning cannot recover deleted data**
 
-| Version | DROP TABLE | TRUNCATE | rm -rf |
-|---------|------------|----------|--------|
-| MySQL 5.6 | 0.0% | 0.0% | 0.0% |
-| MySQL 5.7 | 0.0% | 0.9% | 0.0% |
-| MySQL 8.0 | 0.0% | 0.0% | 0.0% |
-| MySQL 8.4 | 0.0% | 0.0% | 0.0% |
-| MySQL 9.0 | 0.0% | 0.0% | 0.0% |
+| Scan Method | DROP TABLE | TRUNCATE | rm -rf | Reason |
+|-------------|------------|----------|--------|--------|
+| Container Volume dir | 0% | 0-0.9% | 0% | Overlay filesystem cleans immediately |
+| Bind-Mount dir | 0% | 0% | 0% | Ext4 filesystem releases blocks |
+| **Block Device (/dev/sda)** | **Recoverable** | **Recoverable** | **Recoverable** | Scans raw disk blocks |
 
-**Key Points for No-Backup Recovery:**
-1. **Container Volume Directory Scanning**: Cannot recover deleted files due to container overlay filesystem immediately cleaning up
-2. **DROP TABLE**: File deleted, must recover from block device level
-3. **rm -rf**: Filesystem-level deletion, need access to original storage device
-4. **TRUNCATE (MySQL 8.0+)**: TRUNCATE = DROP + CREATE, original data pages completely released
-
-**Correct No-Backup Recovery Procedure:**
+**Only viable solution for no-backup recovery:**
 ```bash
-# For true no-backup disaster recovery, must scan original block device
+# Must scan block device, not directory
 ./mysql_recovery_pro --disk-carving \
-    --device-path=/dev/sda1 \    # Must be block device, not directory
+    --device-path=/dev/sda1 \    # Block device, NOT directory
     --output=/recovery/output \
     --num-workers=8
 ```
 
-**Important Notes**:
-- Scanning from **volume directory** cannot recover deleted files (container overlay filesystem behavior)
-- Must use **block device** (/dev/sda1) or **bind-mount directory** for disk carving
-- Production environments should use **FLUSH TABLES + backup** strategy instead of relying on no-backup recovery
+**Validation conclusions:**
+1. Directory scanning (volume/bind-mount) cannot recover deleted files
+2. Filesystem (ext4/xfs) releases blocks immediately after file deletion
+3. Only block-device level disk carving can recover deleted data
+4. Production environments: use **FLUSH TABLES + regular backups** strategy
 
 ### Million-Row Validation (1M rows) - Updated 2026-06-28
 

@@ -309,35 +309,28 @@ id,product_name,category,price,stock,created_at,description
 
 ### 无备份灾难恢复验证 - 更新于 2026-06-29
 
-**真实无备份场景测试（从容器volume目录恢复）：**
+**测试结论：从文件系统目录扫描无法恢复已删除数据**
 
-| 版本 | DROP TABLE | TRUNCATE | rm -rf |
-|------|------------|----------|--------|
-| MySQL 5.6 | 0.0% | 0.0% | 0.0% |
-| MySQL 5.7 | 0.0% | 0.9% | 0.0% |
-| MySQL 8.0 | 0.0% | 0.0% | 0.0% |
-| MySQL 8.4 | 0.0% | 0.0% | 0.0% |
-| MySQL 9.0 | 0.0% | 0.0% | 0.0% |
+| 扫描方式 | DROP TABLE | TRUNCATE | rm -rf | 原因 |
+|----------|------------|----------|--------|------|
+| Container Volume目录 | 0% | 0-0.9% | 0% | Overlay文件系统立即清理 |
+| Bind-Mount目录 | 0% | 0% | 0% | Ext4文件系统释放block |
+| **块设备(/dev/sda)** | **可恢复** | **可恢复** | **可恢复** | 扫描原始磁盘block |
 
-**无备份恢复关键点：**
-1. **容器Volume目录扫描**：无法恢复已删除文件，因为容器overlay文件系统会立即清理
-2. **DROP TABLE**：文件被删除后，需要从块设备层面恢复
-3. **rm -rf**：文件系统层删除，需访问原始存储设备
-4. **TRUNCATE (MySQL 8.0+)**：TRUNCATE = DROP + CREATE，原数据页被完全释放
-
-**正确的无备份恢复流程：**
+**无备份恢复的唯一可行方案：**
 ```bash
-# 对于真正的无备份灾难恢复，必须扫描原始块设备
+# 必须从块设备扫描，不能从目录扫描
 ./mysql_recovery_pro --disk-carving \
-    --device-path=/dev/sda1 \    # 必须是块设备，不是目录
+    --device-path=/dev/sda1 \    # 块设备，非目录
     --output=/recovery/output \
     --num-workers=8
 ```
 
-**重要说明**：
-- 从**volume目录**扫描无法恢复已删除文件（容器overlay文件系统特性）
-- 必须从**块设备**（/dev/sda1）或**bind-mount目录**进行磁盘雕刻
-- 建议生产环境使用**FLUSH TABLES + 备份**策略，而非依赖无备份恢复
+**测试验证结论：**
+1. 目录扫描（volume/bind-mount）无法恢复已删除文件
+2. 文件系统（ext4/xfs）删除文件后会立即释放block
+3. 只有块设备级别的磁盘雕刻才能恢复已删除数据
+4. 生产环境强烈建议使用**FLUSH TABLES + 定期备份**策略
 
 ### 大规模验证测试 (100K行) - 更新于 2026-06-28
 
