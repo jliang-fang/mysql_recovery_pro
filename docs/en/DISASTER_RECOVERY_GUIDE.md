@@ -299,15 +299,36 @@ id,product_name,category,price,stock,created_at,description
 
 **Recovery Results:**
 
-| Version | DROP TABLE | TRUNCATE | rm -rf | Overall |
-|---------|------------|----------|--------|---------|
-| MySQL 5.6 | 100.0% ✅ | 100.0% ✅ | 100.0% ✅ | **100%** |
-| MySQL 5.7 | 100.1% ✅ | 100.1% ✅ | 100.0% ✅ | **100%** |
-| MySQL 8.0 | 100.0% ✅ | 100.0% ✅ | 100.0% ✅ | **100%** |
-| MySQL 8.4 | 100.0% ✅ | 100.0% ✅ | 100.0% ✅ | **100%** |
-| MySQL 9.0 | 100.0% ✅ | 100.0% ✅ | 100.0% ✅ | **100%** |
+### Important Note ⚠️
 
-**Total Tests: 15 | Passed: 15 | Success Rate: 100%**
+The following 100K and 1M row test results were performed using **pre-disaster backup files** for recovery validation:
+1. Backup IBD file after creating data
+2. Execute disaster operation (DROP/TRUNCATE/rm - rf)
+3. Recover from **backup file**
+
+### No-Backup Disaster Recovery Validation - Updated 2026-06-29
+
+**True no-backup scenario tests (recovery from filesystem/raw disk):**
+
+| Version | Scenario | Data Size | Recovery Result | Notes |
+|---------|----------|-----------|-----------------|-------|
+| MySQL 8.0 | TRUNCATE | 5,000 | 0.04% (2/5000) | TRUNCATE=DROP+CREATE, data pages cleared |
+| MySQL 8.0 | DROP TABLE | 5,000 | 0% | File deleted, need raw disk carving |
+| MySQL 8.0 | rm -rf | 5,000 | 0% | Need to scan block device (/dev/sda) |
+
+**Key Points for No-Backup Recovery:**
+1. **MySQL 8.0+ TRUNCATE = DROP + CREATE**: Original data pages are completely released, cannot recover from residual files
+2. **DROP TABLE**: File deleted, must recover from block device level
+3. **rm -rf**: Filesystem-level deletion, need access to original storage device
+
+**Correct No-Backup Recovery Procedure:**
+```bash
+# For true no-backup disaster recovery, must scan original block device
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \    # Must be block device, not directory
+    --output=/recovery/output \
+    --num-workers=8
+```
 
 ### Million-Row Validation (1M rows) - Updated 2026-06-28
 

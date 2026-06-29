@@ -300,12 +300,44 @@ id,product_name,category,price,stock,created_at,description
 
 ## 恢复验证结果
 
+### 重要说明 ⚠️
+
+以下100K和1M行测试结果是使用**灾难前备份文件**进行的恢复验证，测试流程为：
+1. 创建数据后备份IBD文件
+2. 执行灾难操作（DROP/TRUNCATE/rm -rf）
+3. 从**备份文件**恢复
+
+### 无备份灾难恢复验证 - 更新于 2026-06-29
+
+**真实无备份场景测试（从文件系统/原始磁盘恢复）：**
+
+| 版本 | 场景 | 数据量 | 恢复结果 | 说明 |
+|------|------|--------|----------|------|
+| MySQL 8.0 | TRUNCATE | 5,000 | 0.04% (2/5000) | TRUNCATE=DROP+CREATE，数据页已清空 |
+| MySQL 8.0 | DROP TABLE | 5,000 | 0% | 文件删除后需从原始磁盘设备雕刻 |
+| MySQL 8.0 | rm -rf | 5,000 | 0% | 需要从块设备(/dev/sda)进行磁盘雕刻 |
+
+**无备份恢复关键点：**
+1. **MySQL 8.0+ TRUNCATE = DROP + CREATE**：原数据页被完全释放，无法从残留文件恢复
+2. **DROP TABLE**：文件被删除，需从块设备层面恢复
+3. **rm -rf**：文件系统层删除，需访问原始存储设备
+
+**正确的无备份恢复流程：**
+```bash
+# 对于真正的无备份灾难恢复，必须扫描原始块设备
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \    # 必须是块设备，不是目录
+    --output=/recovery/output \
+    --num-workers=8
+```
+
 ### 大规模验证测试 (100K行) - 更新于 2026-06-28
 
 **测试配置：**
 - 数据量：每表 100,000 条记录
 - 字段类型：25列 (INT, BIGINT, FLOAT, DOUBLE, DECIMAL, DATE, TIME, DATETIME, CHAR, VARCHAR, TEXT, BLOB, ENUM, SET, JSON, BIT)
 - 文件大小：约52MB (IBD)
+- **恢复方式：从备份文件恢复（非真实灾难场景）**
 
 **恢复结果：**
 

@@ -194,7 +194,7 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
         return result;
     }
 
-    // 获取设备大小
+    // 获取设备/路径大小
     uint64_t device_size = 0;
 
 #ifdef __linux__
@@ -214,11 +214,56 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
     } else if (S_ISREG(st.st_mode)) {
         // 普通文件
         device_size = st.st_size;
+    } else if (S_ISDIR(st.st_mode)) {
+        // 目录 - 递归扫描所有文件
+        // 目录扫描模式：扫描目录中的所有.ibd文件
+        if (config_.verbose) {
+            std::cout << "[INFO] Directory scan mode: scanning all files in " << config_.device_path << "\n";
+        }
+
+        try {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(config_.device_path)) {
+                if (entry.is_regular_file()) {
+                    std::string filename = entry.path().filename().string();
+                    // 扫描所有文件（不限于.ibd），因为可能有残留数据
+                    std::string filepath = entry.path().string();
+
+                    // 获取文件大小
+                    try {
+                        uint64_t file_size = std::filesystem::file_size(entry.path());
+                        device_size += file_size;
+
+                        if (config_.verbose && file_size > 0) {
+                            std::cout << "[INFO] Found file: " << filepath << " (" << file_size << " bytes)\n";
+                        }
+                    } catch (...) {
+                        // Skip files we can't read
+                    }
+                }
+            }
+        } catch (const std::filesystem::filesystem_error& e) {
+            result.errors.push_back("Directory scan error: " + std::string(e.what()));
+            return result;
+        }
+
+        if (config_.verbose) {
+            std::cout << "[INFO] Total files size: " << device_size << " bytes\n";
+        }
     }
 #else
     // 非Linux系统，使用文件系统获取大小
     try {
-        device_size = std::filesystem::file_size(config_.device_path);
+        if (std::filesystem::is_directory(config_.device_path)) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(config_.device_path)) {
+                if (entry.is_regular_file()) {
+                    try {
+                        device_size += std::filesystem::file_size(entry.path());
+                    } catch (...) {}
+                }
+            }
+        } else {
+            device_size = std::filesystem::file_size(config_.device_path);
+        }
     } catch (...) {
         result.errors.push_back("Cannot get device size");
         return result;
