@@ -502,6 +502,27 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     } else if (type_str == "FLOAT") {
                         col.mysql_type_id = 4;  // FLOAT
                         col.column_length = 4;
+                    } else if (type_str == "ENUM") {
+                        // ENUM type - InnoDB type 247 (server type) mapped to internal type
+                        col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
+                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 4;
+                    } else if (type_str == "JSON") {
+                        // JSON type - stored as BLOB externally
+                        col.mysql_type_id = 245;  // MYSQL_TYPE_JSON
+                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
+                    } else if (type_str == "BLOB" || type_str == "TEXT") {
+                        // BLOB/TEXT type
+                        col.mysql_type_id = 252;  // MYSQL_TYPE_BLOB
+                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
+                    } else if (type_str == "TINYINT") {
+                        col.mysql_type_id = 1;  // TINY
+                        col.column_length = 1;
+                    } else if (type_str == "SMALLINT") {
+                        col.mysql_type_id = 2;  // SHORT
+                        col.column_length = 2;
+                    } else if (type_str == "MEDIUMINT") {
+                        col.mysql_type_id = 9;  // INT24
+                        col.column_length = 4;
                     } else {
                         col.mysql_type_id = 253;  // Default to VARCHAR
                         col.column_length = 255;
