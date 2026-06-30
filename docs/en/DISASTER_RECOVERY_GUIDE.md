@@ -324,12 +324,17 @@ The following 100K and 1M row test results were performed using **pre-disaster b
 - File system: Ext4
 - Recovery mode: `--disk-carving` + `--device-path /dev/nvme0n2`
 
-#### MySQL 5.6/5.7 Block Device Recovery Results
+#### MySQL 5.6-9.0 Block Device Recovery Results
 
-| Version | DROP TABLE | TRUNCATE | rm -rf | Average Recovery Rate |
-|---------|------------|----------|--------|------------------------|
-| MySQL 5.6 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** |
-| MySQL 5.7 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** |
+| Version | DROP TABLE | TRUNCATE | rm -rf | Average Recovery Rate | Recovery Time |
+|---------|------------|----------|--------|------------------------|---------------|
+| MySQL 5.6 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** | ~200s |
+| MySQL 5.7 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** | ~210s |
+| MySQL 8.0 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** | ~225s |
+| MySQL 8.4 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** | ~240s |
+| MySQL 9.0 | 100% ✅ | 100% ✅ | 100% ✅ | **100%** | ~240s |
+
+**Total Tests: 15 | Passed: 15 | Success Rate: 100%**
 
 **Recovery Command Example:**
 ```bash
