@@ -133,6 +133,8 @@ set(SOURCES
     src/platform/linux/file_system_linux.cpp
     src/platform/linux/memory_linux.cpp
     src/platform/linux/thread_linux.cpp
+    # ✅ 新增：XFS文件系统磁盘雕刻支持
+    src/disk/xfs_disk_carver.cpp
 )
 
 # 根据平台选择性地添加文件

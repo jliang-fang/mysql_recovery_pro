@@ -31,6 +31,7 @@
 #include "dbrecovery/export/data_exporter.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
 #include "dbrecovery/recovery/raw_disk_carver.hpp"
+#include "dbrecovery/disk/xfs_disk_carver.hpp"
 
 namespace fs = std::filesystem;
 
@@ -183,6 +184,8 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--disk-carving\033[0m             Raw disk carving (PhotoRec style, no backup needed)\n";
     std::cout << "  \033[1m--device-path=<path>\033[0m       Raw device path for disk carving (e.g., /dev/sda)\n";
     std::cout << "  \033[1m--num-workers=<n>\033[0m          Number of worker threads for disk carving (default: 4)\n";
+    std::cout << "  \033[1m--filesystem=<fs>\033[0m          Filesystem type for disk carving: ext4|xfs (default: ext4)\n";
+    std::cout << "                                 XFS recovery uses AG scanning and free inode btree traversal\n";
     std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1/mysql.ibd)\n";
     std::cout << "                                 Required for undo log recovery (MySQL 5.6/5.7)\n";
     std::cout << "  \033[1m--data-dir=<path>\033[0m           MySQL data directory for DROP TABLE recovery\n";
@@ -413,6 +416,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     auto num_workers_opt = parser_.get_int_option("num-workers", 4);
     uint32_t num_workers = static_cast<uint32_t>(num_workers_opt.value_or(4));
 
+    // Filesystem type for disk carving (ext4 or xfs)
+    std::string filesystem_type = parser_.get_option("filesystem", "ext4");
+    std::transform(filesystem_type.begin(), filesystem_type.end(), filesystem_type.begin(), ::tolower);
+
     // FRM file option for schema parsing
     std::string frm_path = parser_.get_option("frm", "");
 
@@ -432,9 +439,66 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         std::cout << "[INFO] Starting raw disk carving recovery...\n";
         std::cout << "[INFO] Device: " << device_path << "\n";
+        std::cout << "[INFO] Filesystem: " << filesystem_type << "\n";
         std::cout << "[INFO] Workers: " << num_workers << "\n";
         std::cout << "[INFO] Page size: " << page_size << "\n";
 
+        // Check if XFS filesystem is specified
+        if (filesystem_type == "xfs") {
+            // Use XFS-specific disk carving
+            std::cout << "[INFO] Using XFS-specific recovery (AG scanning + free inode btree)\n";
+
+            dbrecovery::disk::xfs::XfsDiskCarver xfs_carver;
+            dbrecovery::disk::xfs::XfsConfig xfs_config;
+            xfs_config.device_path = device_path;
+            xfs_config.output_dir = output_dir;
+            xfs_config.page_size = page_size;
+            xfs_config.num_workers = num_workers;
+            xfs_config.verbose = verbose;
+            xfs_config.recover_deleted = true;
+            xfs_config.scan_deleted_inodes = true;
+            xfs_config.signature_scan = true;  // Fallback
+            xfs_carver.set_config(xfs_config);
+
+            auto xfs_result = xfs_carver.scan_and_recover([&](double progress, const std::string& msg) {
+                if (verbose) {
+                    std::cout << "[" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
+                }
+            });
+
+            if (xfs_result.success) {
+                std::cout << "[INFO] XFS disk carving completed.\n";
+                std::cout << "  AG count: " << xfs_result.ag_count << "\n";
+                std::cout << "  Inodes scanned: " << xfs_result.total_inodes_scanned << "\n";
+                std::cout << "  Deleted inodes found: " << xfs_result.deleted_inodes_found << "\n";
+                std::cout << "  Pages recovered: " << xfs_result.pages_recovered << "\n";
+                std::cout << "  Total records: " << xfs_result.total_records << "\n";
+                std::cout << "  Unique index_ids: " << xfs_result.records_by_index_id.size() << "\n";
+                std::cout << "  Output files: " << xfs_result.output_files.size() << "\n";
+
+                for (const auto& file : xfs_result.output_files) {
+                    std::cout << "    - " << file << "\n";
+                }
+
+                if (!xfs_result.errors.empty()) {
+                    std::cout << "\n  Errors:\n";
+                    for (const auto& err : xfs_result.errors) {
+                        std::cout << "    - " << err << "\n";
+                    }
+                }
+
+                std::cout << "\n✅ XFS Recovery completed: " << output_dir << "\n";
+                return 0;
+            } else {
+                std::cerr << "[ERROR] XFS disk carving failed.\n";
+                for (const auto& err : xfs_result.errors) {
+                    std::cerr << "  - " << err << "\n";
+                }
+                return 1;
+            }
+        }
+
+        // Default: ext4 or filesystem-independent carving
         dbrecovery::recovery::RawDiskCarver carver;
         dbrecovery::recovery::RawDiskCarver::Config config;
         config.device_path = device_path;
