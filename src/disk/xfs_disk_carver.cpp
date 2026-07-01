@@ -497,13 +497,84 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
     // Accept deleted inodes OR regular inodes with extents (for debugging)
     bool is_deleted = (mode == 0);
 
+    // Get file size from inode core
+    uint64_t file_size = be64toh(inode_core.di_size);
+
+    // Extent btree format - try to recover extents from btree root in inode
+    // For deleted inodes, extent btree is converted to extent list format
+    // But sometimes the btree root is still in the inode data fork area
+    if (format == XFS_DINODE_FMT_BTREE) {
+        if (config_.verbose) {
+            std::cout << "[DEBUG] Inode has extent btree format (large/fragmented file)\n";
+        }
+        // For btree format, the btree root is stored in the inode's data fork
+        // Try to extract extent list from btree root
+        // This is a simplified approach - full btree traversal would be needed for large files
+
+        // Check if we have a btree root block in the inode
+        // btree root starts at offset 176 for v5 inode
+        size_t btree_start = 176;
+        if (btree_start + 16 > inode_size) {
+            return std::nullopt;  // Not enough space for btree header
+        }
+
+        // Try to read btree block header
+        xfs_btree_block btree_hdr;
+        std::memcpy(&btree_hdr, inode_data.data() + btree_start, sizeof(btree_hdr));
+
+        // Validate btree magic (should be XFS_BMAP_CRC_MAGIC = 0x42B33D42 for v5)
+        uint32_t btree_magic = be32toh(btree_hdr.bb_magic);
+        if (btree_magic != 0x42B33D42 && btree_magic != 0x424D4D42) {  // BMAP_CRC or BMAP magic
+            return std::nullopt;  // Not a valid btree root
+        }
+
+        uint16_t level = be16toh(btree_hdr.bb_level);
+        uint16_t numrecs = be16toh(btree_hdr.bb_numrecs);
+
+        if (level == 0 && numrecs > 0 && numrecs < 100) {
+            // Leaf level - records are directly in the btree block
+            // For short form CRC btree, records start at offset 56 (XFS_BTREE_SBLOCK_CRC_LEN)
+            size_t rec_offset = btree_start + 56;
+            size_t rec_size = sizeof(xfs_bmbt_rec);
+
+            XfsExtentInfo info;
+            info.inode_number = ag_inode + ag_index * ag_blocks;
+            info.file_size = file_size;
+            info.is_deleted = is_deleted;
+            info.mtime.t_sec = be32toh(inode_core.di_mtime.t_sec);
+            info.mtime.t_nsec = be32toh(inode_core.di_mtime.t_nsec);
+            info.ctime.t_sec = be32toh(inode_core.di_ctime.t_sec);
+            info.ctime.t_nsec = be32toh(inode_core.di_ctime.t_nsec);
+
+            for (uint16_t i = 0; i < numrecs && rec_offset + rec_size <= inode_size; i++) {
+                xfs_bmbt_rec rec;
+                std::memcpy(&rec, inode_data.data() + rec_offset + i * rec_size, rec_size);
+
+                xfs_extent ext = parse_extent(rec);
+
+                if (ext.block_count == 0 || ext.state == XFS_EXT_UNWRITTEN) {
+                    continue;
+                }
+
+                uint64_t fs_size = be64toh(superblock_.sb_dblocks);
+                if (ext.block_offset + ext.block_count <= fs_size) {
+                    info.extents.push_back(ext);
+                }
+            }
+
+            if (!info.extents.empty()) {
+                return info;
+            }
+        }
+
+        return std::nullopt;  // Non-leaf btree or no valid extents
+    }
+
     if (format != XFS_DINODE_FMT_EXTENTS) {
-        // Extent btree format - more complex, skip for now
-        // Deleted inodes are always converted to extent list format
+        // Unknown format
         return std::nullopt;
     }
 
-    uint64_t file_size = be64toh(inode_core.di_size);
     uint32_t nextents = be32toh(inode_core.di_nextents);
 
     if (file_size == 0 || nextents == 0) {
