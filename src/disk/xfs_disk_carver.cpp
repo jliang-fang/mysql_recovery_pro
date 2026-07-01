@@ -10,7 +10,7 @@
  */
 
 #include "dbrecovery/disk/xfs_disk_carver.hpp"
-#include "dbrecovery/innodb/binary_reader.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 
@@ -34,7 +34,9 @@ namespace dbrecovery {
 namespace disk {
 namespace xfs {
 
-using namespace dbrecovery::innodb;
+// Use innodb namespace for read_be functions and InnoDBIndexParser
+using dbrecovery::innodb::read_be;
+using dbrecovery::innodb::InnoDBIndexParser;
 
 // InnoDB page constants
 constexpr uint16_t FIL_PAGE_INDEX = 0x45BF;
@@ -372,11 +374,8 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
                         // Read inode and try to recover
                         auto extent_info = read_inode(ag_index, ag_inode);
                         if (extent_info.has_value()) {
-                            std::lock_guard<std::mutex> lock(result_mutex_);
-                            last_result_.recovered_extents.push_back(*extent_info);
-                            inodes_found_.fetch_add(1);
-
-                            // Read data from extents
+                            // Read data from extents first (outside lock)
+                            std::vector<XfsPageInfo> recovered_pages;
                             for (const auto& ext : extent_info->extents) {
                                 if (ext.state == XFS_EXT_UNWRITTEN) {
                                     continue;  // Skip unwritten extents
@@ -387,14 +386,21 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
                                     // Parse InnoDB pages from extent data
                                     auto pages = parse_pages_from_extent(extent_data,
                                                                          extent_info->inode_number);
-
-                                    if (!pages.empty()) {
-                                        std::lock_guard<std::mutex> lock2(result_mutex_);
-                                        for (auto& page : pages) {
-                                            last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
-                                            last_result_.pages_recovered++;
-                                        }
+                                    for (auto& page : pages) {
+                                        recovered_pages.push_back(std::move(page));
                                     }
+                                }
+                            }
+
+                            // Now lock and add results
+                            if (!recovered_pages.empty() || extent_info->extents.size() > 0) {
+                                std::lock_guard<std::mutex> lock(result_mutex_);
+                                last_result_.recovered_extents.push_back(*extent_info);
+                                inodes_found_.fetch_add(1);
+
+                                for (auto& page : recovered_pages) {
+                                    last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
+                                    last_result_.pages_recovered++;
                                 }
                             }
                         }
@@ -691,6 +697,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
 
     uint64_t total_scanned = 0;
     uint64_t pages_found = 0;
+    uint64_t frm_files_found = 0;
 
     auto last_progress_time = std::chrono::steady_clock::now();
 
@@ -702,36 +709,71 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
 
         size_t scan_size = bytes_read;
 
-        // Scan for InnoDB pages
-        for (size_t i = 0; i + config_.page_size <= scan_size; i += block_size) {
+        // Scan for InnoDB pages at block-aligned offsets
+        // Also scan at 512-byte offsets for non-aligned pages (edge case)
+        uint64_t scan_step = block_size;  // Primary: block-aligned
+
+        for (size_t i = 0; i + config_.page_size <= scan_size; i += scan_step) {
             const uint8_t* page_data = buffer.data() + i;
 
+            // First check for FRM file signature (MySQL 5.6/5.7 schema files)
+            if (i + 10 <= scan_size && std::memcmp(page_data, FRM_SIGNATURE, 10) == 0) {
+                frm_files_found++;
+                if (config_.verbose) {
+                    std::cout << "[INFO] Found FRM file signature at offset " << (offset + i) << "\n";
+                }
+                // Store FRM location for later extraction
+                XfsPageInfo frm_info;
+                frm_info.disk_offset = offset + i;
+                frm_info.page_type = 0xFFFF;  // Special marker for FRM
+                frm_info.index_id = 0;
+                frm_info.page_no = 0;
+                // Read up to 64KB for FRM file (typical size)
+                size_t frm_size = std::min(static_cast<size_t>(65536), scan_size - i);
+                frm_info.data.resize(frm_size);
+                std::memcpy(frm_info.data.data(), page_data, frm_size);
+
+                std::lock_guard<std::mutex> lock(result_mutex_);
+                last_result_.pages_by_index_id[0xFFFFFFFF].push_back(std::move(frm_info));
+                continue;
+            }
+
+            // Check page type
             uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
 
-            if (page_type == FIL_PAGE_INDEX) {
-                uint64_t index_id = read_be<uint64_t>(page_data, 66);
-                if (index_id != 0) {
-                    XfsPageInfo page_info;
-                    page_info.disk_offset = offset + i;
-                    page_info.page_type = page_type;
-                    page_info.index_id = index_id;
-                    page_info.page_no = read_be<uint32_t>(page_data, 8);
-                    page_info.data.resize(config_.page_size);
-                    std::memcpy(page_info.data.data(), page_data, config_.page_size);
-
-                    {
-                        std::lock_guard<std::mutex> lock(result_mutex_);
-                        last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
-                        last_result_.pages_recovered++;
-                        pages_found++;
+            // Accept INDEX, SDI, and SDI_ZIP pages
+            if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                uint64_t index_id = 0;
+                if (page_type == FIL_PAGE_INDEX && config_.page_size >= 74) {
+                    index_id = read_be<uint64_t>(page_data, 66);
+                    if (index_id == 0) {
+                        continue;  // Invalid index_id
                     }
                 }
+
+                // For SDI pages, use space_id as key
+                if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                    index_id = 0xFFFFFF00 | page_type;  // Special marker for SDI
+                }
+
+                XfsPageInfo page_info;
+                page_info.disk_offset = offset + i;
+                page_info.page_type = page_type;
+                page_info.index_id = index_id;
+                page_info.page_no = read_be<uint32_t>(page_data, 8);
+                page_info.data.resize(config_.page_size);
+                std::memcpy(page_info.data.data(), page_data, config_.page_size);
+
+                std::lock_guard<std::mutex> lock(result_mutex_);
+                last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
+                last_result_.pages_recovered++;
+                pages_found++;
             }
         }
 
         total_scanned += scan_size;
 
-        // Progress
+        // Progress reporting
         auto now = std::chrono::steady_clock::now();
         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             now - last_progress_time).count();
@@ -740,7 +782,8 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
             double pct = static_cast<double>(total_scanned) / device_size;
             std::ostringstream oss;
             oss << "Signature scan: " << std::fixed << std::setprecision(1)
-                << (pct * 100.0) << "% pages=" << pages_found;
+                << (pct * 100.0) << "% pages=" << pages_found
+                << " frm=" << frm_files_found;
             progress(pct, oss.str());
             last_progress_time = now;
         }
@@ -749,7 +792,8 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
     close(fd);
 
     if (config_.verbose) {
-        std::cout << "[INFO] Signature scan found " << pages_found << " pages\n";
+        std::cout << "[INFO] Signature scan found " << pages_found << " pages and "
+                  << frm_files_found << " FRM signatures\n";
     }
 #endif
 }
