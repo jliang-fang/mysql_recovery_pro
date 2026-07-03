@@ -13,6 +13,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -55,6 +56,10 @@ XfsDiskCarver::~XfsDiskCarver() = default;
 
 void XfsDiskCarver::set_config(const XfsConfig& config) {
     config_ = config;
+}
+
+void XfsDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
+    external_schema_ = schema;
 }
 
 // ==================== Static Helper Functions ====================
@@ -900,40 +905,24 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
 
         std::vector<std::map<std::string, std::string>> all_records;
 
+        // Determine if we should use schema-aware parsing
+        bool use_schema = external_schema_.has_value() && !external_schema_->columns.empty();
+
+        if (use_schema && config_.verbose) {
+            std::cerr << "[DEBUG] Using schema-aware parsing with "
+                      << external_schema_->columns.size() << " columns for index_id "
+                      << index_id << std::endl;
+        }
+
         for (const auto& page_info : pages) {
-            // Use schema-less parsing
-            InnoDBIndexParser parser;
-            parser.set_recover_deleted(config_.recover_deleted);
-            parser.set_bad_page_mode(2);
-
-            auto records = parser.parse_page(page_info.data.data(),
-                                            page_info.data.size(), 0);
-
-            for (const auto& rec : records) {
-                if (rec.is_deleted && !config_.recover_deleted) {
-                    continue;
-                }
-
-                std::map<std::string, std::string> record;
-                for (size_t i = 0; i < rec.fields.size(); i++) {
-                    std::string field_name = "field_" + std::to_string(i);
-                    if (rec.fields[i].is_null) {
-                        record[field_name] = "NULL";
-                    } else if (!rec.fields[i].str_value.empty()) {
-                        record[field_name] = rec.fields[i].str_value;
-                    } else if (!rec.fields[i].raw_bytes.empty()) {
-                        std::ostringstream hex;
-                        for (uint8_t b : rec.fields[i].raw_bytes) {
-                            hex << std::hex << std::setw(2) << std::setfill('0')
-                                << static_cast<int>(b);
-                        }
-                        record[field_name] = hex.str();
-                    }
-                }
-
-                if (!record.empty()) {
-                    all_records.push_back(record);
-                }
+            if (use_schema) {
+                // Schema-aware parsing
+                auto records = parse_records_with_schema_xfs(page_info.data, *external_schema_);
+                all_records.insert(all_records.end(), records.begin(), records.end());
+            } else {
+                // Schema-less parsing
+                auto records = parse_records_schemaless_xfs(page_info.data);
+                all_records.insert(all_records.end(), records.begin(), records.end());
             }
         }
 
@@ -1008,6 +997,144 @@ XfsScanResult XfsDiskCarver::scan_and_recover(
     return recover(scan_result, [&](double pct, const std::string& msg) {
         if (progress) progress(0.7 + pct * 0.3, msg);
     });
+}
+
+// ==================== Schema-less Parsing ====================
+
+std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_schemaless_xfs(
+    const std::vector<uint8_t>& page_data) {
+
+    std::vector<std::map<std::string, std::string>> records;
+
+    if (page_data.size() < 100) return records;
+
+    const uint8_t* data = page_data.data();
+    size_t page_size = page_data.size();
+
+    // INDEX page validation
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    if (page_type != FIL_PAGE_INDEX) return records;
+
+    InnoDBIndexParser parser;
+    parser.set_recover_deleted(config_.recover_deleted);
+    parser.set_bad_page_mode(2);
+
+    auto index_records = parser.parse_page(data, page_size, 0);
+
+    for (const auto& rec : index_records) {
+        if (rec.is_deleted && !config_.recover_deleted) continue;
+
+        std::map<std::string, std::string> record;
+        for (size_t i = 0; i < rec.fields.size(); i++) {
+            std::string field_name = "field_" + std::to_string(i);
+            if (rec.fields[i].is_null) {
+                record[field_name] = "NULL";
+            } else if (!rec.fields[i].str_value.empty()) {
+                record[field_name] = rec.fields[i].str_value;
+            } else if (!rec.fields[i].raw_bytes.empty()) {
+                std::ostringstream hex;
+                for (uint8_t b : rec.fields[i].raw_bytes) {
+                    hex << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(b);
+                }
+                record[field_name] = hex.str();
+            }
+        }
+        if (!record.empty()) {
+            records.push_back(record);
+        }
+    }
+
+    return records;
+}
+
+// ==================== Schema-aware Parsing ====================
+
+std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_with_schema_xfs(
+    const std::vector<uint8_t>& page_data,
+    const catalog::TableSchema& schema) {
+
+    std::vector<std::map<std::string, std::string>> records;
+
+    if (page_data.size() < 100 || schema.columns.empty()) return records;
+
+    const uint8_t* data = page_data.data();
+    size_t page_size = page_data.size();
+
+    // INDEX page validation
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+    if (page_type != FIL_PAGE_INDEX) return records;
+
+    // Convert TableSchema to IndexColumnDef list
+    // CRITICAL: Must sort by physical_pos to match InnoDB storage order
+    std::vector<innodb::IndexColumnDef> columns;
+
+    std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_cols;
+    for (const auto& [ordinal, col] : schema.columns) {
+        uint32_t phys_pos = col.physical_pos > 0 ? col.physical_pos : ordinal;
+        sorted_cols.push_back({phys_pos, col});
+    }
+    std::sort(sorted_cols.begin(), sorted_cols.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    for (const auto& [phys_pos, col] : sorted_cols) {
+        innodb::IndexColumnDef col_def;
+        col_def.name = col.name;
+        col_def.col_type = col.mysql_type_id;
+        col_def.col_length = col.column_length;
+        col_def.is_nullable = col.is_nullable;
+        col_def.is_unsigned = !col.is_signed;
+        col_def.precision = col.numeric_precision;
+        col_def.scale = col.numeric_scale;
+        col_def.datetime_precision = col.datetime_precision;
+        col_def.char_set_id = col.charset_id;
+        col_def.ordinal_position = col.ordinal;
+        col_def.physical_pos = phys_pos;
+        col_def.enum_values = col.enum_values;
+        col_def.set_values = col.set_values;
+
+        // Set mb_maxlen based on charset
+        if (col.charset_id == 45 || col.charset_id == 46) {  // utf8mb4
+            col_def.mb_maxlen = 4;
+        } else if (col.charset_id == 33 || col.charset_id == 83) {  // utf8
+            col_def.mb_maxlen = 3;
+        } else {
+            col_def.mb_maxlen = 1;  // latin1 and others
+        }
+
+        columns.push_back(col_def);
+    }
+
+    InnoDBIndexParser parser;
+    parser.set_columns(columns);
+    parser.set_recover_deleted(config_.recover_deleted);
+    parser.set_bad_page_mode(2);
+
+    auto index_records = parser.parse_page(data, page_size, 0);
+
+    for (const auto& rec : index_records) {
+        if (rec.is_deleted && !config_.recover_deleted) continue;
+
+        std::map<std::string, std::string> record;
+        for (size_t i = 0; i < rec.fields.size() && i < columns.size(); i++) {
+            const auto& col = columns[i];
+            if (rec.fields[i].is_null) {
+                record[col.name] = "NULL";
+            } else {
+                record[col.name] = rec.fields[i].str_value;
+            }
+        }
+        if (!record.empty()) {
+            records.push_back(record);
+        }
+    }
+
+    if (config_.verbose) {
+        std::cerr << "[DEBUG] Schema-aware parsing found " << records.size()
+                  << " records for index_id" << std::endl;
+    }
+
+    return records;
 }
 
 } // namespace xfs

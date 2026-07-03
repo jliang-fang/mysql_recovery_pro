@@ -42,6 +42,8 @@
 #include <endian.h>
 #endif
 
+#include "dbrecovery/catalog/schema_defs.hpp"
+
 namespace dbrecovery {
 namespace disk {
 namespace xfs {
@@ -394,6 +396,9 @@ public:
 
     void set_config(const XfsConfig& config);
 
+    // Set external schema for schema-aware recovery
+    void set_external_schema(const catalog::TableSchema& schema);
+
     // Scan XFS filesystem for deleted MySQL data
     XfsScanResult scan(std::function<void(double, const std::string&)> progress = nullptr);
 
@@ -420,6 +425,7 @@ private:
     XfsConfig config_;
     xfs_superblock superblock_;
     XfsScanResult last_result_;
+    std::optional<catalog::TableSchema> external_schema_;
 
     std::atomic<uint64_t> current_ag_{0};
     std::atomic<uint64_t> inodes_scanned_{0};
@@ -455,6 +461,15 @@ private:
     // Parse InnoDB page from extent data
     std::vector<XfsPageInfo> parse_pages_from_extent(const std::vector<uint8_t>& data,
                                                       uint64_t inode_number);
+
+    // Schema-less record parsing
+    std::vector<std::map<std::string, std::string>> parse_records_schemaless_xfs(
+        const std::vector<uint8_t>& page_data);
+
+    // Schema-aware record parsing
+    std::vector<std::map<std::string, std::string>> parse_records_with_schema_xfs(
+        const std::vector<uint8_t>& page_data,
+        const catalog::TableSchema& schema);
 };
 
 // ==================== Helper Functions ====================

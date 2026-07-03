@@ -460,6 +460,87 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             xfs_config.signature_scan = true;  // Fallback
             xfs_carver.set_config(xfs_config);
 
+            // Load and set external schema for schema-aware recovery
+            std::optional<catalog::TableSchema> xfs_schema = load_schema_from_file(schema_file_path);
+
+            // Also try --schema command line string if no schema file
+            if (!xfs_schema.has_value() && !schema_str.empty()) {
+                std::cout << "[INFO] Parsing schema from --schema option for XFS recovery\n";
+                catalog::TableSchema parsed_schema;
+                parsed_schema.table_name = "recovered_table";
+                parsed_schema.page_size = page_size;
+
+                // Parse schema string: "col1:type[:size][:pk],col2:type..."
+                std::istringstream ss(schema_str);
+                std::string col_def;
+                int ordinal = 1;
+                while (std::getline(ss, col_def, ',')) {
+                    catalog::ColumnInfo col;
+                    std::istringstream cs(col_def);
+                    std::string token;
+                    std::vector<std::string> parts;
+                    while (std::getline(cs, token, ':')) {
+                        parts.push_back(token);
+                    }
+
+                    if (parts.size() >= 2) {
+                        col.name = parts[0];
+                        col.ordinal = ordinal;
+                        col.physical_pos = ordinal;
+
+                        // Parse type
+                        std::string type_str = parts[1];
+                        // Convert SQL types to MySQL type IDs
+                        if (type_str.find("INT") != std::string::npos) {
+                            col.mysql_type_id = 3;  // MYSQL_TYPE_LONG
+                        } else if (type_str.find("VARCHAR") != std::string::npos) {
+                            col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
+                            if (parts.size() >= 3) {
+                                col.column_length = std::stoi(parts[2]);
+                            }
+                        } else if (type_str.find("DATETIME") != std::string::npos) {
+                            col.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
+                        } else if (type_str.find("DECIMAL") != std::string::npos) {
+                            col.mysql_type_id = 0;  // MYSQL_TYPE_DECIMAL
+                            if (parts.size() >= 3) {
+                                col.numeric_precision = std::stoi(parts[2]);
+                            }
+                            if (parts.size() >= 4) {
+                                col.numeric_scale = std::stoi(parts[3]);
+                            }
+                        } else if (type_str.find("ENUM") != std::string::npos) {
+                            col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
+                        } else {
+                            col.mysql_type_id = 15;  // Default to VARCHAR
+                        }
+
+                        col.is_nullable = true;
+                        if (parts.size() >= 4) {
+                            if (parts[3].find("pk") != std::string::npos ||
+                                parts[3].find("PK") != std::string::npos ||
+                                parts[3].find("PRIMARY") != std::string::npos) {
+                                col.is_nullable = false;
+                            }
+                        }
+
+                        parsed_schema.columns[ordinal] = col;
+                        ordinal++;
+                    }
+                }
+
+                xfs_schema = parsed_schema;
+                std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
+            }
+
+            // Set schema if available
+            if (xfs_schema.has_value()) {
+                xfs_carver.set_external_schema(*xfs_schema);
+                std::cout << "[INFO] Schema-aware recovery enabled with "
+                          << xfs_schema->columns.size() << " columns\n";
+            } else {
+                std::cout << "[INFO] No schema provided, using schema-less recovery\n";
+            }
+
             auto xfs_result = xfs_carver.scan_and_recover([&](double progress, const std::string& msg) {
                 if (verbose) {
                     std::cout << "[" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
