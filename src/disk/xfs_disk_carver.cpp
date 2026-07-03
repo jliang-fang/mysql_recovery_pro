@@ -897,7 +897,40 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
     size_t total_index_ids = scan_result.pages_by_index_id.size();
     size_t processed = 0;
 
+    // System table index ID ranges (common InnoDB system table IDs)
+    // These are well-known ranges for MySQL system tables
+    auto is_system_index = [](uint64_t index_id) -> bool {
+        // SYS_TABLES, SYS_COLUMNS, SYS_INDEXES, SYS_FIELDS
+        // Typically have low index IDs (1-100) or specific ranges
+        if (index_id > 0 && index_id <= 100) return true;  // System tables
+        // Additional known system table ranges can be added
+        return false;
+    };
+
     for (const auto& [index_id, pages] : scan_result.pages_by_index_id) {
+        // Apply index_id filtering
+        if (!config_.target_index_ids.empty()) {
+            // Only process specified index IDs
+            if (std::find(config_.target_index_ids.begin(),
+                          config_.target_index_ids.end(),
+                          index_id) == config_.target_index_ids.end()) {
+                if (config_.verbose) {
+                    std::cout << "[SKIP] Index ID " << index_id
+                              << " not in target list\n";
+                }
+                continue;
+            }
+        }
+
+        // Exclude system tables if requested
+        if (config_.exclude_system_tables && is_system_index(index_id)) {
+            if (config_.verbose) {
+                std::cout << "[SKIP] Index ID " << index_id
+                          << " is a system table\n";
+            }
+            continue;
+        }
+
         if (progress) {
             double pct = static_cast<double>(processed) / total_index_ids;
             progress(pct, "Recovering index_id " + std::to_string(index_id));

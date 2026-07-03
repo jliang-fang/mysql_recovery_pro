@@ -186,6 +186,9 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--num-workers=<n>\033[0m          Number of worker threads for disk carving (default: 4)\n";
     std::cout << "  \033[1m--filesystem=<fs>\033[0m          Filesystem type for disk carving: ext4|xfs (default: ext4)\n";
     std::cout << "                                 XFS recovery uses AG scanning and free inode btree traversal\n";
+    std::cout << "  \033[1m--target-index-ids=<ids>\033[0m    Only recover specified index IDs (comma-separated)\n";
+    std::cout << "                                 Example: --target-index-ids=1001,1002,1003\n";
+    std::cout << "  \033[1m--exclude-system-tables\033[0m     Exclude MySQL system tables from recovery\n";
     std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1/mysql.ibd)\n";
     std::cout << "                                 Required for undo log recovery (MySQL 5.6/5.7)\n";
     std::cout << "  \033[1m--data-dir=<path>\033[0m           MySQL data directory for DROP TABLE recovery\n";
@@ -420,6 +423,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string filesystem_type = parser_.get_option("filesystem", "ext4");
     std::transform(filesystem_type.begin(), filesystem_type.end(), filesystem_type.begin(), ::tolower);
 
+    // Index ID filtering options
+    std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
+    bool exclude_system_tables = parser_.has_option("exclude-system-tables");
+
     // FRM file option for schema parsing
     std::string frm_path = parser_.get_option("frm", "");
 
@@ -458,6 +465,33 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             xfs_config.recover_deleted = true;
             xfs_config.scan_deleted_inodes = true;
             xfs_config.signature_scan = true;  // Fallback
+
+            // Parse target index IDs (comma-separated)
+            if (!target_index_ids_str.empty()) {
+                std::istringstream id_stream(target_index_ids_str);
+                std::string id_str;
+                while (std::getline(id_stream, id_str, ',')) {
+                    try {
+                        uint64_t id = std::stoull(id_str);
+                        xfs_config.target_index_ids.push_back(id);
+                    } catch (...) {
+                        std::cerr << "[WARN] Invalid index ID: " << id_str << "\n";
+                    }
+                }
+                if (!xfs_config.target_index_ids.empty()) {
+                    std::cout << "[INFO] Target index IDs: ";
+                    for (size_t i = 0; i < xfs_config.target_index_ids.size(); i++) {
+                        if (i > 0) std::cout << ", ";
+                        std::cout << xfs_config.target_index_ids[i];
+                    }
+                    std::cout << "\n";
+                }
+            }
+            xfs_config.exclude_system_tables = exclude_system_tables;
+            if (exclude_system_tables) {
+                std::cout << "[INFO] Excluding system tables from recovery\n";
+            }
+
             xfs_carver.set_config(xfs_config);
 
             // Load and set external schema for schema-aware recovery

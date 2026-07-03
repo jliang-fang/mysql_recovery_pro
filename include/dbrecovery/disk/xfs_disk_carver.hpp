@@ -342,6 +342,10 @@ struct XfsConfig {
     bool        verbose = false;
     bool        recover_deleted = true;      // recover deleted records
     uint64_t    progress_interval_ms = 500;  // progress update interval
+
+    // Index ID filtering
+    std::vector<uint64_t> target_index_ids;    // only recover these index IDs
+    bool exclude_system_tables = false;         // skip mysql/performance_schema/information_schema
 };
 
 // ==================== XFS Disk Carver Result ====================
