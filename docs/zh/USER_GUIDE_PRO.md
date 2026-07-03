@@ -223,12 +223,20 @@ MySQL 8.0+ 使用 SDI (Serialized Dictionary Information) 存储表结构。本�
 |------|------|------|
 | `--disk-carving` | 启用磁盘雕刻模式（无备份恢复） | `--disk-carving` |
 | `--device-path` | 原始设备或文件路径 | `--device-path=/dev/sda1` |
+| `--filesystem` | 文件系统类型（ext4或xfs） | `--filesystem=xfs` |
 | `--frm` | FRM文件路径（MySQL 5.6/5.7） | `--frm=/path/to/table.frm` |
 | `--schema-file` | JSON Schema文件路径 | `--schema-file=schema.json` |
 | `--num-workers` | 并行工作线程数 | `--num-workers=8` |
 | `--truncate-recovery` | TRUNCATE表恢复模式 | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf删除恢复模式 | `--rmrf-recovery` |
 | `--drop-table-recovery` | DROP TABLE恢复模式 | `--drop-table-recovery` |
+
+**文件系统支持说明：**
+
+| 文件系统 | `--filesystem`参数 | 恢复方法 | 性能特点 |
+|----------|-------------------|----------|----------|
+| **Ext4** | `ext4` (默认) | 线性签名扫描 | 通用场景，稳定可靠 |
+| **XFS** | `xfs` | AG并行扫描 + 签名扫描 | 大文件性能更优 |
 
 ---
 
@@ -280,10 +288,27 @@ head -5 /recovery/output/recovered.csv
     --output=/recovery/dropped_table
 
 # 方案2：如果文件在磁盘上但目录结构丢失
-# 使用磁盘雕刻扫描原始设备
+# 使用磁盘雕刻扫描原始设备（Ext4文件系统）
 ./mysql_recovery_pro --disk-carving \
     --device-path=/dev/sda1 \
     --output=/recovery/dropped_table
+
+# 方案3：XFS文件系统专用恢复（推荐用于XFS）
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/nvme0n2 \
+    --filesystem=xfs \
+    --output=/recovery/dropped_table \
+    --num-workers=8 \
+    --verbose
+
+# XFS恢复输出示例：
+# [INFO] Using XFS-specific recovery (AG scanning + free inode btree)
+# [INFO] XFS filesystem detected:
+#   UUID: e9c430cf-2e1a-4f4e-ac18-4e719843cb0a
+#   Block size: 4096 bytes
+#   AG count: 4
+# [Worker 0] Processing AG 0 (free inodes: 57)
+# [INFO] Signature scan found 170164 pages and 31 FRM signatures
 ```
 
 #### MySQL 5.6/5.7 (需FRM文件)

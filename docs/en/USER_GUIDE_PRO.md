@@ -223,12 +223,20 @@ BLOB/TEXT over 768 bytes are stored in external pages, tool automatically recons
 |-----------|-------------|---------|
 | `--disk-carving` | Enable disk carving mode (no backup recovery) | `--disk-carving` |
 | `--device-path` | Raw device or file path | `--device-path=/dev/sda1` |
+| `--filesystem` | Filesystem type (ext4 or xfs) | `--filesystem=xfs` |
 | `--frm` | FRM file path (MySQL 5.6/5.7) | `--frm=/path/to/table.frm` |
 | `--schema-file` | JSON Schema file path | `--schema-file=schema.json` |
 | `--num-workers` | Parallel worker threads | `--num-workers=8` |
 | `--truncate-recovery` | TRUNCATE table recovery mode | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf deletion recovery mode | `--rmrf-recovery` |
 | `--drop-table-recovery` | DROP TABLE recovery mode | `--drop-table-recovery` |
+
+**Filesystem Support:**
+
+| Filesystem | `--filesystem` Parameter | Recovery Method | Performance Characteristics |
+|------------|--------------------------|-----------------|----------------------------|
+| **Ext4** | `ext4` (default) | Linear signature scan | General scenarios, stable |
+| **XFS** | `xfs` | AG parallel scan + signature scan | Better performance for large files |
 
 ---
 
@@ -279,10 +287,27 @@ head -5 /recovery/output/recovered.csv
     --device-path=/backup/dropped_table.ibd \
     --output=/recovery/dropped_table
 
-# Option 2: If file on disk but directory structure lost
+# Option 2: If file on disk but directory structure lost (Ext4 filesystem)
 ./mysql_recovery_pro --disk-carving \
     --device-path=/dev/sda1 \
     --output=/recovery/dropped_table
+
+# Option 3: XFS filesystem specific recovery (recommended for XFS)
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/nvme0n2 \
+    --filesystem=xfs \
+    --output=/recovery/dropped_table \
+    --num-workers=8 \
+    --verbose
+
+# XFS recovery output example:
+# [INFO] Using XFS-specific recovery (AG scanning + free inode btree)
+# [INFO] XFS filesystem detected:
+#   UUID: e9c430cf-2e1a-4f4e-ac18-4e719843cb0a
+#   Block size: 4096 bytes
+#   AG count: 4
+# [Worker 0] Processing AG 0 (free inodes: 57)
+# [INFO] Signature scan found 170164 pages and 31 FRM signatures
 ```
 
 #### MySQL 5.6/5.7 (requires FRM file)
