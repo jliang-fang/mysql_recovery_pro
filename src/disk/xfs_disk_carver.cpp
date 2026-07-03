@@ -1083,6 +1083,67 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_sch
 
 // ==================== Schema-aware Parsing ====================
 
+// MySQL server type ID to InnoDB storage type ID mapping
+// Reference: MySQL include/mysql/mysql_com.h and InnoDB storage format
+// MySQL server types (MYSQL_TYPE_*) differ from InnoDB internal types
+static uint8_t mysql_type_to_innodb(uint32_t mysql_type) {
+    // InnoDB internal type IDs (from ibd2sql column_type.py):
+    // 1: TINY, 2: TINY (unsigned), 3: SHORT (SMALLINT), 4: LONG (INT),
+    // 5: FLOAT, 6: DOUBLE, 7: DECIMAL, 9: LONGLONG (BIGINT), 10: INT24 (MEDIUMINT),
+    // 11: DATE, 12: DATETIME (old), 13: DATETIME (old 8-byte), 15: NEWDATE/DATE,
+    // 16: VARCHAR, 17: BIT, 18: TIMESTAMP2, 19: DATETIME2, 20: TIME2,
+    // 27: BLOB, 28: VAR_STRING (VARCHAR), 31: JSON
+
+    switch (mysql_type) {
+        // MySQL server type IDs to InnoDB storage types
+        case 1:   // MYSQL_TYPE_TINY
+            return 1;  // InnoDB TINY (1 byte)
+        case 2:   // MYSQL_TYPE_SHORT (SMALLINT, 2 bytes)
+            return 3;  // InnoDB SHORT (2 bytes)
+        case 3:   // MYSQL_TYPE_LONG (INT, 4 bytes)
+            return 4;  // InnoDB LONG (4 bytes for INT)
+        case 4:   // MYSQL_TYPE_FLOAT
+            return 5;  // InnoDB FLOAT (4 bytes)
+        case 5:   // MYSQL_TYPE_DOUBLE
+            return 6;  // InnoDB DOUBLE (8 bytes)
+        case 7:   // MYSQL_TYPE_TIMESTAMP
+            return 8;  // InnoDB TIMESTAMP (4 bytes)
+        case 8:   // MYSQL_TYPE_LONGLONG (BIGINT)
+            return 9;  // InnoDB LONGLONG (8 bytes)
+        case 9:   // MYSQL_TYPE_INT24 (MEDIUMINT)
+            return 10; // InnoDB INT24 (3 bytes)
+        case 11:  // MYSQL_TYPE_DATE
+        case 14:  // MYSQL_TYPE_NEWDATE
+            return 15; // InnoDB DATE/NEWDATE (3 bytes)
+        case 12:  // MYSQL_TYPE_DATETIME (old)
+            return 13; // InnoDB DATETIME (old 8-byte)
+        case 17:  // MYSQL_TYPE_TIMESTAMP2
+            return 18; // InnoDB TIMESTAMP2 (4 bytes + frac)
+        case 18:  // MYSQL_TYPE_DATETIME2
+            return 19; // InnoDB DATETIME2 (5 bytes + frac)
+        case 19:  // MYSQL_TYPE_TIME2
+            return 20; // InnoDB TIME2 (3 bytes + frac)
+        case 15:  // MYSQL_TYPE_VARCHAR
+        case 253: // MYSQL_TYPE_VAR_STRING
+            return 16; // InnoDB VARCHAR
+        case 252: // MYSQL_TYPE_BLOB
+        case 250: // MYSQL_TYPE_MEDIUM_BLOB
+        case 251: // MYSQL_TYPE_LONG_BLOB
+            return 27; // InnoDB BLOB
+        case 245: // MYSQL_TYPE_JSON
+            return 31; // InnoDB JSON
+        case 247: // MYSQL_TYPE_ENUM
+            return 247; // ENUM stays same
+        case 248: // MYSQL_TYPE_SET
+            return 248; // SET stays same
+        case 0:   // MYSQL_TYPE_DECIMAL
+        case 246: // MYSQL_TYPE_NEWDECIMAL
+            return 0;  // InnoDB DECIMAL
+        default:
+            return static_cast<uint8_t>(mysql_type); // Pass through for unknown types
+    }
+}
+
 std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_with_schema_xfs(
     const std::vector<uint8_t>& page_data,
     const catalog::TableSchema& schema) {
@@ -1113,7 +1174,8 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
     for (const auto& [phys_pos, col] : sorted_cols) {
         innodb::IndexColumnDef col_def;
         col_def.name = col.name;
-        col_def.col_type = col.mysql_type_id;
+        // CRITICAL: Convert MySQL server type ID to InnoDB storage type ID
+        col_def.col_type = mysql_type_to_innodb(col.mysql_type_id);
         col_def.col_length = col.column_length;
         col_def.is_nullable = col.is_nullable;
         col_def.is_unsigned = !col.is_signed;
