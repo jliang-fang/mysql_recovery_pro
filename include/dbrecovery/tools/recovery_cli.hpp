@@ -1636,11 +1636,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::vector<std::string> column_order;
         const auto& cols = parser.get_column_defs();
 
-        // Build column order from schema
-        for (size_t i = 0; i < cols.size(); i++) {
-            if (!cols[i].name.empty()) {
-                column_order.push_back(cols[i].name);
-            } else {
+        // Build column order from schema, or from first record if no schema
+        if (!cols.empty()) {
+            for (size_t i = 0; i < cols.size(); i++) {
+                if (!cols[i].name.empty()) {
+                    column_order.push_back(cols[i].name);
+                } else {
+                    char buf[16];
+                    snprintf(buf, sizeof(buf), "field_%04zu", i);
+                    column_order.push_back(buf);
+                }
+            }
+        } else if (!records.empty()) {
+            // Schemaless: generate column names from field count in first record
+            for (size_t i = 0; i < records[0].fields.size(); i++) {
                 char buf[16];
                 snprintf(buf, sizeof(buf), "field_%04zu", i);
                 column_order.push_back(buf);
@@ -1651,14 +1660,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::map<std::string, std::string> record_map;
             // DEBUG: Check if rec.fields has more than cols.size()
             static int field_size_debug = 0;
-            if (field_size_debug < 5 && rec.fields.size() != cols.size()) {
+            if (field_size_debug < 5 && !cols.empty() && rec.fields.size() != cols.size()) {
                 std::cerr << "[DEBUG FIELD SIZE] rec.fields.size()=" << rec.fields.size()
                           << " cols.size()=" << cols.size() << "\n";
                 field_size_debug++;
             }
-            // CRITICAL FIX: Only iterate over columns defined in schema (cols.size())
-            // NOT rec.fields.size() which could be larger due to parsing artifacts
-            for (size_t i = 0; i < cols.size() && i < rec.fields.size(); i++) {
+            // CRITICAL FIX: Use rec.fields.size() when no schema (schemaless)
+            // Use cols.size() when schema is available
+            size_t field_count = cols.empty() ? rec.fields.size() : std::min(cols.size(), rec.fields.size());
+            for (size_t i = 0; i < field_count; i++) {
                 // Use column name if available, otherwise use field_NNNN
                 std::string field_name;
                 if (i < cols.size() && !cols[i].name.empty()) {
