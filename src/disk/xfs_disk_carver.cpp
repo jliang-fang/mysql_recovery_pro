@@ -744,8 +744,8 @@ uint64_t XfsDiskCarver::block_to_disk_offset(uint64_t fsblock) const {
 
 void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&)> progress) {
 #ifdef __linux__
-    // Direct signature-based scan as fallback
-    // Similar to ext4 carving but XFS-aware
+    // Parallel signature-based scan for improved performance
+    // Each worker thread scans a portion of the device
 
     int fd = open(config_.device_path.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -762,114 +762,142 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
         }
     }
 
+    close(fd);  // Close main fd, workers will open their own
+
     if (device_size == 0) {
-        close(fd);
         return;
     }
 
     uint32_t block_size = be32toh(superblock_.sb_blocksize);
-    uint64_t scan_chunk = 256 * 1024 * 1024;  // 256MB chunks
-    std::vector<uint8_t> buffer(scan_chunk + config_.page_size);
+    uint64_t scan_chunk = 64 * 1024 * 1024;  // 64MB chunks (smaller for better parallelism)
+    uint32_t num_workers = config_.num_workers;  // Use configured worker count
 
-    uint64_t total_scanned = 0;
-    uint64_t pages_found = 0;
-    uint64_t frm_files_found = 0;
+    std::atomic<uint64_t> current_offset{0};
+    std::atomic<uint64_t> pages_found{0};
+    std::atomic<uint64_t> frm_files_found{0};
+    std::atomic<bool> should_stop{false};
 
     auto last_progress_time = std::chrono::steady_clock::now();
 
-    for (uint64_t offset = 0; offset < device_size; offset += scan_chunk) {
-        ssize_t bytes_read = pread(fd, buffer.data(), scan_chunk + config_.page_size, offset);
-        if (bytes_read <= 0) {
+    // Worker thread function
+    auto worker_func = [&](uint32_t worker_id) {
+        int worker_fd = open(config_.device_path.c_str(), O_RDONLY);
+        if (worker_fd < 0) {
+            return;
+        }
+
+        std::vector<uint8_t> buffer(scan_chunk + config_.page_size);
+
+        while (!should_stop.load()) {
+            uint64_t chunk_start = current_offset.fetch_add(scan_chunk);
+            if (chunk_start >= device_size) {
+                break;
+            }
+
+            uint64_t chunk_end = std::min(chunk_start + scan_chunk, device_size);
+            ssize_t bytes_read = pread(worker_fd, buffer.data(), scan_chunk + config_.page_size, chunk_start);
+            if (bytes_read <= 0) {
+                break;
+            }
+
+            size_t scan_size = bytes_read;
+
+            // Scan for pages at block-aligned offsets
+            for (size_t i = 0; i + config_.page_size <= scan_size; i += block_size) {
+                const uint8_t* page_data = buffer.data() + i;
+
+                // Check for FRM file signature
+                if (i + 10 <= scan_size && std::memcmp(page_data, FRM_SIGNATURE, 10) == 0) {
+                    frm_files_found.fetch_add(1);
+                    if (config_.verbose) {
+                        std::cout << "[Worker " << worker_id << "] Found FRM at offset " << (chunk_start + i) << "\n";
+                    }
+                    XfsPageInfo frm_info;
+                    frm_info.disk_offset = chunk_start + i;
+                    frm_info.page_type = 0xFFFF;
+                    frm_info.index_id = 0;
+                    frm_info.page_no = 0;
+                    size_t frm_size = std::min(static_cast<size_t>(65536), scan_size - i);
+                    frm_info.data.resize(frm_size);
+                    std::memcpy(frm_info.data.data(), page_data, frm_size);
+
+                    std::lock_guard<std::mutex> lock(result_mutex_);
+                    last_result_.pages_by_index_id[0xFFFFFFFF].push_back(std::move(frm_info));
+                    continue;
+                }
+
+                // Check page type
+                uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
+
+                if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                    uint64_t index_id = 0;
+                    if (page_type == FIL_PAGE_INDEX && config_.page_size >= 74) {
+                        index_id = read_be<uint64_t>(page_data, 66);
+                        if (index_id == 0) {
+                            continue;
+                        }
+                    }
+
+                    if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                        index_id = 0xFFFFFF00 | page_type;
+                    }
+
+                    XfsPageInfo page_info;
+                    page_info.disk_offset = chunk_start + i;
+                    page_info.page_type = page_type;
+                    page_info.index_id = index_id;
+                    page_info.page_no = read_be<uint32_t>(page_data, 8);
+                    page_info.data.resize(config_.page_size);
+                    std::memcpy(page_info.data.data(), page_data, config_.page_size);
+
+                    std::lock_guard<std::mutex> lock(result_mutex_);
+                    last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
+                    last_result_.pages_recovered++;
+                    pages_found.fetch_add(1);
+                }
+            }
+        }
+
+        close(worker_fd);
+    };
+
+    // Launch worker threads
+    std::vector<std::thread> workers;
+    for (uint32_t i = 0; i < num_workers; i++) {
+        workers.emplace_back(worker_func, i);
+    }
+
+    // Progress monitoring thread
+    while (!should_stop.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(config_.progress_interval_ms));
+
+        uint64_t scanned = current_offset.load();
+        if (scanned >= device_size) {
+            should_stop.store(true);
             break;
         }
 
-        size_t scan_size = bytes_read;
-
-        // Scan for InnoDB pages at block-aligned offsets
-        // Also scan at 512-byte offsets for non-aligned pages (edge case)
-        uint64_t scan_step = block_size;  // Primary: block-aligned
-
-        for (size_t i = 0; i + config_.page_size <= scan_size; i += scan_step) {
-            const uint8_t* page_data = buffer.data() + i;
-
-            // First check for FRM file signature (MySQL 5.6/5.7 schema files)
-            if (i + 10 <= scan_size && std::memcmp(page_data, FRM_SIGNATURE, 10) == 0) {
-                frm_files_found++;
-                if (config_.verbose) {
-                    std::cout << "[INFO] Found FRM file signature at offset " << (offset + i) << "\n";
-                }
-                // Store FRM location for later extraction
-                XfsPageInfo frm_info;
-                frm_info.disk_offset = offset + i;
-                frm_info.page_type = 0xFFFF;  // Special marker for FRM
-                frm_info.index_id = 0;
-                frm_info.page_no = 0;
-                // Read up to 64KB for FRM file (typical size)
-                size_t frm_size = std::min(static_cast<size_t>(65536), scan_size - i);
-                frm_info.data.resize(frm_size);
-                std::memcpy(frm_info.data.data(), page_data, frm_size);
-
-                std::lock_guard<std::mutex> lock(result_mutex_);
-                last_result_.pages_by_index_id[0xFFFFFFFF].push_back(std::move(frm_info));
-                continue;
-            }
-
-            // Check page type
-            uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
-
-            // Accept INDEX, SDI, and SDI_ZIP pages
-            if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
-                uint64_t index_id = 0;
-                if (page_type == FIL_PAGE_INDEX && config_.page_size >= 74) {
-                    index_id = read_be<uint64_t>(page_data, 66);
-                    if (index_id == 0) {
-                        continue;  // Invalid index_id
-                    }
-                }
-
-                // For SDI pages, use space_id as key
-                if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
-                    index_id = 0xFFFFFF00 | page_type;  // Special marker for SDI
-                }
-
-                XfsPageInfo page_info;
-                page_info.disk_offset = offset + i;
-                page_info.page_type = page_type;
-                page_info.index_id = index_id;
-                page_info.page_no = read_be<uint32_t>(page_data, 8);
-                page_info.data.resize(config_.page_size);
-                std::memcpy(page_info.data.data(), page_data, config_.page_size);
-
-                std::lock_guard<std::mutex> lock(result_mutex_);
-                last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
-                last_result_.pages_recovered++;
-                pages_found++;
-            }
-        }
-
-        total_scanned += scan_size;
-
-        // Progress reporting
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            now - last_progress_time).count();
-
-        if (progress && elapsed_ms >= config_.progress_interval_ms) {
-            double pct = static_cast<double>(total_scanned) / device_size;
+        if (progress) {
+            double pct = static_cast<double>(scanned) / device_size;
             std::ostringstream oss;
             oss << "Signature scan: " << std::fixed << std::setprecision(1)
-                << (pct * 100.0) << "% pages=" << pages_found
-                << " frm=" << frm_files_found;
+                << (pct * 100.0) << "% pages=" << pages_found.load()
+                << " frm=" << frm_files_found.load();
             progress(pct, oss.str());
-            last_progress_time = now;
         }
     }
 
-    close(fd);
+    // Wait for all workers
+    for (auto& w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
+    }
 
     if (config_.verbose) {
-        std::cout << "[INFO] Signature scan found " << pages_found << " pages and "
-                  << frm_files_found << " FRM signatures\n";
+        std::cout << "[INFO] Parallel signature scan found " << pages_found.load() << " pages and "
+                  << frm_files_found.load() << " FRM signatures\n";
+        std::cout << "[INFO] Workers: " << num_workers << ", Chunk size: " << (scan_chunk / 1024 / 1024) << "MB\n";
     }
 #endif
 }
