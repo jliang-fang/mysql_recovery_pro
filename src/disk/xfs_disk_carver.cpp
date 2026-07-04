@@ -369,118 +369,8 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
             btree_magic = XFS_IBT_CRC_MAGIC;
         }
 
-        // Walk the inode btree
-        std::vector<uint8_t> block_buffer(block_size);
-
-        // Simple btree traversal (only leaf level for now)
-        uint32_t current_block = btree_root;
-        int max_levels = 10;  // Safety limit
-
-        for (int level = 0; level < max_levels && current_block != 0; level++) {
-            uint64_t block_offset = static_cast<uint64_t>(ag_index) *
-                                   static_cast<uint64_t>(ag_blocks) *
-                                   static_cast<uint64_t>(block_size) +
-                                   static_cast<uint64_t>(current_block) *
-                                   static_cast<uint64_t>(block_size);
-
-            if (pread(fd, block_buffer.data(), block_size, block_offset) != block_size) {
-                break;
-            }
-
-            xfs_btree_block btree_hdr;
-            std::memcpy(&btree_hdr, block_buffer.data(), sizeof(btree_hdr));
-
-            // Validate magic
-            uint32_t magic = be32toh(btree_hdr.bb_magic);
-            if (magic != btree_magic && magic != XFS_FIBT_MAGIC && magic != XFS_IBT_MAGIC) {
-                break;
-            }
-
-            uint16_t numrecs = be16toh(btree_hdr.bb_numrecs);
-            uint16_t level_val = be16toh(btree_hdr.bb_level);
-
-            if (level_val == 0) {
-                // Leaf node - process inode records
-                // Record offset for short-form CRC btree: XFS_BTREE_SBLOCK_CRC_LEN = 56 bytes
-                size_t rec_offset = 56;
-                size_t rec_size = sizeof(xfs_inobt_rec);
-
-                for (uint16_t i = 0; i < numrecs && rec_offset + rec_size <= block_size; i++) {
-                    xfs_inobt_rec rec;
-                    std::memcpy(&rec, block_buffer.data() + rec_offset + i * rec_size, rec_size);
-
-                    uint32_t start_ino = be32toh(rec.ir_startino);
-                    uint64_t free_mask = be64toh(rec.ir_free);
-                    uint8_t free_count = rec.ir_freecount;
-
-                    // Each record covers 64 consecutive inodes
-                    // free_mask bit N = 1 means inode N is free (deleted)
-
-                    if (free_count == 0 && !has_finobt) {
-                        // In regular inode btree, check free_mask anyway
-                        // (allocated inodes that were deleted)
-                    }
-
-                    // Iterate through free inodes in this chunk
-                    for (uint32_t bit = 0; bit < 64 && free_mask != 0; bit++) {
-                        if ((free_mask & (1ULL << bit)) == 0) {
-                            continue;  // Inode is allocated, skip
-                        }
-
-                        uint32_t ag_inode = start_ino + bit;
-
-                        // Read inode and try to recover
-                        auto extent_info = read_inode(ag_index, ag_inode);
-                        if (extent_info.has_value()) {
-                            // Read data from extents first (outside lock)
-                            std::vector<XfsPageInfo> recovered_pages;
-                            for (const auto& ext : extent_info->extents) {
-                                if (ext.state == XFS_EXT_UNWRITTEN) {
-                                    continue;  // Skip unwritten extents
-                                }
-
-                                std::vector<uint8_t> extent_data = read_extent_data(ext);
-                                if (!extent_data.empty()) {
-                                    // Parse InnoDB pages from extent data
-                                    auto pages = parse_pages_from_extent(extent_data,
-                                                                         extent_info->inode_number);
-                                    for (auto& page : pages) {
-                                        recovered_pages.push_back(std::move(page));
-                                    }
-                                }
-                            }
-
-                            // Now lock and add results
-                            if (!recovered_pages.empty() || extent_info->extents.size() > 0) {
-                                std::lock_guard<std::mutex> lock(result_mutex_);
-                                last_result_.recovered_extents.push_back(*extent_info);
-                                inodes_found_.fetch_add(1);
-
-                                for (auto& page : recovered_pages) {
-                                    last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
-                                    last_result_.pages_recovered++;
-                                }
-                            }
-                        }
-
-                        inodes_scanned_.fetch_add(1);
-                    }
-                }
-                break;  // Done with this AG
-            } else {
-                // Node (non-leaf) - get first pointer for traversal
-                // Pointer offset after keys
-                // For short-form: pointers at offset (header + max_keys) / 2 roughly
-                size_t ptr_offset = block_size / 2;  // Simplified
-                if (ptr_offset + 4 <= block_size) {
-                    uint32_t next_block;
-                    std::memcpy(&next_block, block_buffer.data() + ptr_offset, 4);
-                    current_block = be32toh(next_block);
-                } else {
-                    break;
-                }
-            }
-        }
+        // Use recursive btree traversal (supports multi-level trees)
+        btree_walk_recursive(fd, ag_index, btree_root, btree_magic, 10, 0);
 
         // Progress reporting
         auto now = std::chrono::steady_clock::now();
@@ -499,6 +389,150 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
     }
 
     close(fd);
+#endif
+}
+
+// ==================== Recursive B+tree Traversal ====================
+
+void XfsDiskCarver::btree_walk_recursive(int fd, uint32_t ag_index, uint32_t block_num,
+                                          uint32_t expected_magic, int max_depth, int current_depth) {
+#ifdef __linux__
+    if (current_depth >= max_depth || block_num == 0 || should_stop_.load()) {
+        return;
+    }
+
+    uint32_t block_size = be32toh(superblock_.sb_blocksize);
+    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+
+    // Safety check: block_num should be within AG bounds
+    if (block_num >= ag_blocks) {
+        return;
+    }
+
+    // Calculate block offset
+    uint64_t block_offset = static_cast<uint64_t>(ag_index) *
+                           static_cast<uint64_t>(ag_blocks) *
+                           static_cast<uint64_t>(block_size) +
+                           static_cast<uint64_t>(block_num) *
+                           static_cast<uint64_t>(block_size);
+
+    std::vector<uint8_t> block_buffer(block_size);
+    if (pread(fd, block_buffer.data(), block_size, block_offset) != block_size) {
+        return;
+    }
+
+    // Read btree header (short-form CRC header = 56 bytes)
+    constexpr size_t BTREE_HEADER_SIZE = 56;
+    if (block_size < BTREE_HEADER_SIZE) return;
+
+    uint32_t magic = read_be<uint32_t>(block_buffer.data(), 0);
+    if (magic != expected_magic &&
+        magic != XFS_FIBT_CRC_MAGIC && magic != XFS_IBT_CRC_MAGIC &&
+        magic != XFS_FIBT_MAGIC && magic != XFS_IBT_MAGIC) {
+        return;  // Invalid magic
+    }
+
+    uint16_t level = read_be<uint16_t>(block_buffer.data(), 4);  // bb_level at offset 4
+    uint16_t numrecs = read_be<uint16_t>(block_buffer.data(), 6);  // bb_numrecs at offset 6
+
+    if (numrecs == 0 || numrecs > 1000) {
+        return;  // Invalid record count
+    }
+
+    if (level > 0) {
+        // Non-leaf node: traverse child pointers
+        // Pointer array starts at middle of block (after keys)
+        // For short-form btree: pointers at (header_size + block_size) / 2
+        size_t ptr_array_offset = (BTREE_HEADER_SIZE + block_size) / 2;
+        size_t ptr_size = sizeof(uint32_t);  // Short-form uses 32-bit pointers
+
+        for (uint16_t i = 0; i < numrecs && ptr_array_offset + ptr_size <= block_size; i++) {
+            uint32_t child_block = read_be<uint32_t>(block_buffer.data(), ptr_array_offset + i * ptr_size);
+            if (child_block != 0 && child_block < ag_blocks) {
+                btree_walk_recursive(fd, ag_index, child_block, expected_magic, max_depth, current_depth + 1);
+            }
+        }
+    } else {
+        // Leaf node: process inode records
+        process_inode_records(fd, ag_index, block_buffer.data(), numrecs, block_size);
+    }
+#endif
+}
+
+void XfsDiskCarver::process_inode_records(int fd, uint32_t ag_index, const uint8_t* block_data,
+                                           uint16_t numrecs, uint32_t block_size) {
+#ifdef __linux__
+    // Inode btree record layout (xfs_inobt_rec):
+    // ir_startino (4), ir_holemask (2), ir_count (1), ir_freecount (1), ir_free (8)
+    constexpr size_t INOREC_SIZE = 16;
+    constexpr size_t BTREE_HEADER_SIZE = 56;
+
+    if (block_size < BTREE_HEADER_SIZE + numrecs * INOREC_SIZE) {
+        return;
+    }
+
+    size_t rec_offset = BTREE_HEADER_SIZE;
+
+    for (uint16_t i = 0; i < numrecs; i++) {
+        const uint8_t* rec_data = block_data + rec_offset + i * INOREC_SIZE;
+
+        uint32_t start_ino = read_be<uint32_t>(rec_data, 0);
+        uint16_t holemask = read_be<uint16_t>(rec_data, 4);
+        uint8_t count = rec_data[6];
+        uint8_t freecount = rec_data[7];
+        uint64_t free_mask = read_be<uint64_t>(rec_data, 8);
+
+        // Each record covers 64 consecutive inodes
+        // free_mask bit N = 1 means inode N is free (deleted)
+        if (free_mask == 0) {
+            continue;  // No free inodes in this chunk
+        }
+
+        // Iterate through free inodes in this chunk
+        for (uint32_t bit = 0; bit < 64; bit++) {
+            if ((free_mask & (1ULL << bit)) == 0) {
+                continue;  // Inode is allocated
+            }
+
+            uint32_t ag_inode = start_ino + bit;
+
+            // Check holemask for sparse inode allocation
+            if ((holemask & (1 << (bit / 4))) != 0) {
+                continue;  // Inode is in a hole
+            }
+
+            inodes_scanned_.fetch_add(1);
+
+            // Read inode and try to recover
+            auto extent_info = read_inode(ag_index, ag_inode);
+            if (extent_info.has_value() && !extent_info->extents.empty()) {
+                // Read data from extents
+                std::vector<XfsPageInfo> recovered_pages;
+                for (const auto& ext : extent_info->extents) {
+                    if (ext.state == XFS_EXT_UNWRITTEN) continue;
+
+                    std::vector<uint8_t> extent_data = read_extent_data(ext);
+                    if (!extent_data.empty()) {
+                        auto pages = parse_pages_from_extent(extent_data, extent_info->inode_number);
+                        for (auto& page : pages) {
+                            recovered_pages.push_back(std::move(page));
+                        }
+                    }
+                }
+
+                if (!recovered_pages.empty()) {
+                    std::lock_guard<std::mutex> lock(result_mutex_);
+                    last_result_.recovered_extents.push_back(*extent_info);
+                    inodes_found_.fetch_add(1);
+
+                    for (auto& page : recovered_pages) {
+                        last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
+                        last_result_.pages_recovered++;
+                    }
+                }
+            }
+        }
+    }
 #endif
 }
 

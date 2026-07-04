@@ -443,6 +443,14 @@ private:
     // Walk inode btree for deleted inodes
     void walk_inode_btree(uint32_t ag_index, const xfs_agi& agi, const xfs_agf& agf);
 
+    // Recursive btree traversal (multi-level support)
+    void btree_walk_recursive(int fd, uint32_t ag_index, uint32_t block_num,
+                              uint32_t expected_magic, int max_depth, int current_depth);
+
+    // Process inode records from btree leaf node
+    void process_inode_records(int fd, uint32_t ag_index, const uint8_t* block_data,
+                               uint16_t numrecs, uint32_t block_size);
+
     // Read inode and extract extents
     std::optional<XfsExtentInfo> read_inode(uint32_t ag_index, uint32_t ag_inode);
 
