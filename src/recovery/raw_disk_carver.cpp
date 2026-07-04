@@ -748,12 +748,64 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_sch
                 } else if (!rec.fields[i].str_value.empty()) {
                     record[field_name] = rec.fields[i].str_value;
                 } else if (!rec.fields[i].raw_bytes.empty()) {
-                    // 十六进制输出
-                    std::ostringstream hex;
-                    for (uint8_t b : rec.fields[i].raw_bytes) {
-                        hex << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+                    // 尝试解码raw_bytes为可读格式
+                    const auto& bytes = rec.fields[i].raw_bytes;
+
+                    // 检查是否为可打印字符串
+                    size_t printable = 0;
+                    for (uint8_t b : bytes) {
+                        if ((b >= 32 && b < 127) || b == '\n' || b == '\r' || b == '\t') {
+                            printable++;
+                        }
                     }
-                    record[field_name] = hex.str();
+
+                    if (printable >= bytes.size() * 2 / 3 && !bytes.empty()) {
+                        // 大部分是可打印字符，作为字符串输出
+                        record[field_name] = std::string(bytes.begin(), bytes.end());
+                    } else if (bytes.size() == 4) {
+                        // 可能是INT或TIMESTAMP
+                        uint32_t val = (static_cast<uint32_t>(bytes[0]) << 24) |
+                                       (static_cast<uint32_t>(bytes[1]) << 16) |
+                                       (static_cast<uint32_t>(bytes[2]) << 8) |
+                                       bytes[3];
+                        // 检查是否像Unix时间戳
+                        if (val >= 946684800 && val <= 4102444800) {
+                            time_t t = static_cast<time_t>(val);
+                            struct tm tm_buf;
+                            gmtime_r(&t, &tm_buf);
+                            char buf[32];
+                            strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+                            record[field_name] = buf;
+                        } else {
+                            // 作为INT输出 (有符号)
+                            int32_t int_val = static_cast<int32_t>(val) - 0x80000000L;
+                            record[field_name] = std::to_string(int_val);
+                        }
+                    } else if (bytes.size() == 8) {
+                        // 可能是BIGINT
+                        uint64_t val = (static_cast<uint64_t>(bytes[0]) << 56) |
+                                       (static_cast<uint64_t>(bytes[1]) << 48) |
+                                       (static_cast<uint64_t>(bytes[2]) << 40) |
+                                       (static_cast<uint64_t>(bytes[3]) << 32) |
+                                       (static_cast<uint64_t>(bytes[4]) << 24) |
+                                       (static_cast<uint64_t>(bytes[5]) << 16) |
+                                       (static_cast<uint64_t>(bytes[6]) << 8) |
+                                       bytes[7];
+                        // 检查是否有符号位模式
+                        if ((bytes[0] & 0x80) == 0x80) {
+                            int64_t int_val = static_cast<int64_t>(val ^ 0x8000000000000000ULL);
+                            record[field_name] = std::to_string(int_val);
+                        } else {
+                            record[field_name] = std::to_string(val);
+                        }
+                    } else {
+                        // 对于其他二进制数据，输出为十六进制
+                        std::ostringstream hex;
+                        for (uint8_t b : bytes) {
+                            hex << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+                        }
+                        record[field_name] = hex.str();
+                    }
                 }
             }
 
