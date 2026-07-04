@@ -350,6 +350,16 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
 
 void RawDiskCarver::worker_thread(uint32_t worker_id,
                                    std::function<void(double, const std::string&)> progress) {
+    // 使用pread优化：避免ifstream的seekg开销，支持真正的并行IO
+#ifdef __linux__
+    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        if (config_.verbose) {
+            std::cerr << "[Worker " << worker_id << "] Cannot open device\n";
+        }
+        return;
+    }
+#else
     std::ifstream device(config_.device_path, std::ios::binary);
     if (!device) {
         if (config_.verbose) {
@@ -357,6 +367,7 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
         }
         return;
     }
+#endif
 
     // 优化大磁盘扫描：使用更大的缓冲区和智能扫描步长
     uint64_t scan_chunk_size = config_.chunk_size;
@@ -381,15 +392,24 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
         uint64_t chunk_end = std::min(chunk_start + scan_chunk_size, actual_scan_stop_);
         uint64_t chunk_size = chunk_end - chunk_start;
 
-        // 读取数据
+        // 读取数据 - 使用pread进行更高效的并行IO
+        size_t bytes_read = 0;
+#ifdef __linux__
+        // 使用pread直接读取，避免seekg开销
+        ssize_t ret = pread(fd, buffer.data(), chunk_size, chunk_start);
+        if (ret <= 0) {
+            break;
+        }
+        bytes_read = static_cast<size_t>(ret);
+#else
         device.seekg(chunk_start, std::ios::beg);
         device.read(reinterpret_cast<char*>(buffer.data()), chunk_size);
-
         if (!device || device.gcount() == 0) {
             break;
         }
+        bytes_read = device.gcount();
+#endif
 
-        size_t bytes_read = device.gcount();
         pages_in_chunk = 0;
 
         // 扫描页
@@ -517,6 +537,13 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             last_progress_time = now;
         }
     }
+
+#ifdef __linux__
+    // 关闭文件描述符
+    if (fd >= 0) {
+        close(fd);
+    }
+#endif
 }
 
 RawDiskCarver::RecoveryResult RawDiskCarver::recover(
