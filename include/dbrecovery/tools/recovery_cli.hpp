@@ -505,11 +505,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 parsed_schema.page_size = page_size;
 
                 // Parse schema string: "col1:type[:size][:pk],col2:type..."
+                // Note: type and name are separated by space, not colon
+                // Format: "name TYPE:size:extra" where TYPE may have parameters after colon
                 std::istringstream ss(schema_str);
                 std::string col_def;
                 int ordinal = 1;
                 while (std::getline(ss, col_def, ',')) {
                     catalog::ColumnInfo col;
+
+                    // Split by colon first
                     std::istringstream cs(col_def);
                     std::string token;
                     std::vector<std::string> parts;
@@ -517,48 +521,63 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         parts.push_back(token);
                     }
 
-                    if (parts.size() >= 2) {
-                        col.name = parts[0];
-                        col.ordinal = ordinal;
-                        col.physical_pos = ordinal;
-
-                        // Parse type
-                        std::string type_str = parts[1];
-                        // Convert SQL types to MySQL type IDs
-                        if (type_str.find("INT") != std::string::npos) {
-                            col.mysql_type_id = 3;  // MYSQL_TYPE_LONG
-                        } else if (type_str.find("VARCHAR") != std::string::npos) {
-                            col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
-                            if (parts.size() >= 3) {
-                                col.column_length = std::stoi(parts[2]);
-                            }
-                        } else if (type_str.find("DATETIME") != std::string::npos) {
-                            col.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
-                        } else if (type_str.find("DECIMAL") != std::string::npos) {
-                            col.mysql_type_id = 0;  // MYSQL_TYPE_DECIMAL
-                            if (parts.size() >= 3) {
-                                col.numeric_precision = std::stoi(parts[2]);
-                            }
-                            if (parts.size() >= 4) {
-                                col.numeric_scale = std::stoi(parts[3]);
-                            }
-                        } else if (type_str.find("ENUM") != std::string::npos) {
-                            col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
-                        } else {
-                            col.mysql_type_id = 15;  // Default to VARCHAR
-                        }
-
-                        col.is_nullable = true;
-                        if (parts.size() >= 4) {
-                            if (parts[3].find("pk") != std::string::npos ||
-                                parts[3].find("PK") != std::string::npos ||
-                                parts[3].find("PRIMARY") != std::string::npos) {
-                                col.is_nullable = false;
+                    if (parts.size() >= 1) {
+                        // First part contains "name TYPE", split by space
+                        std::istringstream first_part(parts[0]);
+                        std::vector<std::string> name_type;
+                        std::string nt_token;
+                        while (std::getline(first_part, nt_token, ' ')) {
+                            if (!nt_token.empty()) {
+                                name_type.push_back(nt_token);
                             }
                         }
 
-                        parsed_schema.columns[ordinal] = col;
-                        ordinal++;
+                        if (name_type.size() >= 2) {
+                            col.name = name_type[0];
+                            std::string type_str = name_type[1];
+                            col.ordinal = ordinal;
+                            col.physical_pos = ordinal;
+
+                            // Convert SQL types to MySQL type IDs
+                            if (type_str.find("INT") != std::string::npos) {
+                                col.mysql_type_id = 3;  // MYSQL_TYPE_LONG
+                            } else if (type_str.find("VARCHAR") != std::string::npos) {
+                                col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
+                                // Size is in parts[1] if present
+                                if (parts.size() >= 2) {
+                                    col.column_length = std::stoi(parts[1]);
+                                }
+                            } else if (type_str.find("DATETIME") != std::string::npos) {
+                                col.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
+                            } else if (type_str.find("DECIMAL") != std::string::npos) {
+                                col.mysql_type_id = 0;  // MYSQL_TYPE_DECIMAL
+                                // Precision and scale from parts
+                                if (parts.size() >= 2) {
+                                    col.numeric_precision = std::stoi(parts[1]);
+                                }
+                                if (parts.size() >= 3) {
+                                    col.numeric_scale = std::stoi(parts[2]);
+                                }
+                            } else if (type_str.find("ENUM") != std::string::npos) {
+                                col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
+                            } else {
+                                col.mysql_type_id = 15;  // Default to VARCHAR
+                            }
+
+                            col.is_nullable = true;
+                            // Check for pk flag in last part
+                            if (parts.size() >= 3) {
+                                std::string& last_part = parts.back();
+                                if (last_part.find("pk") != std::string::npos ||
+                                    last_part.find("PK") != std::string::npos ||
+                                    last_part.find("PRIMARY") != std::string::npos) {
+                                    col.is_nullable = false;
+                                }
+                            }
+
+                            parsed_schema.columns[ordinal] = col;
+                            ordinal++;
+                        }
                     }
                 }
 
