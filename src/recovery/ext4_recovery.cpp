@@ -640,9 +640,22 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         return result;
     }
 
-    // Export recovered pages to CSV files
+    // Export recovered pages to CSV files with record parsing
+    uint64_t total_records = 0;
+    uint32_t processed_index = 0;
+
     for (const auto& [index_id, pages] : scan_result.pages_by_index_id) {
         if (pages.empty()) continue;
+
+        processed_index++;
+
+        // Progress reporting
+        if (progress) {
+            double pct = static_cast<double>(processed_index) / scan_result.pages_by_index_id.size();
+            std::ostringstream oss;
+            oss << "Exporting index " << index_id << " (" << pages.size() << " pages)";
+            progress(pct, oss.str());
+        }
 
         std::string output_file = config_.output_dir + "/index_" +
                                   std::to_string(index_id) + ".csv";
@@ -652,32 +665,66 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             continue;
         }
 
-        // Write header (basic schema-less format)
-        out << "index_id,block_number,disk_offset,block_group,data\n";
+        // Write header with basic fields
+        out << "page_no,index_id,trx_id,roll_ptr,record_data\n";
 
-        // Write page data
+        // Parse each page and extract records
         for (const auto& page : pages) {
-            out << index_id << ","
-                << page.block_number << ","
-                << page.disk_offset << ","
-                << page.block_group << ",\"";
+            if (page.data.size() < config_.page_size) continue;
 
-            // Write hex-encoded data
-            for (uint8_t byte : page.data) {
-                if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
-                    out << static_cast<char>(byte);
-                } else if (byte == '"' || byte == '\\') {
-                    out << '\\' << static_cast<char>(byte);
-                } else {
-                    out << '.';
+            // Try to parse as INDEX page using InnoDBIndexParser
+            try {
+                dbrecovery::innodb::InnoDBIndexParser parser;
+                uint32_t page_no = static_cast<uint32_t>(page.disk_offset / config_.page_size);
+                auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
+
+                for (const auto& rec : records) {
+                    // Write record info
+                    out << (page.disk_offset / config_.page_size) << ","
+                        << index_id << ","
+                        << rec.trx_id << ","
+                        << rec.roll_ptr << ",\"";
+
+                    // Escape and write record data
+                    for (uint8_t byte : rec.raw_data) {
+                        if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
+                            out << static_cast<char>(byte);
+                        } else if (byte == '"' || byte == '\\') {
+                            out << '\\' << static_cast<char>(byte);
+                        } else {
+                            out << '.';
+                        }
+                    }
+                    out << "\"\n";
+                    total_records++;
                 }
+            } catch (const std::exception& e) {
+                // Fallback: export raw page data if parsing fails
+                out << (page.disk_offset / config_.page_size) << ","
+                    << index_id << ","
+                    << "0,0,\"";
+
+                // Find infimum/supremum and extract readable content
+                constexpr uint16_t INFIMUM_STRING_OFFSET = 59;
+                for (size_t i = INFIMUM_STRING_OFFSET; i < page.data.size(); i++) {
+                    uint8_t byte = page.data[i];
+                    if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
+                        out << static_cast<char>(byte);
+                    }
+                }
+                out << "\"\n";
             }
-            out << "\"\n";
         }
         out.close();
     }
 
+    result.total_records = total_records;
     result.success = true;
+
+    if (config_.verbose) {
+        std::cout << "[INFO] Exported " << total_records << " records to CSV files\n";
+    }
+
     return result;
 }
 
