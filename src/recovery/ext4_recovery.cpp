@@ -347,10 +347,15 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     Ext4ScanResult result;
     auto start_time = std::chrono::high_resolution_clock::now();
 
+    // Debug: Log entry
+    std::cout << "[DEBUG] Ext4Recovery::scan() starting\n" << std::flush;
+
     if (!read_superblock(config_.device_path, superblock_)) {
         result.errors.push_back("Invalid ext4 superblock or cannot read device");
         return result;
     }
+
+    std::cout << "[DEBUG] Superblock read successfully\n" << std::flush;
 
     // Parse superblock information
     result.block_size = 1024 << le32toh(superblock_.s_log_block_size);
@@ -363,6 +368,10 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
                            (static_cast<uint64_t>(le32toh(superblock_.s_blocks_count_hi)) << 32);
     result.group_count = total_blocks / result.blocks_per_group;
 
+    // Store values to member variables to avoid race condition
+    group_count_ = result.group_count;
+    block_size_ = result.block_size;
+
     if (config_.verbose) {
         std::cout << "[INFO] ext4 filesystem detected:\n";
         std::cout << "  Block size: " << result.block_size << " bytes\n";
@@ -370,6 +379,14 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
         std::cout << "  Block groups: " << result.group_count << "\n";
         std::cout << "  Blocks per group: " << result.blocks_per_group << "\n";
         std::cout << "  Inodes per group: " << result.inodes_per_group << "\n";
+        std::cout << "  Stored group_count_: " << group_count_ << "\n";
+        std::cout << "  Stored block_size_: " << block_size_ << "\n";
+    }
+
+    // Validate group count
+    if (group_count_ == 0 || group_count_ > 100000) {
+        result.errors.push_back("Invalid group count: " + std::to_string(group_count_));
+        return result;
     }
 
     // Initialize counters
@@ -386,11 +403,17 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
         return result;
     }
 
+    std::cout << "[DEBUG] Output directory created\n" << std::flush;
+
     // Create worker threads for parallel group scanning
     std::vector<std::thread> workers;
+    std::cout << "[DEBUG] Creating " << config_.num_workers << " worker threads for " << result.group_count << " groups\n" << std::flush;
+
     for (uint32_t i = 0; i < config_.num_workers && i < result.group_count; ++i) {
         workers.emplace_back(&Ext4Recovery::group_worker_thread, this, i, progress);
     }
+
+    std::cout << "[DEBUG] Worker threads created, joining...\n" << std::flush;
 
     for (auto& w : workers) {
         w.join();
@@ -419,19 +442,31 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
 void Ext4Recovery::group_worker_thread(uint32_t worker_id,
                                        std::function<void(double, const std::string&)> progress) {
 #ifdef __linux__
+    std::cout << "[DEBUG] Worker " << worker_id << " starting\n" << std::flush;
+
     int fd = open(config_.device_path.c_str(), O_RDONLY);
     if (fd < 0) {
+        std::cout << "[DEBUG] Worker " << worker_id << " failed to open device\n" << std::flush;
         return;
     }
 
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
-    uint32_t group_count = last_result_.group_count;
+    uint32_t block_size = block_size_;
+    uint32_t group_count = group_count_;
+
+    std::cout << "[DEBUG] Worker " << worker_id << ": block_size=" << block_size << " group_count=" << group_count << "\n" << std::flush;
+
+    if (group_count == 0) {
+        close(fd);
+        return;  // Safety check
+    }
 
     auto last_progress_time = std::chrono::steady_clock::now();
 
     while (!should_stop_.load()) {
-        uint32_t group_index = current_group_.fetch_add(1);
-        if (group_index >= group_count) {
+        uint64_t group_idx = current_group_.fetch_add(1);
+        uint32_t group_index = static_cast<uint32_t>(group_idx);
+
+        if (group_index >= group_count || group_idx >= group_count) {
             break;
         }
 
@@ -507,56 +542,60 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
         return;
     }
 
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
+    uint32_t block_size = block_size_;
     uint32_t blocks_per_group = le32toh(superblock_.s_blocks_per_group);
 
     // Calculate group start offset
     uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group;
 
-    // Scan blocks marked as free in bitmap
-    // These are candidates for deleted data
-    for (uint32_t i = 0; i < blocks_per_group && i < bitmap.size() * 8; i++) {
-        uint32_t byte_idx = i / 8;
-        uint32_t bit_idx = i % 8;
+    // Safety check: ensure we don't read beyond device
+    uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group * block_size;
 
-        bool is_free = (bitmap[byte_idx] & (1 << bit_idx)) == 0;
+    // InnoDB pages are 16KB, spanning multiple 4KB blocks
+    uint32_t blocks_per_page = config_.page_size / block_size;
+    if (blocks_per_page == 0) blocks_per_page = 4;  // Default: 16KB page / 4KB block = 4
 
-        if (is_free) {
-            // Read block and check for InnoDB page
-            uint64_t block_num = group_start_block + i;
-            uint64_t disk_offset = block_to_disk_offset(block_num);
+    // Scan at page-aligned offsets within this group
+    // Limit the number of pages we scan per group to avoid overflow
+    uint32_t max_pages_per_group = blocks_per_group / blocks_per_page;
+    if (max_pages_per_group > 8192) max_pages_per_group = 8192;  // Safety limit
 
-            // Read block (may contain part of an InnoDB page)
-            std::vector<uint8_t> block_data(block_size);
-            ssize_t bytes_read = pread(fd, block_data.data(), block_size, disk_offset);
+    for (uint32_t page_idx = 0; page_idx < max_pages_per_group; page_idx++) {
+        uint32_t block_offset = page_idx * blocks_per_page;
+        if (block_offset >= blocks_per_group) break;
 
-            if (bytes_read == block_size) {
-                blocks_scanned_.fetch_add(1);
+        uint64_t block_num = group_start_block + block_offset;
+        uint64_t disk_offset = block_to_disk_offset(block_num);
 
-                // Check for InnoDB page signature
-                if (block_data.size() >= 26) {
-                    uint16_t page_type = read_be<uint16_t>(block_data.data(), FIL_PAGE_TYPE_ABS);
+        // Safety check: don't read beyond device
+        if (disk_offset + config_.page_size > max_offset) break;
 
-                    if (page_type == FIL_PAGE_INDEX) {
-                        // Found potential INDEX page
-                        // Need to verify it's a complete 16KB page
-                        if (config_.page_size == block_size ||
-                            (block_data.size() >= config_.page_size)) {
-                            // Extract index_id
-                            uint64_t index_id = read_be<uint64_t>(block_data.data(), 66);
+        // Read full page (16KB)
+        std::vector<uint8_t> page_data(config_.page_size);
+        ssize_t bytes_read = pread(fd, page_data.data(), config_.page_size, disk_offset);
 
-                            if (index_id > 0) {
-                                Ext4BlockInfo block_info;
-                                block_info.block_number = block_num;
-                                block_info.disk_offset = disk_offset;
-                                block_info.block_group = group_index;
-                                block_info.is_freed = true;
+        if (bytes_read == config_.page_size) {
+            blocks_scanned_.fetch_add(1);
 
-                                std::lock_guard<std::mutex> lock(result_mutex_);
-                                last_result_.pages_by_index_id[index_id].push_back(block_info);
-                                last_result_.pages_recovered++;
-                            }
-                        }
+            // Check for InnoDB page type at offset 24
+            if (page_data.size() >= 26) {
+                uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+
+                // Check for INDEX page type (0x45BF)
+                if (page_type == FIL_PAGE_INDEX) {
+                    uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+
+                    if (index_id > 0 && index_id < 1000000000000) {  // Sanity check for index_id
+                        Ext4BlockInfo block_info;
+                        block_info.block_number = block_num;
+                        block_info.disk_offset = disk_offset;
+                        block_info.block_group = group_index;
+                        block_info.is_freed = true;
+                        block_info.data = std::move(page_data);
+
+                        std::lock_guard<std::mutex> lock(result_mutex_);
+                        last_result_.pages_by_index_id[index_id].push_back(std::move(block_info));
+                        last_result_.pages_recovered++;
                     }
                 }
             }
