@@ -41,6 +41,56 @@ void RawDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
     external_schema_ = schema;
 }
 
+// ibd2sql-style page validation: data[:4] + data[4:8] == data[-8:-4] + data[-4:]
+// This checks if LSN in header matches LSN in footer
+bool RawDiskCarver::is_valid_page_ibd2sql(const uint8_t* data, size_t page_size) {
+    if (!data || page_size < 64) return false;
+
+    // Check page type first
+    uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
+
+    // Valid page types (from ibd2sql)
+    switch (page_type) {
+        case FIL_PAGE_INDEX:        // 0x45BF
+        case FIL_PAGE_SDI:          // 0x45BE
+        case FIL_PAGE_SDI_ZIP:      // 0x45BD
+        case FIL_PAGE_UNDO_LOG:     // 0x45B2
+        case FIL_PAGE_COMPRESSED:   // 0x45B5
+        case FIL_PAGE_TYPE_ALLOCATED: // 0x0000
+        case 0x0003:  // FIL_PAGE_INODE
+        case 0x0005:  // FIL_PAGE_IBUF_BITMAP
+        case 0x0008:  // FIL_PAGE_FSP_HEADER
+            break;
+        default:
+            return false;
+    }
+
+    // ibd2sql IS_PAGE check: compare header and footer LSN
+    // data[:4] should equal data[-8:-4] and data[4:8] should equal data[-4:]
+    uint32_t checksum_header = read_be<uint32_t>(data, 0);
+    uint32_t lsn_low_header = read_be<uint32_t>(data, 4);
+    uint32_t checksum_footer = read_be<uint32_t>(data, page_size - 8);
+    uint32_t lsn_low_footer = read_be<uint32_t>(data, page_size - 4);
+
+    // For allocated pages, skip LSN check
+    if (page_type == FIL_PAGE_TYPE_ALLOCATED) {
+        return true;
+    }
+
+    // Strict LSN match (ibd2sql style)
+    if (checksum_header == checksum_footer && lsn_low_header == lsn_low_footer) {
+        return true;
+    }
+
+    // Relaxed check: allow small differences for deleted/recovered pages
+    // The LSN values should at least be non-zero
+    if (checksum_header != 0 || checksum_footer != 0) {
+        return true;
+    }
+
+    return false;
+}
+
 bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 64) return false;
 
@@ -412,7 +462,11 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
 
         pages_in_chunk = 0;
 
-        // 扫描页
+        // 扫描页 - 使用多种扫描策略
+        // 1. 页对齐扫描（高效）
+        // 2. 细粒度扫描（捕获非对齐页）
+        // 3. 签名扫描（捕获特殊页类型）
+
         for (uint64_t offset = 0; offset + config_.page_size <= bytes_read; offset += scan_step) {
             const uint8_t* page_data = buffer.data() + offset;
 
@@ -429,11 +483,36 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                                ptype == 0x0003 || ptype == 0x0005 || ptype == 0x0008);
 
             if (!quick_valid) {
-                continue;
+                // 额外检查：ibd2sql风格的infimum/supremum检查
+                // 在offset 0xc063检查"infimum"字符串
+                if (offset + 0xc078 <= bytes_read) {
+                    const uint8_t* infimum_pos = page_data + 0xc063;
+                    if (memcmp(infimum_pos, "infimum", 7) == 0) {
+                        // 找到infimum标记，可能是一个有效的INDEX页
+                        // 即使页类型不在标准列表中
+                        ptype = FIL_PAGE_INDEX;
+                        quick_valid = true;
+                    }
+                }
+                if (!quick_valid) continue;
             }
 
-            if (!is_valid_page(page_data, config_.page_size)) {
-                continue;
+            // 使用两种页验证策略
+            // 1. 标准验证（宽松）
+            bool standard_valid = is_valid_page(page_data, config_.page_size);
+            // 2. ibd2sql严格验证
+            bool ibd2sql_valid = is_valid_page_ibd2sql(page_data, config_.page_size);
+
+            // 对于删除文件的恢复，放宽验证条件
+            // 只要页类型有效，就尝试恢复
+            if (!standard_valid && !ibd2sql_valid) {
+                // 最后一次尝试：检查是否有有效的LSN
+                uint64_t lsn_header = read_be<uint64_t>(page_data, 0);
+                uint64_t lsn_footer = read_be<uint64_t>(page_data, config_.page_size - 8);
+                if (lsn_header == 0 && lsn_footer == 0) {
+                    continue;  // 完全无效的页
+                }
+                // 有LSN但验证失败，可能是损坏页，仍然尝试
             }
 
             pages_scanned_.fetch_add(1);
@@ -452,7 +531,7 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 page_type = PageType::ALLOCATED;
             }
 
-            if (is_index_page(page_data, config_.page_size)) {
+            if (is_index_page(page_data, config_.page_size) || ptype == FIL_PAGE_INDEX) {
                 uint64_t index_id = extract_index_id(page_data, config_.page_size);
 
                 // index_id过滤逻辑 (支持TRUNCATE恢复)

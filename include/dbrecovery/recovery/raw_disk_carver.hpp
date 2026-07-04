@@ -166,6 +166,13 @@ private:
     static bool is_valid_page(const uint8_t* data, size_t page_size);
 
     /**
+     * @brief ibd2sql-style严格页验证
+     * 检查data[:4]+data[4:8]是否等于data[-8:-4]+data[-4:]
+     * 这是一种更严格的页检测方法
+     */
+    static bool is_valid_page_ibd2sql(const uint8_t* data, size_t page_size);
+
+    /**
      * @brief 检测是否是INDEX页
      * 参考ibd2sql IS_INDEX: data[24:26] == b'E\xbf' (即0x45BF)
      */

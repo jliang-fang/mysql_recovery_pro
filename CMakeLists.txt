@@ -135,6 +135,8 @@ set(SOURCES
     src/platform/linux/thread_linux.cpp
     # ✅ 新增：XFS文件系统磁盘雕刻支持
     src/disk/xfs_disk_carver.cpp
+    # ✅ 新增：ext4文件系统磁盘雕刻支持
+    src/recovery/ext4_recovery.cpp
 )
 
 # 根据平台选择性地添加文件
