@@ -148,6 +148,67 @@ mkdir -p /recovery/output
 
 ### Disk Carving Recovery
 
+#### ⚠️ Important: Correct Schema Usage
+
+**Key Principle**: Schema should only be applied to specific index_ids, not all recovered pages!
+
+Disk carving recovers **ALL** InnoDB INDEX pages from the disk, including:
+- User data tables
+- MySQL system tables (sys_tables, sys_columns, etc.)
+- Other historical data
+
+**Wrong Usage** (causes data corruption):
+```bash
+# ❌ Wrong: Schema applied to ALL tables
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --schema="id INT, name VARCHAR, age INT" \
+    --output=/recovery/output
+
+# Result: System table data incorrectly parsed, age shows negative numbers like -396006047
+```
+
+**Correct Usage** (step-by-step):
+
+**Step 1: Use schema-less mode to discover all tables**
+```bash
+# ✅ Correct: No schema, let tool auto-detect field structure
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --output=/recovery/output
+
+# Output: One CSV file per index_id
+# xfs_index_100.csv  - field_0, field_1, field_2...
+# xfs_index_101.csv  - field_0 (single field)
+# ...
+```
+
+**Step 2: Identify target table's index_id**
+```bash
+# Check output files to find the index_id containing user data
+# Example: xfs_index_1001.csv contains id, name, email fields
+
+# Identify by data content:
+head /recovery/output/xfs_index_*.csv
+```
+
+**Step 3: Use --target-index-ids to filter specific tables**
+```bash
+# ✅ Correct: Apply schema only to target table
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --target-index-ids=1001 \
+    --schema="id INT PRIMARY KEY, name VARCHAR(100), email VARCHAR(100)" \
+    --output=/recovery/filtered
+
+# Or exclude system tables
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --exclude-system-tables \
+    --schema="id INT, name VARCHAR, age INT" \
+    --output=/recovery/output
+```
+
 #### Ext4 Filesystem
 
 ```bash

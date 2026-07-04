@@ -147,6 +147,67 @@ mkdir -p /recovery/output
 
 ### 磁盘雕刻恢复
 
+#### ⚠️ 重要：Schema的正确使用
+
+**关键原则**：Schema只应用于特定表的index_id，而不是所有恢复的页面！
+
+磁盘雕刻会恢复磁盘上**所有**InnoDB INDEX页面，包括：
+- 用户数据表
+- MySQL系统表（sys_tables, sys_columns等）
+- 其他历史数据
+
+**错误的用法**（会导致数据乱码）：
+```bash
+# ❌ 错误：Schema应用到所有表
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --schema="id INT, name VARCHAR, age INT" \
+    --output=/recovery/output
+
+# 结果：系统表数据被错误解析，年龄显示为负数如-396006047
+```
+
+**正确的用法**（分步骤）：
+
+**步骤1：先用schema-less模式发现所有表**
+```bash
+# ✅ 正确：不指定schema，让工具自动检测字段结构
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --output=/recovery/output
+
+# 输出：每个index_id生成一个CSV文件
+# xfs_index_100.csv  - field_0, field_1, field_2...
+# xfs_index_101.csv  - field_0 (单字段)
+# ...
+```
+
+**步骤2：识别目标表的index_id**
+```bash
+# 查看输出文件，找到包含用户数据的index_id
+# 例如：xfs_index_1001.csv 包含 id, name, email 字段
+
+# 可通过数据内容判断：
+head /recovery/output/xfs_index_*.csv
+```
+
+**步骤3：使用--target-index-ids过滤特定表**
+```bash
+# ✅ 正确：只对目标表应用schema
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --target-index-ids=1001 \
+    --schema="id INT PRIMARY KEY, name VARCHAR(100), email VARCHAR(100)" \
+    --output=/recovery/filtered
+
+# 或排除系统表
+./mysql_recovery_pro --disk-carving \
+    --device-path=/dev/sda1 \
+    --exclude-system-tables \
+    --schema="id INT, name VARCHAR, age INT" \
+    --output=/recovery/output
+```
+
 #### Ext4文件系统
 
 ```bash
