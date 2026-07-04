@@ -726,16 +726,15 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
             continue;  // Preallocated but not written
         }
 
-        // Check extent doesn't exceed filesystem size
+        // Check extent doesn't exceed filesystem size or AG bounds
         uint64_t fs_size = be64toh(superblock_.sb_dblocks);
         if (ext.block_offset + ext.block_count > fs_size) {
-            continue;  // Invalid extent
+            continue;  // Invalid extent - beyond filesystem
         }
 
-        // Only accept extents starting at file offset 0 (for MySQL data files)
-        if (ext.file_offset == 0) {
-            info.extents.push_back(ext);
-        }
+        // For MySQL data files, accept all extents regardless of file_offset
+        // MySQL tables can have extents at various file offsets due to table growth
+        info.extents.push_back(ext);
     }
 
     if (info.extents.empty()) {
