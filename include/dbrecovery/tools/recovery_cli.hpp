@@ -583,6 +583,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                 xfs_schema = parsed_schema;
                 std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
+                std::cout << "[WARN] Schema is applied to ALL recovered index_ids.\n";
+                std::cout << "[WARN] Different tables have different column structures.\n";
+                std::cout << "[WARN] Use --target-index-ids to filter specific table(s).\n";
+                std::cout << "[WARN] Use --exclude-system-tables to skip system data.\n";
             }
 
             // Set schema if available
@@ -590,8 +594,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 xfs_carver.set_external_schema(*xfs_schema);
                 std::cout << "[INFO] Schema-aware recovery enabled with "
                           << xfs_schema->columns.size() << " columns\n";
+                if (target_index_ids_str.empty() && !exclude_system_tables) {
+                    std::cout << "[WARN] Schema applied to ALL pages - data may be incorrectly decoded!\n";
+                    std::cout << "[WARN] Recommend: --target-index-ids=<your_index_id> or --exclude-system-tables\n";
+                }
             } else {
                 std::cout << "[INFO] No schema provided, using schema-less recovery\n";
+                std::cout << "[INFO] This is recommended for finding unknown table structures\n";
             }
 
             auto xfs_result = xfs_carver.scan_and_recover([&](double progress, const std::string& msg) {
