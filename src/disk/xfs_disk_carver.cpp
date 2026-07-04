@@ -302,8 +302,12 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
         // Strategy 1: Scan unlinked inode list (most recent deleted files)
         // XFS stores recently deleted inodes in agi_unlinked hash buckets
         // These inodes have di_mode=0 but still have extent data
-        // Note: agi_unlinked may contain NULL entries (0xFFFFFFFF = XFS_NULL_INO)
+        // Each bucket entry is the head of a linked list of deleted inodes
+        // Reference: xfsprogs xfs_agi.h - agi_unlinked is hash table of unlinked inode lists
         constexpr uint32_t XFS_NULL_INO = 0xFFFFFFFF;
+
+        // Track visited inodes to prevent duplicate processing across buckets
+        std::set<uint32_t> visited_inodes;
 
         for (uint32_t bucket = 0; bucket < XFS_AGI_UNLINKED_BUCKETS; bucket++) {
             uint32_t unlinked_ino = be32toh(agi.agi_unlinked[bucket]);
@@ -312,44 +316,12 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
             if (unlinked_ino == 0 || unlinked_ino == XFS_NULL_INO) continue;
 
             if (config_.verbose) {
-                std::cout << "[Worker " << worker_id << "] Found unlinked inode in bucket "
+                std::cout << "[Worker " << worker_id << "] Found unlinked chain head in bucket "
                           << bucket << ": inode " << unlinked_ino << "\n";
             }
 
-            // Convert absolute inode number to AG-relative inode number
-            // XFS inode number = (ag_index * ag_inodes) + ag_inode
-            // ag_inodes = ag_blocks * inodes_per_block
-            uint64_t inodes_per_ag = static_cast<uint64_t>(ag_blocks) *
-                                     static_cast<uint64_t>(block_size / inode_size);
-            uint32_t unlinked_ag = unlinked_ino / inodes_per_ag;
-            uint32_t ag_inode = unlinked_ino % inodes_per_ag;
-
-            // Only process if unlinked inode belongs to current AG
-            if (unlinked_ag != ag_index) continue;
-
-            auto extent_info = read_inode(ag_index, ag_inode);
-            if (extent_info.has_value()) {
-                std::vector<XfsPageInfo> recovered_pages;
-                for (const auto& ext : extent_info->extents) {
-                    if (ext.state == XFS_EXT_UNWRITTEN) continue;
-                    std::vector<uint8_t> extent_data = read_extent_data(ext);
-                    if (!extent_data.empty()) {
-                        auto pages = parse_pages_from_extent(extent_data, extent_info->inode_number);
-                        for (auto& page : pages) {
-                            recovered_pages.push_back(std::move(page));
-                        }
-                    }
-                }
-                if (!recovered_pages.empty()) {
-                    std::lock_guard<std::mutex> lock(result_mutex_);
-                    last_result_.recovered_extents.push_back(*extent_info);
-                    inodes_found_.fetch_add(1);
-                    for (auto& page : recovered_pages) {
-                        last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
-                        last_result_.pages_recovered++;
-                    }
-                }
-            }
+            // Follow the entire unlinked chain from this bucket
+            follow_unlinked_chain(fd, ag_index, unlinked_ino, visited_inodes);
         }
 
         // Check if free inode btree exists (FINOBT feature)
@@ -527,30 +499,7 @@ void XfsDiskCarver::process_inode_records(int fd, uint32_t ag_index, const uint8
             // Read inode and try to recover
             auto extent_info = read_inode(ag_index, ag_inode);
             if (extent_info.has_value() && !extent_info->extents.empty()) {
-                // Read data from extents
-                std::vector<XfsPageInfo> recovered_pages;
-                for (const auto& ext : extent_info->extents) {
-                    if (ext.state == XFS_EXT_UNWRITTEN) continue;
-
-                    std::vector<uint8_t> extent_data = read_extent_data(ext);
-                    if (!extent_data.empty()) {
-                        auto pages = parse_pages_from_extent(extent_data, extent_info->inode_number);
-                        for (auto& page : pages) {
-                            recovered_pages.push_back(std::move(page));
-                        }
-                    }
-                }
-
-                if (!recovered_pages.empty()) {
-                    std::lock_guard<std::mutex> lock(result_mutex_);
-                    last_result_.recovered_extents.push_back(*extent_info);
-                    inodes_found_.fetch_add(1);
-
-                    for (auto& page : recovered_pages) {
-                        last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
-                        last_result_.pages_recovered++;
-                    }
-                }
+                process_recovered_inode(fd, ag_index, ag_inode, *extent_info);
             }
         }
     }
@@ -654,6 +603,7 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
             info.inode_number = ag_inode + ag_index * ag_blocks;
             info.file_size = file_size;
             info.is_deleted = is_deleted;
+            info.next_unlinked = be32toh(inode_core.di_next_unlinked);  // For chain traversal
             info.mtime.t_sec = be32toh(inode_core.di_mtime.t_sec);
             info.mtime.t_nsec = be32toh(inode_core.di_mtime.t_nsec);
             info.ctime.t_sec = be32toh(inode_core.di_ctime.t_sec);
@@ -703,6 +653,7 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
     info.inode_number = ag_inode + ag_index * ag_blocks;  // Calculate full inode number
     info.file_size = file_size;
     info.is_deleted = is_deleted;
+    info.next_unlinked = be32toh(inode_core.di_next_unlinked);  // For chain traversal
 
     // Parse mtime/ctime
     info.mtime.t_sec = be32toh(inode_core.di_mtime.t_sec);
@@ -744,6 +695,105 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
     return info;
 #else
     return std::nullopt;
+#endif
+}
+
+// ==================== Follow Unlinked Chain ====================
+
+void XfsDiskCarver::follow_unlinked_chain(int fd, uint32_t ag_index, uint32_t start_ino,
+                                           std::set<uint32_t>& visited) {
+#ifdef __linux__
+    constexpr uint32_t XFS_NULL_INO = 0xFFFFFFFF;
+    constexpr size_t MAX_CHAIN_LENGTH = 1000;  // Safety limit
+
+    uint32_t current_ino = start_ino;
+    size_t chain_length = 0;
+
+    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+    uint16_t inode_size = be16toh(superblock_.sb_inodesize);
+    uint64_t inodes_per_ag = static_cast<uint64_t>(ag_blocks) *
+                             static_cast<uint64_t>(be32toh(superblock_.sb_blocksize) / inode_size);
+
+    while (current_ino != 0 && current_ino != XFS_NULL_INO &&
+           chain_length < MAX_CHAIN_LENGTH && !should_stop_.load()) {
+
+        // Prevent infinite loops
+        if (visited.count(current_ino) > 0) {
+            if (config_.verbose) {
+                std::cout << "[WARN] Cycle detected in unlinked chain at inode " << current_ino << "\n";
+            }
+            break;
+        }
+        visited.insert(current_ino);
+
+        // Convert absolute inode to AG-relative
+        uint32_t ino_ag = current_ino / inodes_per_ag;
+        uint32_t ag_inode = current_ino % inodes_per_ag;
+
+        // Only process inodes in current AG
+        if (ino_ag != ag_index) {
+            // Need to switch AG context - for simplicity, skip cross-AG inodes
+            break;
+        }
+
+        if (config_.verbose) {
+            std::cout << "[CHAIN] Processing unlinked inode " << current_ino
+                      << " (AG " << ag_index << ", depth " << chain_length << ")\n";
+        }
+
+        // Read and process the inode
+        auto extent_info = read_inode(ag_index, ag_inode);
+        if (extent_info.has_value()) {
+            process_recovered_inode(fd, ag_index, ag_inode, *extent_info);
+
+            // Continue following chain
+            current_ino = extent_info->next_unlinked;
+        } else {
+            // Invalid inode, stop chain
+            break;
+        }
+
+        chain_length++;
+        inodes_scanned_.fetch_add(1);
+    }
+#endif
+}
+
+// ==================== Process Recovered Inode ====================
+
+void XfsDiskCarver::process_recovered_inode(int fd, uint32_t ag_index, uint32_t ag_inode,
+                                             const XfsExtentInfo& extent_info) {
+#ifdef __linux__
+    if (extent_info.extents.empty()) {
+        return;
+    }
+
+    std::vector<XfsPageInfo> recovered_pages;
+
+    for (const auto& ext : extent_info.extents) {
+        if (ext.state == XFS_EXT_UNWRITTEN) {
+            continue;  // Skip unwritten extents
+        }
+
+        std::vector<uint8_t> extent_data = read_extent_data(ext);
+        if (!extent_data.empty()) {
+            auto pages = parse_pages_from_extent(extent_data, extent_info.inode_number);
+            for (auto& page : pages) {
+                recovered_pages.push_back(std::move(page));
+            }
+        }
+    }
+
+    if (!recovered_pages.empty()) {
+        std::lock_guard<std::mutex> lock(result_mutex_);
+        last_result_.recovered_extents.push_back(extent_info);
+        inodes_found_.fetch_add(1);
+
+        for (auto& page : recovered_pages) {
+            last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
+            last_result_.pages_recovered++;
+        }
+    }
 #endif
 }
 

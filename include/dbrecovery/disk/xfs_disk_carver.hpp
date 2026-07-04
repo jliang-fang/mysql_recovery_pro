@@ -28,6 +28,7 @@
 #include <thread>
 #include <fstream>
 #include <cstring>
+#include <set>
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
@@ -357,6 +358,7 @@ struct XfsExtentInfo {
     xfs_timestamp mtime;
     xfs_timestamp ctime;
     bool is_deleted;
+    uint32_t next_unlinked;  // di_next_unlinked for chain traversal
 };
 
 struct XfsPageInfo {
@@ -453,6 +455,14 @@ private:
 
     // Read inode and extract extents
     std::optional<XfsExtentInfo> read_inode(uint32_t ag_index, uint32_t ag_inode);
+
+    // Follow di_next_unlinked chain for deleted inode recovery
+    void follow_unlinked_chain(int fd, uint32_t ag_index, uint32_t start_ino,
+                               std::set<uint32_t>& visited);
+
+    // Process recovered inode (extract pages from extents)
+    void process_recovered_inode(int fd, uint32_t ag_index, uint32_t ag_inode,
+                                 const XfsExtentInfo& extent_info);
 
     // Walk free space btree (for extent validation)
     void walk_free_space_btree(uint32_t ag_index, const xfs_agf& agf);
