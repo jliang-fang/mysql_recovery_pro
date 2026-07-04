@@ -1154,6 +1154,8 @@ static uint8_t mysql_type_to_innodb(uint32_t mysql_type) {
         case 15:  // MYSQL_TYPE_VARCHAR
         case 253: // MYSQL_TYPE_VAR_STRING
             return 16; // InnoDB VARCHAR
+        case 16:  // MYSQL_TYPE_BIT
+            return 17; // InnoDB BIT (variable bytes)
         case 252: // MYSQL_TYPE_BLOB
         case 250: // MYSQL_TYPE_MEDIUM_BLOB
         case 251: // MYSQL_TYPE_LONG_BLOB

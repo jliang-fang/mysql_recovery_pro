@@ -109,9 +109,8 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
                                 size_t element_count, bool is_object, size_t entry_size) {
     if (element_count == 0) return is_object ? "{}" : "[]";
     if (element_count > 100) {
-        // 防止解析过大JSON导致性能问题
-        return is_object ? "{\"_count\":" + std::to_string(element_count) + "}"
-                         : "[\"_count\":" + std::to_string(element_count) + "]";
+        // 防止解析过大JSON导致性能问题，但显示部分元素
+        element_count = 10;  // Cap at 10 elements for display
     }
 
     std::string result = is_object ? "{" : "[";
@@ -350,9 +349,9 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
         return (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT) ? "{}" : "[]";
     }
 
-    if (element_count > 1000) {
-        return (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT) ?
-               "{\"_error\":\"too_large\"}" : "[\"_error\":\"too_large\"]";
+    if (element_count > 100) {
+        // Cap at 10 elements for display instead of showing error
+        element_count = 10;
     }
 
     // KEY_ENTRIES和VALUE_ENTRIES开始位置
@@ -2109,6 +2108,25 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::UINT_VAL;
             val.uint_value = data[offset] + 1900;
             val.str_value = std::to_string(val.uint_value);
+            break;
+        }
+        case 17: {  // BIT (variable bytes) - InnoDB type 17
+            // BIT field stores bits as big-endian bytes
+            // field_size = (bit_count + 7) / 8
+            val.type = IndexFieldValue::Type::UINT_VAL;
+            if (field_size > 0 && field_size <= 8) {
+                uint64_t bits = 0;
+                for (size_t i = 0; i < field_size; i++) {
+                    bits = (bits << 8) | data[offset + i];
+                }
+                val.uint_value = bits;
+                // Output as hexadecimal for readability
+                char buf[24];
+                snprintf(buf, sizeof(buf), "0x%0*lX", static_cast<int>(field_size * 2), bits);
+                val.str_value = buf;
+            } else {
+                val.str_value = "<BIT_SIZE_ERR>";
+            }
             break;
         }
         case 12: {  // TIME (3 bytes) - InnoDB type 12
