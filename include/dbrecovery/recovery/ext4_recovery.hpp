@@ -22,6 +22,7 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
+#include <queue>
 
 #ifdef __linux__
 #include <sys/stat.h>
@@ -322,6 +323,9 @@ private:
     std::atomic<uint64_t> blocks_found_{0};
     std::atomic<bool> should_stop_{false};
     std::mutex result_mutex_;
+
+    // Thread-safe result collection queue
+    std::queue<std::pair<uint64_t, Ext4BlockInfo>> result_queue_;
 
     // Read block group descriptor
     bool read_group_descriptor(uint32_t group_index, ext4_group_desc& desc) const;

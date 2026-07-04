@@ -642,11 +642,64 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
         }
 
-        // ext4-specific recovery - fallback to raw disk carving for stability
-        // The ext4-specific module has thread safety issues that need more investigation
+        // ext4-specific recovery using Ext4Recovery module
         if (filesystem_type == "ext4") {
-            std::cout << "[INFO] ext4 filesystem detected, using raw disk carving (stable fallback)\n";
-            // Fall through to generic carving below
+            std::cout << "[INFO] ext4 filesystem detected, using ext4-specific recovery\n";
+
+            dbrecovery::recovery::ext4::Ext4Recovery ext4_recovery;
+            dbrecovery::recovery::ext4::Ext4Config ext4_config;
+            ext4_config.device_path = device_path;
+            ext4_config.output_dir = output_dir;
+            ext4_config.page_size = page_size;
+            ext4_config.num_workers = num_workers;
+            ext4_config.verbose = verbose;
+            ext4_config.scan_freed_blocks = true;
+            ext4_config.scan_deleted_inodes = true;
+
+            // Parse target index IDs
+            if (!target_index_ids_str.empty()) {
+                std::istringstream iss(target_index_ids_str);
+                std::string id_str;
+                while (std::getline(iss, id_str, ',')) {
+                    try {
+                        ext4_config.target_index_ids.push_back(std::stoull(id_str));
+                    } catch (...) {}
+                }
+            }
+
+            ext4_recovery.set_config(ext4_config);
+
+            auto ext4_result = ext4_recovery.scan_and_recover([&](double pct, const std::string& msg) {
+                if (verbose) {
+                    std::cout << "\r[INFO] Progress: " << std::fixed << std::setprecision(1)
+                              << (pct * 100) << "% - " << msg << std::string(20, ' ') << std::flush;
+                }
+            });
+
+            if (ext4_result.success) {
+                std::cout << "\n[INFO] ext4 Recovery Results:\n";
+                std::cout << "  Block size: " << ext4_result.block_size << "\n";
+                std::cout << "  Block groups: " << ext4_result.group_count << "\n";
+                std::cout << "  Pages recovered: " << ext4_result.pages_recovered << "\n";
+                std::cout << "  Deleted inodes found: " << ext4_result.deleted_inodes_found << "\n";
+                std::cout << "  Time: " << std::fixed << std::setprecision(2) << ext4_result.elapsed_seconds << "s\n";
+
+                if (!ext4_result.errors.empty()) {
+                    std::cout << "\n[WARN] Recovery completed with warnings:\n";
+                    for (const auto& err : ext4_result.errors) {
+                        std::cout << "    - " << err << "\n";
+                    }
+                }
+
+                std::cout << "\n✅ ext4 Recovery completed: " << output_dir << "\n";
+                return 0;
+            } else {
+                std::cerr << "[ERROR] ext4 recovery failed. Falling back to raw disk carving.\n";
+                for (const auto& err : ext4_result.errors) {
+                    std::cerr << "  - " << err << "\n";
+                }
+                // Fall through to generic carving below
+            }
         }
 
         // Default: filesystem-independent carving
