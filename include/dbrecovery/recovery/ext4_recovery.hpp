@@ -308,8 +308,14 @@ private:
     Ext4Config config_;
     ext4_superblock superblock_;
     Ext4ScanResult last_result_;
-    uint32_t group_count_ = 0;  // Store group count to avoid race condition
-    uint32_t block_size_ = 4096; // Store block size
+
+    // Cached superblock values for thread-safe access
+    uint32_t group_count_ = 0;
+    uint32_t block_size_ = 4096;
+    uint32_t blocks_per_group_ = 0;
+    uint32_t inodes_per_group_ = 0;
+    uint16_t inode_size_ = 256;
+    uint16_t desc_size_ = 32;
 
     std::atomic<uint64_t> current_group_{0};
     std::atomic<uint64_t> blocks_scanned_{0};

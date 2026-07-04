@@ -92,9 +92,9 @@ bool Ext4Recovery::read_group_descriptor(uint32_t group_index, ext4_group_desc& 
         return false;
     }
 
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
-    uint32_t desc_size = le16toh(superblock_.s_desc_size);
-    if (desc_size == 0) desc_size = 32;  // Legacy size
+    // Use cached block_size and desc_size (thread-safe)
+    uint32_t block_size = block_size_;
+    uint32_t desc_size = desc_size_;
 
     // Group descriptor table starts at block 1 (or 2 for 1KB blocks)
     uint32_t gdb_block = (block_size == 1024) ? 2 : 1;
@@ -126,8 +126,9 @@ std::vector<uint8_t> Ext4Recovery::read_block_bitmap(uint32_t group_index) {
         return {};
     }
 
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
-    uint32_t blocks_per_group = le32toh(superblock_.s_blocks_per_group);
+    // Use cached values (thread-safe)
+    uint32_t block_size = block_size_;
+    uint32_t blocks_per_group = blocks_per_group_;
 
     // Calculate block bitmap block number (combine lo and hi for 64-bit)
     uint64_t bitmap_block = static_cast<uint64_t>(le32toh(desc.bg_block_bitmap_lo)) |
@@ -170,8 +171,9 @@ std::vector<uint8_t> Ext4Recovery::read_inode_bitmap(uint32_t group_index) {
         return {};
     }
 
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
-    uint32_t inodes_per_group = le32toh(superblock_.s_inodes_per_group);
+    // Use cached values (thread-safe)
+    uint32_t block_size = block_size_;
+    uint32_t inodes_per_group = inodes_per_group_;
 
     uint64_t bitmap_block = static_cast<uint64_t>(le32toh(desc.bg_inode_bitmap_lo)) |
                           (static_cast<uint64_t>(le32toh(desc.bg_inode_bitmap_hi)) << 32);
@@ -202,8 +204,9 @@ std::vector<uint8_t> Ext4Recovery::read_inode_bitmap(uint32_t group_index) {
 
 uint64_t Ext4Recovery::inode_to_disk_offset(uint32_t group_index, uint32_t local_inode) const {
 #ifdef __linux__
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
-    uint16_t inode_size = le16toh(superblock_.s_inode_size);
+    // Use cached values (thread-safe)
+    uint32_t block_size = block_size_;
+    uint16_t inode_size = inode_size_;
 
     ext4_group_desc desc;
     if (!read_group_descriptor(group_index, desc)) {
@@ -234,7 +237,10 @@ std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint
         return std::nullopt;
     }
 
-    uint16_t inode_size = le16toh(superblock_.s_inode_size);
+    // Use cached values (thread-safe)
+    uint16_t inode_size = inode_size_;
+    uint32_t inodes_per_group = inodes_per_group_;
+
     uint64_t inode_offset = inode_to_disk_offset(group_index, local_inode);
 
     if (inode_offset == 0) {
@@ -252,7 +258,7 @@ std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint
 
     // Parse inode information
     Ext4InodeInfo info;
-    info.inode_number = group_index * le32toh(superblock_.s_inodes_per_group) + local_inode;
+    info.inode_number = group_index * inodes_per_group + local_inode;
     info.block_group = group_index;
 
     // Check if inode is deleted (mode = 0 or dtime > 0)
@@ -333,12 +339,8 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(const ext4_inode& inode) {
 // ==================== Block Offset Calculation ====================
 
 uint64_t Ext4Recovery::block_to_disk_offset(uint64_t block) const {
-#ifdef __linux__
-    uint32_t block_size = 1024 << le32toh(superblock_.s_log_block_size);
-    return block * block_size;
-#else
-    return block * 4096;
-#endif
+    // Use cached block_size (thread-safe)
+    return block * block_size_;
 }
 
 // ==================== Main Scan Function ====================
@@ -368,9 +370,14 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
                            (static_cast<uint64_t>(le32toh(superblock_.s_blocks_count_hi)) << 32);
     result.group_count = total_blocks / result.blocks_per_group;
 
-    // Store values to member variables to avoid race condition
+    // Cache all superblock values to member variables for thread-safe access
     group_count_ = result.group_count;
     block_size_ = result.block_size;
+    blocks_per_group_ = result.blocks_per_group;
+    inodes_per_group_ = result.inodes_per_group;
+    inode_size_ = result.inode_size;
+    desc_size_ = le16toh(superblock_.s_desc_size);
+    if (desc_size_ == 0) desc_size_ = 32;  // Legacy default
 
     if (config_.verbose) {
         std::cout << "[INFO] ext4 filesystem detected:\n";
@@ -394,6 +401,12 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     blocks_scanned_ = 0;
     blocks_found_ = 0;
     should_stop_ = false;
+
+    // Clear last_result_ before starting threads
+    {
+        std::lock_guard<std::mutex> lock(result_mutex_);
+        last_result_ = Ext4ScanResult();
+    }
 
     // Create output directory
     try {
@@ -450,10 +463,17 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
         return;
     }
 
+    // Use cached superblock values (thread-safe)
     uint32_t block_size = block_size_;
     uint32_t group_count = group_count_;
+    uint32_t blocks_per_group = blocks_per_group_;
+    uint32_t inodes_per_group = inodes_per_group_;
+    uint16_t inode_size = inode_size_;
+    uint16_t desc_size = desc_size_;
 
-    std::cout << "[DEBUG] Worker " << worker_id << ": block_size=" << block_size << " group_count=" << group_count << "\n" << std::flush;
+    std::cout << "[DEBUG] Worker " << worker_id << ": block_size=" << block_size
+              << " group_count=" << group_count << " blocks_per_group=" << blocks_per_group
+              << " inodes_per_group=" << inodes_per_group << "\n" << std::flush;
 
     if (group_count == 0) {
         close(fd);
@@ -487,8 +507,8 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
                 if (read_group_descriptor(group_index, desc)) {
                     uint16_t free_count = le16toh(desc.bg_free_inodes_count_lo);
 
-                    // Scan recently freed inode slots
-                    for (uint32_t i = 0; i < le32toh(superblock_.s_inodes_per_group); i++) {
+                    // Scan recently freed inode slots (using cached inodes_per_group)
+                    for (uint32_t i = 0; i < inodes_per_group; i++) {
                         // Check if inode slot was recently used (bit = 0 in bitmap)
                         // but inode itself is deleted (mode = 0)
                         uint32_t byte_idx = i / 8;
@@ -542,8 +562,10 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
         return;
     }
 
+    // Use cached values (thread-safe)
     uint32_t block_size = block_size_;
-    uint32_t blocks_per_group = le32toh(superblock_.s_blocks_per_group);
+    uint32_t blocks_per_group = blocks_per_group_;
+    uint32_t group_count = group_count_;
 
     // Calculate group start offset
     uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group;
@@ -596,6 +618,7 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
                         std::lock_guard<std::mutex> lock(result_mutex_);
                         last_result_.pages_by_index_id[index_id].push_back(std::move(block_info));
                         last_result_.pages_recovered++;
+                        blocks_found_.fetch_add(1);
                     }
                 }
             }

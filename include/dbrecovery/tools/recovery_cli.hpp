@@ -642,10 +642,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
         }
 
-        // ext4-specific recovery - temporarily disabled due to stability issues
-        // Use raw signature scanning as fallback
+        // ext4-specific recovery - fallback to raw disk carving for stability
+        // The ext4-specific module has thread safety issues that need more investigation
         if (filesystem_type == "ext4") {
-            std::cout << "[INFO] ext4 filesystem detected, using raw disk carving (signature scan)\n";
+            std::cout << "[INFO] ext4 filesystem detected, using raw disk carving (stable fallback)\n";
             // Fall through to generic carving below
         }
 
