@@ -449,7 +449,7 @@ private:
 
     // Process inode records from btree leaf node
     void process_inode_records(int fd, uint32_t ag_index, const uint8_t* block_data,
-                               uint16_t numrecs, uint32_t block_size);
+                               uint16_t numrecs, uint32_t block_size, size_t btree_header_size);
 
     // Read inode and extract extents
     std::optional<XfsExtentInfo> read_inode(uint32_t ag_index, uint32_t ag_inode);

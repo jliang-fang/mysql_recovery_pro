@@ -421,19 +421,32 @@ void XfsDiskCarver::btree_walk_recursive(int fd, uint32_t ag_index, uint32_t blo
         return;
     }
 
-    // Read btree header (short-form CRC header = 56 bytes)
-    constexpr size_t BTREE_HEADER_SIZE = 56;
-    if (block_size < BTREE_HEADER_SIZE) return;
+    // Read btree header
+    // CRC-enabled btrees use 56-byte header (XFS_BTREE_SBLOCK_CRC_LEN)
+    // Non-CRC btrees use 16-byte header (XFS_BTREE_SBLOCK_LEN)
+    // Check magic to determine header size
+    constexpr size_t BTREE_CRC_HEADER_SIZE = 56;  // XFS_BTREE_SBLOCK_CRC_LEN
+    constexpr size_t BTREE_OLD_HEADER_SIZE = 16;  // XFS_BTREE_SBLOCK_LEN
 
     uint32_t magic = read_be<uint32_t>(block_buffer.data(), 0);
+
+    // Determine if this is CRC-enabled btree
+    bool is_crc_btree = (magic == XFS_FIBT_CRC_MAGIC || magic == XFS_IBT_CRC_MAGIC ||
+                         magic == 0x424D4D33 || magic == 0x424D4D42);  // BMAP CRC variants
+
+    // Also accept non-CRC variants for older XFS
     if (magic != expected_magic &&
         magic != XFS_FIBT_CRC_MAGIC && magic != XFS_IBT_CRC_MAGIC &&
         magic != XFS_FIBT_MAGIC && magic != XFS_IBT_MAGIC) {
         return;  // Invalid magic
     }
 
-    uint16_t level = read_be<uint16_t>(block_buffer.data(), 4);  // bb_level at offset 4
-    uint16_t numrecs = read_be<uint16_t>(block_buffer.data(), 6);  // bb_numrecs at offset 6
+    size_t btree_header_size = is_crc_btree ? BTREE_CRC_HEADER_SIZE : BTREE_OLD_HEADER_SIZE;
+    if (block_size < btree_header_size) return;
+
+    // bb_level at offset 4, bb_numrecs at offset 6 (same for both variants)
+    uint16_t level = read_be<uint16_t>(block_buffer.data(), 4);
+    uint16_t numrecs = read_be<uint16_t>(block_buffer.data(), 6);
 
     if (numrecs == 0 || numrecs > 1000) {
         return;  // Invalid record count
@@ -443,7 +456,8 @@ void XfsDiskCarver::btree_walk_recursive(int fd, uint32_t ag_index, uint32_t blo
         // Non-leaf node: traverse child pointers
         // Pointer array starts at middle of block (after keys)
         // For short-form btree: pointers at (header_size + block_size) / 2
-        size_t ptr_array_offset = (BTREE_HEADER_SIZE + block_size) / 2;
+        // Reference: xfs_undelete xfs_tree.hpp:101
+        size_t ptr_array_offset = (btree_header_size + block_size) / 2;
         size_t ptr_size = sizeof(uint32_t);  // Short-form uses 32-bit pointers
 
         for (uint16_t i = 0; i < numrecs && ptr_array_offset + ptr_size <= block_size; i++) {
@@ -454,24 +468,23 @@ void XfsDiskCarver::btree_walk_recursive(int fd, uint32_t ag_index, uint32_t blo
         }
     } else {
         // Leaf node: process inode records
-        process_inode_records(fd, ag_index, block_buffer.data(), numrecs, block_size);
+        process_inode_records(fd, ag_index, block_buffer.data(), numrecs, block_size, btree_header_size);
     }
 #endif
 }
 
 void XfsDiskCarver::process_inode_records(int fd, uint32_t ag_index, const uint8_t* block_data,
-                                           uint16_t numrecs, uint32_t block_size) {
+                                           uint16_t numrecs, uint32_t block_size, size_t btree_header_size) {
 #ifdef __linux__
     // Inode btree record layout (xfs_inobt_rec):
     // ir_startino (4), ir_holemask (2), ir_count (1), ir_freecount (1), ir_free (8)
     constexpr size_t INOREC_SIZE = 16;
-    constexpr size_t BTREE_HEADER_SIZE = 56;
 
-    if (block_size < BTREE_HEADER_SIZE + numrecs * INOREC_SIZE) {
+    if (block_size < btree_header_size + numrecs * INOREC_SIZE) {
         return;
     }
 
-    size_t rec_offset = BTREE_HEADER_SIZE;
+    size_t rec_offset = btree_header_size;
 
     for (uint16_t i = 0; i < numrecs; i++) {
         const uint8_t* rec_data = block_data + rec_offset + i * INOREC_SIZE;
@@ -489,17 +502,25 @@ void XfsDiskCarver::process_inode_records(int fd, uint32_t ag_index, const uint8
         }
 
         // Iterate through free inodes in this chunk
-        for (uint32_t bit = 0; bit < 64; bit++) {
+        // Note: holemask is 16-bit, each bit covers 4 inodes (bit 0 = inodes 0-3, bit 1 = inodes 4-7, etc.)
+        // For sparse inode chunks, holemask indicates which inode clusters are missing
+        for (uint32_t bit = 0; bit < 64 && bit < static_cast<uint32_t>(count); bit++) {
             if ((free_mask & (1ULL << bit)) == 0) {
-                continue;  // Inode is allocated
+                continue;  // Inode is allocated, not free
             }
-
-            uint32_t ag_inode = start_ino + bit;
 
             // Check holemask for sparse inode allocation
-            if ((holemask & (1 << (bit / 4))) != 0) {
-                continue;  // Inode is in a hole
+            // holemask bit N covers inodes N*4 to N*4+3
+            // Check holemask for sparse inode allocation
+            // holemask bit N covers inodes N*4 to N*4+3
+            uint32_t hole_bit = bit / 4;
+            if ((holemask & (1 << hole_bit)) != 0) {
+                continue;  // Inode cluster is in a hole (sparse chunk)
             }
+
+            // Calculate AG-relative inode number
+            // start_ino is the first inode number in this chunk (AG-relative)
+            uint32_t ag_inode = start_ino + bit;
 
             inodes_scanned_.fetch_add(1);
 
