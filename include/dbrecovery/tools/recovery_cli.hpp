@@ -184,7 +184,7 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--drop-table-recovery\033[0m      Recover from DROP TABLE (scan system tablespace)\n";
     std::cout << "  \033[1m--disk-carving\033[0m             Raw disk carving (PhotoRec style, no backup needed)\n";
     std::cout << "  \033[1m--device-path=<path>\033[0m       Raw device path for disk carving (e.g., /dev/sda)\n";
-    std::cout << "  \033[1m--num-workers=<n>\033[0m          Number of worker threads for disk carving (default: 4)\n";
+    std::cout << "  \033[1m--num-workers=<n>\033[0m          Number of worker threads for disk carving (default: 8)\n";
     std::cout << "  \033[1m--filesystem=<fs>\033[0m          Filesystem type for disk carving: ext4|xfs (default: ext4)\n";
     std::cout << "                                 XFS recovery uses AG scanning and free inode btree traversal\n";
     std::cout << "  \033[1m--target-index-ids=<ids>\033[0m    Only recover specified index IDs (comma-separated)\n";
@@ -417,8 +417,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // Disk carving specific options
     std::string device_path = parser_.get_option("device-path", "");
-    auto num_workers_opt = parser_.get_int_option("num-workers", 4);
-    uint32_t num_workers = static_cast<uint32_t>(num_workers_opt.value_or(4));
+    // Default to 8 workers for better parallelism on modern systems
+    auto num_workers_opt = parser_.get_int_option("num-workers", 8);
+    uint32_t num_workers = static_cast<uint32_t>(num_workers_opt.value_or(8));
 
     // Filesystem type for disk carving (ext4 or xfs)
     std::string filesystem_type = parser_.get_option("filesystem", "ext4");

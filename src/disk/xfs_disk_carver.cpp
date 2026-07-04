@@ -184,8 +184,13 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
     // Strategy 1: Scan deleted inodes via free inode btree
     if (config_.scan_deleted_inodes) {
         // Create worker threads for parallel AG scanning
+        // Use at least min(ag_count, 8) workers for better parallelism
+        uint32_t effective_workers = std::min(
+            std::max(config_.num_workers, static_cast<uint32_t>(8)),
+            result.ag_count
+        );
         std::vector<std::thread> workers;
-        for (uint32_t i = 0; i < config_.num_workers && i < result.ag_count; ++i) {
+        for (uint32_t i = 0; i < effective_workers; ++i) {
             workers.emplace_back(&XfsDiskCarver::ag_worker_thread, this, i, progress);
         }
 
@@ -926,8 +931,10 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
     }
 
     uint32_t block_size = be32toh(superblock_.sb_blocksize);
-    uint64_t scan_chunk = 64 * 1024 * 1024;  // 64MB chunks (smaller for better parallelism)
-    uint32_t num_workers = config_.num_workers;  // Use configured worker count
+    // Use larger chunks (128MB) for better throughput with more workers
+    uint64_t scan_chunk = 128 * 1024 * 1024;
+    // Use at least 8 workers for better parallelism
+    uint32_t num_workers = std::max(config_.num_workers, static_cast<uint32_t>(8));
 
     std::atomic<uint64_t> current_offset{0};
     std::atomic<uint64_t> pages_found{0};
