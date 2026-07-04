@@ -213,8 +213,9 @@ uint64_t Ext4Recovery::inode_to_disk_offset(uint32_t group_index, uint32_t local
     // Use cached values (thread-safe)
     uint32_t block_size = block_size_;
     uint16_t inode_size = inode_size_;
+    uint32_t blocks_per_group = blocks_per_group_;
 
-    if (block_size == 0 || inode_size == 0) {
+    if (block_size == 0 || inode_size == 0 || blocks_per_group == 0) {
         return 0;
     }
 
@@ -227,6 +228,17 @@ uint64_t Ext4Recovery::inode_to_disk_offset(uint32_t group_index, uint32_t local
                                 (static_cast<uint64_t>(le32toh(desc.bg_inode_table_hi)) << 32);
 
     if (inode_table_block == 0) {
+        return 0;
+    }
+
+    // Safety check: inode_table_block should be within the group
+    // Each group has blocks_per_group blocks, starting at group_index * blocks_per_group
+    uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group;
+    uint64_t group_end_block = group_start_block + blocks_per_group;
+
+    if (inode_table_block < group_start_block || inode_table_block >= group_end_block) {
+        // Invalid inode table block - outside group bounds
+        // This can happen with corrupted filesystems
         return 0;
     }
 
@@ -526,11 +538,21 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
         }
 
         // Read inode bitmap and scan deleted inodes
-        // NOTE: Temporarily disabled due to crashes - needs more investigation
+        // This is now safer with bounds checking in inode_to_disk_offset
         if (config_.scan_deleted_inodes) {
-            // Inode scanning disabled for now - crashes in read_inode
-            // The crash appears to be in inode_to_disk_offset or read_inode
-            // Likely cause: invalid inode table block number from group descriptor
+            try {
+                std::vector<uint8_t> inode_bitmap = read_inode_bitmap(group_index);
+                if (!inode_bitmap.empty()) {
+                    // Scan deleted inodes (those with bit=0 in bitmap but have data)
+                    scan_deleted_inodes_safe(group_index, inode_bitmap);
+                }
+            } catch (const std::exception& e) {
+                // Log and continue on error
+                if (config_.verbose) {
+                    std::cout << "[WARN] Inode scan failed for group " << group_index
+                              << ": " << e.what() << "\n";
+                }
+            }
         }
 
         // Progress reporting
@@ -619,6 +641,134 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
                         std::lock_guard<std::mutex> lock(result_mutex_);
                         result_queue_.push({index_id, std::move(block_info)});
                         blocks_found_.fetch_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    close(fd);
+#endif
+}
+
+// ==================== Safe Deleted Inode Scanning ====================
+
+void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vector<uint8_t>& inode_bitmap) {
+#ifdef __linux__
+    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+
+    // Use cached values (thread-safe)
+    uint32_t inodes_per_group = inodes_per_group_;
+    uint16_t inode_size = inode_size_;
+    uint32_t block_size = block_size_;
+
+    // Safety checks
+    if (inodes_per_group == 0 || inode_size == 0 || block_size == 0) {
+        close(fd);
+        return;
+    }
+
+    // Calculate maximum disk offset for safety
+    uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group_ * block_size;
+
+    // Scan for potential deleted inodes
+    // Focus on inodes that were regular files (potential MySQL data files)
+    for (uint32_t local_inode = 1; local_inode < inodes_per_group; local_inode++) {
+        // Check if inode is marked as free in bitmap
+        uint32_t byte_idx = local_inode / 8;
+        uint32_t bit_idx = local_inode % 8;
+
+        if (byte_idx >= inode_bitmap.size()) {
+            break;  // Safety check
+        }
+
+        bool is_free = (inode_bitmap[byte_idx] & (1 << bit_idx)) == 0;
+
+        if (!is_free) {
+            continue;  // Skip allocated inodes
+        }
+
+        // Try to read the inode safely
+        uint64_t inode_offset = inode_to_disk_offset(group_index, local_inode);
+        if (inode_offset == 0 || inode_offset >= max_offset) {
+            continue;  // Invalid or out-of-bounds offset
+        }
+
+        ext4_inode inode_raw;
+        memset(&inode_raw, 0, sizeof(inode_raw));
+
+        // Read with safety limit
+        ssize_t bytes_read = pread(fd, &inode_raw, std::min(inode_size, static_cast<uint16_t>(sizeof(inode_raw))), inode_offset);
+
+        if (bytes_read <= 0) {
+            continue;  // Read failed
+        }
+
+        // Check if this was a regular file with data
+        uint16_t mode = le16toh(inode_raw.i_mode);
+        uint32_t dtime = le32toh(inode_raw.i_dtime);
+        uint16_t links_count = le16toh(inode_raw.i_links_count);
+        uint64_t file_size = le32toh(inode_raw.i_size_lo) |
+                            (static_cast<uint64_t>(le32toh(inode_raw.i_size_hi)) << 32);
+
+        // Check for deleted regular files with size matching InnoDB data
+        constexpr uint16_t EXT4_S_IFREG = 0x8000;  // Regular file type
+        bool is_regular_file = (mode & EXT4_S_IFREG) != 0;
+        bool is_deleted = (dtime > 0) || (links_count == 0) || (mode == 0);
+
+        // Only process deleted regular files with potential InnoDB data
+        if (is_deleted && file_size >= config_.page_size) {
+            // Parse extents to find data blocks
+            std::vector<ext4_extent> extents = parse_extents(inode_raw);
+
+            for (const auto& ext : extents) {
+                uint32_t ext_len = le16toh(ext.ee_len);
+                uint32_t ext_start_lo = le32toh(ext.ee_start_lo);
+                uint16_t ext_start_hi = le16toh(ext.ee_start_hi);
+
+                uint64_t ext_start = ext_start_lo | (static_cast<uint64_t>(ext_start_hi) << 32);
+
+                if (ext_len == 0 || ext_start == 0) {
+                    continue;
+                }
+
+                // Read blocks from this extent
+                for (uint32_t blk = 0; blk < ext_len && blk < 1000; blk++) {
+                    uint64_t block_num = ext_start + blk;
+                    uint64_t disk_offset = block_num * block_size;
+
+                    if (disk_offset + config_.page_size > max_offset) {
+                        break;  // Safety check
+                    }
+
+                    std::vector<uint8_t> page_data(config_.page_size);
+                    ssize_t page_read = pread(fd, page_data.data(), config_.page_size, disk_offset);
+
+                    if (page_read == config_.page_size) {
+                        // Check for InnoDB INDEX page
+                        if (page_data.size() >= 26) {
+                            uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+
+                            if (page_type == FIL_PAGE_INDEX) {
+                                uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+
+                                if (index_id > 0 && index_id < 1000000000000) {
+                                    Ext4BlockInfo block_info;
+                                    block_info.block_number = block_num;
+                                    block_info.disk_offset = disk_offset;
+                                    block_info.block_group = group_index;
+                                    block_info.is_freed = true;
+                                    block_info.data = std::move(page_data);
+
+                                    std::lock_guard<std::mutex> lock(result_mutex_);
+                                    result_queue_.push({index_id, std::move(block_info)});
+                                    blocks_found_.fetch_add(1);
+                                }
+                            }
+                        }
                     }
                 }
             }

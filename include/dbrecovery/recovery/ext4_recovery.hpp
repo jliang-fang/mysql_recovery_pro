@@ -345,6 +345,9 @@ private:
     // Scan freed blocks in block bitmap
     void scan_freed_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap);
 
+    // Safe inode scanning with bounds checking
+    void scan_deleted_inodes_safe(uint32_t group_index, const std::vector<uint8_t>& inode_bitmap);
+
     // Worker thread for parallel group scanning
     void group_worker_thread(uint32_t worker_id,
                              std::function<void(double, const std::string&)> progress);
