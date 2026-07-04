@@ -49,10 +49,13 @@ public:
         bool scan_frm_files = true;   // 扫描FRM文件签名
         bool scan_sdi_pages = true;   // 扫描SDI页
         bool use_page_aligned_scan = true; // 使用页对齐扫描（提升性能）
+        bool scan_data_patterns = true; // 扫描数据模式（用于删除文件恢复）
         uint32_t progress_interval_ms = 1000; // 进度报告间隔（毫秒）
         // TRUNCATE恢复支持: 指定要恢复的index_id列表
         std::vector<uint64_t> target_index_ids;  // 只恢复指定的index_id
         std::vector<uint64_t> exclude_index_ids; // 排除已知的系统表index_id
+        // 数据模式匹配（用于删除文件恢复）
+        std::vector<std::string> data_patterns;  // 要搜索的数据模式
     };
 
     // 页类型枚举

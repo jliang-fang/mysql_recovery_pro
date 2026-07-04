@@ -483,10 +483,13 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                                ptype == 0x0003 || ptype == 0x0005 || ptype == 0x0008);
 
             if (!quick_valid) {
-                // 额外检查：ibd2sql风格的infimum/supremum检查
-                // 在offset 0xc063检查"infimum"字符串
-                if (offset + 0xc078 <= bytes_read) {
-                    const uint8_t* infimum_pos = page_data + 0xc063;
+                // 额外检查：infimum/supremum系统记录检查
+                // infimum记录在offset 54，记录头5字节后是"infimum\0"
+                // 所以"infimum"字符串在offset 54+5=59
+                // 参考: page_defs.hpp PAGE_INFIMUM_REC_OFFSET_ABS = 54
+                constexpr uint16_t INFIMUM_STRING_OFFSET = 59;  // 54 + 5 bytes record header
+                if (offset + INFIMUM_STRING_OFFSET + 8 <= bytes_read) {
+                    const uint8_t* infimum_pos = page_data + INFIMUM_STRING_OFFSET;
                     if (memcmp(infimum_pos, "infimum", 7) == 0) {
                         // 找到infimum标记，可能是一个有效的INDEX页
                         // 即使页类型不在标准列表中
@@ -587,6 +590,46 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 for (size_t frm_offset = 0; frm_offset + 10 <= config_.page_size; frm_offset++) {
                     if (is_frm_signature(page_data + frm_offset, config_.page_size - frm_offset)) {
                         pages_found_.fetch_add(1);
+                    }
+                }
+            }
+        }
+
+        // 数据模式扫描：用于删除文件恢复
+        // 当指定了data_patterns时，搜索这些模式并提取周围的数据块
+        if (config_.scan_data_patterns && !config_.data_patterns.empty()) {
+            for (const auto& pattern : config_.data_patterns) {
+                if (pattern.empty()) continue;
+
+                // 在当前缓冲区中搜索模式
+                for (size_t search_offset = 0; search_offset + pattern.size() <= bytes_read; search_offset++) {
+                    if (memcmp(buffer.data() + search_offset, pattern.data(), pattern.size()) == 0) {
+                        // 找到匹配！
+                        // 计算包含该模式的页对齐数据块
+                        uint64_t abs_offset = chunk_start + search_offset;
+                        uint64_t page_start = (abs_offset / config_.page_size) * config_.page_size;
+
+                        // 确保不越界
+                        if (search_offset >= (abs_offset - page_start)) {
+                            size_t local_page_start = search_offset - (abs_offset - page_start);
+                            if (local_page_start + config_.page_size <= bytes_read) {
+                                const uint8_t* potential_page = buffer.data() + local_page_start;
+
+                                // 尝试将其作为INDEX页解析
+                                uint64_t index_id = extract_index_id(potential_page, config_.page_size);
+                                if (index_id > 0) {
+                                    // 收集该页
+                                    std::vector<uint8_t> page_copy(config_.page_size);
+                                    std::memcpy(page_copy.data(), potential_page, config_.page_size);
+
+                                    {
+                                        std::lock_guard<std::mutex> lock(pages_mutex_);
+                                        collected_pages_[index_id].push_back(std::move(page_copy));
+                                    }
+                                    pages_found_.fetch_add(1);
+                                }
+                            }
+                        }
                     }
                 }
             }
