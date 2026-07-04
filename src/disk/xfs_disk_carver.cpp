@@ -299,6 +299,59 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
                       << " (free inodes: " << be32toh(agi.agi_freecount) << ")\n";
         }
 
+        // Strategy 1: Scan unlinked inode list (most recent deleted files)
+        // XFS stores recently deleted inodes in agi_unlinked hash buckets
+        // These inodes have di_mode=0 but still have extent data
+        // Note: agi_unlinked may contain NULL entries (0xFFFFFFFF = XFS_NULL_INO)
+        constexpr uint32_t XFS_NULL_INO = 0xFFFFFFFF;
+
+        for (uint32_t bucket = 0; bucket < XFS_AGI_UNLINKED_BUCKETS; bucket++) {
+            uint32_t unlinked_ino = be32toh(agi.agi_unlinked[bucket]);
+
+            // Skip NULL inode entries (empty buckets)
+            if (unlinked_ino == 0 || unlinked_ino == XFS_NULL_INO) continue;
+
+            if (config_.verbose) {
+                std::cout << "[Worker " << worker_id << "] Found unlinked inode in bucket "
+                          << bucket << ": inode " << unlinked_ino << "\n";
+            }
+
+            // Convert absolute inode number to AG-relative inode number
+            // XFS inode number = (ag_index * ag_inodes) + ag_inode
+            // ag_inodes = ag_blocks * inodes_per_block
+            uint64_t inodes_per_ag = static_cast<uint64_t>(ag_blocks) *
+                                     static_cast<uint64_t>(block_size / inode_size);
+            uint32_t unlinked_ag = unlinked_ino / inodes_per_ag;
+            uint32_t ag_inode = unlinked_ino % inodes_per_ag;
+
+            // Only process if unlinked inode belongs to current AG
+            if (unlinked_ag != ag_index) continue;
+
+            auto extent_info = read_inode(ag_index, ag_inode);
+            if (extent_info.has_value()) {
+                std::vector<XfsPageInfo> recovered_pages;
+                for (const auto& ext : extent_info->extents) {
+                    if (ext.state == XFS_EXT_UNWRITTEN) continue;
+                    std::vector<uint8_t> extent_data = read_extent_data(ext);
+                    if (!extent_data.empty()) {
+                        auto pages = parse_pages_from_extent(extent_data, extent_info->inode_number);
+                        for (auto& page : pages) {
+                            recovered_pages.push_back(std::move(page));
+                        }
+                    }
+                }
+                if (!recovered_pages.empty()) {
+                    std::lock_guard<std::mutex> lock(result_mutex_);
+                    last_result_.recovered_extents.push_back(*extent_info);
+                    inodes_found_.fetch_add(1);
+                    for (auto& page : recovered_pages) {
+                        last_result_.pages_by_index_id[page.index_id].push_back(std::move(page));
+                        last_result_.pages_recovered++;
+                    }
+                }
+            }
+        }
+
         // Check if free inode btree exists (FINOBT feature)
         uint32_t features_ro_compat = be32toh(superblock_.sb_features_ro_compat);
         bool has_finobt = (features_ro_compat & 0x01) != 0;  // XFS_SB_FEAT_RO_COMPAT_FINOBT
