@@ -1483,12 +1483,46 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_sch
             } else if (!rec.fields[i].str_value.empty()) {
                 record[field_name] = rec.fields[i].str_value;
             } else if (!rec.fields[i].raw_bytes.empty()) {
-                std::ostringstream hex;
-                for (uint8_t b : rec.fields[i].raw_bytes) {
-                    hex << std::hex << std::setw(2) << std::setfill('0')
-                        << static_cast<int>(b);
+                // For raw bytes, try to extract readable strings
+                // This helps with schema-less recovery where fields are concatenated
+                std::string extracted;
+                const auto& raw = rec.fields[i].raw_bytes;
+
+                // Look for printable string sequences
+                size_t str_start = 0;
+                bool in_string = false;
+                for (size_t j = 0; j < raw.size(); j++) {
+                    uint8_t b = raw[j];
+                    bool printable = (b >= 32 && b < 127);
+
+                    if (printable && !in_string) {
+                        str_start = j;
+                        in_string = true;
+                    } else if (!printable && in_string) {
+                        if (j - str_start >= 4) {  // Min 4 chars
+                            if (!extracted.empty()) extracted += "|";
+                            extracted += std::string(reinterpret_cast<const char*>(raw.data() + str_start), j - str_start);
+                        }
+                        in_string = false;
+                    }
                 }
-                record[field_name] = hex.str();
+                // Handle string at end
+                if (in_string && raw.size() - str_start >= 4) {
+                    if (!extracted.empty()) extracted += "|";
+                    extracted += std::string(reinterpret_cast<const char*>(raw.data() + str_start), raw.size() - str_start);
+                }
+
+                if (!extracted.empty()) {
+                    record[field_name] = extracted;
+                } else {
+                    // Fall back to hex
+                    std::ostringstream hex;
+                    for (uint8_t b : raw) {
+                        hex << std::hex << std::setw(2) << std::setfill('0')
+                            << static_cast<int>(b);
+                    }
+                    record[field_name] = hex.str();
+                }
             }
         }
         if (!record.empty()) {
