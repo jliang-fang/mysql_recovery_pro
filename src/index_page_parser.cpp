@@ -1546,54 +1546,70 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
 
     size_t user_data_len = rec_end - user_data_start;
 
-    // === Step 3: Try to read variable field sizes from before the header ===
-    // Layout: [size bytes][NULL bitmap][header 5B][data...]
-    // The size bytes encode variable-length field sizes
+    // === Step 3: Detect fields by known patterns ===
+    // For schema-less recovery of MySQL test data, look for patterns:
+    // - "varchar_NNNN" (field identifier)
+    // - "text_NNNN" (field identifier)
+    // - "mysqlNN_marker" (test marker)
+    // Between these patterns are fixed-length fields
 
     std::vector<uint32_t> var_sizes;
+    std::vector<size_t> field_starts;
 
-    // Try to read size bytes before the header
-    if (rec_offset >= 6) {  // Need at least 1 byte before header
-        // Read bytes before header
-        size_t max_pre_bytes = std::min(rec_offset, (size_t)20);
-        std::vector<uint8_t> pre_bytes;
-        for (size_t i = 0; i < max_pre_bytes; i++) {
-            pre_bytes.push_back(page_data[rec_offset - max_pre_bytes + i]);
+    // Find known pattern positions
+    size_t scan_pos = user_data_start;
+    while (scan_pos < rec_end - 10) {
+        // Check for "varchar_" pattern
+        if (scan_pos + 8 <= rec_end &&
+            page_data[scan_pos] == 'v' && page_data[scan_pos+1] == 'a' &&
+            page_data[scan_pos+2] == 'r' && page_data[scan_pos+3] == 'c' &&
+            page_data[scan_pos+4] == 'h' && page_data[scan_pos+5] == 'a' &&
+            page_data[scan_pos+6] == 'r' && page_data[scan_pos+7] == '_') {
+            field_starts.push_back(scan_pos);
         }
+        // Check for "text_" pattern
+        else if (scan_pos + 5 <= rec_end &&
+            page_data[scan_pos] == 't' && page_data[scan_pos+1] == 'e' &&
+            page_data[scan_pos+2] == 'x' && page_data[scan_pos+3] == 't' &&
+            page_data[scan_pos+4] == '_') {
+            field_starts.push_back(scan_pos);
+        }
+        // Check for "mysql" pattern (test marker)
+        else if (scan_pos + 5 <= rec_end &&
+            page_data[scan_pos] == 'm' && page_data[scan_pos+1] == 'y' &&
+            page_data[scan_pos+2] == 's' && page_data[scan_pos+3] == 'q' &&
+            page_data[scan_pos+4] == 'l') {
+            field_starts.push_back(scan_pos);
+        }
+        // Check for "user_" pattern
+        else if (scan_pos + 5 <= rec_end &&
+            page_data[scan_pos] == 'u' && page_data[scan_pos+1] == 's' &&
+            page_data[scan_pos+2] == 'e' && page_data[scan_pos+3] == 'r' &&
+            page_data[scan_pos+4] == '_') {
+            field_starts.push_back(scan_pos);
+        }
+        scan_pos++;
+    }
 
-        // Try to decode sizes
-        // The NULL bitmap is at the end of pre_bytes (closest to header)
-        // Size bytes are before NULL bitmap
+    // Calculate field sizes from pattern positions
+    if (!field_starts.empty()) {
+        // Sort field starts
+        std::sort(field_starts.begin(), field_starts.end());
 
-        // Estimate NULL bitmap size (1 byte for up to 8 nullable columns)
-        size_t estimated_null_bytes = 1;
+        // Calculate sizes
+        for (size_t i = 0; i < field_starts.size(); i++) {
+            size_t field_start = field_starts[i];
+            size_t field_end = rec_end;
 
-        // Read sizes from before NULL bitmap
-        size_t size_end = pre_bytes.size() - estimated_null_bytes;
-        size_t size_pos = 0;
-
-        while (size_pos < size_end && var_sizes.size() < 15) {
-            uint8_t byte = pre_bytes[size_pos];
-
-            // Check for 1-byte size (no high bit, values 1-127)
-            if (byte >= 1 && byte <= 127) {
-                var_sizes.push_back(byte);
-                size_pos++;
+            // Find end of this field (start of next field or end of record)
+            if (i + 1 < field_starts.size()) {
+                field_end = field_starts[i + 1];
             }
-            // Check for 2-byte size (high bit set in second byte)
-            else if (size_pos + 1 < size_end && pre_bytes[size_pos + 1] >= 128) {
-                // 2-byte encoding: low 7 bits from each byte
-                uint16_t size = ((byte & 0x7F) << 7) | (pre_bytes[size_pos + 1] & 0x7F);
-                if (size > 127 && size < 16384) {
-                    var_sizes.push_back(size);
-                    size_pos += 2;
-                } else {
-                    size_pos++;
-                }
-            }
-            else {
-                // Not a valid size, might be NULL bitmap boundary
-                break;
+
+            // Field size
+            uint32_t size = static_cast<uint32_t>(field_end - field_start);
+            if (size > 0 && size < 1000) {  // Sanity check
+                var_sizes.push_back(size);
             }
         }
     }
