@@ -209,10 +209,13 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
         }
     }
 
-    // Strategy 2: Fallback signature scan
-    if (config_.signature_scan && result.pages_recovered == 0) {
+    // Strategy 2: Always run signature scan for maximum recovery
+    // Signature scan finds pages that inode scan might miss
+    if (config_.signature_scan) {
+        size_t pages_before = result.pages_recovered;
         if (config_.verbose) {
-            std::cout << "[INFO] No pages found via inode scan, performing signature scan\n";
+            std::cout << "[INFO] Running signature scan for additional pages (found "
+                      << pages_before << " via inode scan)\n";
         }
         signature_scan(progress);
 
@@ -220,6 +223,11 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
             std::lock_guard<std::mutex> lock(result_mutex_);
             result.pages_by_index_id = last_result_.pages_by_index_id;
             result.pages_recovered = last_result_.pages_recovered;
+        }
+
+        if (config_.verbose) {
+            std::cout << "[INFO] Signature scan found "
+                      << (result.pages_recovered - pages_before) << " additional pages\n";
         }
     }
 
@@ -966,9 +974,20 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
 
             size_t scan_size = bytes_read;
 
-            // Scan for pages at block-aligned offsets
-            for (size_t i = 0; i + config_.page_size <= scan_size; i += block_size) {
+            // Scan for pages - check every 512 bytes (sector size) for maximum coverage
+            // InnoDB pages may not always be block-aligned after deletion
+            size_t scan_step = 512;  // Sector size for thorough scanning
+
+            for (size_t i = 0; i + config_.page_size <= scan_size; i += scan_step) {
                 const uint8_t* page_data = buffer.data() + i;
+
+                // Quick filter: check if this looks like a valid page
+                // FIL header starts with page number (offset 4-8) and LSN (offset 8-16)
+                // Check LSN > 0 to filter out zeroed areas
+                uint64_t lsn = read_be<uint64_t>(page_data, 16);
+                if (lsn == 0) {
+                    continue;  // Skip zeroed areas
+                }
 
                 // Check for FRM file signature
                 if (i + 10 <= scan_size && std::memcmp(page_data, FRM_SIGNATURE, 10) == 0) {
@@ -997,13 +1016,19 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     uint64_t index_id = 0;
                     if (page_type == FIL_PAGE_INDEX && config_.page_size >= 74) {
                         index_id = read_be<uint64_t>(page_data, 66);
-                        if (index_id == 0) {
-                            continue;
-                        }
+                        // Accept all INDEX pages, even with index_id=0
+                        // (may be system tables or partially corrupted)
                     }
 
                     if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
                         index_id = 0xFFFFFF00 | page_type;
+                    }
+
+                    // Validate page by checking LSN consistency
+                    // LSN should be > 0 for valid pages
+                    uint64_t lsn = read_be<uint64_t>(page_data, 16);
+                    if (lsn == 0 && index_id == 0) {
+                        continue;  // Skip obviously invalid pages
                     }
 
                     XfsPageInfo page_info;
