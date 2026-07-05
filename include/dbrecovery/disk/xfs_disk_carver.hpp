@@ -470,6 +470,9 @@ private:
     // Direct signature scan fallback
     void signature_scan(std::function<void(double, const std::string&)> progress);
 
+    // Raw data pattern scan for non-page-aligned records
+    void raw_data_scan(std::function<void(double, const std::string&)> progress);
+
     // Read data from extent
     std::vector<uint8_t> read_extent_data(const xfs_extent& ext);
 
