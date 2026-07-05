@@ -2509,19 +2509,30 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
         }
     }
 
-    // If still recovering less than expected, try brute force scan
-    if (expected_recs > 0 && records.size() < expected_recs * 2 / 3) {
-        auto try_records = parse_page_try(page_data, page_size, page_no);
-        if (try_records.size() > records.size()) {
-            std::set<uint16_t> seen_heap_no;
-            for (const auto& rec : records) {
-                seen_heap_no.insert(rec.heap_no);
+    // CRITICAL FIX: Always try brute force scan to catch any missed records
+    // Even when recovery rate seems good (only missing ~1 per page), we need to catch all
+    // The page directory method may miss records at chain boundaries
+    auto try_records = parse_page_try(page_data, page_size, page_no);
+    if (try_records.size() > 0) {
+        std::set<uint16_t> seen_heap_no;
+        for (const auto& rec : records) {
+            seen_heap_no.insert(rec.heap_no);
+        }
+        size_t added = 0;
+        for (const auto& rec : try_records) {
+            if (seen_heap_no.insert(rec.heap_no).second) {
+                records.push_back(rec);
+                added++;
             }
-            for (const auto& rec : try_records) {
-                if (seen_heap_no.insert(rec.heap_no).second) {
-                    records.push_back(rec);
-                }
-            }
+        }
+        // Debug output
+        static int merge_debug = 0;
+        if (merge_debug < 5 && added > 0) {
+            std::cerr << "[DEBUG MERGE] page_no=" << page_no
+                      << " chain=" << records.size() - added
+                      << " try_added=" << added
+                      << " total=" << records.size() << "\n";
+            merge_debug++;
         }
     }
 
