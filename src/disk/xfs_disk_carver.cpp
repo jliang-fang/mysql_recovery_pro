@@ -1045,6 +1045,62 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     pages_found.fetch_add(1);
                 }
             }
+
+            // Strategy 3: Data pattern scan for non-page-aligned records
+            // Look for InnoDB record patterns in raw data blocks
+            // This helps recover data from fragmented/corrupted pages
+            if (config_.signature_scan) {
+                for (size_t i = 0; i + 8192 <= scan_size; i += 4096) {
+                    const uint8_t* block_data = buffer.data() + i;
+
+                    // Look for infimum/supremum markers which indicate InnoDB data
+                    // These are reliable markers for INDEX page data even if header is corrupted
+                    bool has_infimum = false;
+                    bool has_supremum = false;
+
+                    // Scan for "infimum" and "supremum" strings in the block
+                    for (size_t j = 50; j + 20 < 8192; j++) {
+                        if (block_data[j] == 'i' && block_data[j+1] == 'n' &&
+                            block_data[j+2] == 'f' && block_data[j+3] == 'i' &&
+                            block_data[j+4] == 'm' && block_data[j+5] == 'u' &&
+                            block_data[j+6] == 'm') {
+                            has_infimum = true;
+                        }
+                        if (block_data[j] == 's' && block_data[j+1] == 'u' &&
+                            block_data[j+2] == 'p' && block_data[j+3] == 'r' &&
+                            block_data[j+4] == 'e' && block_data[j+5] == 'm' &&
+                            block_data[j+6] == 'u' && block_data[j+7] == 'm') {
+                            has_supremum = true;
+                        }
+                    }
+
+                    // If we found infimum/supremum, this is likely an INDEX page with corrupted header
+                    if (has_infimum && has_supremum) {
+                        // Try to extract records by scanning the entire block
+                        // Use a special index_id to indicate pattern-scanned pages
+                        uint64_t pattern_index_id = 0xFFFF0000 | ((chunk_start + i) & 0xFFFF);
+
+                        XfsPageInfo page_info;
+                        page_info.disk_offset = chunk_start + i;
+                        page_info.page_type = FIL_PAGE_INDEX;  // Treat as INDEX page
+                        page_info.index_id = pattern_index_id;
+                        page_info.page_no = 0;
+                        page_info.data.resize(config_.page_size);
+                        // Copy 16KB from this position
+                        size_t copy_size = std::min(static_cast<size_t>(config_.page_size), scan_size - i);
+                        std::memcpy(page_info.data.data(), block_data, copy_size);
+                        // Zero-fill if we don't have enough data
+                        if (copy_size < config_.page_size) {
+                            std::memset(page_info.data.data() + copy_size, 0, config_.page_size - copy_size);
+                        }
+
+                        std::lock_guard<std::mutex> lock(result_mutex_);
+                        last_result_.pages_by_index_id[pattern_index_id].push_back(std::move(page_info));
+                        last_result_.pages_recovered++;
+                        pages_found.fetch_add(1);
+                    }
+                }
+            }
         }
 
         close(worker_fd);
