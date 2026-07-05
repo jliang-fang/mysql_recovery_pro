@@ -1100,7 +1100,13 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     size_t data_end = data_start;
 
     auto page_hdr = parse_page_header(page_data, page_size);
-    if (!page_hdr) return std::nullopt;
+    // CRITICAL FIX: Don't fail if page_hdr is invalid
+    // For disk carving / parse_page_try, we need to parse records even with corrupted headers
+    // Use default values if page header is invalid
+    uint16_t heap_top = page_hdr ? page_hdr->heap_top : (page_size - 8);
+    if (heap_top < 100 || heap_top > page_size - 8) {
+        heap_top = page_size - 8;
+    }
 
     if (is_compact) {
         auto hdr = parse_new_record_header(page_data, rec_offset, page_size);
@@ -1136,20 +1142,20 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
                     expected_size += (n_nullable_ + 7) / 8 + n_variable_ + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
                 }
                 // Cap data_end to expected_size if heap_top gives unreasonable length
-                size_t heap_top_len = page_hdr->heap_top - data_start;
+                size_t heap_top_len = heap_top - data_start;
                 // Use 2x expected_size as threshold (variable fields can be larger than estimate)
                 if (expected_size > 0 && heap_top_len > expected_size * 2) {
                     // Use expected size instead of heap_top for last record
                     data_end = data_start + expected_size * 2;  // Allow 2x buffer for variable fields
                 } else {
-                    data_end = page_hdr->heap_top;
+                    data_end = heap_top;
                 }
             } else {
                 // Out of bounds - likely last record on page
-                data_end = page_hdr->heap_top;
+                data_end = heap_top;
             }
         } else {
-            data_end = page_hdr->heap_top;
+            data_end = heap_top;
         }
     } else {
         auto hdr = parse_old_record_header(page_data, rec_offset, page_size);
@@ -1158,7 +1164,7 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         if (hdr->next_offset != 0 && hdr->next_offset < page_size && hdr->next_offset > data_start) {
             data_end = hdr->next_offset - REC_HEADER_SIZE_OLD;
         } else {
-            data_end = page_hdr->heap_top;
+            data_end = heap_top;
         }
     }
 
@@ -1168,8 +1174,8 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
 
     // CRITICAL FIX: data_end should not exceed heap_top!
     // heap_top is the end of record data area - reading past it means wrong record chain
-    if (data_end > page_hdr->heap_top) {
-        data_end = page_hdr->heap_top;
+    if (data_end > heap_top) {
+        data_end = heap_top;
     }
 
     if (data_end - data_start <= 65536) {
