@@ -1552,244 +1552,195 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
 
     size_t user_data_len = rec_end - user_data_start;
 
-    // === Step 3: Detect fields by known patterns ===
-    // For schema-less recovery of MySQL test data, look for patterns:
-    // - "varchar_NNNN" (field identifier)
-    // - "text_NNNN" (field identifier)
-    // - "mysqlNN_marker" (test marker)
-    // Between these patterns are fixed-length fields
+    // === Step 3: Try to parse variable-length fields using InnoDB encoding ===
+    // InnoDB variable-length encoding:
+    // - If byte <= 127 (0x7F): 1-byte length, value is the byte itself
+    // - If byte > 127: 2-byte length, value = (byte & 0x7F) | (next_byte << 7)
+    // Reference: ibd2sql index.py read_reverse() for size bytes
 
-    std::vector<uint32_t> var_sizes;
-    std::vector<size_t> field_starts;
-
-    // Find known pattern positions
-    size_t scan_pos = user_data_start;
-    while (scan_pos < rec_end - 10) {
-        // Check for "varchar_" pattern
-        if (scan_pos + 8 <= rec_end &&
-            page_data[scan_pos] == 'v' && page_data[scan_pos+1] == 'a' &&
-            page_data[scan_pos+2] == 'r' && page_data[scan_pos+3] == 'c' &&
-            page_data[scan_pos+4] == 'h' && page_data[scan_pos+5] == 'a' &&
-            page_data[scan_pos+6] == 'r' && page_data[scan_pos+7] == '_') {
-            field_starts.push_back(scan_pos);
-        }
-        // Check for "text_" pattern
-        else if (scan_pos + 5 <= rec_end &&
-            page_data[scan_pos] == 't' && page_data[scan_pos+1] == 'e' &&
-            page_data[scan_pos+2] == 'x' && page_data[scan_pos+3] == 't' &&
-            page_data[scan_pos+4] == '_') {
-            field_starts.push_back(scan_pos);
-        }
-        // Check for "mysql" pattern (test marker)
-        else if (scan_pos + 5 <= rec_end &&
-            page_data[scan_pos] == 'm' && page_data[scan_pos+1] == 'y' &&
-            page_data[scan_pos+2] == 's' && page_data[scan_pos+3] == 'q' &&
-            page_data[scan_pos+4] == 'l') {
-            field_starts.push_back(scan_pos);
-        }
-        // Check for "user_" pattern
-        else if (scan_pos + 5 <= rec_end &&
-            page_data[scan_pos] == 'u' && page_data[scan_pos+1] == 's' &&
-            page_data[scan_pos+2] == 'e' && page_data[scan_pos+3] == 'r' &&
-            page_data[scan_pos+4] == '_') {
-            field_starts.push_back(scan_pos);
-        }
-        scan_pos++;
-    }
-
-    // Calculate field sizes from pattern positions
-    if (!field_starts.empty()) {
-        // Sort field starts
-        std::sort(field_starts.begin(), field_starts.end());
-
-        // Calculate sizes
-        for (size_t i = 0; i < field_starts.size(); i++) {
-            size_t field_start = field_starts[i];
-            size_t field_end = rec_end;
-
-            // Find end of this field (start of next field or end of record)
-            if (i + 1 < field_starts.size()) {
-                field_end = field_starts[i + 1];
-            }
-
-            // Field size
-            uint32_t size = static_cast<uint32_t>(field_end - field_start);
-            if (size > 0 && size < 1000) {  // Sanity check
-                var_sizes.push_back(size);
-            }
-        }
-    }
-
-    // === Step 4: Parse user data based on detected sizes ===
     size_t parse_pos = user_data_start;
 
-    // Calculate total variable field size
-    size_t total_var_size = 0;
-    for (auto sz : var_sizes) {
-        total_var_size += sz;
+    // Try parsing with length-prefix awareness
+    // For typical MySQL test table: col_int(4), col_varchar(var), col_text(var), col_marker(var)
+    // After PK + TRX + ROLL: [4 bytes int] [len prefix + varchar] [len prefix + text] [len prefix + marker]
+
+    // First try: parse fixed INT field (4 bytes) if present
+    if (parse_pos + 4 <= rec_end) {
+        // Check if next 4 bytes look like a signed INT (with InnoDB sign bit encoding)
+        uint32_t raw_int = read_be<uint32_t>(page_data, parse_pos);
+        // InnoDB stores INT with sign bit: positive values have 0x80 in high byte
+        bool likely_int = ((raw_int >> 24) & 0x80) != 0 || (raw_int >> 24) < 0x80;
+
+        if (likely_int) {
+            IndexFieldValue int_val;
+            int_val.type = IndexFieldValue::Type::INT_VAL;
+            // Convert from InnoDB sign encoding
+            int32_t decoded_int = static_cast<int32_t>(raw_int);
+            if ((raw_int >> 24) & 0x80) {
+                decoded_int = static_cast<int32_t>(raw_int ^ 0x80000000);
+            } else {
+                decoded_int = static_cast<int32_t>(raw_int) - 0x80000000;
+            }
+            int_val.int_value = decoded_int;
+            int_val.str_value = std::to_string(decoded_int);
+            int_val.raw_bytes.assign(page_data + parse_pos, page_data + parse_pos + 4);
+            result.push_back(int_val);
+            parse_pos += 4;
+        }
     }
 
-    // If we detected variable sizes, use them
-    if (!var_sizes.empty() && total_var_size <= user_data_len) {
-        // Parse variable-length fields
-        for (size_t i = 0; i < var_sizes.size() && parse_pos < user_data_start + total_var_size; i++) {
-            uint32_t sz = var_sizes[i];
-            if (sz == 0 || parse_pos + sz > rec_end) continue;
+    // === Step 4: Parse variable-length fields ===
+    // Read remaining fields using length-prefix detection
+    while (parse_pos < rec_end - 1) {
+        // Check for length prefix
+        uint8_t first_byte = page_data[parse_pos];
+        uint32_t field_len = 0;
+        size_t len_prefix_size = 0;
 
-            IndexFieldValue val;
-            val.raw_bytes.assign(page_data + parse_pos, page_data + parse_pos + sz);
+        if (first_byte <= 127) {
+            // 1-byte length encoding
+            field_len = first_byte;
+            len_prefix_size = 1;
+        } else {
+            // 2-byte length encoding
+            if (parse_pos + 1 >= rec_end) break;
+            uint8_t second_byte = page_data[parse_pos + 1];
+            field_len = (first_byte & 0x7F) | (second_byte << 7);
+            len_prefix_size = 2;
+        }
 
-            // Check if it looks like string data
+        // Sanity check: field length should be reasonable
+        if (field_len == 0 || field_len > 1000) {
+            // Invalid length - try pattern-based parsing instead
+            break;
+        }
+
+        size_t data_start = parse_pos + len_prefix_size;
+        size_t data_end = data_start + field_len;
+
+        if (data_end > rec_end) {
+            // Length exceeds record boundary - truncate
+            field_len = static_cast<uint32_t>(rec_end - data_start);
+            data_end = rec_end;
+        }
+
+        if (field_len > 0) {
+            IndexFieldValue var_val;
+            var_val.raw_bytes.assign(page_data + data_start, page_data + data_end);
+
+            // Check if it's printable string
             size_t printable = 0;
-            for (size_t j = 0; j < sz; j++) {
-                uint8_t b = page_data[parse_pos + j];
+            for (size_t j = 0; j < field_len; j++) {
+                uint8_t b = page_data[data_start + j];
                 if (b >= 32 && b < 127) printable++;
             }
 
-            if (printable >= sz * 2 / 3) {
-                val.type = IndexFieldValue::Type::STRING_VAL;
-                val.str_value.assign(reinterpret_cast<const char*>(page_data + parse_pos), sz);
+            if (printable >= field_len * 2 / 3) {
+                var_val.type = IndexFieldValue::Type::STRING_VAL;
+                var_val.str_value.assign(reinterpret_cast<const char*>(page_data + data_start), field_len);
             } else {
-                val.type = IndexFieldValue::Type::BINARY_VAL;
+                var_val.type = IndexFieldValue::Type::BINARY_VAL;
             }
 
-            result.push_back(val);
-            parse_pos += sz;
+            result.push_back(var_val);
         }
+
+        parse_pos = data_end;
     }
 
-    // === Step 5: Parse fixed-length fields from the END backwards ===
-    size_t parse_end = rec_end;
-    std::vector<IndexFieldValue> fixed_fields;
+    // === Step 5: If length-prefix parsing failed, use pattern detection ===
+    if (result.size() <= 1 && user_data_len > 10) {
+        // Fall back to pattern-based parsing
+        std::vector<size_t> field_starts;
 
-    while (parse_end > parse_pos + 8) {
-        size_t remaining = parse_end - parse_pos;
+        size_t scan_pos = user_data_start;
+        while (scan_pos < rec_end - 10) {
+            // Check for "varchar_" pattern
+            if (scan_pos + 8 <= rec_end &&
+                page_data[scan_pos] == 'v' && page_data[scan_pos+1] == 'a' &&
+                page_data[scan_pos+2] == 'r' && page_data[scan_pos+3] == 'c' &&
+                page_data[scan_pos+4] == 'h' && page_data[scan_pos+5] == 'a' &&
+                page_data[scan_pos+6] == 'r' && page_data[scan_pos+7] == '_') {
+                field_starts.push_back(scan_pos);
+            }
+            // Check for "text_" pattern
+            else if (scan_pos + 5 <= rec_end &&
+                page_data[scan_pos] == 't' && page_data[scan_pos+1] == 'e' &&
+                page_data[scan_pos+2] == 'x' && page_data[scan_pos+3] == 't' &&
+                page_data[scan_pos+4] == '_') {
+                field_starts.push_back(scan_pos);
+            }
+            // Check for "mysql" pattern (test marker)
+            else if (scan_pos + 5 <= rec_end &&
+                page_data[scan_pos] == 'm' && page_data[scan_pos+1] == 'y' &&
+                page_data[scan_pos+2] == 's' && page_data[scan_pos+3] == 'q' &&
+                page_data[scan_pos+4] == 'l') {
+                field_starts.push_back(scan_pos);
+            }
+            // Check for "row_" pattern (test marker suffix)
+            else if (scan_pos + 4 <= rec_end &&
+                page_data[scan_pos] == 'r' && page_data[scan_pos+1] == 'o' &&
+                page_data[scan_pos+2] == 'w' && page_data[scan_pos+3] == '_') {
+                field_starts.push_back(scan_pos);
+            }
+            scan_pos++;
+        }
 
-        // Check for 8-byte BIGINT with sign bit
-        if (remaining >= 8) {
-            uint64_t val8 = read_be<uint64_t>(page_data, parse_end - 8);
-            if ((val8 >> 56) == 0x80 || (val8 >> 56) == 0x7F) {
-                IndexFieldValue fval;
-                fval.type = IndexFieldValue::Type::INT_VAL;
-                if ((val8 >> 56) == 0x80) {
-                    fval.int_value = static_cast<int64_t>(val8 ^ 0x8000000000000000ULL);
-                } else {
-                    fval.int_value = static_cast<int64_t>(val8) - 0x8000000000000000LL;
+        // Parse fields based on detected patterns
+        if (!field_starts.empty()) {
+            std::sort(field_starts.begin(), field_starts.end());
+
+            for (size_t i = 0; i < field_starts.size(); i++) {
+                size_t field_start = field_starts[i];
+                size_t field_end = rec_end;
+
+                if (i + 1 < field_starts.size()) {
+                    field_end = field_starts[i + 1];
                 }
-                fval.str_value = std::to_string(fval.int_value);
-                fval.raw_bytes.assign(page_data + parse_end - 8, page_data + parse_end);
-                fixed_fields.push_back(fval);
-                parse_end -= 8;
-                continue;
-            }
-        }
 
-        // Check for 4-byte INT or TIMESTAMP
-        if (remaining >= 4) {
-            uint32_t val4 = read_be<uint32_t>(page_data, parse_end - 4);
-
-            // INT with sign bit
-            if ((val4 >> 24) == 0x80 || (val4 >> 24) == 0x7F) {
-                IndexFieldValue fval;
-                fval.type = IndexFieldValue::Type::INT_VAL;
-                if ((val4 >> 24) == 0x80) {
-                    fval.int_value = static_cast<int64_t>(val4 ^ 0x80000000);
-                } else {
-                    fval.int_value = static_cast<int64_t>(val4) - 0x80000000LL;
+                // Also need to handle the gap before first pattern (could be fixed field)
+                if (i == 0 && field_start > user_data_start + 4) {
+                    // Gap before first pattern - might be INT field
+                    size_t gap = field_start - user_data_start;
+                    if (gap >= 4 && gap <= 8) {
+                        IndexFieldValue gap_val;
+                        gap_val.raw_bytes.assign(page_data + user_data_start, page_data + field_start);
+                        gap_val.type = IndexFieldValue::Type::BINARY_VAL;
+                        result.push_back(gap_val);
+                    }
                 }
-                fval.str_value = std::to_string(fval.int_value);
-                fval.raw_bytes.assign(page_data + parse_end - 4, page_data + parse_end);
-                fixed_fields.push_back(fval);
-                parse_end -= 4;
-                continue;
-            }
 
-            // TIMESTAMP
-            if (val4 >= 1577836800 && val4 <= 4102444800) {
-                time_t t = static_cast<time_t>(val4);
-                struct tm tm_buf;
-                gmtime_r(&t, &tm_buf);
-                char buf[32];
-                strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
+                uint32_t size = static_cast<uint32_t>(field_end - field_start);
+                if (size > 0 && size < 1000) {
+                    IndexFieldValue val;
+                    val.raw_bytes.assign(page_data + field_start, page_data + field_end);
 
-                IndexFieldValue fval;
-                fval.type = IndexFieldValue::Type::TIMESTAMP_VAL;
-                fval.str_value = buf;
-                fval.raw_bytes.assign(page_data + parse_end - 4, page_data + parse_end);
-                fixed_fields.push_back(fval);
-                parse_end -= 4;
-                continue;
-            }
-        }
+                    // Check if printable
+                    size_t printable = 0;
+                    for (size_t j = 0; j < size; j++) {
+                        uint8_t b = page_data[field_start + j];
+                        if (b >= 32 && b < 127) printable++;
+                    }
 
-        // Check for 3-byte DATE
-        if (remaining >= 3) {
-            uint32_t date_val = (static_cast<uint32_t>(page_data[parse_end - 3]) << 16) |
-                               (static_cast<uint32_t>(page_data[parse_end - 2]) << 8) |
-                               static_cast<uint32_t>(page_data[parse_end - 1]);
+                    if (printable >= size * 2 / 3) {
+                        val.type = IndexFieldValue::Type::STRING_VAL;
+                        val.str_value.assign(reinterpret_cast<const char*>(page_data + field_start), size);
+                    } else {
+                        val.type = IndexFieldValue::Type::BINARY_VAL;
+                    }
 
-            uint32_t year = (date_val >> 9) & 0x7FFF;
-            uint32_t month = (date_val >> 5) & 0x0F;
-            uint32_t day = date_val & 0x1F;
-
-            if (year >= 1900 && year <= 2100 && month >= 1 && month <= 12 && day >= 1 && day <= 31) {
-                IndexFieldValue fval;
-                fval.type = IndexFieldValue::Type::DATE_VAL;
-                char buf[16];
-                snprintf(buf, sizeof(buf), "%04u-%02u-%02u", year, month, day);
-                fval.str_value = buf;
-                fval.raw_bytes.assign(page_data + parse_end - 3, page_data + parse_end);
-                fixed_fields.push_back(fval);
-                parse_end -= 3;
-                continue;
+                    result.push_back(val);
+                }
             }
         }
-
-        // Check for 2-byte SMALLINT
-        if (remaining >= 2) {
-            uint16_t val2 = read_be<uint16_t>(page_data, parse_end - 2);
-            if (val2 >= 0x8000 || val2 <= 0x100) {
-                IndexFieldValue fval;
-                fval.type = IndexFieldValue::Type::INT_VAL;
-                fval.int_value = static_cast<int64_t>(val2) - 32768;
-                fval.str_value = std::to_string(fval.int_value);
-                fval.raw_bytes.assign(page_data + parse_end - 2, page_data + parse_end);
-                fixed_fields.push_back(fval);
-                parse_end -= 2;
-                continue;
-            }
-        }
-
-        break;
     }
 
-    // If no variable sizes were detected, output remaining data as one blob
-    if (var_sizes.empty() && parse_pos < parse_end) {
-        size_t remaining_len = parse_end - parse_pos;
-
-        size_t printable = 0;
-        for (size_t i = 0; i < remaining_len && i < 1000; i++) {
-            uint8_t b = page_data[parse_pos + i];
-            if ((b >= 32 && b < 127) || b == '\n' || b == '\r' || b == '\t') {
-                printable++;
-            }
-        }
-
-        IndexFieldValue var_val;
-        if (printable >= remaining_len * 2 / 3) {
-            var_val.type = IndexFieldValue::Type::STRING_VAL;
-            var_val.str_value.assign(reinterpret_cast<const char*>(page_data + parse_pos), remaining_len);
-        } else {
-            var_val.type = IndexFieldValue::Type::BINARY_VAL;
-        }
-        var_val.raw_bytes.assign(page_data + parse_pos, page_data + parse_end);
-        result.push_back(var_val);
-    }
-
-    // Add detected fixed fields (reverse order since we parsed backwards)
-    std::reverse(fixed_fields.begin(), fixed_fields.end());
-    for (const auto& f : fixed_fields) {
-        result.push_back(f);
+    // === Step 6: If still no fields, output raw data ===
+    if (result.size() <= 1) {
+        IndexFieldValue raw_val;
+        raw_val.type = IndexFieldValue::Type::BINARY_VAL;
+        raw_val.raw_bytes.assign(page_data + user_data_start, page_data + rec_end);
+        result.push_back(raw_val);
     }
 
     return result;
