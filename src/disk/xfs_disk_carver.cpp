@@ -1582,15 +1582,29 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_sch
     const uint8_t* data = page_data.data();
     size_t page_size = page_data.size();
 
-    // INDEX page validation
+    // INDEX page validation - be more lenient for disk carving
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
-    if (page_type != FIL_PAGE_INDEX) return records;
+
+    // Accept INDEX pages (0x45BF), SDI pages (0x45BE/0x45BD), and unknown pages (0x0000)
+    // The latter can happen for corrupted/partial pages from XFS delayed allocation
+    bool is_valid_page = (page_type == FIL_PAGE_INDEX ||
+                          page_type == FIL_PAGE_SDI ||
+                          page_type == FIL_PAGE_SDI_ZIP ||
+                          page_type == 0);  // Unknown/corrupted page
+
+    if (!is_valid_page) return records;
 
     InnoDBIndexParser parser;
     parser.set_recover_deleted(config_.recover_deleted);
     parser.set_bad_page_mode(2);
 
+    // Use parse_page_try for more aggressive extraction on potentially corrupted pages
     auto index_records = parser.parse_page(data, page_size, 0);
+
+    // If we got no records, try the brute-force approach
+    if (index_records.empty()) {
+        index_records = parser.parse_page_try(data, page_size, 0);
+    }
 
     for (const auto& rec : index_records) {
         if (rec.is_deleted && !config_.recover_deleted) continue;

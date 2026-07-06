@@ -2687,10 +2687,59 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
     // Track visited origins to avoid duplicates
     std::set<uint16_t> visited_origins;
 
+    // Strategy 1: Standard infimum/supremum chain traversal
+    // First try standard parsing
+    bool is_compact = true;
+    auto page_hdr = parse_page_header(page_data, page_size);
+    if (page_hdr) {
+        // Try to follow the record chain from infimum
+        size_t infimum_origin = 99;  // PAGE_NEW_INFIMUM
+        size_t current_origin = infimum_origin;
+
+        // Read infimum's REC_NEXT to get first user record
+        size_t infimum_header = infimum_origin - REC_HEADER_SIZE_NEW;
+        auto inf_hdr = parse_new_record_header(page_data, infimum_header, page_size);
+        if (inf_hdr && inf_hdr->next_offset != 0) {
+            ssize_t first_user = static_cast<ssize_t>(infimum_origin) + inf_hdr->next_offset;
+            if (first_user > 100 && static_cast<size_t>(first_user) < heap_top) {
+                current_origin = static_cast<size_t>(first_user);
+
+                // Follow the chain
+                std::set<uint16_t> chain_visited;
+                int max_chain = 500;
+                while (current_origin > 100 && current_origin < heap_top &&
+                       chain_visited.size() < max_chain) {
+                    if (chain_visited.count(static_cast<uint16_t>(current_origin))) break;
+                    chain_visited.insert(static_cast<uint16_t>(current_origin));
+                    visited_origins.insert(static_cast<uint16_t>(current_origin));
+
+                    size_t header_start = current_origin - REC_HEADER_SIZE_NEW;
+                    auto rec = parse_user_record(page_data, page_size, header_start, page_no, is_compact, true);
+                    if (rec && !rec->is_deleted && rec->fields.size() >= 1) {
+                        records.push_back(std::move(*rec));
+                    }
+
+                    // Get next record
+                    auto hdr = parse_new_record_header(page_data, header_start, page_size);
+                    if (!hdr || hdr->next_offset == 0) break;
+
+                    ssize_t next_origin = static_cast<ssize_t>(current_origin) + hdr->next_offset;
+                    // Check for supremum (backward pointing)
+                    if (next_origin <= 150 && next_origin > 0) break;  // Points to supremum
+                    if (next_origin <= static_cast<ssize_t>(current_origin)) break;
+                    if (static_cast<size_t>(next_origin) >= heap_top) break;
+
+                    current_origin = static_cast<size_t>(next_origin);
+                }
+            }
+        }
+    }
+
+    // Strategy 2: Brute-force scan for additional records
+    // This finds records that may be missing from the chain
     // Start from INFIMUM offset (99) and scan forward
-    // Use page_size - 8 as upper limit (like ibd2sql)
     size_t scan_limit = page_size - 8;
-    for (size_t offset = INFIMUM_OFFSET; offset < scan_limit - REC_HEADER_SIZE_NEW; offset++) {
+    for (size_t offset = INFIMUM_OFFSET + 20; offset < scan_limit - REC_HEADER_SIZE_NEW; offset++) {
         // Skip if already processed
         if (visited_origins.count(static_cast<uint16_t>(offset))) continue;
 
@@ -2706,41 +2755,50 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
         // Validate REC_TYPE - must be <= 1 for data records
         if (hdr->rec_type > 1) continue;
 
-        // CRITICAL FIX: next_offset must point forward within page
-        // For valid records, next_offset is typically small positive (pointing to next record)
-        // Allow larger values since records can span more than 500 bytes
+        // For brute-force mode, be more lenient with next_offset validation
+        // Some records may have corrupted next_offset but still have valid data
+        bool likely_valid = false;
+
+        // Check if next_offset is reasonable
         ssize_t next_origin = static_cast<ssize_t>(offset) + hdr->next_offset;
-        if (hdr->next_offset <= 0 || hdr->next_offset > 2000) {
-            // Invalid next_offset - skip this false positive
-            continue;
-        }
-        if (next_origin <= static_cast<ssize_t>(offset) || static_cast<size_t>(next_origin) >= page_size - 8) {
-            // next_offset points outside valid range
-            continue;
+        if (hdr->next_offset > 0 && hdr->next_offset < 2000 &&
+            next_origin > static_cast<ssize_t>(offset) &&
+            static_cast<size_t>(next_origin) < page_size - 8) {
+            likely_valid = true;
         }
 
-        // Check if this looks like a valid record
-        // - next_offset should point within the page
-        // - heap_no should be reasonable
-        if (hdr->next_offset < -1000 || hdr->next_offset > 1000) continue;
+        // Also accept records with invalid next_offset if they have data
+        // Check if there's data after the header (at least 20 bytes of non-zero data)
+        if (!likely_valid && offset + 20 < page_size) {
+            size_t data_start = offset;
+            size_t nonzero_count = 0;
+            for (size_t i = 0; i < 50 && data_start + i < page_size - 8; i++) {
+                if (page_data[data_start + i] != 0) nonzero_count++;
+            }
+            if (nonzero_count >= 10) {
+                likely_valid = true;  // Has meaningful data
+            }
+        }
+
+        if (!likely_valid) continue;
 
         // Mark this origin as visited
         visited_origins.insert(static_cast<uint16_t>(offset));
 
         // Parse the record
         auto rec = parse_user_record(page_data, page_size, header_start, page_no, true, true);
-        if (rec && !rec->is_deleted) {
+        if (rec && !rec->is_deleted && rec->fields.size() >= 1) {
             records.push_back(std::move(*rec));
         }
 
         // Also try REDUNDANT format if COMPACT fails
-        if (!hdr || records.empty()) {
+        if (!rec || rec->fields.empty()) {
             size_t old_header_start = offset - REC_HEADER_SIZE_OLD;
             auto old_hdr = parse_old_record_header(page_data, old_header_start, page_size);
             if (old_hdr && old_hdr->heap_no >= 2 && old_hdr->n_fields > 0) {
                 visited_origins.insert(static_cast<uint16_t>(offset));
                 auto rec = parse_user_record(page_data, page_size, old_header_start, page_no, false, true);
-                if (rec && !rec->is_deleted) {
+                if (rec && !rec->is_deleted && rec->fields.size() >= 1) {
                     records.push_back(std::move(*rec));
                 }
             }
