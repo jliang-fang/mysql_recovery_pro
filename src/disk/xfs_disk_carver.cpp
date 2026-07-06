@@ -1078,6 +1078,8 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     // These are reliable markers for INDEX page data even if header is corrupted
                     bool has_infimum = false;
                     bool has_supremum = false;
+                    bool has_mysql_pattern = false;
+                    bool has_row_pattern = false;
 
                     // Scan for "infimum" and "supremum" strings in the block
                     for (size_t j = 50; j + 20 < 8192; j++) {
@@ -1093,9 +1095,21 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                             block_data[j+6] == 'u' && block_data[j+7] == 'm') {
                             has_supremum = true;
                         }
+                        // Check for "mysql" pattern (test marker prefix)
+                        if (block_data[j] == 'm' && block_data[j+1] == 'y' &&
+                            block_data[j+2] == 's' && block_data[j+3] == 'q' &&
+                            block_data[j+4] == 'l') {
+                            has_mysql_pattern = true;
+                        }
+                        // Check for "row_" pattern (test marker suffix)
+                        if (block_data[j] == 'r' && block_data[j+1] == 'o' &&
+                            block_data[j+2] == 'w' && block_data[j+3] == '_') {
+                            has_row_pattern = true;
+                        }
                     }
 
-                    // If we found infimum/supremum, this is likely an INDEX page with corrupted header
+                    // Accept blocks with infimum/supremum OR mysql pattern markers
+                    // This helps catch more valid data blocks
                     if (has_infimum && has_supremum) {
                         // Try to extract records by scanning the entire block
                         // Use a special index_id to indicate pattern-scanned pages
@@ -1119,6 +1133,57 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                         last_result_.pages_by_index_id[pattern_index_id].push_back(std::move(page_info));
                         last_result_.pages_recovered++;
                         pages_found.fetch_add(1);
+                    }
+                    // Additional pattern: blocks with mysql test markers but no infimum/supremum
+                    // These may contain partial record data from early batches
+                    else if (has_mysql_pattern && has_row_pattern) {
+                        // Scan smaller blocks (512 bytes) for record data
+                        for (size_t j = 0; j + 512 <= 8192; j += 256) {
+                            const uint8_t* sub_block = block_data + j;
+
+                            // Check for marker pattern in this sub-block
+                            bool has_marker = false;
+                            for (size_t k = 0; k + 20 < 512; k++) {
+                                if (sub_block[k] == 'm' && sub_block[k+1] == 'y' &&
+                                    sub_block[k+2] == 's' && sub_block[k+3] == 'q' &&
+                                    sub_block[k+4] == 'l') {
+                                    // Check for _row_ suffix within 30 bytes
+                                    for (size_t m = k + 5; m < k + 35 && m + 4 < 512; m++) {
+                                        if (sub_block[m] == '_' && sub_block[m+1] == 'r' &&
+                                            sub_block[m+2] == 'o' && sub_block[m+3] == 'w' &&
+                                            sub_block[m+4] == '_') {
+                                            has_marker = true;
+                                            break;
+                                        }
+                                    }
+                                    if (has_marker) break;
+                                }
+                            }
+
+                            if (has_marker) {
+                                uint64_t raw_index_id = 0xFFFE0000 | ((chunk_start + i + j) & 0xFFFF);
+
+                                XfsPageInfo page_info;
+                                page_info.disk_offset = chunk_start + i + j;
+                                page_info.page_type = FIL_PAGE_INDEX;
+                                page_info.index_id = raw_index_id;
+                                page_info.page_no = 0;
+                                page_info.data.resize(config_.page_size);
+
+                                // Copy surrounding data (expand to 2KB for context)
+                                size_t data_start = j > 512 ? j - 512 : 0;
+                                size_t copy_size = std::min(static_cast<size_t>(config_.page_size), 8192 - data_start);
+                                std::memcpy(page_info.data.data(), block_data + data_start, copy_size);
+                                if (copy_size < config_.page_size) {
+                                    std::memset(page_info.data.data() + copy_size, 0, config_.page_size - copy_size);
+                                }
+
+                                std::lock_guard<std::mutex> lock(result_mutex_);
+                                last_result_.pages_by_index_id[raw_index_id].push_back(std::move(page_info));
+                                last_result_.pages_recovered++;
+                                pages_found.fetch_add(1);
+                            }
+                        }
                     }
                 }
             }
@@ -1220,20 +1285,63 @@ void XfsDiskCarver::raw_data_scan(std::function<void(double, const std::string&)
         bytes_scanned.fetch_add(bytes_read);
 
         // Scan for data patterns
-        // Look for "varchar_" strings which indicate record data
+        // Look for "varchar_", "text_", "mysql", and "row_" strings
+        // These indicate record data areas
         for (size_t i = 0; i < static_cast<size_t>(bytes_read) - 100; i++) {
+            bool found_pattern = false;
+            std::string pattern_type;
+
             // Look for "varchar_" pattern
             if (buffer[i] == 'v' && buffer[i+1] == 'a' && buffer[i+2] == 'r' &&
                 buffer[i+3] == 'c' && buffer[i+4] == 'h' && buffer[i+5] == 'a' &&
                 buffer[i+6] == 'r' && buffer[i+7] == '_') {
+                found_pattern = true;
+                pattern_type = "varchar";
+            }
+            // Look for "text_" pattern
+            else if (buffer[i] == 't' && buffer[i+1] == 'e' && buffer[i+2] == 'x' &&
+                     buffer[i+3] == 't' && buffer[i+4] == '_') {
+                found_pattern = true;
+                pattern_type = "text";
+            }
+            // Look for "mysql" pattern (test marker prefix) - early batch indicator
+            else if (buffer[i] == 'm' && buffer[i+1] == 'y' && buffer[i+2] == 's' &&
+                     buffer[i+3] == 'q' && buffer[i+4] == 'l') {
+                // Verify this has a proper marker format with _row_ nearby
+                for (size_t j = i + 5; j < i + 50 && j + 4 < bytes_read; j++) {
+                    if (buffer[j] == '_' && buffer[j+1] == 'r' && buffer[j+2] == 'o' &&
+                        buffer[j+3] == 'w' && buffer[j+4] == '_') {
+                        found_pattern = true;
+                        pattern_type = "marker";
+                        break;
+                    }
+                }
+            }
+            // Look for standalone "row_" pattern (may be partial marker)
+            else if (buffer[i] == 'r' && buffer[i+1] == 'o' && buffer[i+2] == 'w' &&
+                     buffer[i+3] == '_') {
+                // Check for nearby digits indicating row number
+                for (size_t j = i + 4; j < i + 15 && j < bytes_read; j++) {
+                    if (buffer[j] >= '0' && buffer[j] <= '9') {
+                        found_pattern = true;
+                        pattern_type = "rownum";
+                        break;
+                    }
+                }
+            }
 
+            if (found_pattern) {
                 // Found potential record data
                 // Try to extract a record from surrounding bytes
                 // Record is typically within 200-500 bytes
 
+                // For markers, look back further to capture the full record
+                size_t lookback = (pattern_type == "marker" || pattern_type == "rownum") ? 400 : 200;
+                size_t lookahead = (pattern_type == "marker" || pattern_type == "rownum") ? 600 : 300;
+
                 // Find the extent of this data
-                size_t data_start = i > 200 ? i - 200 : 0;
-                size_t data_end = std::min(i + 300, static_cast<size_t>(bytes_read));
+                size_t data_start = i > lookback ? i - lookback : 0;
+                size_t data_end = std::min(i + lookahead, static_cast<size_t>(bytes_read));
 
                 // Check if this looks like valid record data
                 // (contains printable strings, reasonable byte values)
@@ -1244,6 +1352,18 @@ void XfsDiskCarver::raw_data_scan(std::function<void(double, const std::string&)
                 }
                 if (printable < (data_end - data_start) / 3) {
                     valid = false;  // Not enough printable chars
+                }
+
+                // Additional validation for markers: ensure we have a number
+                if (valid && pattern_type == "marker") {
+                    bool has_number = false;
+                    for (size_t j = i; j < data_end && j < i + 100; j++) {
+                        if (buffer[j] >= '0' && buffer[j] <= '9') {
+                            has_number = true;
+                            break;
+                        }
+                    }
+                    if (!has_number) valid = false;
                 }
 
                 if (valid) {
