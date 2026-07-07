@@ -1850,14 +1850,26 @@ int main(int argc, char** argv) {
                 else if (type_upper == "JSON") { icol.col_type = 31; icol.is_big = true; icol.col_length = 4294967295; }
                 else { icol.col_type = 15; icol.is_big = (icol.col_length > 255); }
 
-                // In MySQL, columns are nullable by default unless PRIMARY KEY or NOT NULL
-                // PK columns are never nullable
-                // Non-PK columns are nullable unless marked "notnull"
+                // Determine which part index contains flags
+                // Format: name:TYPE[:size][:flag1:flag2:...]
+                // If parts[2] is a number, it's size, so flags start at parts[3]
+                size_t flag_start_idx = 2;
+                if (parts.size() > 2) {
+                    std::string potential_size = parts[2];
+                    bool is_number = !potential_size.empty();
+                    for (char c : potential_size) {
+                        if (!std::isdigit(c)) { is_number = false; break; }
+                    }
+                    if (is_number) {
+                        try { icol.col_length = std::stoul(potential_size); } catch (...) {}
+                        flag_start_idx = 3;
+                    }
+                }
+
                 bool is_pk = false;
                 bool explicit_nullable = false;
                 bool explicit_notnull = false;
-
-                for (size_t fi = 2; fi < parts.size(); fi++) {
+                for (size_t fi = flag_start_idx; fi < parts.size(); fi++) {
                     std::string flag = parts[fi];
                     std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
                     if (flag == "pk" || flag == "primary") {
@@ -1867,6 +1879,22 @@ int main(int argc, char** argv) {
                     else if (flag == "null" || flag == "nullable") { explicit_nullable = true; }
                     else if (flag == "notnull" || flag == "not_null") { explicit_notnull = true; }
                     else if (flag == "unsigned") { icol.is_unsigned = true; }
+                    else if (flag == "signed") { icol.is_unsigned = false; }  // Explicit signed
+                    else if (flag == "autoinc" || flag == "auto_increment") { icol.is_unsigned = true; }
+                }
+
+                // AUTO_INCREMENT PK columns are typically INT UNSIGNED
+                // If user specified INT:pk without explicit unsigned, assume unsigned for AUTO_INCREMENT
+                if (is_pk && (icol.col_type == 4 || icol.col_type == 2 || icol.col_type == 3 || icol.col_type == 9 || icol.col_type == 10)) {
+                    bool explicit_signed = false;
+                    for (size_t fi = flag_start_idx; fi < parts.size(); fi++) {
+                        std::string flag = parts[fi];
+                        std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
+                        if (flag == "signed") { explicit_signed = true; break; }
+                    }
+                    if (!explicit_signed && !icol.is_unsigned) {
+                        icol.is_unsigned = true;  // Default to unsigned for PK INT columns
+                    }
                 }
 
                 // Set nullable: PK never nullable, otherwise nullable unless explicit notnull
@@ -2246,14 +2274,52 @@ int main(int argc, char** argv) {
                 else if (type_upper == "JSON") { icol.col_type = 31; icol.is_big = true; icol.col_length = 4294967295; }
                 else { icol.col_type = 15; icol.is_big = (icol.col_length > 255); }
 
+                // Determine which part index contains flags
+                // Format: name:TYPE[:size][:flag1:flag2:...]
+                // If parts[2] is a number, it's size, so flags start at parts[3]
+                // Otherwise flags start at parts[2]
+                size_t flag_start_idx = 2;
+                if (parts.size() > 2) {
+                    // Check if parts[2] looks like a number (column size)
+                    std::string potential_size = parts[2];
+                    bool is_number = !potential_size.empty();
+                    for (char c : potential_size) {
+                        if (!std::isdigit(c)) { is_number = false; break; }
+                    }
+                    if (is_number) {
+                        // parts[2] is column size, flags start at parts[3]
+                        try {
+                            icol.col_length = std::stoul(potential_size);
+                        } catch (...) {}
+                        flag_start_idx = 3;
+                    }
+                }
+
                 bool is_pk = false;
                 bool explicit_notnull = false;
-                for (size_t fi = 2; fi < parts.size(); fi++) {
+                for (size_t fi = flag_start_idx; fi < parts.size(); fi++) {
                     std::string flag = parts[fi];
                     std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
                     if (flag == "pk" || flag == "primary") { n_pk++; is_pk = true; }
                     else if (flag == "notnull" || flag == "not_null") { explicit_notnull = true; }
                     else if (flag == "unsigned") { icol.is_unsigned = true; }
+                    else if (flag == "signed") { icol.is_unsigned = false; }  // Explicit signed
+                    else if (flag == "autoinc" || flag == "auto_increment") {
+                        icol.is_unsigned = true;  // AUTO_INCREMENT columns are typically UNSIGNED
+                    }
+                }
+                // AUTO_INCREMENT PK columns are typically INT UNSIGNED
+                // If user specified INT:pk without explicit unsigned, assume unsigned for AUTO_INCREMENT
+                if (is_pk && (icol.col_type == 4 || icol.col_type == 2 || icol.col_type == 3 || icol.col_type == 9 || icol.col_type == 10)) {
+                    bool explicit_signed = false;
+                    for (size_t fi = flag_start_idx; fi < parts.size(); fi++) {
+                        std::string flag = parts[fi];
+                        std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
+                        if (flag == "signed") { explicit_signed = true; break; }
+                    }
+                    if (!explicit_signed && !icol.is_unsigned) {
+                        icol.is_unsigned = true;  // Default to unsigned for PK INT columns
+                    }
                 }
                 icol.is_nullable = is_pk ? false : !explicit_notnull;
                 icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);  // CRITICAL: InnoDB storage order

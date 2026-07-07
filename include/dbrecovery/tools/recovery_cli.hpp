@@ -1559,6 +1559,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             // Parse flags (pk, notnull, unsigned)
             icol.is_nullable = true;  // Default nullable
             bool is_pk_col = false;
+            bool explicit_signed = false;
             for (const auto& flag : flag_parts) {
                 std::string flag_lower = flag;
                 std::transform(flag_lower.begin(), flag_lower.end(), flag_lower.begin(), ::tolower);
@@ -1576,6 +1577,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 else if (flag_lower == "unsigned") {
                     icol.is_unsigned = true;
                 }
+                else if (flag_lower == "signed") {
+                    explicit_signed = true;
+                }
             }
 
             // Handle multi-word flags: "PRIMARY KEY", "NOT NULL"
@@ -1591,6 +1595,18 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
             if (def_lower.find("unsigned") != std::string::npos) {
                 icol.is_unsigned = true;
+            }
+            if (def_lower.find(" signed") != std::string::npos) {
+                explicit_signed = true;
+            }
+
+            // AUTO_UNSIGNED: PK INT columns are typically UNSIGNED in MySQL
+            // If PK INT column without explicit signed/unsigned, default to unsigned
+            if (is_pk_col && (icol.col_type == 4 || icol.col_type == 2 || icol.col_type == 3 ||
+                              icol.col_type == 9 || icol.col_type == 10)) {
+                if (!explicit_signed && !icol.is_unsigned) {
+                    icol.is_unsigned = true;  // Default to unsigned for PK INT columns
+                }
             }
 
             // Count PK columns
