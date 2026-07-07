@@ -507,84 +507,131 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 parsed_schema.page_size = page_size;
 
                 // Parse schema string: "col1:type[:size][:pk],col2:type..."
-                // Note: type and name are separated by space, not colon
-                // Format: "name TYPE:size:extra" where TYPE may have parameters after colon
+                // Support both formats:
+                //   - "name:type:size:pk" (colon-separated, current test format)
+                //   - "name type:size:extra" (space-separated for type)
                 std::istringstream ss(schema_str);
                 std::string col_def;
                 int ordinal = 1;
                 while (std::getline(ss, col_def, ',')) {
                     catalog::ColumnInfo col;
 
-                    // Split by colon first
+                    // Trim whitespace
+                    col_def.erase(0, col_def.find_first_not_of(" \t"));
+                    col_def.erase(col_def.find_last_not_of(" \t") + 1);
+
+                    if (col_def.empty()) continue;
+
+                    // Split by colon
                     std::istringstream cs(col_def);
                     std::string token;
                     std::vector<std::string> parts;
                     while (std::getline(cs, token, ':')) {
+                        // Trim each part
+                        token.erase(0, token.find_first_not_of(" \t"));
+                        token.erase(token.find_last_not_of(" \t") + 1);
                         parts.push_back(token);
                     }
 
-                    if (parts.size() >= 1) {
-                        // First part contains "name TYPE", split by space
-                        std::istringstream first_part(parts[0]);
-                        std::vector<std::string> name_type;
-                        std::string nt_token;
-                        while (std::getline(first_part, nt_token, ' ')) {
-                            if (!nt_token.empty()) {
-                                name_type.push_back(nt_token);
-                            }
-                        }
+                    if (parts.size() >= 2) {
+                        // parts[0] = column name
+                        // parts[1] = type (INT, VARCHAR, BIGINT, etc.)
+                        // parts[2] = size (optional)
+                        // parts[3] = flags (pk, etc.)
+                        col.name = parts[0];
+                        std::string type_str = parts[1];
+                        std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
 
-                        if (name_type.size() >= 2) {
-                            col.name = name_type[0];
-                            std::string type_str = name_type[1];
-                            col.ordinal = ordinal;
-                            col.physical_pos = ordinal;
+                        col.ordinal = ordinal;
+                        col.physical_pos = ordinal;
 
-                            // Convert SQL types to MySQL type IDs
-                            if (type_str.find("INT") != std::string::npos) {
-                                col.mysql_type_id = 3;  // MYSQL_TYPE_LONG
-                            } else if (type_str.find("VARCHAR") != std::string::npos) {
-                                col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
-                                // Size is in parts[1] if present
-                                if (parts.size() >= 2) {
-                                    col.column_length = std::stoi(parts[1]);
-                                }
-                            } else if (type_str.find("DATETIME") != std::string::npos) {
-                                col.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
-                            } else if (type_str.find("DECIMAL") != std::string::npos) {
-                                col.mysql_type_id = 0;  // MYSQL_TYPE_DECIMAL
-                                // Precision and scale from parts
-                                if (parts.size() >= 2) {
-                                    col.numeric_precision = std::stoi(parts[1]);
-                                }
-                                if (parts.size() >= 3) {
-                                    col.numeric_scale = std::stoi(parts[2]);
-                                }
-                            } else if (type_str.find("ENUM") != std::string::npos) {
-                                col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
-                            } else {
-                                col.mysql_type_id = 15;  // Default to VARCHAR
-                            }
-
-                            col.is_nullable = true;
-                            // Check for pk flag in last part
+                        // Convert SQL types to InnoDB internal type IDs
+                        // ColumnInfo doesn't have 'type' field, only mysql_type_id
+                        // The actual type handling is done in IndexPageParser based on mysql_type_id
+                        if (type_str == "INT" || type_str == "INTEGER") {
+                            col.mysql_type_id = 3;  // MYSQL_TYPE_LONG
+                            col.column_length = 4;
+                        } else if (type_str == "BIGINT") {
+                            col.mysql_type_id = 8;  // MYSQL_TYPE_LONGLONG
+                            col.column_length = 8;
+                        } else if (type_str == "SMALLINT") {
+                            col.mysql_type_id = 2;  // MYSQL_TYPE_SHORT
+                            col.column_length = 2;
+                        } else if (type_str == "TINYINT") {
+                            col.mysql_type_id = 1;  // MYSQL_TYPE_TINY
+                            col.column_length = 1;
+                        } else if (type_str == "FLOAT") {
+                            col.mysql_type_id = 4;  // MYSQL_TYPE_FLOAT
+                            col.column_length = 4;
+                        } else if (type_str == "DOUBLE") {
+                            col.mysql_type_id = 5;  // MYSQL_TYPE_DOUBLE
+                            col.column_length = 8;
+                        } else if (type_str == "DECIMAL") {
+                            col.mysql_type_id = 0;  // MYSQL_TYPE_DECIMAL
                             if (parts.size() >= 3) {
-                                std::string& last_part = parts.back();
-                                if (last_part.find("pk") != std::string::npos ||
-                                    last_part.find("PK") != std::string::npos ||
-                                    last_part.find("PRIMARY") != std::string::npos) {
-                                    col.is_nullable = false;
-                                }
+                                col.column_length = std::stoi(parts[2]);
                             }
-
-                            parsed_schema.columns[ordinal] = col;
-                            ordinal++;
+                        } else if (type_str == "VARCHAR" || type_str == "CHAR") {
+                            col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
+                            col.is_variable_length = true;
+                            if (parts.size() >= 3) {
+                                col.column_length = std::stoi(parts[2]);
+                            }
+                        } else if (type_str == "TEXT" || type_str == "BLOB") {
+                            col.mysql_type_id = (type_str == "TEXT") ? 252 : 251;  // MYSQL_TYPE_TEXT/BLOB
+                            col.is_variable_length = true;
+                        } else if (type_str == "JSON") {
+                            col.mysql_type_id = 245;  // MYSQL_TYPE_JSON
+                            col.is_variable_length = true;
+                        } else if (type_str == "DATETIME") {
+                            col.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
+                            col.column_length = 8;
+                        } else if (type_str == "TIMESTAMP") {
+                            col.mysql_type_id = 7;  // MYSQL_TYPE_TIMESTAMP
+                            col.column_length = 4;
+                        } else if (type_str == "DATE") {
+                            col.mysql_type_id = 10;  // MYSQL_TYPE_DATE
+                            col.column_length = 3;
+                        } else if (type_str == "TIME") {
+                            col.mysql_type_id = 11;  // MYSQL_TYPE_TIME
+                            col.column_length = 3;
+                        } else if (type_str == "ENUM") {
+                            col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
+                            col.column_length = 1;
+                        } else if (type_str == "SET") {
+                            col.mysql_type_id = 248;  // MYSQL_TYPE_SET
+                            col.column_length = 1;
+                        } else {
+                            // Default to VARCHAR
+                            col.mysql_type_id = 15;
+                            col.is_variable_length = true;
+                            if (parts.size() >= 3) {
+                                col.column_length = std::stoi(parts[2]);
+                            }
                         }
+
+                        col.is_nullable = true;
+
+                        // Check for pk flag
+                        for (size_t i = 2; i < parts.size(); i++) {
+                            std::string flag = parts[i];
+                            std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
+                            if (flag == "PK" || flag == "PRIMARY" || flag == "KEY") {
+                                col.is_nullable = false;
+                            }
+                        }
+
+                        parsed_schema.columns[ordinal] = col;
+                        ordinal++;
                     }
                 }
 
                 xfs_schema = parsed_schema;
                 std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
+                for (const auto& [ord, col] : parsed_schema.columns) {
+                    std::cout << "  [" << ord << "] " << col.name << " mysql_type=" << col.mysql_type_id
+                              << " len=" << col.column_length << "\n";
+                }
                 std::cout << "[WARN] Schema is applied to ALL recovered index_ids.\n";
                 std::cout << "[WARN] Different tables have different column structures.\n";
                 std::cout << "[WARN] Use --target-index-ids to filter specific table(s).\n";
