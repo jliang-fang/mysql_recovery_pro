@@ -611,13 +611,25 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         }
 
                         col.is_nullable = true;
+                        col.is_signed = true;  // Default signed for INT types
 
-                        // Check for pk flag
+                        // Check for pk and unsigned flags
                         for (size_t i = 2; i < parts.size(); i++) {
                             std::string flag = parts[i];
                             std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
                             if (flag == "PK" || flag == "PRIMARY" || flag == "KEY") {
                                 col.is_nullable = false;
+                                // PK INT columns are typically UNSIGNED in MySQL
+                                if (type_str == "INT" || type_str == "INTEGER" || type_str == "BIGINT" ||
+                                    type_str == "SMALLINT" || type_str == "TINYINT" || type_str == "MEDIUMINT") {
+                                    col.is_signed = false;  // UNSIGNED
+                                }
+                            }
+                            if (flag == "UNSIGNED") {
+                                col.is_signed = false;
+                            }
+                            if (flag == "SIGNED") {
+                                col.is_signed = true;
                             }
                         }
 
