@@ -1507,26 +1507,52 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
             std::ofstream out(output_file);
 
             if (out) {
-                // Header
-                if (!all_records.empty()) {
-                    bool first = true;
-                    for (const auto& kv : all_records[0]) {
-                        if (!first) out << ",";
-                        out << kv.first;
-                        first = false;
+                // Get column names in the correct order from schema
+                std::vector<std::string> column_names;
+                if (external_schema_.has_value() && !external_schema_->columns.empty()) {
+                    // Sort columns by physical_pos to match storage order
+                    std::vector<std::pair<uint32_t, std::string>> sorted_cols;
+                    for (const auto& [ordinal, col] : external_schema_->columns) {
+                        uint32_t phys_pos = col.physical_pos > 0 ? col.physical_pos : ordinal;
+                        sorted_cols.push_back({phys_pos, col.name});
                     }
-                    out << "\n";
+                    std::sort(sorted_cols.begin(), sorted_cols.end());
+                    for (const auto& [pos, name] : sorted_cols) {
+                        column_names.push_back(name);
+                    }
+                } else {
+                    // Fallback: use keys from first record
+                    for (const auto& kv : all_records[0]) {
+                        column_names.push_back(kv.first);
+                    }
+                }
 
-                    // Data rows
-                    for (const auto& rec : all_records) {
-                        first = true;
-                        for (const auto& kv : rec) {
-                            if (!first) out << ",";
+                // Write header
+                bool first = true;
+                for (const auto& col_name : column_names) {
+                    if (!first) out << ",";
+                    out << col_name;
+                    first = false;
+                }
+                out << "\n";
 
-                            std::string val = kv.second;
-                            if (val.find(',') != std::string::npos ||
-                                val.find('"') != std::string::npos ||
-                                val.find('\n') != std::string::npos) {
+                // Write data rows
+                for (const auto& rec : all_records) {
+                    first = true;
+                    for (const auto& col_name : column_names) {
+                        if (!first) out << ",";
+
+                        auto it = rec.find(col_name);
+                        if (it != rec.end()) {
+                            std::string val = it->second;
+                            // Always quote values that may contain special characters
+                            // This is safer for TEXT, VARCHAR, BLOB, JSON fields
+                            bool needs_quote = val.find(',') != std::string::npos ||
+                                              val.find('"') != std::string::npos ||
+                                              val.find('\n') != std::string::npos ||
+                                              val.find('\r') != std::string::npos;
+
+                            if (needs_quote) {
                                 out << "\"";
                                 for (char c : val) {
                                     if (c == '"') out << "\"\"";
@@ -1536,12 +1562,14 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                             } else {
                                 out << val;
                             }
-                            first = false;
+                        } else {
+                            out << "NULL";
                         }
-                        out << "\n";
+                        first = false;
                     }
-                    result.output_files.push_back(output_file);
+                    out << "\n";
                 }
+                result.output_files.push_back(output_file);
             }
         }
 
