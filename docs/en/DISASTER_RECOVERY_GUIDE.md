@@ -564,14 +564,20 @@ The following 100K and 1M row test results were performed using **pre-disaster b
 - ✅ Signature scan effectively finds all InnoDB pages
 - ✅ FRM signature detection provides schema hints
 - ✅ Performance suitable for large-scale production recovery
-- ✅ No data loss, all pages recovered successfully
+- ✅ All pages recovered successfully
+
+⚠️ **XFS Recovery Rate Limitation**:
+- Maximum achievable rate: **~98.77%** (not 100%)
+- Root cause: **XFS delayed allocation** buffers data in memory before writing to disk
+- Missing ~1.23% of records were never flushed to disk before disaster
+- For 99%+ recovery rate, consider using **Ext4 filesystem** instead
 
 **XFS vs Ext4 Comparison Summary:**
 
-| Filesystem | Recovery Method | 200GB Scan Time | Page Detection | Use Case |
-|------------|-----------------|-----------------|----------------|----------|
-| **Ext4** | Linear signature scan | ~250s | Excellent | General scenarios |
-| **XFS** | AG scan + signature scan | ~205s | Excellent | Large files, high concurrency |
+| Filesystem | Recovery Method | Max Recovery Rate | 200GB Scan Time | Use Case |
+|------------|-----------------|-------------------|-----------------|----------|
+| **Ext4** | Linear signature scan | ~100% | ~250s | General scenarios, best recovery rate |
+| **XFS** | AG scan + signature scan | ~98.77% | ~205s | Large files, high concurrency |
 
 **Production Environment Recommendations:**
 ```bash
