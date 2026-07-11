@@ -1383,7 +1383,7 @@ int main(int argc, char** argv) {
                 else if (type_upper == "DOUBLE") { tcol.mysql_type = dbrecovery::innodb::mysql_types::DOUBLE; tcol.max_length = 8; }
                 else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") {
                     tcol.mysql_type = dbrecovery::innodb::mysql_types::NEWDECIMAL;
-                    // DECIMAL is NOT is_var in InnoDB COMPACT format (ibd2sql COLUMN_TYPE)
+                    // DECIMAL is NOT is_var in InnoDB COMPACT format
                     // char_length for is_big calculation
                     tcol.char_length = tcol.decimal_precision > 0 ? tcol.decimal_precision : 12;
                     // Storage size for DECIMAL(P,S):
@@ -1608,8 +1608,8 @@ int main(int argc, char** argv) {
     // rmrf_recovery 和 truncate_recovery 现在都使用高精度的 InnoDBIndexParser
     // 此处仅保留注释，实际处理逻辑在下方统一处理
 
-    // ✅ 恢复模式：Truncate 恢复
-    // ✅ 使用新的 ibd2sql-style InnoDBIndexParser 进行 TRUNCATE 恢复
+    // 恢复模式：Truncate 恢复
+    // 使用 InnoDBIndexParser 进行 TRUNCATE 恢复
     // 这种方法可以正确解析 COMPACT/DYNAMIC 行格式，实现 >=99.9% 的恢复率
 
     // ✅ 恢复模式：BLOB 恢复
@@ -1652,14 +1652,14 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ✅ 恢复模式：ibd2sql-style force scan (new high-accuracy parser)
+    // 恢复模式：force scan using InnoDBIndexParser
     // This mode uses the new InnoDBIndexParser which correctly parses COMPACT/DYNAMIC
     // row format records, enabling >=99.9% recovery rate
     bool force_scan = parser.get_bool_option("force-scan", false);
     bool use_index_parser = parser.get_bool_option("index-parser", false);
 
     if (force_scan || use_index_parser || truncate_recovery || rmrf_recovery) {
-        std::cout << "[INFO] Starting ibd2sql-style index page parsing...\n";
+        std::cout << "[INFO] Starting index page parsing...\n";
 
         if (ibd_path.empty() && pre_truncate_ibd.empty()) {
             std::cerr << "[ERROR] --ibd=<path> is required for index parsing\n";
@@ -1915,7 +1915,7 @@ int main(int argc, char** argv) {
             std::cout << "[INFO] Schema set from --schema option (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
         }
 
-        // Force scan: scan all pages sequentially (ibd2sql --force mode)
+        // Force scan: scan all pages sequentially
         std::cout << "[INFO] Starting force scan of: " << effective_ibd << "\n";
         auto scan_start = std::chrono::high_resolution_clock::now();
 
@@ -1926,7 +1926,7 @@ int main(int argc, char** argv) {
 
         const auto& idx_stats = index_parser.get_stats();
 
-        std::cout << "\n=== ibd2sql-style Index Parser Results ===\n";
+        std::cout << "\n=== Index Parser Results ===\n";
         std::cout << "  Pages scanned: " << idx_stats.pages_scanned << "\n";
         std::cout << "  Valid INDEX pages: " << idx_stats.pages_valid << "\n";
         std::cout << "  Leaf pages: " << idx_stats.pages_index_leaf << "\n";
@@ -2033,10 +2033,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ✅ 恢复模式：默认使用 InnoDBIndexParser (ibd2sql-style B+Tree 解析)
+    // 恢复模式：默认使用 InnoDBIndexParser
     // 优先使用结构化解析（记录链遍历），比 heuristic scanner 可靠得多
     // heuristic scanner 依赖模式匹配（如 "user_"），对小表恢复率接近 0%
-    std::cout << "[INFO] Starting ibd2sql-style index page recovery (default mode)...\n";
+    std::cout << "[INFO] Starting index page recovery (default mode)...\n";
 
     if (ibd_path.empty()) {
         std::cerr << "[ERROR] --ibd=<path> is required for recovery\n";
@@ -2526,9 +2526,9 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Phase 1: Run InnoDBIndexParser (ibd2sql-style force scan)
+        // Phase 1: Run InnoDBIndexParser
         auto scan_start = std::chrono::high_resolution_clock::now();
-        std::cout << "[INFO] Phase 1: ibd2sql-style index page parsing...\n";
+        std::cout << "[INFO] Phase 1: Index page parsing...\n";
 
         // Check file size for streaming optimization decision
         std::ifstream size_check(actual_ibd_path, std::ios::binary | std::ios::ate);
