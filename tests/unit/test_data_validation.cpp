@@ -575,3 +575,103 @@ TEST_F(DataValidationTest, ValidateRecordChainCompactEmpty) {
     // Note: this may fail if the implementation requires specific validation
     // The test validates the function doesn't crash
 }
+
+// ==================== Record Header Validation Tests ====================
+
+TEST_F(DataValidationTest, ValidatePageDirectoryNull) {
+    using dbrecovery::innodb::validate_page_directory;
+    EXPECT_FALSE(validate_page_directory(nullptr, 16384));
+}
+
+TEST_F(DataValidationTest, ValidatePageDirectoryTooSmall) {
+    using dbrecovery::innodb::validate_page_directory;
+    std::vector<uint8_t> small_page(50, 0);
+    EXPECT_FALSE(validate_page_directory(small_page.data(), 50));
+}
+
+TEST_F(DataValidationTest, ValidatePageDirectoryValid) {
+    using dbrecovery::innodb::validate_page_directory;
+    std::vector<uint8_t> page(16384, 0);
+
+    // Set n_dir_slots to 2 (minimum valid)
+    page[38] = 0x00; page[39] = 0x02;  // Big-endian: 2 slots
+
+    EXPECT_TRUE(validate_page_directory(page.data(), 16384));
+}
+
+TEST_F(DataValidationTest, ValidatePageDirectoryTooManySlots) {
+    using dbrecovery::innodb::validate_page_directory;
+    std::vector<uint8_t> page(16384, 0);
+
+    // Set n_dir_slots to 2000 (too many)
+    page[38] = 0x07; page[39] = 0xD0;  // Big-endian: 2000
+
+    EXPECT_FALSE(validate_page_directory(page.data(), 16384));
+}
+
+TEST_F(DataValidationTest, ValidatePageDirectoryTooFewSlots) {
+    using dbrecovery::innodb::validate_page_directory;
+    std::vector<uint8_t> page(16384, 0);
+
+    // Set n_dir_slots to 1 (too few, minimum is 2 for infimum/supremum)
+    page[38] = 0x00; page[39] = 0x01;
+
+    EXPECT_FALSE(validate_page_directory(page.data(), 16384));
+}
+
+TEST_F(DataValidationTest, ValidateCompactRecordHeaderNull) {
+    using dbrecovery::innodb::validate_compact_record_header;
+    uint16_t n_fields;
+    uint8_t n_owned;
+    bool deleted;
+    EXPECT_FALSE(validate_compact_record_header(nullptr, 100, 16384, n_fields, n_owned, deleted));
+}
+
+TEST_F(DataValidationTest, ValidateCompactRecordHeaderTooSmall) {
+    using dbrecovery::innodb::validate_compact_record_header;
+    std::vector<uint8_t> page(16384, 0);
+    uint16_t n_fields;
+    uint8_t n_owned;
+    bool deleted;
+    EXPECT_FALSE(validate_compact_record_header(page.data(), 3, 16384, n_fields, n_owned, deleted));
+}
+
+TEST_F(DataValidationTest, ValidateRedundantRecordHeaderNull) {
+    using dbrecovery::innodb::validate_redundant_record_header;
+    uint16_t n_fields;
+    uint16_t extra_bytes;
+    EXPECT_FALSE(validate_redundant_record_header(nullptr, 100, 16384, n_fields, extra_bytes));
+}
+
+TEST_F(DataValidationTest, ValidateRedundantRecordHeaderTooSmall) {
+    using dbrecovery::innodb::validate_redundant_record_header;
+    std::vector<uint8_t> page(16384, 0);
+    uint16_t n_fields;
+    uint16_t extra_bytes;
+    EXPECT_FALSE(validate_redundant_record_header(page.data(), 3, 16384, n_fields, extra_bytes));
+}
+
+TEST_F(DataValidationTest, IsCompactFormat) {
+    using dbrecovery::innodb::is_compact_format;
+
+    // Null page should default to COMPACT
+    EXPECT_TRUE(is_compact_format(nullptr));
+
+    std::vector<uint8_t> page(16384, 0);
+
+    // COMPACT format: n_heap has bit 15 set
+    page[42] = 0x80; page[43] = 0x02;  // n_heap = 0x8002
+    EXPECT_TRUE(is_compact_format(page.data()));
+
+    // REDUNDANT format: n_heap does not have bit 15 set
+    page[42] = 0x00; page[43] = 0x02;  // n_heap = 0x0002
+    EXPECT_FALSE(is_compact_format(page.data()));
+}
+
+TEST_F(DataValidationTest, FieldCountConstants) {
+    using dbrecovery::innodb::REC_N_FIELDS_ONE_BYTE_MAX;
+    using dbrecovery::innodb::MAX_FIELD_COUNT;
+
+    EXPECT_EQ(REC_N_FIELDS_ONE_BYTE_MAX, 0x7F);  // 127
+    EXPECT_EQ(MAX_FIELD_COUNT, 1000);
+}

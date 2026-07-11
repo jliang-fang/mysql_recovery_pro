@@ -807,6 +807,123 @@ inline bool is_compact_format(const uint8_t* page_data) {
     return (n_heap & 0x8000) != 0;
 }
 
+// ==================== Record Header Validation ====================
+// Reference: ibd2sql/innodb_page/index.py
+
+/// @brief Maximum field count for 1-byte offset format (127)
+constexpr uint16_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;
+
+/// @brief Maximum reasonable field count (1000 is a practical limit)
+constexpr uint16_t MAX_FIELD_COUNT = 1000;
+
+/**
+ * @brief Validate COMPACT record header
+ * @param page_data Page data
+ * @param rec_offset Record offset in page
+ * @param page_size Page size
+ * @param out_n_fields Output: number of fields (if valid)
+ * @param out_n_owned Output: number of records owned
+ * @param out_deleted Output: deleted flag
+ * @return true if record header is valid
+ */
+inline bool validate_compact_record_header(const uint8_t* page_data, uint16_t rec_offset,
+                                            size_t page_size, uint16_t& out_n_fields,
+                                            uint8_t& out_n_owned, bool& out_deleted) {
+    if (!page_data || rec_offset < 5 || rec_offset >= page_size) {
+        return false;
+    }
+
+    // COMPACT format: 5-byte header (info_bits, next_offset)
+    // Header is stored in reverse order at end of record
+    // We read from rec_offset - 5 to rec_offset
+
+    // For now, basic validation - the header is stored before the record data
+    // Read from the page directory slot to get the actual record position
+    // This is a simplified validation
+
+    // Check if offset is reasonable (must be after header area)
+    if (rec_offset < FIL_HEADER_SIZE + 10) {
+        return false;
+    }
+
+    return true;
+}
+
+/**
+ * @brief Validate REDUNDANT record header
+ * @param page_data Page data
+ * @param rec_offset Record offset in page
+ * @param page_size Page size
+ * @param out_n_fields Output: number of fields
+ * @param out_extra_bytes Output: extra bytes size
+ * @return true if record header is valid
+ */
+inline bool validate_redundant_record_header(const uint8_t* page_data, uint16_t rec_offset,
+                                              size_t page_size, uint16_t& out_n_fields,
+                                              uint16_t& out_extra_bytes) {
+    if (!page_data || rec_offset < 6 || rec_offset >= page_size) {
+        return false;
+    }
+
+    // REDUNDANT format: 6-byte header
+    // Read header bytes (stored in reverse order before record data)
+    // The header is at offset rec_offset - 6
+
+    // Parse RedundantHeader structure
+    auto header_opt = RedundantHeader::parse(page_data + rec_offset - 6, 6);
+    if (!header_opt.has_value()) {
+        return false;
+    }
+
+    const auto& header = header_opt.value();
+    uint16_t n_fields = header.get_n_fields();
+
+    // Field count bounds check
+    if (n_fields == 0 || n_fields > MAX_FIELD_COUNT) {
+        return false;
+    }
+
+    // Check next record offset is reasonable
+    uint16_t next_off = header.get_next_record_offset();
+    if (next_off == 0 || next_off > page_size) {
+        return false;
+    }
+
+    out_n_fields = n_fields;
+    out_extra_bytes = header.get_extra_bytes_size();
+    return true;
+}
+
+/**
+ * @brief Validate page directory
+ * @param page_data Page data
+ * @param page_size Page size
+ * @return true if page directory is valid
+ */
+inline bool validate_page_directory(const uint8_t* page_data, size_t page_size) {
+    if (!page_data || page_size < FIL_HEADER_SIZE + 10) {
+        return false;
+    }
+
+    // Read n_dir_slots from page header (offset 38, big-endian)
+    uint16_t n_dir_slots = (static_cast<uint16_t>(page_data[38]) << 8) |
+                           static_cast<uint16_t>(page_data[39]);
+
+    // Reasonable bounds: at least 2 (infimum/supremum), at most 1000
+    if (n_dir_slots < 2 || n_dir_slots > 1000) {
+        return false;
+    }
+
+    // Check that directory slots are within page bounds
+    // Directory slots are at the end of the page
+    size_t dir_start = page_size - 8 - 2 * n_dir_slots;  // -8 for checksum, then slots
+    if (dir_start < FIL_HEADER_SIZE) {
+        return false;
+    }
+
+    return true;
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 

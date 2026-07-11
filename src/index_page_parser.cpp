@@ -46,7 +46,7 @@ constexpr uint8_t JSON_TYPE_STRING = 0x0C;
 // Variable length field size encoding constant
 // For is_big columns (BLOB, JSON): byte > 127 means 2-byte encoding
 // Reference: ibd2sql index.py line 12
-constexpr uint8_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;  // 127
+// Note: REC_N_FIELDS_ONE_BYTE_MAX is now defined in page_defs.hpp
 
 // 递归解析 JSON 二进制数据
 std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_size, uint8_t type, size_t& consumed);
