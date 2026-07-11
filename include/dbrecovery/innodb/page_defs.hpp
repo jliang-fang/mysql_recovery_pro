@@ -62,7 +62,6 @@ constexpr uint16_t FIL_PAGE_SDI         = 17854; // 0x45BE — SDI metadata page
 /// @brief Compressed SDI (SDI_ZIP) page type - MySQL 8.0+ (0x45BD = 17853)
 /// This is the actual page type used for SDI pages in MySQL 8.0+ standalone tablespaces.
 /// Pages 3 and 4 in a standalone IBD file typically contain compressed SDI data.
-/// Reference: ibd2sql IS_SDI() checks for data[24:26] == b'E\xbd' (0x45BD big-endian)
 constexpr uint16_t FIL_PAGE_SDI_ZIP     = 17853; // 0x45BD — Compressed SDI metadata page (MySQL 8.0+)
 /// @brief BLOB page type (shares 0x45BD with compressed SDI)
 /// Note: 0x45BD is used for BOTH compressed SDI pages AND BLOB pages.
@@ -240,22 +239,18 @@ constexpr uint8_t BTR_BLOB_HDR_NEXT_PAGE_NO = 4;    // 4 bytes: next page in cha
 constexpr uint8_t BTR_BLOB_HDR_SIZE         = 8;    // 8 bytes total header
 
 /// @brief BLOB first page data starts after infimum/supremum (offset 696 for 16KB page)
-/// Reference: ibd2sql FIRST_BLOB uses data[96:96+60] for entry, data[696:] for first page data
 constexpr uint16_t BLOB_FIRST_PAGE_DATA_OFFSET = 696;  // For 16KB pages
 
 /// @brief BLOB subsequent page data starts at offset 49 (after FIL header + BLOB header)
-/// Reference: ibd2sql FIRST_BLOB uses pg.read(pageno)[49:49+datalen] for subsequent pages
 constexpr uint16_t BLOB_SUBSEQUENT_PAGE_DATA_OFFSET = 49;
 
 /// @brief BLOB entry header size (60 bytes in first page)
-/// Reference: ibd2sql FIRST_BLOB: entry = data[96:96+60]
 constexpr uint16_t BLOB_ENTRY_HEADER_SIZE = 60;
 
 /// @brief BLOB entry header offset in first page
 constexpr uint16_t BLOB_ENTRY_HEADER_OFFSET = 96;
 
 // ==================== BLOB Entry Chain Constants ====================
-// Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
 
 /// @brief Offset of next_entry_pageno within BLOB entry header (bytes 6-9)
 constexpr uint8_t BLOB_ENTRY_NEXT_PAGE_OFFSET = 6;
@@ -267,7 +262,6 @@ constexpr uint8_t BLOB_ENTRY_TRAILER_SIZE = 12;
 constexpr uint8_t BLOB_ENTRY_DATALEN_SHIFT = 16;
 
 // ==================== 1-byte vs 2-byte Offset Constants for REDUNDANT ====================
-// Reference: undrop-for-innodb/rem0rec.ic
 
 /// @brief REC_OLD_SHORT flag (bit in record header for 1-byte offset detection)
 constexpr uint8_t REC_OLD_SHORT_MASK = 0x01;
@@ -371,7 +365,7 @@ struct alignas(1) RecordHeader {
 
     // REC_NEXT is a signed 16-bit value, relative to current record start
     int16_t get_next_record_offset() const {
-        // Byte 3-4: signed 16-bit BIG-ENDIAN (matching ibd2sql struct.unpack('>h'))
+        // Byte 3-4: signed 16-bit BIG-ENDIAN
         return static_cast<int16_t>(
             (static_cast<uint16_t>(next_off_0) << 8) |
             static_cast<uint16_t>(next_off_1)
@@ -463,7 +457,6 @@ struct alignas(1) RedundantHeader {
     }
 
     /// @brief Check if using 1-byte offset format (REC_OLD_SHORT flag)
-    /// Reference: undrop-for-innodb/rem0rec.ic rec_get_1byte_offs_flag()
     /// When bit 0 of byte3 is set, uses 1-byte offsets, otherwise 2-byte offsets
     bool is_1byte_offset_format() const {
         return (byte3 & REC_OLD_SHORT_MASK) != 0;
@@ -618,10 +611,9 @@ struct Record {
 
 // ==================== MySQL 类型常量 ====================
 // These are InnoDB internal type IDs, NOT MySQL server type IDs!
-// Reference: ibd2sql/ibd2sql/innodb_page/column_type.py
 namespace mysql_types {
 
-// InnoDB internal type IDs (from ibd2sql)
+// InnoDB internal type IDs
 constexpr uint8_t DECIMAL     = 1;   // DECIMAL (MySQL server type 0)
 constexpr uint8_t TINY        = 2;   // TINYINT (MySQL server type 1)
 constexpr uint8_t SHORT       = 3;   // SMALLINT (MySQL server type 2)
@@ -665,7 +657,6 @@ namespace row_formats {
 } // namespace row_formats
 
 // ==================== External Storage Validation ====================
-// Reference: undrop-for-innodb/rem0rec.ic and c_parser.c
 
 /**
  * @brief Check if field type can have external storage
@@ -721,7 +712,6 @@ inline uint16_t extract_2byte_offset(uint16_t offset, bool& has_extern) {
 }
 
 // ==================== Page Record Chain Validation ====================
-// Reference: undrop-for-innodb/c_parser.c check_page()
 
 /**
  * @brief Validate page record chain
@@ -808,7 +798,6 @@ inline bool is_compact_format(const uint8_t* page_data) {
 }
 
 // ==================== Record Header Validation ====================
-// Reference: ibd2sql/innodb_page/index.py
 
 /// @brief Maximum field count for 1-byte offset format (127)
 constexpr uint16_t REC_N_FIELDS_ONE_BYTE_MAX = 0x7F;

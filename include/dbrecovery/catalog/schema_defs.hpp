@@ -58,11 +58,11 @@ struct ColumnInfo {
     uint32_t physical_pos = 0;     // InnoDB物理存储位置（不同于ordinal position）
     uint32_t ordinal = 0;          // Schema定义顺序（用户看到的列顺序）
 
-    // ✅ 新增：Instant ADD COLUMN 支持 (MySQL 8.0.23+)
-    // 参考ibd2sql: version_added/version_dropped 控制列在不同行版本中的可见性
+    // Instant ADD COLUMN 支持 (MySQL 8.0.23+)
+    // version_added/version_dropped 控制列在不同行版本中的可见性
     // 逻辑: version_added <= row_version < version_dropped 时列存在
     uint16_t version_added = 0;    // 列被添加的行版本 (0=初始创建)
-    uint16_t version_dropped = 66; // 列被删除的行版本 (66=未删除, 参考 ibd2sql 默认值)
+    uint16_t version_dropped = 66; // 列被删除的行版本 (66=未删除)
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）
@@ -169,8 +169,7 @@ struct TableSchema {
         return true;
     }
 
-    // ✅ 新增：判断列是否为固定长度（用于 InnoDB DYNAMIC/COMPRESSED 存储顺序）
-    // 参考 ibd2sql column_type.py 的 is_var 字段
+    // 判断列是否为固定长度（用于 InnoDB DYNAMIC/COMPRESSED 存储顺序）
     // is_var=False 的类型: DECIMAL, TINY, SHORT, LONG, FLOAT, DOUBLE, LONGLONG, INT24,
     //                       DATE, TIME, DATETIME, YEAR, NEWDATE, TIMESTAMP, TIMESTAMP2, DATETIME2, TIME2,
     //                       BIT, NEWDECIMAL, ENUM, SET
@@ -278,10 +277,9 @@ struct TableSchema {
         return count;
     }
 
-    // ✅ 新增：获取指定行版本的活跃列（Instant ADD COLUMN 支持）
-    // 参考ibd2sql table.py init_pkmr() 逻辑:
-    //   列存在条件: version_added <= row_version < version_dropped
-    //   version_dropped=66 表示未删除 (ibd2sql默认值)
+    // 获取指定行版本的活跃列（Instant ADD COLUMN 支持）
+    // 列存在条件: version_added <= row_version < version_dropped
+    // version_dropped=66 表示未删除
     std::vector<ColumnInfo> get_active_columns(uint16_t row_version = 0) const {
         std::vector<ColumnInfo> active_cols;
         for (const auto& pair : columns) {
@@ -394,7 +392,6 @@ struct TableSchema {
 
                 if (col_json.contains("type")) {
                     // SDI stores InnoDB type IDs directly as numbers
-                    // Reference: ibd2sql/ibd2sql/innodb_page/column_type.py
                     if (col_json["type"].is_number()) {
                         col.mysql_type_id = col_json["type"].get<uint32_t>();
                     } else if (col_json["type"].is_string()) {
@@ -546,8 +543,8 @@ struct TableSchema {
                               << " type=" << col.mysql_type_id << "\n";
                 }
 
-                // ✅ 新增：解析 instant DDL version_added 和 version_dropped
-                // 参考ibd2sql table.py: se_private_data 中存储这些值
+                // 解析 instant DDL version_added 和 version_dropped
+                // se_private_data 中存储这些值
                 // 格式: "version_added=1;version_dropped=5" 或单独字段
                 if (col_json.contains("se_private_data")) {
                     std::string se_private = col_json["se_private_data"].get<std::string>();

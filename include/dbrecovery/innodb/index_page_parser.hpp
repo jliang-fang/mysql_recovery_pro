@@ -36,14 +36,12 @@
 namespace dbrecovery {
 namespace innodb {
 
-// ==================== Constants from ibd2sql ====================
+// ==================== Page Constants ====================
 
 /// Off-page flag for DYNAMIC/COMPRESSED row format
-/// Reference: ibd2sql/innodb_page/index.py line 108 - self.off_page_flag = 16404
-constexpr uint32_t OFF_PAGE_FLAG_DYNAMIC = 16404;  // Correct value from ibd2sql
+constexpr uint32_t OFF_PAGE_FLAG_DYNAMIC = 16404;
 
 /// Off-page flag for COMPACT/REDUNDANT (Antelope) row format
-/// Reference: ibd2sql/innodb_page/index.py line 111 - self.off_page_flag = 17172
 constexpr uint32_t OFF_PAGE_FLAG_ANTLELOPE = 17172;  // 0x4314
 
 /// Alias for compatibility
@@ -55,7 +53,6 @@ constexpr size_t DB_ROLL_PTR_SIZE = 7;
 constexpr size_t DB_ROW_ID_SIZE = 6;
 
 /// INFIMUM record origin offset (data start) in COMPACT/DYNAMIC format pages
-/// In ibd2sql: PAGE_NEW_INFIMUM = 99 (the record origin, NOT the header start)
 /// The 5-byte COMPACT record header precedes this at offset 94 (99 - 5)
 /// The 6-byte REDUNDANT record header precedes offset 101 at offset 95 (101 - 6)
 constexpr uint16_t INFIMUM_OFFSET = 99;
@@ -77,11 +74,10 @@ constexpr uint32_t MAX_FIELDS_PER_RECORD = 4096;
 
 /**
  * @brief Column definition for schema-aware record parsing
- * Mirrors ibd2sql's column structure from TABLE/SDI
  */
 struct IndexColumnDef {
     std::string name;
-    uint8_t col_type = 0;       // InnoDB column type ID (from column_type.py)
+    uint8_t col_type = 0;       // InnoDB column type ID
     uint32_t col_length = 0;    // Max byte length of column
     bool is_nullable = false;
     bool is_unsigned = false;
@@ -153,7 +149,7 @@ struct IndexColumnDef {
     /**
      * @brief Get the fixed storage size for this column type
      * Returns 0 for variable-length columns (including CHAR for multi-byte charsets)
-     * Uses InnoDB type IDs (参考 ibd2sql column_type.py)
+     * Uses InnoDB type IDs
      */
     uint32_t fixed_size() const {
         switch (col_type) {
@@ -261,9 +257,6 @@ struct IndexColumnDef {
     /**
      * @brief Check if this is a system column (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
      * System columns are NOT included in NULL bitmap and variable size calculations.
-     * ibd2sql skips these in _read_nullbitmask_varsize_new():
-     *   if self.table.column[colid]['name'] in ['DB_TRX_ID','DB_ROLL_PTR']:
-     *       continue
      */
     bool is_system_column() const {
         return name == "DB_TRX_ID" || name == "DB_ROLL_PTR" || name == "DB_ROW_ID";
@@ -501,11 +494,10 @@ struct IndexRecord {
     }
 };
 
-// ==================== Record Header (ibd2sql-style) ====================
+// ==================== Record Header ====================
 
 /**
  * @brief Parsed COMPACT/DYNAMIC record header
- * Matches ibd2sql's _read_rec_header_new layout exactly
  */
 struct NewRecordHeader {
     // Bit fields from 3-byte header (24 bits, big-endian)
@@ -526,7 +518,6 @@ struct NewRecordHeader {
 
 /**
  * @brief Parsed REDUNDANT record header
- * Matches ibd2sql's _read_rec_header_old layout exactly
  */
 struct OldRecordHeader {
     bool instant_flag;       // bit 31
@@ -542,7 +533,7 @@ struct OldRecordHeader {
     uint16_t next_offset;
 };
 
-// ==================== Page Header (ibd2sql-style) ====================
+// ==================== Page Header ====================
 
 /**
  * @brief InnoDB page header parsed from bytes 38+ of a page
@@ -590,10 +581,10 @@ struct InnoDBPageHeader {
     }
 };
 
-// ==================== InnoDBIndexParser (ibd2sql-style) ====================
+// ==================== InnoDBIndexParser ====================
 
 /**
- * @brief ibd2sql-style INDEX page parser
+ * @brief INDEX page parser
  *
  * This is the core class that correctly parses InnoDB INDEX pages
  * to extract records with proper COMPACT/DYNAMIC/REDUNDANT handling.
@@ -685,17 +676,15 @@ public:
      */
     std::vector<IndexRecord> parse_page_try(const uint8_t* page_data, size_t page_size, uint32_t page_no);
 
-    // ---- Record Header Parsing (ibd2sql-style) ----
+    // ---- Record Header Parsing ----
 
     /**
      * @brief Parse COMPACT/DYNAMIC record header (5 bytes)
-     * Matches ibd2sql _read_rec_header_new exactly
      */
     static std::optional<NewRecordHeader> parse_new_record_header(const uint8_t* data, size_t offset, size_t max_size);
 
     /**
      * @brief Parse REDUNDANT record header (6 bytes)
-     * Matches ibd2sql _read_rec_header_old exactly
      */
     static std::optional<OldRecordHeader> parse_old_record_header(const uint8_t* data, size_t offset, size_t max_size);
 
@@ -714,7 +703,7 @@ public:
 
     /**
      * @brief Parse all pages from an IBD file sequentially (force mode)
-     * This is ibd2sql's --force mode: scan every page in the file
+     * Scans every page in the file
      * @param ibd_path Path to .ibd file
      * @return All recovered records from all leaf INDEX pages
      */
@@ -798,7 +787,6 @@ private:
      * - The header is read BACKWARD from the origin (5 bytes for COMPACT, 6 for REDUNDANT)
      * - REC_NEXT is a signed 16-bit offset RELATIVE to the current record's origin
      * - The next record's absolute offset = current_origin + REC_NEXT
-     * This matches ibd2sql's read_reverse() + REC_NEXT computation exactly.
      */
     std::vector<IndexRecord> follow_record_chain(
         const uint8_t* page_data, size_t page_size,
@@ -824,8 +812,7 @@ private:
 
     /**
      * @brief Read null bitmask and variable-length field sizes from a COMPACT/DYNAMIC record
-     * This is the critical function that was missing - it reads BACKWARD from the record end
-     * exactly like ibd2sql does.
+     * This reads BACKWARD from the record end.
      *
      * @param page_data Full page data
      * @param rec_start Offset of record header (5 bytes before record data start)
@@ -904,13 +891,11 @@ private:
 
     /**
      * @brief Validate INFIMUM and SUPREMUM markers in page
-     * Reference: undrop-for-innodb stream_parser.c INFIMUM/SUPREMUM validation
      */
     bool validate_infimum_supremum(const uint8_t* page_data, size_t page_size, bool is_compact) const;
 
     /**
      * @brief Validate page checksum (both old and new style)
-     * Reference: undrop-for-innodb stream_parser.c:96-135
      */
     bool validate_page_checksum(const uint8_t* page_data, size_t page_size) const;
 
