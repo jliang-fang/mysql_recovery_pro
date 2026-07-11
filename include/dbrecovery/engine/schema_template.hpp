@@ -66,7 +66,7 @@ struct SchemaTemplate {
 
     // ✅ 新增：Instant DDL 行版本支持 (MySQL 8.0.23+)
     uint16_t max_row_version = 0;         // 最大行版本号
-    uint16_t mysql_version_id = 0;        // MySQL版本ID
+    uint32_t mysql_version_id = 0;        // MySQL版本ID
 
     // Validation hints
     struct ValidationHints {

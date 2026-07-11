@@ -154,3 +154,8 @@ gtest_discover_tests(test_page_parser_v3)
 add_executable(test_extreme_scenarios test_extreme_scenarios.cpp)
 target_link_libraries(test_extreme_scenarios PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_extreme_scenarios)
+
+# Instant DDL tests (MySQL 8.0.23+ instant ADD COLUMN support)
+add_executable(test_instant_ddl unit/test_instant_ddl.cpp)
+target_link_libraries(test_instant_ddl PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
+gtest_discover_tests(test_instant_ddl)

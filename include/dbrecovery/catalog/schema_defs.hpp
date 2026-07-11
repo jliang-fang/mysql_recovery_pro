@@ -109,7 +109,7 @@ struct TableSchema {
 
     // ✅ 新增：Instant DDL 行版本支持 (MySQL 8.0.23+)
     uint16_t max_row_version = 0;         // 最大行版本号 (用于 instant ADD/DROP column)
-    uint16_t mysql_version_id = 0;        // MySQL版本ID (80029=8.0.29, 用于判断 instant DDL 版本)
+    uint32_t mysql_version_id = 0;        // MySQL版本ID (80029=8.0.29, 用于判断 instant DDL 版本)
     
     void debug_print() const {
         std::cout << "Table: " << table_name << std::endl;
@@ -360,7 +360,7 @@ struct TableSchema {
 
         // ✅ 新增：解析 MySQL 版本 ID (用于判断 instant DDL 版本)
         if (j.contains("mysql_version_id")) {
-            mysql_version_id = j["mysql_version_id"].get<uint16_t>();
+            mysql_version_id = j["mysql_version_id"].get<uint32_t>();
         }
 
         // dd_object 结构（MySQL 8.0 SDI）
@@ -370,7 +370,7 @@ struct TableSchema {
                 table_name = dd_obj["name"].get<std::string>();
             }
             if (dd_obj.contains("mysql_version_id")) {
-                mysql_version_id = dd_obj["mysql_version_id"].get<uint16_t>();
+                mysql_version_id = dd_obj["mysql_version_id"].get<uint32_t>();
             }
         }
 
