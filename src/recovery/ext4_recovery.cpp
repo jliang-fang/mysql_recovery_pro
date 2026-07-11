@@ -1,8 +1,6 @@
 /**
  * @file ext4_recovery.cpp
  * @brief ext4 filesystem-specific recovery implementation for MySQL/InnoDB data
- *
- * Implements ext4-specific recovery techniques based on testdisk/ext2p.c
  */
 
 #include "dbrecovery/recovery/ext4_recovery.hpp"

@@ -572,7 +572,7 @@ bool RmrfRecovery::reconstruct_from_file(const std::string& file_path,
     return !recovered_records.empty();
 }
 
-// ==================== 全分区扫描恢复（ibd2sql-style） ====================
+// ==================== 全分区扫描恢复 ====================
 
 std::vector<std::map<std::string, std::string>>
 RmrfRecovery::full_partition_recovery(const std::string& file_path) {
@@ -1168,7 +1168,7 @@ uint32_t RmrfRecovery::scan_with_two_level_index(
 }
 
 /**
- * @brief 使用 ibd2sql FORCE 模式扫描文件
+ * @brief FORCE 模式扫描文件
  *
  * FORCE 模式遍历文件的每一页，不依赖页链：
  * 1. 检查 offset 24 的签名

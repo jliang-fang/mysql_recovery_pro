@@ -41,15 +41,14 @@ void RawDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
     external_schema_ = schema;
 }
 
-// ibd2sql-style page validation: data[:4] + data[4:8] == data[-8:-4] + data[-4:]
-// This checks if LSN in header matches LSN in footer
+// Page validation: checks if LSN in header matches LSN in footer
 bool RawDiskCarver::is_valid_page_ibd2sql(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 64) return false;
 
     // Check page type first
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
 
-    // Valid page types (from ibd2sql)
+    // Valid page types
     switch (page_type) {
         case FIL_PAGE_INDEX:        // 0x45BF
         case FIL_PAGE_SDI:          // 0x45BE
@@ -65,8 +64,7 @@ bool RawDiskCarver::is_valid_page_ibd2sql(const uint8_t* data, size_t page_size)
             return false;
     }
 
-    // ibd2sql IS_PAGE check: compare header and footer LSN
-    // data[:4] should equal data[-8:-4] and data[4:8] should equal data[-4:]
+    // IS_PAGE check: compare header and footer LSN
     uint32_t checksum_header = read_be<uint32_t>(data, 0);
     uint32_t lsn_low_header = read_be<uint32_t>(data, 4);
     uint32_t checksum_footer = read_be<uint32_t>(data, page_size - 8);
@@ -77,7 +75,7 @@ bool RawDiskCarver::is_valid_page_ibd2sql(const uint8_t* data, size_t page_size)
         return true;
     }
 
-    // Strict LSN match (ibd2sql style)
+    // Strict LSN match
     if (checksum_header == checksum_footer && lsn_low_header == lsn_low_footer) {
         return true;
     }
@@ -99,14 +97,13 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
     // 2. 对于INDEX页，检查额外的结构完整性
     //
     // 注意：LSN检查在真实文件中可能不严格匹配
-    // ibd2sql使用: data[:4] + data[4:8] == data[-8:-4] + data[-4:]
-    // 但实际文件可能LSN不完全匹配（如恢复后的文件、压缩页等）
+    // 实际文件可能LSN不完全匹配（如恢复后的文件、压缩页等）
 
     try {
         // 检查页类型 (offset 24-25)
         uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
 
-        // 有效页类型列表 (参考 ibd2sql)
+        // 有效页类型列表
         bool is_valid_type = false;
         switch (page_type) {
             case FIL_PAGE_INDEX:        // 0x45BF - INDEX页
@@ -188,7 +185,6 @@ bool RawDiskCarver::is_blob_page(const uint8_t* data, size_t page_size) {
 
 /**
  * @brief 检测FRM文件签名
- * 参考 ibd2sql IS_FRM: data[:10] == b'\xfe\x01\n\x0c\x03\x00\x00\x10\x01\x00'
  */
 bool RawDiskCarver::is_frm_signature(const uint8_t* data, size_t len) {
     if (!data || len < 10) return false;
@@ -502,12 +498,12 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             // 使用两种页验证策略
             // 1. 标准验证（宽松）
             bool standard_valid = is_valid_page(page_data, config_.page_size);
-            // 2. ibd2sql严格验证
-            bool ibd2sql_valid = is_valid_page_ibd2sql(page_data, config_.page_size);
+            // 2. 严格验证
+            bool strict_valid = is_valid_page_ibd2sql(page_data, config_.page_size);
 
             // 对于删除文件的恢复，放宽验证条件
             // 只要页类型有效，就尝试恢复
-            if (!standard_valid && !ibd2sql_valid) {
+            if (!standard_valid && !strict_valid) {
                 // 最后一次尝试：检查是否有有效的LSN
                 uint64_t lsn_header = read_be<uint64_t>(page_data, 0);
                 uint64_t lsn_footer = read_be<uint64_t>(page_data, config_.page_size - 8);
