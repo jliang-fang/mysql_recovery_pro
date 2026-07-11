@@ -808,9 +808,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
                             if (flag == "PK" || flag == "PRIMARY" || flag == "KEY") {
                                 col.is_nullable = false;
-                                col.is_signed = false;
+                                // PK INT columns are typically UNSIGNED in MySQL
+                                if (type_str == "INT" || type_str == "INTEGER" || type_str == "BIGINT" ||
+                                    type_str == "SMALLINT" || type_str == "TINYINT" || type_str == "MEDIUMINT") {
+                                    col.is_signed = false;  // UNSIGNED
+                                }
                             }
                             if (flag == "UNSIGNED") col.is_signed = false;
+                            if (flag == "SIGNED") col.is_signed = true;
                         }
 
                         parsed_schema.columns[ordinal] = col;
@@ -820,6 +825,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                 ext4_schema = parsed_schema;
                 std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
+                for (const auto& [ord, col] : parsed_schema.columns) {
+                    std::cout << "  [" << ord << "] " << col.name << " mysql_type=" << col.mysql_type_id
+                              << " is_signed=" << col.is_signed << "\n";
+                }
             }
 
             // Set schema if available
