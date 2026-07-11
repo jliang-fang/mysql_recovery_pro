@@ -159,3 +159,8 @@ gtest_discover_tests(test_extreme_scenarios)
 add_executable(test_instant_ddl unit/test_instant_ddl.cpp)
 target_link_libraries(test_instant_ddl PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
 gtest_discover_tests(test_instant_ddl)
+
+# IBD file recovery tests
+add_executable(test_ibd_recovery unit/test_ibd_recovery.cpp)
+target_link_libraries(test_ibd_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_ibd_recovery)
