@@ -3,9 +3,8 @@
 
 /**
  * @file index_page_parser.hpp
- * @brief ibd2sql-style INDEX page parser for COMPACT/DYNAMIC/REDUNDANT row formats
+ * @brief INDEX page parser for COMPACT/DYNAMIC/REDUNDANT row formats
  *
- * Ported from ibd2sql v2.x innodb_page/index.py with C++ optimizations.
  * This is the core parser that enables >=99.9% recovery rate by correctly
  * parsing InnoDB record headers, null bitmasks, variable-length field sizes,
  * and extracting field data with schema awareness.
