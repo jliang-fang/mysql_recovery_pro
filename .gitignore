@@ -1,1 +1,42 @@
-.aider*
+# Build directories
+build/
+bin/
+lib/
+
+# IDE and editor
+.vscode/
+.idea/
+.claude/
+.qwen/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+.eggs/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+*.bak
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test output
+test_output/
+output_*/
+*.out
+
+# Memory directory (session data)
+memory/
+
+# vcpkg
+vcpkg/

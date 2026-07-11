@@ -5,9 +5,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 
-# GUI option
-option(GUI_ENABLED "Enable GUI support" OFF)
-
 # 集成 nlohmann/json 库
 # ✅ P0-1 修复：使用系统安装的 nlohmann-json 库
 find_package(nlohmann_json REQUIRED)
@@ -348,12 +345,4 @@ if(ENABLE_ASAN OR ENABLE_UBSAN OR ENABLE_LSAN)
 
     # 修复：仅在链接时添加 sanitizer（避免链接器找不到库的问题）
     # sanitizer 库会在运行时自动链接
-endif()
-
-# GUI support (optional)
-if(GUI_ENABLED)
-    add_subdirectory(gui)
-    message(STATUS "GUI enabled - building MySQL Recovery Pro GUI")
-else()
-    message(STATUS "GUI disabled - use -DGUI_ENABLED=ON to enable")
 endif()
