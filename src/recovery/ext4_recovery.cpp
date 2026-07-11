@@ -925,6 +925,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                 case 251: col_def.col_type = 27; break; // BLOB (InnoDB type 27)
                 case 247: col_def.col_type = 247; col_def.col_length = 1; break; // ENUM
                 case 248: col_def.col_type = 248; col_def.col_length = 1; break; // SET
+                case 255: col_def.col_type = 30; break; // GEOMETRY (MySQL type 255 -> InnoDB type 30)
                 default: col_def.col_type = 16; break; // Default to VARCHAR type
             }
             col_def.is_nullable = col.is_nullable;

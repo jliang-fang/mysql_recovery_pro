@@ -601,6 +601,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         } else if (type_str == "SET") {
                             col.mysql_type_id = 248;  // MYSQL_TYPE_SET
                             col.column_length = 1;
+                        } else if (type_str == "GEOMETRY") {
+                            col.mysql_type_id = 255;  // MYSQL_TYPE_GEOMETRY
+                            col.is_variable_length = true;
                         } else {
                             // Default to VARCHAR
                             col.mysql_type_id = 15;
@@ -797,6 +800,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             col.mysql_type_id = 12; col.column_length = 8;
                         } else if (type_str == "DATE") {
                             col.mysql_type_id = 10; col.column_length = 3;
+                        } else if (type_str == "GEOMETRY") {
+                            col.mysql_type_id = 255; col.is_variable_length = true;
                         } else {
                             col.mysql_type_id = 15; col.is_variable_length = true;
                             if (parts.size() >= 3) col.column_length = std::stoi(parts[2]);
@@ -948,6 +953,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     } else if (type_str == "JSON") {
                         // JSON type - stored as BLOB externally
                         col.mysql_type_id = 245;  // MYSQL_TYPE_JSON
+                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
+                    } else if (type_str == "GEOMETRY") {
+                        // GEOMETRY type - spatial data
+                        col.mysql_type_id = 255;  // MYSQL_TYPE_GEOMETRY
                         col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
                     } else if (type_str == "BLOB" || type_str == "TEXT") {
                         // BLOB/TEXT type

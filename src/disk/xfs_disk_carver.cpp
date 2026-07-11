@@ -1752,6 +1752,8 @@ static uint8_t mysql_type_to_innodb(uint32_t mysql_type) {
             return 247; // ENUM stays same
         case 248: // MYSQL_TYPE_SET
             return 248; // SET stays same
+        case 255: // MYSQL_TYPE_GEOMETRY
+            return 30;  // InnoDB GEOMETRY type
         case 0:   // MYSQL_TYPE_DECIMAL
         case 246: // MYSQL_TYPE_NEWDECIMAL
             return 0;  // InnoDB DECIMAL
