@@ -2,7 +2,6 @@
  * @file data_validation.hpp
  * @brief Data validation functions for recovered field values
  *
- * Reference: undrop-for-innodb/check_data.c
  * Provides validation functions to detect corrupted or invalid field values
  */
 
@@ -21,7 +20,6 @@ namespace innodb {
 namespace validation {
 
 // ==================== DateTime Validation ====================
-// Reference: undrop-for-innodb/check_data.c check_datetime()
 
 /**
  * @brief Validate datetime field value (MySQL <5.6 format)
@@ -123,7 +121,6 @@ inline bool validate_date(int year, int month, int day) {
 }
 
 // ==================== String Validation ====================
-// Reference: undrop-for-innodb/check_data.c check_char_ascii()
 
 /**
  * @brief Validate ASCII printable characters
@@ -264,7 +261,6 @@ inline bool validate_set_bits(uint64_t set_bits, uint32_t set_count) {
 }
 
 // ==================== Field Limits Structure ====================
-// Reference: undrop-for-innodb/tables_dict.h field_limits_t
 
 /**
  * @brief Field validation limits

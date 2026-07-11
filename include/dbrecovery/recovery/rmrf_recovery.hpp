@@ -57,10 +57,10 @@ struct TwoLevelScanResult {
     std::vector<uint8_t> data;         // 页数据
 };
 
-// ==================== ibd2sql FORCE 模式扫描 ====================
+// ==================== FORCE 模式扫描 ====================
 
 /**
- * @brief ibd2sql FORCE 模式扫描配置
+ * @brief FORCE 模式扫描配置
  */
 struct ForceScanConfig {
     uint32_t page_size = 16384;       // 页大小
@@ -70,7 +70,7 @@ struct ForceScanConfig {
 };
 
 /**
- * @brief ibd2sql FORCE 模式扫描结果
+ * @brief FORCE 模式扫描结果
  */
 struct ForceScanResult {
     uint64_t file_offset;              // 文件偏移
@@ -107,7 +107,7 @@ struct PageVersionInfo {
  * - 页识别：识别 InnoDB 页类型
  * - 记录恢复：从碎片化页中恢复记录
  * - PhotoRec 风格双层签名扫描
- * - ibd2sql FORCE 模式扫描
+ * - FORCE 模式扫描
  * - TRUNCATE 恢复（基于 LSN 过滤）
  */
 class RmrfRecovery {
@@ -220,10 +220,9 @@ public:
         const catalog::TableSchema& schema);
 
     /**
-     * @brief 全分区扫描恢复（ibd2sql-style，参考 ibd2sql 的扫描方式）
+     * @brief 全分区扫描恢复
      *
-     * 这个方法实现 ibd2sql 风格的全分区扫描：
-     * - 遍历整个 IBD 文件的每个页
+     * 遍历整个 IBD 文件的每个页：
      * - 识别页类型（INDEX, SDI, UNDO, ALLOCATED）
      * - 对 INDEX 页执行 B+Tree 解析
      * - 对损坏页使用启发式恢复
@@ -258,7 +257,6 @@ public:
      * @brief 从磁盘/镜像文件中恢复 TRUNCATE 的表
      *
      * 使用已知表结构作为模板，扫描磁盘寻找残留的 InnoDB 数据页
-     * 这是 ibd2sql 风格的恢复方法
      *
      * @param disk_path 磁盘/镜像文件路径
      * @param schema 表结构（TRUNCATE 前的结构）
@@ -328,10 +326,10 @@ public:
         const TwoLevelScanConfig& config,
         std::function<void(const TwoLevelScanResult&)> callback);
 
-    // ==================== ibd2sql FORCE 模式扫描 ====================
+    // ==================== FORCE 模式扫描 ====================
 
     /**
-     * @brief 使用 ibd2sql FORCE 模式扫描文件
+     * @brief 使用 FORCE 模式扫描文件
      *
      * FORCE 模式遍历文件的每一页，不依赖页链：
      * 1. 检查 offset 24 的签名

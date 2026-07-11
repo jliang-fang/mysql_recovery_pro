@@ -180,7 +180,6 @@ public:
      * @param first_page First page number
      * @return Decompressed BLOB data
      *
-     * Reference: ibd2sql/innodb_page/lob.py FIRST_ZBLOB
      * ZBLOB uses zlib streaming decompression across page chains
      */
     std::vector<uint8_t> read_zblob_chain(
@@ -194,7 +193,6 @@ public:
      * @param mysql_version_id MySQL version ID (e.g., 50744 for 5.7.44)
      * @return Complete BLOB data
      *
-     * Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
      * Entry header at offset 96 (60 bytes), data at offset 696 for first page
      * Entry chain: next_entry_pageno/next_entry_offset from entry[6:12]
      * Data: pageno/datalen/lobversion from entry[-12:]
@@ -220,7 +218,6 @@ public:
      * @param total_length Expected total length
      * @return Complete BLOB data
      *
-     * Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
      * First page has entry header at offset 96, data at offset 696
      * Entry chain: next_entry_pageno, next_entry_offset from entry[6:12]
      */
@@ -414,7 +411,6 @@ inline BLOBField BlobScanner::extract_blob_pointer(const uint8_t* field_data, ui
 }
 
 // ==================== FIRST_BLOB Entry Chain Traversal ====================
-// Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
 
 inline bool BlobScanner::is_off_page(uint16_t vsize, uint8_t row_format, uint32_t mysql_version) {
     // DYNAMIC and COMPRESSED row formats use 16404 as off-page flag
