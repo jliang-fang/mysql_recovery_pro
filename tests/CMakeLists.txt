@@ -184,3 +184,18 @@ gtest_discover_tests(test_data_validation)
 add_executable(test_blob_chain_traversal unit/test_blob_chain_traversal.cpp)
 target_link_libraries(test_blob_chain_traversal PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_blob_chain_traversal)
+
+# ext4 block bitmap tests
+add_executable(test_ext4_block_bitmap unit/test_ext4_block_bitmap.cpp)
+target_link_libraries(test_ext4_block_bitmap PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_ext4_block_bitmap)
+
+# File signature detection tests
+add_executable(test_file_signature unit/test_file_signature.cpp)
+target_link_libraries(test_file_signature PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_file_signature)
+
+# XFS extent validation tests
+add_executable(test_xfs_extent unit/test_xfs_extent.cpp)
+target_link_libraries(test_xfs_extent PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_xfs_extent)

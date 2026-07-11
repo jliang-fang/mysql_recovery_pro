@@ -342,6 +342,50 @@ private:
     // Read inode bitmap for a group
     std::vector<uint8_t> read_inode_bitmap(uint32_t group_index);
 
+    /**
+     * @brief Check if a block is free in the block bitmap
+     * Reference: testdisk ext2p.c ext2fs_test_generic_bitmap
+     * @param bitmap Block bitmap for the group
+     * @param block_offset Block offset within the group
+     * @return true if block is free (bit is 0)
+     */
+    static bool is_block_free(const std::vector<uint8_t>& bitmap, uint32_t block_offset) {
+        if (bitmap.empty() || block_offset >= bitmap.size() * 8) {
+            return false;  // Out of bounds - treat as used
+        }
+        uint32_t byte_index = block_offset / 8;
+        uint32_t bit_index = block_offset % 8;
+        // Bit is 0 = free, Bit is 1 = used
+        return (bitmap[byte_index] & (1 << bit_index)) == 0;
+    }
+
+    /**
+     * @brief Check if a block is used in the block bitmap
+     * @param bitmap Block bitmap for the group
+     * @param block_offset Block offset within the group
+     * @return true if block is used (bit is 1)
+     */
+    static bool is_block_used(const std::vector<uint8_t>& bitmap, uint32_t block_offset) {
+        return !is_block_free(bitmap, block_offset);
+    }
+
+    /**
+     * @brief Count free blocks in a bitmap
+     * @param bitmap Block bitmap for the group
+     * @param blocks_per_group Number of blocks in the group
+     * @return Number of free blocks
+     */
+    static uint32_t count_free_blocks(const std::vector<uint8_t>& bitmap, uint32_t blocks_per_group) {
+        uint32_t free_count = 0;
+        uint32_t blocks_to_check = std::min(blocks_per_group, static_cast<uint32_t>(bitmap.size() * 8));
+        for (uint32_t i = 0; i < blocks_to_check; i++) {
+            if (is_block_free(bitmap, i)) {
+                free_count++;
+            }
+        }
+        return free_count;
+    }
+
     // Read inode from inode table
     std::optional<Ext4InodeInfo> read_inode(uint32_t group_index, uint32_t local_inode);
 
