@@ -1850,6 +1850,48 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
     return records;
 }
 
+// ==================== AG Header Reading ====================
+bool XfsDiskCarver::read_ag_headers(uint32_t ag_index, xfs_agi& agi, xfs_agf& agf) {
+#ifdef __linux__
+    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return false;
+    }
+
+    uint32_t block_size = be32toh(superblock_.sb_blocksize);
+    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+
+    // AGI is at block 2 of each AG (XFS_AGI_BLOCK = 2)
+    uint64_t agi_offset = static_cast<uint64_t>(ag_index) * ag_blocks * block_size + 2 * block_size;
+    if (pread(fd, &agi, sizeof(agi), agi_offset) != sizeof(agi)) {
+        close(fd);
+        return false;
+    }
+
+    if (be32toh(agi.agi_magicnum) != XFS_AGI_MAGIC) {
+        close(fd);
+        return false;
+    }
+
+    // AGF is at block 1 of each AG (XFS_AGF_BLOCK = 1)
+    uint64_t agf_offset = static_cast<uint64_t>(ag_index) * ag_blocks * block_size + 1 * block_size;
+    if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) {
+        close(fd);
+        return false;
+    }
+
+    if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) {
+        close(fd);
+        return false;
+    }
+
+    close(fd);
+    return true;
+#else
+    return false;
+#endif
+}
+
 // ==================== Extent Validation ====================
 // Reference: xfs_undelete OnlyWithinAGF() pattern
 // Validates that extent blocks are still free (not reallocated)
