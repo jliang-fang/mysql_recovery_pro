@@ -729,6 +729,108 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             ext4_recovery.set_config(ext4_config);
 
+            // Load and set external schema for schema-aware recovery (same logic as XFS)
+            std::optional<catalog::TableSchema> ext4_schema = load_schema_from_file(schema_file_path);
+
+            // Also try --schema command line string if no schema file
+            if (!ext4_schema.has_value() && !schema_str.empty()) {
+                std::cout << "[INFO] Parsing schema from --schema option for ext4 recovery\n";
+                catalog::TableSchema parsed_schema;
+                parsed_schema.table_name = "recovered_table";
+                parsed_schema.page_size = page_size;
+
+                // Parse schema string (same logic as XFS)
+                std::istringstream ss(schema_str);
+                std::string col_def;
+                int ordinal = 1;
+                while (std::getline(ss, col_def, ',')) {
+                    catalog::ColumnInfo col;
+
+                    // Trim whitespace
+                    col_def.erase(0, col_def.find_first_not_of(" \t"));
+                    col_def.erase(col_def.find_last_not_of(" \t") + 1);
+
+                    if (col_def.empty()) continue;
+
+                    // Split by colon
+                    std::istringstream cs(col_def);
+                    std::string token;
+                    std::vector<std::string> parts;
+                    while (std::getline(cs, token, ':')) {
+                        token.erase(0, token.find_first_not_of(" \t"));
+                        token.erase(token.find_last_not_of(" \t") + 1);
+                        parts.push_back(token);
+                    }
+
+                    if (parts.size() >= 2) {
+                        col.name = parts[0];
+                        std::string type_str = parts[1];
+                        std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
+
+                        col.ordinal = ordinal;
+                        col.physical_pos = ordinal;
+                        col.is_nullable = true;
+                        col.is_signed = true;
+
+                        // Convert MySQL types to internal type IDs (same as XFS)
+                        if (type_str == "INT" || type_str == "INTEGER") {
+                            col.mysql_type_id = 3; col.column_length = 4;
+                        } else if (type_str == "BIGINT") {
+                            col.mysql_type_id = 8; col.column_length = 8;
+                        } else if (type_str == "SMALLINT") {
+                            col.mysql_type_id = 2; col.column_length = 2;
+                        } else if (type_str == "TINYINT") {
+                            col.mysql_type_id = 1; col.column_length = 1;
+                        } else if (type_str == "FLOAT") {
+                            col.mysql_type_id = 4; col.column_length = 4;
+                        } else if (type_str == "DOUBLE") {
+                            col.mysql_type_id = 5; col.column_length = 8;
+                        } else if (type_str == "VARCHAR" || type_str == "CHAR") {
+                            col.mysql_type_id = 15; col.is_variable_length = true;
+                            if (parts.size() >= 3) col.column_length = std::stoi(parts[2]);
+                        } else if (type_str == "TEXT" || type_str == "BLOB") {
+                            col.mysql_type_id = (type_str == "TEXT") ? 252 : 251;
+                            col.is_variable_length = true;
+                        } else if (type_str == "JSON") {
+                            col.mysql_type_id = 245; col.is_variable_length = true;
+                        } else if (type_str == "DATETIME") {
+                            col.mysql_type_id = 12; col.column_length = 8;
+                        } else if (type_str == "DATE") {
+                            col.mysql_type_id = 10; col.column_length = 3;
+                        } else {
+                            col.mysql_type_id = 15; col.is_variable_length = true;
+                            if (parts.size() >= 3) col.column_length = std::stoi(parts[2]);
+                        }
+
+                        // Check for pk and unsigned flags
+                        for (size_t i = 2; i < parts.size(); i++) {
+                            std::string flag = parts[i];
+                            std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
+                            if (flag == "PK" || flag == "PRIMARY" || flag == "KEY") {
+                                col.is_nullable = false;
+                                col.is_signed = false;
+                            }
+                            if (flag == "UNSIGNED") col.is_signed = false;
+                        }
+
+                        parsed_schema.columns[ordinal] = col;
+                        ordinal++;
+                    }
+                }
+
+                ext4_schema = parsed_schema;
+                std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
+            }
+
+            // Set schema if available
+            if (ext4_schema.has_value()) {
+                ext4_recovery.set_external_schema(*ext4_schema);
+                std::cout << "[INFO] Schema-aware recovery enabled with "
+                          << ext4_schema->columns.size() << " columns\n";
+            } else {
+                std::cout << "[INFO] No schema provided, using schema-less recovery\n";
+            }
+
             auto ext4_result = ext4_recovery.scan_and_recover([&](double pct, const std::string& msg) {
                 if (verbose) {
                     std::cout << "\r[INFO] Progress: " << std::fixed << std::setprecision(1)

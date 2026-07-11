@@ -24,6 +24,8 @@
 #include <atomic>
 #include <queue>
 
+#include "dbrecovery/catalog/schema_defs.hpp"
+
 #ifdef __linux__
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -289,6 +291,9 @@ public:
 
     void set_config(const Ext4Config& config);
 
+    // Set external schema for schema-aware recovery
+    void set_external_schema(const catalog::TableSchema& schema);
+
     // Check if device has valid ext4 superblock
     static bool is_ext4_device(const std::string& device_path);
 
@@ -309,6 +314,7 @@ private:
     Ext4Config config_;
     ext4_superblock superblock_;
     Ext4ScanResult last_result_;
+    std::optional<catalog::TableSchema> external_schema_;  // External schema for schema-aware recovery
 
     // Cached superblock values for thread-safe access
     uint32_t group_count_ = 0;

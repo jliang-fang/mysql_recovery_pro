@@ -54,6 +54,10 @@ void Ext4Recovery::set_config(const Ext4Config& config) {
     config_ = config;
 }
 
+void Ext4Recovery::set_external_schema(const catalog::TableSchema& schema) {
+    external_schema_ = schema;
+}
+
 // ==================== Static Helper Functions ====================
 
 bool Ext4Recovery::is_ext4_device(const std::string& device_path) {
@@ -790,6 +794,59 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         return result;
     }
 
+    // Check if schema-aware recovery is enabled
+    bool use_schema = external_schema_.has_value() && !external_schema_->columns.empty();
+
+    if (use_schema && config_.verbose) {
+        std::cout << "[INFO] Using schema-aware recovery with "
+                  << external_schema_->columns.size() << " columns\n";
+    }
+
+    // Prepare IndexColumnDef list if schema is available
+    std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
+    if (use_schema) {
+        // Convert TableSchema to IndexColumnDef list
+        std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_cols;
+        for (const auto& [ordinal, col] : external_schema_->columns) {
+            uint32_t phys_pos = col.physical_pos > 0 ? col.physical_pos : ordinal;
+            sorted_cols.push_back({phys_pos, col});
+        }
+        std::sort(sorted_cols.begin(), sorted_cols.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+        for (const auto& [phys_pos, col] : sorted_cols) {
+            dbrecovery::innodb::IndexColumnDef col_def;
+            col_def.name = col.name;
+            // Convert MySQL server type to InnoDB storage type
+            // Reference: xfs_disk_carver.cpp mysql_type_to_innodb()
+            switch (col.mysql_type_id) {
+                case 1: col_def.col_type = 1; col_def.col_length = 1; break;  // TINYINT
+                case 2: col_def.col_type = 3; col_def.col_length = 2; break;  // SMALLINT
+                case 3: col_def.col_type = 4; col_def.col_length = 4; break;  // INT
+                case 4: col_def.col_type = 5; col_def.col_length = 4; break;  // FLOAT
+                case 5: col_def.col_type = 6; col_def.col_length = 8; break;  // DOUBLE
+                case 8: col_def.col_type = 9; col_def.col_length = 8; break;  // BIGINT
+                case 9: col_def.col_type = 10; col_def.col_length = 3; break;  // MEDIUMINT
+                case 10: col_def.col_type = 15; col_def.col_length = 3; break; // DATE
+                case 11: col_def.col_type = 20; col_def.col_length = 3; break; // TIME
+                case 12: col_def.col_type = 19; col_def.col_length = 5; break; // DATETIME
+                case 15: // VARCHAR
+                case 253: col_def.col_type = 16; break;  // VARCHAR (InnoDB type 16 is variable)
+                case 245: col_def.col_type = 31; break; // JSON (InnoDB type 31)
+                case 252: col_def.col_type = 27; break; // TEXT/BLOB (InnoDB type 27)
+                case 251: col_def.col_type = 27; break; // BLOB (InnoDB type 27)
+                case 247: col_def.col_type = 247; col_def.col_length = 1; break; // ENUM
+                case 248: col_def.col_type = 248; col_def.col_length = 1; break; // SET
+                default: col_def.col_type = 16; break; // Default to VARCHAR type
+            }
+            col_def.is_nullable = col.is_nullable;
+            col_def.is_unsigned = !col.is_signed;
+            col_def.ordinal_position = col.ordinal;
+            col_def.physical_pos = phys_pos;
+            index_columns.push_back(col_def);
+        }
+    }
+
     // Export recovered pages to CSV files with record parsing
     uint64_t total_records = 0;
     uint32_t processed_index = 0;
@@ -815,54 +872,104 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             continue;
         }
 
-        // Write header with basic fields
-        out << "page_no,index_id,trx_id,roll_ptr,record_data\n";
+        // Write header
+        if (use_schema) {
+            // Write column names from schema
+            bool first = true;
+            for (const auto& col : index_columns) {
+                if (!first) out << ",";
+                out << col.name;
+                first = false;
+            }
+            out << "\n";
+        } else {
+            // Write default header
+            out << "page_no,index_id,trx_id,roll_ptr,record_data\n";
+        }
 
         // Parse each page and extract records
         for (const auto& page : pages) {
             if (page.data.size() < config_.page_size) continue;
 
-            // Try to parse as INDEX page using InnoDBIndexParser
             try {
                 dbrecovery::innodb::InnoDBIndexParser parser;
                 uint32_t page_no = static_cast<uint32_t>(page.disk_offset / config_.page_size);
-                auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
 
-                for (const auto& rec : records) {
-                    // Write record info
+                if (use_schema) {
+                    // Schema-aware parsing
+                    parser.set_columns(index_columns);
+                    auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
+
+                    for (const auto& rec : records) {
+                        bool first = true;
+                        for (size_t i = 0; i < rec.fields.size() && i < index_columns.size(); i++) {
+                            if (!first) out << ",";
+                            first = false;
+
+                            if (rec.fields[i].is_null) {
+                                out << "NULL";
+                            } else {
+                                // Quote string values and escape special characters
+                                std::string val = rec.fields[i].str_value;
+                                if (val.find(',') != std::string::npos ||
+                                    val.find('"') != std::string::npos ||
+                                    val.find('\n') != std::string::npos) {
+                                    out << "\"";
+                                    for (char c : val) {
+                                        if (c == '"') out << "\"\"";
+                                        else out << c;
+                                    }
+                                    out << "\"";
+                                } else {
+                                    out << val;
+                                }
+                            }
+                        }
+                        out << "\n";
+                        total_records++;
+                    }
+                } else {
+                    // Schema-less parsing (original behavior)
+                    auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
+
+                    for (const auto& rec : records) {
+                        // Write record info
+                        out << (page.disk_offset / config_.page_size) << ","
+                            << index_id << ","
+                            << rec.trx_id << ","
+                            << rec.roll_ptr << ",\"";
+
+                        // Escape and write record data
+                        for (uint8_t byte : rec.raw_data) {
+                            if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
+                                out << static_cast<char>(byte);
+                            } else if (byte == '"' || byte == '\\') {
+                                out << '\\' << static_cast<char>(byte);
+                            } else {
+                                out << '.';
+                            }
+                        }
+                        out << "\"\n";
+                        total_records++;
+                    }
+                }
+            } catch (const std::exception& e) {
+                if (!use_schema) {
+                    // Fallback: export raw page data if parsing fails
                     out << (page.disk_offset / config_.page_size) << ","
                         << index_id << ","
-                        << rec.trx_id << ","
-                        << rec.roll_ptr << ",\"";
+                        << "0,0,\"";
 
-                    // Escape and write record data
-                    for (uint8_t byte : rec.raw_data) {
+                    // Find infimum/supremum and extract readable content
+                    constexpr uint16_t INFIMUM_STRING_OFFSET = 59;
+                    for (size_t i = INFIMUM_STRING_OFFSET; i < page.data.size(); i++) {
+                        uint8_t byte = page.data[i];
                         if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
                             out << static_cast<char>(byte);
-                        } else if (byte == '"' || byte == '\\') {
-                            out << '\\' << static_cast<char>(byte);
-                        } else {
-                            out << '.';
                         }
                     }
                     out << "\"\n";
-                    total_records++;
                 }
-            } catch (const std::exception& e) {
-                // Fallback: export raw page data if parsing fails
-                out << (page.disk_offset / config_.page_size) << ","
-                    << index_id << ","
-                    << "0,0,\"";
-
-                // Find infimum/supremum and extract readable content
-                constexpr uint16_t INFIMUM_STRING_OFFSET = 59;
-                for (size_t i = INFIMUM_STRING_OFFSET; i < page.data.size(); i++) {
-                    uint8_t byte = page.data[i];
-                    if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
-                        out << static_cast<char>(byte);
-                    }
-                }
-                out << "\"\n";
             }
         }
         out.close();
