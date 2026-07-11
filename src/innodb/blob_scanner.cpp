@@ -21,16 +21,9 @@ namespace dbrecovery {
 namespace innodb {
 
 // ==================== BLOB Page Constants ====================
-// From MySQL 8.0.36: include/fil0fil.h & include/fut0fut.h
+// Constants moved to page_defs.hpp (BTR_BLOB_HDR_SIZE, BTR_EXTERN_*, etc.)
 
-// BLOB page header starts at offset 0 (no FIL header in BLOB pages)
-// BLOB page header format:
-// Offset 0-3: Next BLOB page (0 if last)
-// Offset 4-7: Previous BLOB page (0 if first)
-// Offset 8-11: BLOB sequence number
-// Offset 12-15: BLOB field length (for first page)
-
-constexpr uint16_t BTR_BLOB_HDR_SIZE = 16;  // BLOB header size
+// Local constants not in page_defs.hpp
 constexpr uint16_t BTR_BLOB_NEXT = 0;       // Next page offset
 constexpr uint16_t BTR_BLOB_PREV = 4;       // Previous page offset
 constexpr uint16_t BTR_BLOB_LEN  = 8;       // Total length (4 bytes)
@@ -42,22 +35,6 @@ constexpr uint8_t BTR_BLOB_FREE    = 0x40;  // Free page
 
 // First BLOB page flags
 constexpr uint8_t BTR_BLOB_FIRST = 0x01;    // First page of BLOB
-
-// ==================== BLOB Pointer (20 bytes) ====================
-// In DYNAMIC/COMPRESSED row format, BLOB fields store 20-byte pointers:
-// Offset 0-3: Space ID
-// Offset 4-7: Page number
-// Offset 8-11: Offset within page
-// Offset 12-15: Total BLOB length (for fully external)
-// Offset 16-19: Version/length info
-
-constexpr uint16_t BTR_EXTERN_SPACE_ID = 0;
-constexpr uint16_t BTR_EXTERN_PAGE     = 4;
-constexpr uint16_t BTR_EXTERN_OFFSET   = 8;
-constexpr uint16_t BTR_EXTERN_LEN      = 12;
-constexpr uint16_t BTR_EXTERN_VERSION  = 16;
-
-constexpr uint32_t BTR_EXTERN_SIZE = 20;
 
 // ==================== BLOB Scanner Implementation ====================
 

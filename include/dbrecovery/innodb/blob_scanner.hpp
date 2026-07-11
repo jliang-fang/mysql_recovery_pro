@@ -50,14 +50,32 @@ struct BLOBPage {
 
 /**
  * @brief BLOB field reference - pointer to external BLOB storage
+ *
+ * This structure represents the 20-byte BTR_EXTERN field reference
+ * that appears at the end of externally stored (off-page) fields.
+ *
+ * Layout (20 bytes, at end of field data):
+ *   bytes 0-3:  space_id   (4 bytes)
+ *   bytes 4-7:  page_no    (4 bytes)
+ *   bytes 8-11: offset     (4 bytes)
+ *   bytes 12-19: length    (4 bytes) + flags (4 bytes)
  */
 struct BLOBField {
     uint16_t field_index;     // Index in record fields
-    uint32_t space_id;        // Space ID
-    uint32_t page_no;         // First page number
-    uint32_t offset;          // Offset within first page
-    uint32_t total_len;       // Total BLOB length
+    uint32_t space_id;        // Space ID (BTR_EXTERN_SPACE_ID)
+    uint32_t page_no;         // First page number (BTR_EXTERN_PAGE_NO)
+    uint32_t offset;          // Offset within first page (BTR_EXTERN_OFFSET)
+    uint32_t total_len;       // Total BLOB length (BTR_EXTERN_LEN, lower 24 bits)
     bool is_partial;          // Partial external storage
+    bool is_owner;            // This field owns the BLOB (BTR_EXTERN_OWNER_FLAG)
+    bool is_inherited;        // Inherited from parent (BTR_EXTERN_INHERITED_FLAG)
+
+    /**
+     * @brief Parse BLOB field reference from 20-byte pointer
+     * @param data Pointer to BTR_EXTERN field ref (20 bytes at end of field)
+     * @return Parsed BLOBField structure
+     */
+    static BLOBField parse(const uint8_t* data);
 };
 
 /**
@@ -169,6 +187,44 @@ public:
         uint32_t first_page);
 
     /**
+     * @brief Read FIRST_BLOB with entry chain traversal
+     * @param file_path Path to .ibd file
+     * @param first_page First page number
+     * @param total_length Expected total length
+     * @return Complete BLOB data
+     *
+     * Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
+     * First page has entry header at offset 96, data at offset 696
+     * Entry chain: next_entry_pageno, next_entry_offset from entry[6:12]
+     */
+    std::vector<uint8_t> read_first_blob_chain(
+        const std::string& file_path,
+        uint32_t first_page,
+        uint32_t total_length);
+
+    /**
+     * @brief Parse BLOB page header from page data
+     * @param page_data Raw page data (16KB)
+     * @return BLOBPage with parsed header fields
+     */
+    BLOBPage parse_blob_page_header(const std::vector<uint8_t>& page_data);
+
+    /**
+     * @brief Check if page is a valid BLOB page
+     * @param page_data Raw page data
+     * @return true if page is valid BLOB/ZBLOB page
+     */
+    bool is_valid_blob_page(const std::vector<uint8_t>& page_data);
+
+    /**
+     * @brief Extract BLOB field reference from record field
+     * @param field_data Field data with BTR_EXTERN pointer at end
+     * @param field_length Total field length (including 20-byte pointer)
+     * @return BLOBField with parsed external storage info
+     */
+    BLOBField extract_blob_pointer(const uint8_t* field_data, uint32_t field_length);
+
+    /**
      * @brief Decompress ZBLOB page data using zlib
      * @param compressed_data Compressed data (starts at offset 38)
      * @param decompressor_state Optional: continue streaming decompression
@@ -232,11 +288,103 @@ private:
     uint32_t page_size_;
     ScanStats stats_{0, 0, 0, 0};
 
-    size_t get_field_size(FieldType type, 
-                         const std::vector<uint8_t>& data, 
+    size_t get_field_size(FieldType type,
+                         const std::vector<uint8_t>& data,
                          size_t offset);
     bool is_ascii_or_utf8(const std::vector<uint8_t>& data);
 };
+
+// ==================== Inline Implementations ====================
+
+inline BLOBField BLOBField::parse(const uint8_t* data) {
+    BLOBField field{};
+    field.field_index = 0;
+    field.space_id = (static_cast<uint32_t>(data[0]) << 24) |
+                     (static_cast<uint32_t>(data[1]) << 16) |
+                     (static_cast<uint32_t>(data[2]) << 8) |
+                     static_cast<uint32_t>(data[3]);
+    field.page_no = (static_cast<uint32_t>(data[4]) << 24) |
+                    (static_cast<uint32_t>(data[5]) << 16) |
+                    (static_cast<uint32_t>(data[6]) << 8) |
+                    static_cast<uint32_t>(data[7]);
+    field.offset = (static_cast<uint32_t>(data[8]) << 24) |
+                   (static_cast<uint32_t>(data[9]) << 16) |
+                   (static_cast<uint32_t>(data[10]) << 8) |
+                   static_cast<uint32_t>(data[11]);
+    // Length is 8 bytes: lower 4 bytes are length, upper 4 bytes are flags
+    uint32_t len_low = (static_cast<uint32_t>(data[12]) << 24) |
+                       (static_cast<uint32_t>(data[13]) << 16) |
+                       (static_cast<uint32_t>(data[14]) << 8) |
+                       static_cast<uint32_t>(data[15]);
+    uint32_t len_high = (static_cast<uint32_t>(data[16]) << 24) |
+                        (static_cast<uint32_t>(data[17]) << 16) |
+                        (static_cast<uint32_t>(data[18]) << 8) |
+                        static_cast<uint32_t>(data[19]);
+    field.total_len = len_low;
+    field.is_owner = (len_high & BTR_EXTERN_OWNER_FLAG) != 0;
+    field.is_inherited = (len_high & BTR_EXTERN_INHERITED_FLAG) != 0;
+    field.is_partial = false;
+    return field;
+}
+
+inline BLOBPage BlobScanner::parse_blob_page_header(const std::vector<uint8_t>& page_data) {
+    BLOBPage page{};
+    page.data = page_data;
+
+    if (page_data.size() < FIL_HEADER_SIZE + BTR_BLOB_HDR_SIZE) {
+        return page;
+    }
+
+    // Parse FIL header
+    page.page_no = (static_cast<uint32_t>(page_data[4]) << 24) |
+                   (static_cast<uint32_t>(page_data[5]) << 16) |
+                   (static_cast<uint32_t>(page_data[6]) << 8) |
+                   static_cast<uint32_t>(page_data[7]);
+
+    page.page_type = (static_cast<uint16_t>(page_data[24]) << 8) |
+                     static_cast<uint16_t>(page_data[25]);
+
+    // Parse BLOB header at FIL_PAGE_DATA (offset 38)
+    const uint8_t* blob_hdr = page_data.data() + FIL_HEADER_SIZE;
+    page.total_len = (static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_PART_LEN]) << 24) |
+                     (static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_PART_LEN + 1]) << 16) |
+                     (static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_PART_LEN + 2]) << 8) |
+                     static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_PART_LEN + 3]);
+
+    page.next_page = (static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_NEXT_PAGE_NO]) << 24) |
+                     (static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_NEXT_PAGE_NO + 1]) << 16) |
+                     (static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_NEXT_PAGE_NO + 2]) << 8) |
+                     static_cast<uint32_t>(blob_hdr[BTR_BLOB_HDR_NEXT_PAGE_NO + 3]);
+
+    page.flag = 0;
+    page.prev_page = 0;
+
+    return page;
+}
+
+inline bool BlobScanner::is_valid_blob_page(const std::vector<uint8_t>& page_data) {
+    if (page_data.size() < FIL_HEADER_SIZE) {
+        return false;
+    }
+
+    uint16_t page_type = (static_cast<uint16_t>(page_data[24]) << 8) |
+                         static_cast<uint16_t>(page_data[25]);
+
+    // Check for BLOB page types
+    return page_type == static_cast<uint16_t>(BlobPageType::BLOB) ||
+           page_type == static_cast<uint16_t>(BlobPageType::ZBLOB) ||
+           page_type == static_cast<uint16_t>(BlobPageType::ZBLOB2);
+}
+
+inline BLOBField BlobScanner::extract_blob_pointer(const uint8_t* field_data, uint32_t field_length) {
+    if (field_length < BTR_EXTERN_FIELD_REF_SIZE) {
+        return BLOBField{};
+    }
+
+    // BTR_EXTERN field ref is at the END of the field data
+    const uint8_t* extern_ref = field_data + field_length - BTR_EXTERN_FIELD_REF_SIZE;
+    return BLOBField::parse(extern_ref);
+}
 
 } // namespace innodb
 } // namespace dbrecovery

@@ -194,6 +194,65 @@ constexpr uint8_t REC_STATUS_NODE_PTR   = 0x01;   // node pointer record
 constexpr uint8_t REC_STATUS_INFIMUM    = 0x02;   // infimum system record (record type bits)
 constexpr uint8_t REC_STATUS_SUPREMUM   = 0x03;   // supremum system record (record type bits)
 
+// ==================== External BLOB Field Reference Constants ====================
+// From MySQL source: include/btr0cur.h lines 673-693
+// BTR_EXTERN_FIELD_REF is a 20-byte structure at the end of externally stored fields
+
+/// @brief Offset of space_id within BTR_EXTERN field ref (20 bytes at end of field)
+constexpr uint8_t BTR_EXTERN_SPACE_ID     = 0;    // 4 bytes: space id where stored
+/// @brief Offset of page_no within BTR_EXTERN field ref
+constexpr uint8_t BTR_EXTERN_PAGE_NO      = 4;    // 4 bytes: page no where stored
+/// @brief Offset of offset within BTR_EXTERN field ref
+constexpr uint8_t BTR_EXTERN_OFFSET       = 8;    // 4 bytes: offset of BLOB header
+/// @brief Offset of length within BTR_EXTERN field ref
+constexpr uint8_t BTR_EXTERN_LEN          = 12;   // 8 bytes: length + flags (upper 16 bits are flags)
+
+/// @brief Total size of BTR_EXTERN field reference
+constexpr uint8_t BTR_EXTERN_FIELD_REF_SIZE = 20;
+
+/// @brief Alias for backward compatibility
+constexpr uint8_t BTR_EXTERN_SIZE = BTR_EXTERN_FIELD_REF_SIZE;
+
+/// @brief Alias for BTR_EXTERN_PAGE_NO (used in some files)
+constexpr uint8_t BTR_EXTERN_PAGE = BTR_EXTERN_PAGE_NO;
+
+/// @brief Offset for version/length info (legacy)
+constexpr uint8_t BTR_EXTERN_VERSION = 16;
+
+/// @brief Owner flag in BTR_EXTERN_LEN high bits
+constexpr uint32_t BTR_EXTERN_OWNER_FLAG      = 0x80000000;  // bit 31: this field owns the BLOB
+/// @brief Inherited flag in BTR_EXTERN_LEN high bits
+constexpr uint32_t BTR_EXTERN_INHERITED_FLAG  = 0x40000000;  // bit 30: inherited from parent
+
+/// @brief FIL_NULL value (0xFFFFFFFF) indicates end of chain
+constexpr uint32_t FIL_NULL = 0xFFFFFFFF;
+
+// ==================== BLOB Page Header Constants ====================
+// From MySQL source: include/page0page.h
+// BLOB page header starts at FIL_PAGE_DATA (offset 38)
+
+/// @brief BLOB header part length offset (within BLOB page data)
+constexpr uint8_t BTR_BLOB_HDR_PART_LEN     = 0;    // 4 bytes: length of this part
+/// @brief BLOB header next page number offset
+constexpr uint8_t BTR_BLOB_HDR_NEXT_PAGE_NO = 4;    // 4 bytes: next page in chain
+/// @brief BLOB header size (total header bytes before data)
+constexpr uint8_t BTR_BLOB_HDR_SIZE         = 8;    // 8 bytes total header
+
+/// @brief BLOB first page data starts after infimum/supremum (offset 696 for 16KB page)
+/// Reference: ibd2sql FIRST_BLOB uses data[96:96+60] for entry, data[696:] for first page data
+constexpr uint16_t BLOB_FIRST_PAGE_DATA_OFFSET = 696;  // For 16KB pages
+
+/// @brief BLOB subsequent page data starts at offset 49 (after FIL header + BLOB header)
+/// Reference: ibd2sql FIRST_BLOB uses pg.read(pageno)[49:49+datalen] for subsequent pages
+constexpr uint16_t BLOB_SUBSEQUENT_PAGE_DATA_OFFSET = 49;
+
+/// @brief BLOB entry header size (60 bytes in first page)
+/// Reference: ibd2sql FIRST_BLOB: entry = data[96:96+60]
+constexpr uint16_t BLOB_ENTRY_HEADER_SIZE = 60;
+
+/// @brief BLOB entry header offset in first page
+constexpr uint16_t BLOB_ENTRY_HEADER_OFFSET = 96;
+
 // ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名，用于兼容不同命名习惯
 // 在 MySQL 8.0 源码中，该位被命名为 REC_MIN_MARK_FLAG（位于 info_bits 的 bit 4）
 constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)
