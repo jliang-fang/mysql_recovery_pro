@@ -399,7 +399,6 @@ TEST_F(DataValidationTest, FullRecordValidation) {
 }
 
 // ==================== REDUNDANT Format Validation Tests ====================
-// Reference: undrop-for-innodb/rem0rec.ic
 
 TEST_F(DataValidationTest, IsBlobType) {
     using namespace dbrecovery::innodb::mysql_types;

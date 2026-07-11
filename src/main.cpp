@@ -1731,7 +1731,6 @@ int main(int argc, char** argv) {
 
                     // CRITICAL FIX: Set is_binary based on charset_id
                     // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
-                    // Reference: ibd2sql uses charset.collation.is_binary to detect binary columns
                     // EXCEPTION: JSON type (31) also uses binary charset but should NOT be treated as binary data
                     // JSON is stored in MySQL's internal binary format but is decoded as text
                     icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
@@ -1823,7 +1822,6 @@ int main(int argc, char** argv) {
                 // 5=FLOAT, 6=DOUBLE, 21=NEWDECIMAL
                 // 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2, 15=NEWDATE, 14=YEAR
                 // 16=VARCHAR, 29=STRING(CHAR), 27=BLOB, 31=JSON
-                // Reference: ibd2sql column_type.py
                 if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
                 else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
                 else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }
@@ -2247,7 +2245,6 @@ int main(int argc, char** argv) {
                 // 5=FLOAT, 6=DOUBLE, 21=NEWDECIMAL
                 // 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2, 15=NEWDATE, 14=YEAR
                 // 16=VARCHAR, 29=STRING(CHAR), 27=BLOB, 31=JSON
-                // Reference: ibd2sql column_type.py
                 if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
                 else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
                 else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }

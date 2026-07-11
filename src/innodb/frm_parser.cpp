@@ -49,7 +49,6 @@ enum class MySQLFieldType : uint8_t {
 };
 
 // MySQL 服务器类型到 InnoDB 存储类型的映射
-// 参考 ibd2sql frm2sdi.py COL_TYPE 映射表
 // 格式: MySQL server type -> InnoDB type
 static uint8_t mysql_to_innodb_type(uint8_t mysql_type) {
     switch (mysql_type) {
@@ -387,7 +386,6 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
     }
 
     // FRM column section starts at record_offset + 258
-    // Reference: ibd2sql frm2sdi.py _read_columns()
     size_t pos = offset;
 
     // Read column section header
@@ -552,7 +550,6 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
     }
 
     // Read ENUM/SET values (interval section)
-    // Reference: ibd2sql frm2sdi.py lines 344-358
     for (uint16_t i = 0; i < columns.size() && pos < header.frm_length; i++) {
         if (columns[i].field_type == 247 || columns[i].field_type == 248) {  // ENUM or SET
             std::string element;

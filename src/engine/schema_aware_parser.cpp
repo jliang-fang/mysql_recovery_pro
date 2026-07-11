@@ -188,7 +188,6 @@ static std::string decode_blob(const uint8_t* data, uint32_t& offset) {
  */
 static std::string decode_datetime(const uint8_t* data, uint32_t& offset, uint8_t fractional_digits = 0) {
     // InnoDB DATETIME binary format (5 bytes + fractional):
-    // Reference: ibd2sql/utils/b2data.py B2DATETIME()
     // t = (B2UINT4(data[:4])<<8) + B2UINT1(data[4:5])
     // months = (t&549751619584)>>22  = (t & 0x8000000000) >> 22
     // year = months//13, month = months%13
@@ -251,7 +250,6 @@ static std::string decode_datetime(const uint8_t* data, uint32_t& offset, uint8_
  */
 static std::string decode_timestamp(const uint8_t* data, uint32_t& offset, uint8_t fractional_digits = 0) {
     // InnoDB stores TIMESTAMP as big-endian 4-byte Unix epoch
-    // Reference: ibd2sql B2TIMESTAMP - uses time.localtime(B2UINT4(data[:4]))
     uint32_t epoch = innodb::read_be<uint32_t>(data, offset);
     offset += 4;
 
@@ -315,7 +313,6 @@ static std::string decode_date(const uint8_t* data, uint32_t& offset) {
  */
 static std::string decode_time(const uint8_t* data, uint32_t& offset, uint8_t fractional_digits = 0) {
     // InnoDB TIME format: 3 bytes + optional fractional
-    // Reference: ibd2sql/utils/b2data.py B2TIME()
     // t = B2INT3(data[:3]) - signed 3-byte integer
     // For negative: hour = 2047 - ((8384512&t)>>12), minute = 63 - ((4032&t)>>6), second = 63 - (63&t)
     // For positive: hour = (8384512&t)>>12, minute = (4032&t)>>6, second = 63&t

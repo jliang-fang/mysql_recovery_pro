@@ -337,7 +337,6 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
         // XFS stores recently deleted inodes in agi_unlinked hash buckets
         // These inodes have di_mode=0 but still have extent data
         // Each bucket entry is the head of a linked list of deleted inodes
-        // Reference: xfsprogs xfs_agi.h - agi_unlinked is hash table of unlinked inode lists
         constexpr uint32_t XFS_NULL_INO = 0xFFFFFFFF;
 
         // Track visited inodes to prevent duplicate processing across buckets
@@ -462,7 +461,6 @@ void XfsDiskCarver::btree_walk_recursive(int fd, uint32_t ag_index, uint32_t blo
         // Non-leaf node: traverse child pointers
         // Pointer array starts at middle of block (after keys)
         // For short-form btree: pointers at (header_size + block_size) / 2
-        // Reference: xfs_undelete xfs_tree.hpp:101
         size_t ptr_array_offset = (btree_header_size + block_size) / 2;
         size_t ptr_size = sizeof(uint32_t);  // Short-form uses 32-bit pointers
 
@@ -1698,10 +1696,9 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_sch
 // ==================== Schema-aware Parsing ====================
 
 // MySQL server type ID to InnoDB storage type ID mapping
-// Reference: MySQL include/mysql/mysql_com.h and InnoDB storage format
 // MySQL server types (MYSQL_TYPE_*) differ from InnoDB internal types
 static uint8_t mysql_type_to_innodb(uint32_t mysql_type) {
-    // InnoDB internal type IDs (from ibd2sql column_type.py):
+    // InnoDB internal type IDs:
     // 1: TINY, 2: TINY (unsigned), 3: SHORT (SMALLINT), 4: LONG (INT),
     // 5: FLOAT, 6: DOUBLE, 7: DECIMAL, 9: LONGLONG (BIGINT), 10: INT24 (MEDIUMINT),
     // 11: DATE, 12: DATETIME (old), 13: DATETIME (old 8-byte), 15: NEWDATE/DATE,
@@ -1893,7 +1890,6 @@ bool XfsDiskCarver::read_ag_headers(uint32_t ag_index, xfs_agi& agi, xfs_agf& ag
 }
 
 // ==================== Extent Validation ====================
-// Reference: xfs_undelete OnlyWithinAGF() pattern
 // Validates that extent blocks are still free (not reallocated)
 
 bool XfsDiskCarver::validate_extent(const xfs_extent& ext, uint32_t ag_index) {

@@ -1,9 +1,8 @@
 /**
  * @file index_page_parser.cpp
- * @brief ibd2sql-style INDEX page parser implementation
+ * @brief INDEX page parser implementation
  *
- * Core record extraction logic ported from ibd2sql v2.x innodb_page/index.py
- * with C++20 optimizations for speed and memory efficiency.
+ * Core record extraction logic with C++20 optimizations for speed and memory efficiency.
  */
 
 #include "dbrecovery/innodb/index_page_parser.hpp"
@@ -24,7 +23,6 @@ namespace dbrecovery {
 namespace innodb {
 
 // ==================== JSON Binary Decoder ====================
-// 参考 ibd2sql/utils/mysql_json.py 实现
 
 namespace {
 
@@ -45,7 +43,6 @@ constexpr uint8_t JSON_TYPE_STRING = 0x0C;
 
 // Variable length field size encoding constant
 // For is_big columns (BLOB, JSON): byte > 127 means 2-byte encoding
-// Reference: ibd2sql index.py line 12
 // Note: REC_N_FIELDS_ONE_BYTE_MAX is now defined in page_defs.hpp
 
 // 递归解析 JSON 二进制数据
@@ -102,7 +99,6 @@ std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len
 }
 
 // 解析JSON对象/数组的元素
-// 参考 ibd2sql/utils/mysql_json.py 实现
 // KEY_ENTRY格式: KEY_OFFSET(2/4) + KEY_LENGTH(2) = entry_size + 2 字节
 // VALUE_ENTRY格式: TYPE(1) + OFFSET/VALUE(2/4) = entry_size + 1 字节
 std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_size,
@@ -115,12 +111,12 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
 
     std::string result = is_object ? "{" : "[";
 
-    // ibd2sql格式:
+    // JSON binary format:
     // OBJECT: KEY_ENTRY(element_count * (entry_size+2)) + VALUE_ENTRY(element_count * (entry_size+1)) + KEYS + VALUES
     // ARRAY:  VALUE_ENTRY(element_count * (entry_size+1)) + VALUES
 
-    // KEY_ENTRY大小: entry_size + 2 (offset + length)
-    // VALUE_ENTRY大小: entry_size + 1 (type + offset/value)
+    // KEY_ENTRY size: entry_size + 2 (offset + length)
+    // VALUE_ENTRY size: entry_size + 1 (type + offset/value)
     size_t key_entry_size = entry_size + 2;
     size_t value_entry_size = entry_size + 1;
 
@@ -313,7 +309,6 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
                                 size_t element_count, bool is_object, size_t entry_size);
 
 // 解析完整 JSON 文档
-// 参考 ibd2sql/utils/mysql_json.py 的实现
 // JSON数据格式: [TYPE] + [COUNT(ssize)] + [SIZE(ssize)] + [KEY_ENTRIES] + [VALUE_ENTRIES] + [KEYS] + [VALUES]
 // 注意: 数据不包含长度前缀，field_size就是JSON数据大小
 std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size) {
@@ -694,7 +689,7 @@ std::string decode_geometry_wkb(const uint8_t* data, size_t offset, size_t field
         return wkb_result;
     }
 
-    // Fallback: return as hex string (like ibd2sql)
+    // Fallback: return as hex string
     std::string hex = "0x";
     char buf[3];
     for (size_t i = 0; i < field_size && i < 100; i++) {
@@ -724,7 +719,6 @@ void InnoDBIndexParser::set_columns(const std::vector<IndexColumnDef>& columns,
     n_pk_cols_ = n_pk_cols;
 
     // Sort columns by physical_pos (InnoDB storage order)
-    // Reference: ibd2sql table.py line 747-748
     std::sort(columns_.begin(), columns_.end(),
         [](const IndexColumnDef& a, const IndexColumnDef& b) {
             return a.physical_pos < b.physical_pos;
@@ -783,7 +777,7 @@ std::optional<InnoDBPageHeader> InnoDBIndexParser::parse_page_header(
     return hdr;
 }
 
-// ==================== Record Header Parsing (ibd2sql-style) ====================
+// ==================== Record Header Parsing ====================
 
 std::optional<NewRecordHeader> InnoDBIndexParser::parse_new_record_header(
     const uint8_t* data, size_t offset, size_t max_size) {
@@ -844,7 +838,6 @@ std::optional<OldRecordHeader> InnoDBIndexParser::parse_old_record_header(
 
 // CRITICAL: For ROW_FORMAT=COMPRESSED, sizes are read FORWARD (from low address to high)
 // For DYNAMIC/COMPACT/REDUNDANT, sizes are read BACKWARD (from high address to low)
-// Reference: ibd2sql index_compressed.py lines 248-284:
 //   _read_null_compressed: read() (forward)
 //   _read_varsize_compressed: read(1) (forward)
 //   _read_null_new: read_reverse() (backward)
@@ -864,14 +857,8 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // For COMPRESSED: read sizes FORWARD instead of BACKWARD
     bool is_compressed = (row_format == 3);
 
-    // CRITICAL FIX: Match ibd2sql's _read_nullbitmask_varsize_new() exactly!
-    //
-    // Key insight from ibd2sql: System columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
+    // System columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
     // are NOT included in NULL bitmap and variable size calculations.
-    // ibd2sql code (index.py:319-320):
-    //   if self.table.column[colid]['name'] in ['DB_TRX_ID','DB_ROLL_PTR']:
-    //       continue
-    //
     // We must recalculate n_nullable and n_variable by EXCLUDING system columns!
 
     // Count nullable and variable columns EXCLUDING system columns
@@ -915,7 +902,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     }
 
     // Read null bitmask as integer for bit testing
-    // CRITICAL: InnoDB uses BIG-ENDIAN for NULL bitmap (ibd2sql line 332)
+    // InnoDB uses BIG-ENDIAN for NULL bitmap
     uint32_t null_bit_value = 0;
     if (null_bytes > 0) {
         for (size_t i = 0; i < null_bytes; i++) {
@@ -934,7 +921,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
 
     // Step 2: Read variable sizes (they are before NULL bitmap, at lower addresses)
     // CRITICAL FIX: InnoDB stores size bytes in physical_pos order!
-    // Reference: ibd2sql table.py line 747-748:
     //   colid_list.append([col['physical_pos'],colid,col['name']])
     //   colid_list.sort() # for physical_pos
     //
@@ -944,7 +930,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // CRITICAL: Sizes are read in physical_pos ASCENDING order!
     // Layout: [size for last var col (highest phys_pos)]...[size for first var col (lowest phys_pos)][NULL bitmap][Header]
     // But we READ in ascending order, starting closest to NULL bitmap.
-    // Reference: ibd2sql index.py _read_nullbitmask_varsize_new():
     //   - Reads NULL bitmap first (closest to header)
     //   - Then for each column in colid_list (sorted ascending by physical_pos):
     //     reads size via read_reverse() which moves backward
@@ -956,7 +941,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
             physical_order_indices.push_back(i);
         }
     }
-    // Sort by physical_pos (ascending) - matches ibd2sql's colid_list.sort()
+    // Sort by physical_pos (ascending)
     std::sort(physical_order_indices.begin(), physical_order_indices.end(),
         [&columns](size_t a, size_t b) {
             return columns[a].physical_pos < columns[b].physical_pos;
@@ -966,10 +951,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     std::map<uint32_t, uint32_t> var_size_by_physical;
 
     // Read sizes in physical_pos order (ascending)
-    // ibd2sql iterates through colid_list (sorted by physical_pos ascending)
-    // and calls read_reverse() for each variable column.
-    // Each read_reverse() reads backward and advances _offset backward.
-    // So first column reads closest to NULL bitmap, last column reads furthest.
     // Layout: [sizes in reverse physical_pos order][NULL bitmap][Header][origin]
     for (size_t phys_idx : physical_order_indices) {
         const auto& col = columns[phys_idx];
@@ -991,7 +972,6 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
         } else {
             // Read size byte(s) from the current position (going backward)
             // CRITICAL FIX: Different handling for is_big vs non-is_big columns!
-            // Reference: ibd2sql index.py lines 347-354:
             //   if col['is_big']:
             //     tsize = read_reverse(1)
             //     if tsize > REC_N_FIELDS_ONE_BYTE_MAX (127):  # 2-byte encoding
@@ -1223,11 +1203,6 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
             // CRITICAL: REC_NEXT in InnoDB is a relative offset from current position
             // The value read from header (next_offset) is added to current_origin
             // to get the next record's origin position.
-            // ibd2sql: REC_NEXT = rec_next + self._offset + 5
-            // where self._offset after read_reverse(5) is (original_offset - 5)
-            // So: REC_NEXT = rec_next + (original_offset - 5) + 5 = rec_next + original_offset
-            // And original_offset = current_origin
-            // Therefore: next_origin = current_origin + next_offset
             if (hdr->next_offset == 0) break;
             ssize_t next_origin = static_cast<ssize_t>(current_origin) + hdr->next_offset;
 
@@ -1405,15 +1380,10 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     }
 
     // Parse fields
-    // CRITICAL: Match ibd2sql's exact layout!
-    //
-    // ibd2sql COMPACT/DYNAMIC layout:
-    // [变长大小 + NULL bitmap] <- 低地址, _offset 向这里移动 (read_reverse)
+    // COMPACT/DYNAMIC layout:
+    // [变长大小 + NULL bitmap] <- 低地址
     // [记录头 5B] <- origin - 5
-    // [PK + TRX + ROLL + 字段数据] <- origin (高地址), offset 指向这里 (read)
-    //
-    // ibd2sql's _offset starts at origin, then read_reverse() moves toward low addresses.
-    // We need to read from rec_origin (NOT from data_end)!
+    // [PK + TRX + ROLL + 字段数据] <- origin (高地址)
 
     if (!columns_.empty()) {
         // Pass rec_origin as the start position for read_reverse
@@ -1481,8 +1451,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     std::vector<IndexFieldValue> result;
     if (data_start >= data_end || data_end > page_size) return result;
 
-    // CRITICAL FIX: Match ibd2sql's _read_field() exactly!
-    //
     // After read_null_and_varsizes(), variable_sizes[] contains size for EVERY column:
     // - NULL columns: size = 0
     // - Fixed columns: size = storage_size()
@@ -1587,7 +1555,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
     // Step 3: Read remaining user columns
     // CRITICAL FIX: InnoDB DYNAMIC format stores ALL columns in physical_pos order!
-    // Reference: ibd2sql table.py line 747-748:
     //   colid_list.append([col['physical_pos'],colid,col['name']])
     //   colid_list.sort() # for physical_pos
     // Then _read_field() reads columns in colid_list order (physical_pos sorted)
@@ -1598,7 +1565,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     std::map<size_t, IndexFieldValue> results_map;
 
     // Read ALL user columns in physical_pos order (columns[] is already sorted)
-    // Reference: ibd2sql index.py _read_row_pk_leaf():
     //   row = self._read_field(self.table.pk,...)  # Read PK
     //   row.update(self._read_trx_id_rollptr())    # Skip TRX_ID + ROLL_PTR
     //   row.update(self._read_field(the_rest_of_field,null_list,size_list))  # Read rest in colid_list order
@@ -1705,19 +1671,12 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
 // ==================== Schemaless Record Parsing ====================
 //
-// Key insight from ibd2sql: Read sizes from data end backward!
-//
 // InnoDB COMPACT/DYNAMIC record structure:
 // [Sizes/NULLs][Header 5B][Origin -- PK][TRX][ROLL][Fixed fields][Variable fields]
 //      ↑           ↑           ↑                                      ↑
 //   low_addr   rec_offset   origin                              rec_end (next_origin - 5)
 //
-// ibd2sql's approach:
-// 1. _offset starts at origin
-// 2. read_reverse() reads backward from _offset (toward lower addresses)
-// 3. First read header (5 bytes), then NULL bitmap, then sizes
-//
-// NEW APPROACH for schemaless:
+// APPROACH for schemaless:
 // 1. Calculate record data range: origin to rec_end
 // 2. Find variable field data at END of record
 // 3. Read sizes from rec_offset backward (before header)
@@ -1778,7 +1737,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::parse_record_schemaless(
     // InnoDB variable-length encoding:
     // - If byte <= 127 (0x7F): 1-byte length, value is the byte itself
     // - If byte > 127: 2-byte length, value = (byte & 0x7F) | (next_byte << 7)
-    // Reference: ibd2sql index.py read_reverse() for size bytes
 
     size_t parse_pos = user_data_start;
 
@@ -1983,7 +1941,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
     }
 
     // ==================== Field Constraint Validation ====================
-    // Reference: undrop-for-innodb c_parser.c field validation
     // Check min/max length and type-specific constraints
 
     // Check if BLOB/TEXT field has proper size (should be external or reasonable inline)
@@ -2057,7 +2014,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
 
     switch (col.col_type) {
         // ==================== Integer Types (InnoDB storage type IDs) ====================
-        // Reference: ibd2sql/innodb_page/column_type.py
         case 2: {  // InnoDB TINY (TINYINT, 1 byte)
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
@@ -2152,7 +2108,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             break;
         }
         // ==================== Temporal Types ====================
-        // 使用 InnoDB 类型 ID (参考 ibd2sql column_type.py)
         // InnoDB type 8 = TIMESTAMP (4 bytes)
         case 8: {  // TIMESTAMP (4 bytes) - InnoDB type 8
             val.type = IndexFieldValue::Type::TIMESTAMP_VAL;
@@ -2169,7 +2124,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 15: {  // NEWDATE/DATE (3 bytes) - InnoDB type 15
             val.type = IndexFieldValue::Type::DATE_VAL;
             // DATE is stored as: bit 0-4: day, bit 5-8: month, bit 9-22: year, bit 23: sign
-            // Reference: ibd2sql/utils/b2data.py B2DATE()
             uint32_t t = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
                          static_cast<uint32_t>(data[offset + 2]);
@@ -2211,7 +2165,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             uint64_t t = (static_cast<uint64_t>(read_be<uint32_t>(data, offset)) << 8) |
                          static_cast<uint64_t>(data[offset + 4]);
 
-            // Extract bit fields using ibd2sql's exact mask values
+            // Extract bit fields using mask values
             // months = (t & 549751619584) >> 22  where 549751619584 = 0x7FFFC00000
             uint64_t months = (t & 0x7FFFC00000ULL) >> 22;  // 19 bits
             uint16_t year = static_cast<uint16_t>(months / 13);
@@ -2280,8 +2234,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         case 20: {  // TIME2 (MySQL 5.6+ time format, 3-6 bytes) - InnoDB type 20
             val.type = IndexFieldValue::Type::STRING_VAL;
-            // ✅ 修复：完全按照 ibd2sql 的 B2TIME 函数实现
-            // 参考: ibd2sql/utils/b2data.py 第 104-129 行
+            // TIME decoding
             if (field_size >= 3) {
                 // 读取 3 字节作为有符号整数（大端序）
                 // B2INT3: (struct.unpack('>L',data+b'\x00')[0]>>8) - 8388608
@@ -2296,7 +2249,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 if (t < 0) {
                     // 负时间
                     signed_str = "-";
-                    // 使用 ibd2sql 的掩码公式
+                    // 使用掩码公式
                     uint32_t hour = 2047 - ((8384512 & raw) >> 12);   // 2047 = 0x7FF, 8384512 = 0x7FF000
                     uint32_t minute = 63 - ((4032 & raw) >> 6);        // 63 = 0x3F, 4032 = 0xFC0
                     uint32_t second = 63 - (63 & raw);
@@ -2530,7 +2483,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 21: { // NEWDECIMAL - InnoDB type 21
             val.type = IndexFieldValue::Type::DECIMAL_VAL;
 
-            // Reference: ibd2sql/utils/b2data.py B2DECIMAL() and _READ_DECIMAL()
             //
             // DECIMAL encoding in InnoDB:
             // 1. Sign bit in first byte: bit 7 (0x80)
@@ -2581,7 +2533,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             proc_data[0] -= 128;
 
             // Read each group and build string representation
-            // This matches ibd2sql's _READ_DECIMAL exactly:
             // rdata += str(int.from_bytes(data[offset:offset+psize],'big')).zfill(pzfill)
 
             size_t read_offset = 0;
@@ -2625,7 +2576,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
 
             // Remove leading zeros from integer part (but keep at least one digit)
-            // ibd2sql: p1_data = str(0 if p1_data == '' else int(p1_data))
+            // p1_data = str(0 if p1_data == '' else int(p1_data))
             // This means converting to int to strip leading zeros, then back to string
             if (!int_str.empty()) {
                 // Strip leading zeros by converting to int
@@ -2812,8 +2763,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_fast(
 
     if (!page_data || page_size < 100) return records;
 
-    // Fast mode: use page directory (ibd2sql's get_all_rows_fast)
-    // Reference: ibd2sql/innodb_page/index.py:181-204
+    // Fast mode: use page directory
     //
     // Page directory is at the end of the page:
     // - n_dir_slots at offset 38 (PAGE_N_DIR_SLOTS)
@@ -2855,7 +2805,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_fast(
         slot_debug++;
     }
 
-    // Reverse the slots (ibd2sql reverses them)
+    // Reverse the slots
     std::reverse(slot_offsets.begin(), slot_offsets.end());
 
     // Read heap_top to know where record data ends
@@ -2920,8 +2870,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_try(
 
     if (!page_data || page_size < 100) return records;
 
-    // Try mode: brute-force byte scan (ibd2sql's get_all_rows_try)
-    // Reference: ibd2sql/innodb_page/index.py:206-217
+    // Try mode: brute-force byte scan
     //
     // Scan every possible offset from 99 to page_size - 8
     // Try to parse as a record header
@@ -3066,7 +3015,6 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_free_chain(
     std::vector<IndexRecord> records;
 
     // Follow PAGE_FREE chain (deleted records)
-    // Reference: undrop-for-innodb/page0page.ic:804-807
     // PAGE_FREE points to the first deleted record in the free list
     // Each deleted record has REC_NEXT pointing to the next deleted record
 
@@ -3553,7 +3501,6 @@ bool InnoDBIndexParser::is_index_page(const uint8_t* page_data, size_t page_size
 
 bool InnoDBIndexParser::validate_infimum_supremum(
     const uint8_t* page_data, size_t page_size, bool is_compact) const {
-    // Reference: undrop-for-innodb stream_parser.c:177-286
     // INFIMUM record should contain literal "infimum" marker
     // SUPREMUM record should contain literal "supremum" marker
 
@@ -3598,7 +3545,6 @@ bool InnoDBIndexParser::validate_infimum_supremum(
 
 bool InnoDBIndexParser::validate_page_checksum(
     const uint8_t* page_data, size_t page_size) const {
-    // Reference: undrop-for-innodb stream_parser.c:96-135
     // Dual checksum validation: both old-style and new-style
 
     if (!page_data || page_size < 8) return false;
@@ -3742,7 +3688,6 @@ uint8_t detect_row_format_from_fsp(const uint8_t* page_data) {
 
     uint32_t flags = read_be<uint32_t>(page_data, 54);
 
-    // Reference: ibd2sql fsp.py GET_FSP_STATUS_FROM_FLAGS
     // POST_ANTELOPE: bit 0 - 1=DYNAMIC/COMPRESSED, 0=REDUNDANT/COMPACT
     // ZIP_SSIZE: bits 1-4 - if != 0, table is compressed
     // ATOMIC_BLOBS: bit 5 - 1 means atomic BLOBs (DYNAMIC)

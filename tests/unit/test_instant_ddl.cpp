@@ -263,7 +263,6 @@ int test_json_parsing_with_version_fields() {
 int test_ibd2sql_compatible_version_logic() {
     std::cout << "\n=== Test: ibd2sql compatible version logic ===\n";
 
-    // Reference: ibd2sql table.py init_pkmr()
     // Logic: version_added <= row_version < version_dropped
 
     catalog::ColumnInfo col;

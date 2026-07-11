@@ -486,7 +486,6 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 // 额外检查：infimum/supremum系统记录检查
                 // infimum记录在offset 54，记录头5字节后是"infimum\0"
                 // 所以"infimum"字符串在offset 54+5=59
-                // 参考: page_defs.hpp PAGE_INFIMUM_REC_OFFSET_ABS = 54
                 constexpr uint16_t INFIMUM_STRING_OFFSET = 59;  // 54 + 5 bytes record header
                 if (offset + INFIMUM_STRING_OFFSET + 8 <= bytes_read) {
                     const uint8_t* infimum_pos = page_data + INFIMUM_STRING_OFFSET;
@@ -942,7 +941,6 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_sch
     }
 
     // 回退：使用页目录（Page Directory）进行快速记录定位
-    // 参考: ibd2sql get_all_rows_fast 方法
     if (n_dir_slots < 2 || n_dir_slots > 1000) return records;
 
     size_t slot_dir_offset = page_size - 8 - n_dir_slots * 2;
@@ -1152,7 +1150,6 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
 std::vector<std::pair<size_t, size_t>> RawDiskCarver::detect_field_boundaries(
     const uint8_t* record_start, size_t max_len) {
     // 启发式字段边界检测
-    // 参考: ibd2sql的schema-less解析
 
     std::vector<std::pair<size_t, size_t>> boundaries;
 

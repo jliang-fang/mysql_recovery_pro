@@ -32,7 +32,6 @@ std::string to_lower(const std::string& str) {
 }
 
 // 辅助函数：从 SDI 页解析表结构 (支持压缩 SDI 页 0x45BD)
-// 参考 ibd2sql scan_drop_table.py 的 SDI 解析逻辑:
 //   offset = struct.unpack('>h',tdata[97:99])[0] + 99
 //   dunzip_len,dzip_len = struct.unpack('>LL',tdata[offset+33-8:offset+33])
 //   unzbdata = zlib.decompress(tdata[offset+33:offset+33+dzip_len])
@@ -63,11 +62,7 @@ std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
         if (page_type == dbrecovery::innodb::FIL_PAGE_SDI ||
             page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP) {
 
-            // ibd2sql approach for compressed SDI pages:
-            // offset = struct.unpack('>h',data[97:99])[0] + 99
-            // The page directory slot at offset 97-99 points to the first record
-            // For SDI pages, the SDI record starts at that offset
-
+            // Compressed SDI pages: slot at offset 97-99 points to first record
             if (page_size < 100) continue;
 
             // Read the first slot from page directory (at page_end - 2)
@@ -85,20 +80,16 @@ std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
             // Alternative: try simpler offset calculation
             // The SDI payload often starts right after the FIL header + page header
             // FIL header = 38 bytes, page header = 56 bytes (for SDI page)
-            // But ibd2sql uses the slot-based approach
 
             // Try both approaches:
             std::vector<std::pair<uint32_t, std::string>> sdi_payloads;
 
-            // Approach 1: ibd2sql slot-based
+            // Approach 1: Slot-based offset
             if (record_offset > 0 && record_offset < page_size - 50) {
                 // Read SDI header: type(4) + id(8) + uncompressed_len(4) + compressed_len(4) = 20 bytes
-                // But ibd2sql reads at offset+25 for lengths
                 uint32_t offset1 = record_offset;
                 if (offset1 + 50 < page_size) {
                     // Read compressed/uncompressed lengths
-                    // ibd2sql: dunzip_len,dzip_len = struct.unpack('>LL',tdata[offset+33-8:offset+33])
-                    // This means lengths are at offset+25 (offset+33-8)
                     uint32_t uncompressed_len = dbrecovery::innodb::read_be<uint32_t>(
                         page_data.data(), offset1 + 25);
                     uint32_t compressed_len = dbrecovery::innodb::read_be<uint32_t>(

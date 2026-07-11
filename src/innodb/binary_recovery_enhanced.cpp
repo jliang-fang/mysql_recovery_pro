@@ -19,7 +19,6 @@ namespace dbrecovery {
 namespace innodb {
 
 // ==================== Constants for PhotoRec-style Recovery ====================
-// Reference: TestDisk and ibd2sql implementations
 
 /// @brief Signature values for PhotoRec-style scanning
 /// When reading with big-endian (read_be), these are the correct page type values.
