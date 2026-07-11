@@ -1601,8 +1601,59 @@ bool DropTableRecovery::try_recover_from_ibd(
     const RecoveredTableMetadata& table,
     std::vector<std::map<std::string, std::string>>& records) {
 
-    // TODO: Implement IBD file recovery
-    return false;
+    // Check if IBD file exists
+    if (!std::filesystem::exists(ibd_path)) {
+        return false;
+    }
+
+    // Get file size
+    uint64_t file_size = std::filesystem::file_size(ibd_path);
+    if (file_size < 16384) {  // Minimum one page
+        return false;
+    }
+
+    // Determine page size from file
+    uint32_t page_size = 16384;  // Default 16KB
+
+    // Read first page to detect page size
+    std::ifstream file(ibd_path, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    std::vector<uint8_t> first_page(page_size);
+    file.read(reinterpret_cast<char*>(first_page.data()), page_size);
+
+    // Check for valid InnoDB page
+    uint16_t page_type = (static_cast<uint16_t>(first_page[24]) << 8) | first_page[25];
+
+    // Use IndexPageParser to recover records
+    innodb::InnoDBIndexParser parser;
+
+    // Read and parse all pages
+    file.seekg(0);
+    uint64_t total_pages = file_size / page_size;
+
+    for (uint64_t page_no = 0; page_no < total_pages; page_no++) {
+        std::vector<uint8_t> page_data(page_size);
+        file.read(reinterpret_cast<char*>(page_data.data()), page_size);
+
+        if (!file) break;
+
+        // Parse page records using schema-aware parsing
+        auto page_records = parser.parse_page(page_data.data(), page_size, page_no);
+        for (const auto& rec : page_records) {
+            // Convert IndexRecord to map format
+            std::map<std::string, std::string> record;
+            for (size_t i = 0; i < rec.fields.size() && i < table.columns.size(); i++) {
+                record[table.columns[i].name] = rec.fields[i].to_string();
+            }
+            records.push_back(record);
+        }
+    }
+
+    file.close();
+    return !records.empty();
 }
 
 // ==================== Deleted Record Parsing Helpers ====================
