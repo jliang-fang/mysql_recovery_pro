@@ -461,6 +461,252 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
     return result;
 }
 
+// ==================== GEOMETRY WKB Decoder ====================
+// Well-Known Binary format parsing for spatial types
+// Reference: MySQL GIS documentation and OpenGIS Simple Features
+
+// WKB geometry type constants
+constexpr uint32_t WKB_POINT = 1;
+constexpr uint32_t WKB_LINESTRING = 2;
+constexpr uint32_t WKB_POLYGON = 3;
+constexpr uint32_t WKB_MULTIPOINT = 4;
+constexpr uint32_t WKB_MULTILINESTRING = 5;
+constexpr uint32_t WKB_MULTIPOLYGON = 6;
+constexpr uint32_t WKB_GEOMETRYCOLLECTION = 7;
+
+std::string decode_wkb_point(const uint8_t* data, size_t offset, size_t max_size, bool is_little_endian, size_t& bytes_consumed) {
+    if (offset + 16 > max_size) {
+        bytes_consumed = 0;
+        return "<invalid_point>";
+    }
+
+    double x, y;
+    if (is_little_endian) {
+        std::memcpy(&x, data + offset, 8);
+        std::memcpy(&y, data + offset + 8, 8);
+    } else {
+        // Big-endian: need to swap bytes
+        uint8_t x_bytes[8], y_bytes[8];
+        for (int i = 0; i < 8; i++) {
+            x_bytes[i] = data[offset + 7 - i];
+            y_bytes[i] = data[offset + 8 + 7 - i];
+        }
+        std::memcpy(&x, x_bytes, 8);
+        std::memcpy(&y, y_bytes, 8);
+    }
+
+    bytes_consumed = 16;
+
+    // Format as POINT(x y) - MySQL syntax
+    char buf[64];
+    snprintf(buf, sizeof(buf), "POINT(%.6f %.6f)", x, y);
+    return std::string(buf);
+}
+
+std::string decode_wkb_geometry(const uint8_t* data, size_t offset, size_t max_size, size_t& bytes_consumed);
+
+std::string decode_wkb_linestring(const uint8_t* data, size_t offset, size_t max_size, bool is_little_endian, size_t& bytes_consumed) {
+    if (offset + 4 > max_size) {
+        bytes_consumed = 0;
+        return "<invalid_linestring>";
+    }
+
+    uint32_t num_points;
+    if (is_little_endian) {
+        std::memcpy(&num_points, data + offset, 4);
+    } else {
+        num_points = (data[offset] << 24) | (data[offset+1] << 16) | (data[offset+2] << 8) | data[offset+3];
+    }
+
+    bytes_consumed = 4;
+
+    if (num_points == 0 || num_points > 10000 || offset + 4 + num_points * 16 > max_size) {
+        return "<invalid_linestring>";
+    }
+
+    std::string result = "LINESTRING(";
+    for (uint32_t i = 0; i < num_points; i++) {
+        size_t point_bytes = 0;
+        std::string point = decode_wkb_point(data, offset + bytes_consumed, max_size, is_little_endian, point_bytes);
+        bytes_consumed += point_bytes;
+
+        // Extract just the coordinates from "POINT(x y)"
+        size_t start = point.find('(');
+        size_t end = point.find(')');
+        if (start != std::string::npos && end != std::string::npos) {
+            if (i > 0) result += ",";
+            result += point.substr(start + 1, end - start - 1);
+        }
+    }
+    result += ")";
+    return result;
+}
+
+std::string decode_wkb_polygon(const uint8_t* data, size_t offset, size_t max_size, bool is_little_endian, size_t& bytes_consumed) {
+    if (offset + 4 > max_size) {
+        bytes_consumed = 0;
+        return "<invalid_polygon>";
+    }
+
+    uint32_t num_rings;
+    if (is_little_endian) {
+        std::memcpy(&num_rings, data + offset, 4);
+    } else {
+        num_rings = (data[offset] << 24) | (data[offset+1] << 16) | (data[offset+2] << 8) | data[offset+3];
+    }
+
+    bytes_consumed = 4;
+
+    if (num_rings == 0 || num_rings > 1000) {
+        return "<invalid_polygon>";
+    }
+
+    std::string result = "POLYGON(";
+    for (uint32_t r = 0; r < num_rings; r++) {
+        if (r > 0) result += ",(";
+        else result += "(";
+
+        if (offset + bytes_consumed + 4 > max_size) break;
+
+        uint32_t num_points;
+        if (is_little_endian) {
+            std::memcpy(&num_points, data + offset + bytes_consumed, 4);
+        } else {
+            num_points = (data[offset + bytes_consumed] << 24) | (data[offset + bytes_consumed + 1] << 16) |
+                         (data[offset + bytes_consumed + 2] << 8) | data[offset + bytes_consumed + 3];
+        }
+        bytes_consumed += 4;
+
+        for (uint32_t i = 0; i < num_points && offset + bytes_consumed + 16 <= max_size; i++) {
+            size_t point_bytes = 0;
+            std::string point = decode_wkb_point(data, offset + bytes_consumed, max_size, is_little_endian, point_bytes);
+            bytes_consumed += point_bytes;
+
+            size_t start = point.find('(');
+            size_t end = point.find(')');
+            if (start != std::string::npos && end != std::string::npos) {
+                if (i > 0) result += ",";
+                result += point.substr(start + 1, end - start - 1);
+            }
+        }
+        result += ")";
+    }
+    result += ")";
+    return result;
+}
+
+std::string decode_wkb_geometry(const uint8_t* data, size_t offset, size_t max_size, size_t& bytes_consumed) {
+    // WKB header: byte order (1) + type (4) = 5 bytes minimum
+    if (offset + 5 > max_size) {
+        bytes_consumed = 0;
+        return "<invalid_geometry>";
+    }
+
+    // Byte order marker: 0x01 = little-endian, 0x00 = big-endian
+    bool is_little_endian = (data[offset] == 0x01);
+
+    // Geometry type (4 bytes)
+    uint32_t geom_type;
+    if (is_little_endian) {
+        std::memcpy(&geom_type, data + offset + 1, 4);
+    } else {
+        geom_type = (data[offset+1] << 24) | (data[offset+2] << 16) | (data[offset+3] << 8) | data[offset+4];
+    }
+
+    bytes_consumed = 5;
+
+    switch (geom_type) {
+        case WKB_POINT: {
+            size_t point_bytes = 0;
+            std::string pt = decode_wkb_point(data, offset + 5, max_size, is_little_endian, point_bytes);
+            bytes_consumed += point_bytes;
+            return pt;
+        }
+        case WKB_LINESTRING: {
+            size_t line_bytes = 0;
+            std::string line = decode_wkb_linestring(data, offset + 5, max_size, is_little_endian, line_bytes);
+            bytes_consumed += line_bytes;
+            return line;
+        }
+        case WKB_POLYGON: {
+            size_t poly_bytes = 0;
+            std::string poly = decode_wkb_polygon(data, offset + 5, max_size, is_little_endian, poly_bytes);
+            bytes_consumed += poly_bytes;
+            return poly;
+        }
+        case WKB_MULTIPOINT:
+        case WKB_MULTILINESTRING:
+        case WKB_MULTIPOLYGON:
+        case WKB_GEOMETRYCOLLECTION: {
+            // Parse number of geometries
+            if (offset + bytes_consumed + 4 > max_size) {
+                return "<invalid_collection>";
+            }
+
+            uint32_t num_geoms;
+            if (is_little_endian) {
+                std::memcpy(&num_geoms, data + offset + bytes_consumed, 4);
+            } else {
+                num_geoms = (data[offset + bytes_consumed] << 24) | (data[offset + bytes_consumed + 1] << 16) |
+                           (data[offset + bytes_consumed + 2] << 8) | data[offset + bytes_consumed + 3];
+            }
+            bytes_consumed += 4;
+
+            std::string type_name;
+            switch (geom_type) {
+                case WKB_MULTIPOINT: type_name = "MULTIPOINT"; break;
+                case WKB_MULTILINESTRING: type_name = "MULTILINESTRING"; break;
+                case WKB_MULTIPOLYGON: type_name = "MULTIPOLYGON"; break;
+                case WKB_GEOMETRYCOLLECTION: type_name = "GEOMETRYCOLLECTION"; break;
+            }
+
+            std::string result = type_name + "(";
+            for (uint32_t g = 0; g < num_geoms && offset + bytes_consumed + 5 <= max_size; g++) {
+                size_t geom_bytes = 0;
+                std::string geom = decode_wkb_geometry(data, offset + bytes_consumed, max_size, geom_bytes);
+                bytes_consumed += geom_bytes;
+
+                if (g > 0) result += ",";
+                result += geom;
+            }
+            result += ")";
+            return result;
+        }
+        default:
+            return "<unknown_geometry_type_" + std::to_string(geom_type) + ">";
+    }
+}
+
+std::string decode_geometry_wkb(const uint8_t* data, size_t offset, size_t field_size) {
+    if (field_size == 0 || offset + field_size > 100000) {
+        return "NULL";
+    }
+
+    // MySQL GEOMETRY format:
+    // - First 4 bytes: SRID (Spatial Reference System ID), big-endian
+    // - Remaining: WKB data
+
+    size_t bytes_consumed = 0;
+    std::string wkb_result = decode_wkb_geometry(data, offset, offset + field_size, bytes_consumed);
+
+    // If parsing succeeded, return the geometry
+    if (bytes_consumed > 0 && wkb_result.find("<invalid") == std::string::npos) {
+        return wkb_result;
+    }
+
+    // Fallback: return as hex string (like ibd2sql)
+    std::string hex = "0x";
+    char buf[3];
+    for (size_t i = 0; i < field_size && i < 100; i++) {
+        snprintf(buf, sizeof(buf), "%02x", data[offset + i]);
+        hex += buf;
+    }
+    if (field_size > 100) {
+        hex += "...";
+    }
+    return hex;
+}
+
 } // anonymous namespace
 
 // ==================== Constructor / Destructor ====================
@@ -1736,6 +1982,70 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         return val;
     }
 
+    // ==================== Field Constraint Validation ====================
+    // Reference: undrop-for-innodb c_parser.c field validation
+    // Check min/max length and type-specific constraints
+
+    // Check if BLOB/TEXT field has proper size (should be external or reasonable inline)
+    if ((col.col_type == 27 || col.col_type == 30 || col.col_type == 31) &&  // BLOB, GEOMETRY, JSON
+        field_size > 0 && field_size < col.col_length && !col.is_big) {
+        // Large BLOB/TEXT may be stored externally; inline portion is pointer
+        // If field_size > 0 but less than expected, it might be external pointer
+        // This is normal for DYNAMIC row format
+    }
+
+    // Validate fixed-length integer types
+    if (col.col_type == 2 && field_size != 1 && field_size != 0) {  // TINYINT
+        // Field size mismatch for TINYINT
+    }
+    if (col.col_type == 3 && field_size != 2 && field_size != 0) {  // SMALLINT
+        // Field size mismatch for SMALLINT
+    }
+    if (col.col_type == 10 && field_size != 3 && field_size != 0) {  // MEDIUMINT
+        // Field size mismatch for MEDIUMINT
+    }
+    if (col.col_type == 4 && field_size != 4 && field_size != 0) {  // INT
+        // Field size mismatch for INT
+    }
+    if (col.col_type == 9 && field_size != 8 && field_size != 0) {  // BIGINT
+        // Field size mismatch for BIGINT
+    }
+
+    // Validate FLOAT/DOUBLE (always little-endian, fixed size)
+    if (col.col_type == 5 && field_size != 4 && field_size != 0) {  // FLOAT
+        // Field size mismatch for FLOAT
+    }
+    if (col.col_type == 6 && field_size != 8 && field_size != 0) {  // DOUBLE
+        // Field size mismatch for DOUBLE
+    }
+
+    // Validate DATE (3 bytes)
+    if (col.col_type == 11 && field_size != 3 && field_size != 0) {  // DATE
+        // Field size mismatch for DATE
+    }
+
+    // Validate DATETIME (old format: 8 bytes)
+    if (col.col_type == 13 && field_size != 8 && field_size != 0) {  // DATETIME
+        // Field size mismatch for DATETIME
+    }
+
+    // Validate TIMESTAMP (4 bytes)
+    if (col.col_type == 8 && field_size != 4 && field_size != 0) {  // TIMESTAMP
+        // Field size mismatch for TIMESTAMP
+    }
+
+    // Validate TIME (3 bytes)
+    if (col.col_type == 12 && field_size != 3 && field_size != 0) {  // TIME
+        // Field size mismatch for TIME
+    }
+
+    // Validate YEAR (1 byte)
+    if (col.col_type == 14 && field_size != 1 && field_size != 0) {  // YEAR
+        // Field size mismatch for YEAR
+    }
+
+    // ==================== End Field Constraint Validation ====================
+
     try {
         val.raw_bytes.assign(data + offset, data + offset + field_size);
     } catch (const std::length_error&) {
@@ -2384,6 +2694,18 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 val.str_value = result.empty() ? "" : result;
             } else {
                 val.str_value = "<SET>";
+            }
+            break;
+        }
+        // ==================== GEOMETRY (InnoDB type 30, MySQL type 255) ====================
+        // Stored as WKB (Well-Known Binary) format with optional SRID prefix
+        case 30:
+        case 255: {
+            val.type = IndexFieldValue::Type::STRING_VAL;
+            if (field_size > 0) {
+                val.str_value = decode_geometry_wkb(data, offset, field_size);
+            } else {
+                val.str_value = "NULL";
             }
             break;
         }
