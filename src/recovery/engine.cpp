@@ -615,20 +615,85 @@ void RecoveryEngine::set_space_id(uint32_t space_id) {
 }
 
 bool RecoveryEngine::set_tde_primary_key(const std::string& key_hex) {
-    // TODO: 实现TDE主密钥设置逻辑
-    std::cout << "[INFO] Set TDE primary key" << std::endl;
+    // Parse hex string to bytes
+    std::vector<uint8_t> key_bytes;
+    std::string clean_hex = key_hex;
+    // Remove "0x" prefix if present
+    if (clean_hex.substr(0, 2) == "0x" || clean_hex.substr(0, 2) == "0X") {
+        clean_hex = clean_hex.substr(2);
+    }
+    // Remove any spaces or colons
+    clean_hex.erase(std::remove(clean_hex.begin(), clean_hex.end(), ' '), clean_hex.end());
+    clean_hex.erase(std::remove(clean_hex.begin(), clean_hex.end(), ':'), clean_hex.end());
+
+    if (clean_hex.length() % 2 != 0) {
+        std::cerr << "[ERROR] Invalid TDE key hex length (must be even)" << std::endl;
+        return false;
+    }
+
+    for (size_t i = 0; i < clean_hex.length(); i += 2) {
+        uint8_t byte = std::stoul(clean_hex.substr(i, 2), nullptr, 16);
+        key_bytes.push_back(byte);
+    }
+
+    if (key_bytes.size() < 16 || key_bytes.size() > 64) {
+        std::cerr << "[ERROR] TDE key must be 16-64 bytes (got " << key_bytes.size() << ")" << std::endl;
+        return false;
+    }
+
+    tde_decryptor_.set_primary_key(key_bytes);
+    std::cout << "[INFO] Set TDE primary key (" << key_bytes.size() << " bytes)" << std::endl;
     return true;
 }
 
 bool RecoveryEngine::add_tde_table_key(uint32_t key_id, const std::string& key_hex) {
-    // TODO: 实现TDE表密钥添加逻辑
-    std::cout << "[INFO] Add TDE table key: " << key_id << std::endl;
+    // Parse hex string to bytes
+    std::vector<uint8_t> key_bytes;
+    std::string clean_hex = key_hex;
+    if (clean_hex.substr(0, 2) == "0x" || clean_hex.substr(0, 2) == "0X") {
+        clean_hex = clean_hex.substr(2);
+    }
+    clean_hex.erase(std::remove(clean_hex.begin(), clean_hex.end(), ' '), clean_hex.end());
+    clean_hex.erase(std::remove(clean_hex.begin(), clean_hex.end(), ':'), clean_hex.end());
+
+    if (clean_hex.length() % 2 != 0) {
+        std::cerr << "[ERROR] Invalid TDE key hex length" << std::endl;
+        return false;
+    }
+
+    for (size_t i = 0; i < clean_hex.length(); i += 2) {
+        uint8_t byte = std::stoul(clean_hex.substr(i, 2), nullptr, 16);
+        key_bytes.push_back(byte);
+    }
+
+    tde_decryptor_.add_table_key(key_id, key_bytes, innodb::TDEAlgorithm::AES_256_CBC);
+    std::cout << "[INFO] Added TDE table key: id=" << key_id << " (" << key_bytes.size() << " bytes)" << std::endl;
     return true;
 }
 
 bool RecoveryEngine::load_tde_keyring(const std::string& keyring_path) {
-    // TODO: 实现从Keyring文件加载密钥逻辑
-    std::cout << "[INFO] Load TDE keyring from: " << keyring_path << std::endl;
+    innodb::KeyringFile keyring;
+    if (!keyring.load(keyring_path)) {
+        std::cerr << "[ERROR] Failed to load keyring file: " << keyring_path << std::endl;
+        return false;
+    }
+
+    std::cout << "[INFO] Loaded keyring with " << keyring.entries.size() << " keys" << std::endl;
+
+    // Store all keys from keyring
+    // Keys are stored by name (e.g., "INNODBKey-uuid-123")
+    for (const auto& entry : keyring.entries) {
+        // Store key by name for lookup during decryption
+        tde_decryptor_.add_table_key(
+            static_cast<uint32_t>(std::hash<std::string>{}(entry.key_name)),  // Hash name to numeric ID
+            entry.key_data,
+            entry.algorithm);
+
+        std::cout << "[INFO]   Key: " << entry.key_name
+                  << " (" << entry.key_data.size() << " bytes)" << std::endl;
+    }
+
+    keyring_loaded_ = true;
     return true;
 }
 

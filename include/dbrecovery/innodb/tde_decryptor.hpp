@@ -149,7 +149,7 @@ private:
  */
 struct KeyringFile {
     struct Entry {
-        uint32_t key_id;
+        std::string key_name;    // e.g., "INNODBKey-uuid-123"
         TDEKeyType type;
         TDEAlgorithm algorithm;
         std::vector<uint8_t> key_data;
@@ -159,7 +159,7 @@ struct KeyringFile {
     std::vector<Entry> entries;
 
     bool load(const std::string& path);
-    std::optional<Entry> find_key(uint32_t key_id) const;
+    std::optional<Entry> find_key(const std::string& key_name) const;
 };
 
 // ==================== 实现 ====================
@@ -333,9 +333,21 @@ inline bool KeyringFile::load(const std::string& path) {
 
         // Create entry
         Entry entry;
-        entry.key_id = static_cast<uint32_t>(std::stoul(key_id));
+        entry.key_name = key_id;  // Keep as string (e.g., "INNODBKey-uuid-123")
         entry.type = TDEKeyType::KEYRING_KEY;
-        entry.algorithm = TDEAlgorithm::AES_256_CBC;  // Default assumption
+
+        // Determine algorithm from key_type
+        if (key_type.find("AES") != std::string::npos) {
+            if (key_type.find("256") != std::string::npos) {
+                entry.algorithm = TDEAlgorithm::AES_256_CBC;
+            } else if (key_type.find("192") != std::string::npos) {
+                entry.algorithm = TDEAlgorithm::AES_192_CBC;
+            } else {
+                entry.algorithm = TDEAlgorithm::AES_128_CBC;
+            }
+        } else {
+            entry.algorithm = TDEAlgorithm::AES_256_CBC;  // Default
+        }
         entry.key_data = decrypted_key;
 
         entries.push_back(entry);
@@ -349,9 +361,9 @@ inline bool KeyringFile::load(const std::string& path) {
     return !entries.empty();
 }
 
-inline std::optional<KeyringFile::Entry> KeyringFile::find_key(uint32_t key_id) const {
+inline std::optional<KeyringFile::Entry> KeyringFile::find_key(const std::string& key_name) const {
     for (const auto& entry : entries) {
-        if (entry.key_id == key_id) {
+        if (entry.key_name == key_name) {
             return entry;
         }
     }

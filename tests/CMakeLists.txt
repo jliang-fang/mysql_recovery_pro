@@ -164,3 +164,8 @@ gtest_discover_tests(test_instant_ddl)
 add_executable(test_ibd_recovery unit/test_ibd_recovery.cpp)
 target_link_libraries(test_ibd_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_ibd_recovery)
+
+# TDE keyring tests
+add_executable(test_tde_keyring unit/test_tde_keyring.cpp)
+target_link_libraries(test_tde_keyring PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_tde_keyring)

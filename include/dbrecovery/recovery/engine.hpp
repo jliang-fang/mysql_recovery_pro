@@ -249,6 +249,11 @@ private:
     bool detect_encryption_ = false;
 
     /**
+     * @brief Keyring 是否已加载
+     */
+    bool keyring_loaded_ = false;
+
+    /**
      * @brief 页大小提示（如果非零，覆盖自动检测）
      */
     uint32_t page_size_hint_ = 0;
