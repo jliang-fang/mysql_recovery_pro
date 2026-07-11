@@ -57,6 +57,12 @@ struct ColumnInfo {
     // ✅ 关键：InnoDB物理存储顺序
     uint32_t physical_pos = 0;     // InnoDB物理存储位置（不同于ordinal position）
     uint32_t ordinal = 0;          // Schema定义顺序（用户看到的列顺序）
+
+    // ✅ 新增：Instant ADD COLUMN 支持 (MySQL 8.0.23+)
+    // 参考ibd2sql: version_added/version_dropped 控制列在不同行版本中的可见性
+    // 逻辑: version_added <= row_version < version_dropped 时列存在
+    uint16_t version_added = 0;    // 列被添加的行版本 (0=初始创建)
+    uint16_t version_dropped = 66; // 列被删除的行版本 (66=未删除, 参考 ibd2sql 默认值)
 };
 
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）
@@ -100,6 +106,10 @@ struct TableSchema {
     uint64_t table_id = 0;                // InnoDB 内部表 ID（用于关联 SDI）
     uint32_t flags = 0;                   // FSP_FLAGS (页空间标志)
     uint32_t auto_inc_value = 0;          // AUTO_INCREMENT 当前值
+
+    // ✅ 新增：Instant DDL 行版本支持 (MySQL 8.0.23+)
+    uint16_t max_row_version = 0;         // 最大行版本号 (用于 instant ADD/DROP column)
+    uint16_t mysql_version_id = 0;        // MySQL版本ID (80029=8.0.29, 用于判断 instant DDL 版本)
     
     void debug_print() const {
         std::cout << "Table: " << table_name << std::endl;
@@ -267,6 +277,46 @@ struct TableSchema {
         }
         return count;
     }
+
+    // ✅ 新增：获取指定行版本的活跃列（Instant ADD COLUMN 支持）
+    // 参考ibd2sql table.py init_pkmr() 逻辑:
+    //   列存在条件: version_added <= row_version < version_dropped
+    //   version_dropped=66 表示未删除 (ibd2sql默认值)
+    std::vector<ColumnInfo> get_active_columns(uint16_t row_version = 0) const {
+        std::vector<ColumnInfo> active_cols;
+        for (const auto& pair : columns) {
+            const auto& col = pair.second;
+            // 跳过系统列
+            if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
+                continue;
+            }
+            // Instant ADD COLUMN: 列存在条件
+            if (col.version_added <= row_version && row_version < col.version_dropped) {
+                active_cols.push_back(col);
+            }
+        }
+        // 按 physical_pos 排序（InnoDB 存储顺序）
+        std::sort(active_cols.begin(), active_cols.end(),
+            [](const ColumnInfo& a, const ColumnInfo& b) {
+                return a.physical_pos < b.physical_pos;
+            });
+        return active_cols;
+    }
+
+    // ✅ 新增：计算指定行版本的可空列数量
+    uint32_t get_nullable_count_for_version(uint16_t row_version = 0) const {
+        uint32_t count = 0;
+        for (const auto& pair : columns) {
+            const auto& col = pair.second;
+            if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
+                continue;
+            }
+            if (col.version_added <= row_version && row_version < col.version_dropped && col.is_nullable) {
+                count++;
+            }
+        }
+        return count;
+    }
     
     // ✅ 新增：获取列在表中的物理偏移
     std::optional<uint32_t> get_column_offset(const std::string& col_name) const {
@@ -306,6 +356,22 @@ struct TableSchema {
 
         if (j.contains("table_id")) {
             table_id = j["table_id"].get<uint64_t>();
+        }
+
+        // ✅ 新增：解析 MySQL 版本 ID (用于判断 instant DDL 版本)
+        if (j.contains("mysql_version_id")) {
+            mysql_version_id = j["mysql_version_id"].get<uint16_t>();
+        }
+
+        // dd_object 结构（MySQL 8.0 SDI）
+        if (j.contains("dd_object")) {
+            const auto& dd_obj = j["dd_object"];
+            if (dd_obj.contains("name")) {
+                table_name = dd_obj["name"].get<std::string>();
+            }
+            if (dd_obj.contains("mysql_version_id")) {
+                mysql_version_id = dd_obj["mysql_version_id"].get<uint16_t>();
+            }
         }
 
         if (j.contains("columns") && j["columns"].is_array()) {
@@ -479,6 +545,40 @@ struct TableSchema {
                     std::cerr << "[DEBUG POS] Column '" << col.name << "' physical_pos=" << col.physical_pos
                               << " type=" << col.mysql_type_id << "\n";
                 }
+
+                // ✅ 新增：解析 instant DDL version_added 和 version_dropped
+                // 参考ibd2sql table.py: se_private_data 中存储这些值
+                // 格式: "version_added=1;version_dropped=5" 或单独字段
+                if (col_json.contains("se_private_data")) {
+                    std::string se_private = col_json["se_private_data"].get<std::string>();
+                    // 解析 key=value 格式
+                    std::istringstream ss(se_private);
+                    std::string token;
+                    while (std::getline(ss, token, ';')) {
+                        size_t eq_pos = token.find('=');
+                        if (eq_pos != std::string::npos) {
+                            std::string key = token.substr(0, eq_pos);
+                            std::string value = token.substr(eq_pos + 1);
+                            if (key == "version_added") {
+                                col.version_added = static_cast<uint16_t>(std::stoi(value));
+                            } else if (key == "version_dropped") {
+                                col.version_dropped = static_cast<uint16_t>(std::stoi(value));
+                            }
+                        }
+                    }
+                }
+                // 直接字段形式（某些SDI版本）
+                if (col_json.contains("version_added")) {
+                    col.version_added = col_json["version_added"].get<uint16_t>();
+                }
+                if (col_json.contains("version_dropped")) {
+                    col.version_dropped = col_json["version_dropped"].get<uint16_t>();
+                }
+                // 更新 max_row_version
+                if (col.version_dropped < 66) {
+                    max_row_version = std::max(max_row_version, col.version_dropped);
+                }
+                max_row_version = std::max(max_row_version, col.version_added);
 
                 // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
                 // These are internal columns not part of user table schema

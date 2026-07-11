@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <algorithm>
 
 namespace dbrecovery {
 namespace engine {
@@ -53,10 +54,19 @@ struct SchemaTemplate {
 
         // Default value (as string)
         std::string default_value;
+
+        // ✅ 新增：Instant ADD COLUMN 支持 (MySQL 8.0.23+)
+        uint16_t version_added = 0;    // 列被添加的行版本 (0=初始创建)
+        uint16_t version_dropped = 66; // 列被删除的行版本 (66=未删除)
+        uint32_t physical_pos = 0;     // InnoDB物理存储位置
     };
 
     std::vector<Column> columns;
     std::vector<uint32_t> primary_key_columns;
+
+    // ✅ 新增：Instant DDL 行版本支持 (MySQL 8.0.23+)
+    uint16_t max_row_version = 0;         // 最大行版本号
+    uint16_t mysql_version_id = 0;        // MySQL版本ID
 
     // Validation hints
     struct ValidationHints {
@@ -97,6 +107,37 @@ struct SchemaTemplate {
             return std::nullopt;
         }
         return primary_key_columns[0];
+    }
+
+    // ✅ 新增：获取指定行版本的活跃列（Instant ADD COLUMN 支持）
+    // 参考ibd2sql table.py init_pkmr() 逻辑:
+    //   列存在条件: version_added <= row_version < version_dropped
+    //   version_dropped=66 表示未删除 (ibd2sql默认值)
+    std::vector<Column> get_active_columns(uint16_t row_version = 0) const {
+        std::vector<Column> active_cols;
+        for (const auto& col : columns) {
+            // Instant ADD COLUMN: 列存在条件
+            if (col.version_added <= row_version && row_version < col.version_dropped) {
+                active_cols.push_back(col);
+            }
+        }
+        // 按 physical_pos 排序（InnoDB 存储顺序）
+        std::sort(active_cols.begin(), active_cols.end(),
+            [](const Column& a, const Column& b) {
+                return a.physical_pos < b.physical_pos;
+            });
+        return active_cols;
+    }
+
+    // ✅ 新增：计算指定行版本的可空列数量
+    uint32_t get_nullable_count_for_version(uint16_t row_version = 0) const {
+        uint32_t count = 0;
+        for (const auto& col : columns) {
+            if (col.version_added <= row_version && row_version < col.version_dropped && col.is_nullable) {
+                count++;
+            }
+        }
+        return count;
     }
 };
 

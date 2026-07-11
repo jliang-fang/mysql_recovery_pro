@@ -611,8 +611,26 @@ uint32_t TupleParser::parse_page(
                 bwd_offset--;
             }
 
-            // 2. Read NULL bitmap backward
-            uint32_t null_bitmap_size = (num_nullable + 7) / 8;
+            // ✅ 新增：根据 row_version 获取活跃列 (Instant ADD COLUMN 支持)
+            // 参考ibd2sql: version_added <= row_version < version_dropped 时列存在
+            auto active_cols = schema.get_active_columns(row_version);
+            uint32_t active_num_cols = static_cast<uint32_t>(active_cols.size());
+            uint32_t active_num_nullable = schema.get_nullable_count_for_version(row_version);
+
+            // Count variable-length columns among active columns
+            uint32_t active_num_variable = 0;
+            for (const auto& col : active_cols) {
+                bool is_var = col.is_variable_length || col.mysql_type == mt::VARCHAR ||
+                              col.mysql_type == mt::VAR_STRING ||
+                              col.mysql_type == mt::STRING ||  // STRING/CHAR (type 29) - variable for utf8mb4
+                              col.mysql_type == mt::TINY_BLOB || col.mysql_type == mt::MEDIUM_BLOB ||
+                              col.mysql_type == mt::LONG_BLOB || col.mysql_type == mt::BLOB ||
+                              col.mysql_type == mt::JSON;
+                if (is_var) active_num_variable++;
+            }
+
+            // 2. Read NULL bitmap backward (using active column count)
+            uint32_t null_bitmap_size = (active_num_nullable + 7) / 8;
             uint32_t nullvalue = 0;
             if (null_bitmap_size > 0 && bwd_offset >= null_bitmap_size) {
                 bwd_offset -= null_bitmap_size;
@@ -627,10 +645,10 @@ uint32_t TupleParser::parse_page(
             // Each size is read via read_reverse (toward lower offsets), but the
             // column iteration order matches the schema definition order.
             // is_big = char_length > 255 where char_length = mbmaxlen * character_count
-            std::vector<uint32_t> var_lengths(num_variable, 0);
+            std::vector<uint32_t> var_lengths(active_num_variable, 0);
             uint32_t var_idx = 0;
-            for (uint32_t ci = 0; ci < num_cols; ci++) {
-                const auto& col = schema.columns[ci];
+            for (uint32_t ci = 0; ci < active_num_cols; ci++) {
+                const auto& col = active_cols[ci];
                 bool is_var = col.is_variable_length || col.mysql_type == mt::VARCHAR ||
                               col.mysql_type == mt::VAR_STRING ||
                               col.mysql_type == mt::STRING ||  // STRING/CHAR (type 29) - variable for utf8mb4
@@ -640,7 +658,7 @@ uint32_t TupleParser::parse_page(
                 // NOTE: NEWDECIMAL is NOT is_var per ibd2sql COLUMN_TYPE definitions
                 if (!is_var) continue;
 
-                if (var_idx >= num_variable) break;  // safety
+                if (var_idx >= active_num_variable) break;  // safety
 
                 // is_big: char_length > 255 (ibd2sql logic)
                 // char_length = mbmaxlen * character_count (byte length)
@@ -679,9 +697,9 @@ uint32_t TupleParser::parse_page(
             // Order: PK fields → DB_TRX_ID(6) → DB_ROLL_PTR(7) → non-PK fields
             // PK fields are stored in InnoDB internal format: big-endian with sign bit inverted
 
-            // Determine PK column count
+            // Determine PK column count among active columns
             uint32_t pk_count = 0;
-            for (const auto& col : schema.columns) {
+            for (const auto& col : active_cols) {
                 if (col.is_primary_key) pk_count++;
             }
             if (pk_count == 0) pk_count = 1;  // Assume first column is PK if none marked
@@ -695,14 +713,14 @@ uint32_t TupleParser::parse_page(
             recovered.is_supremum = false;
             recovered.page_number = innodb::read_be<uint32_t>(data, 4);
             recovered.space_id = innodb::read_be<uint32_t>(data, 34);
-            recovered.field_count = num_cols;
+            recovered.field_count = active_num_cols;
             recovered.transaction_id = 0;
             recovered.roll_ptr = 0;
 
             bool parse_ok = true;
             uint32_t col_ordinal = 0;
 
-            for (const auto& col : schema.columns) {
+            for (const auto& col : active_cols) {
                 if (fwd_offset >= page_size) { parse_ok = false; break; }
 
                 // Check if this is where DB_TRX_ID and DB_ROLL_PTR go
