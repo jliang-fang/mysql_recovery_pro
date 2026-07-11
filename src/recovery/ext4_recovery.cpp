@@ -365,6 +365,94 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(const ext4_inode& inode) {
         }
     }
 
+    // Handle multi-level extent tree (depth > 0)
+    // For large files, extent tree can have multiple levels of index nodes
+    if (depth > 0 && entries > 0 && entries <= 4) {
+        // This is an index node, need to traverse down to leaf nodes
+        // ext4_extent_idx structure: ei_block (4), ei_leaf_lo (4), ei_leaf_hi (2)
+        // Same size as ext4_extent (12 bytes each)
+        const uint8_t* idx_array = reinterpret_cast<const uint8_t*>(inode.i_block) + sizeof(ext4_extent_header);
+
+        // For multi-level extent trees, we need to read external blocks
+        // This requires device access, which is not available in this context
+        // The caller should handle this by calling traverse_extent_tree()
+        // For now, we return empty and let the caller handle multi-level trees
+    }
+
+    return extents;
+}
+
+// ==================== Multi-level Extent Tree Traversal ====================
+
+std::vector<ext4_extent> Ext4Recovery::traverse_extent_tree(
+    int fd, uint64_t root_block, uint32_t block_size, int max_depth) {
+
+    std::vector<ext4_extent> extents;
+
+    if (max_depth <= 0 || root_block == 0) {
+        return extents;
+    }
+
+#ifdef __linux__
+    std::vector<uint8_t> block_buffer(block_size);
+
+    // Read the extent block
+    uint64_t block_offset = root_block * block_size;
+    if (pread(fd, block_buffer.data(), block_size, block_offset) != block_size) {
+        return extents;
+    }
+
+    // Parse extent header
+    const ext4_extent_header* header = reinterpret_cast<const ext4_extent_header*>(block_buffer.data());
+
+    if (le16toh(header->eh_magic) != EXT4_EXTENT_MAGIC) {
+        return extents;
+    }
+
+    uint16_t entries = le16toh(header->eh_entries);
+    uint16_t depth = le16toh(header->eh_depth);
+
+    if (entries == 0 || entries > 340) {  // Max entries in a 4K block
+        return extents;
+    }
+
+    if (depth == 0) {
+        // Leaf node: extract extents
+        const ext4_extent* ext_array = reinterpret_cast<const ext4_extent*>(
+            block_buffer.data() + sizeof(ext4_extent_header));
+
+        for (uint16_t i = 0; i < entries; i++) {
+            ext4_extent ext;
+            ext.ee_block = le32toh(ext_array[i].ee_block);
+            ext.ee_len = le16toh(ext_array[i].ee_len);
+            ext.ee_start_hi = le16toh(ext_array[i].ee_start_hi);
+            ext.ee_start_lo = le32toh(ext_array[i].ee_start_lo);
+
+            if (ext.ee_len > 0) {
+                extents.push_back(ext);
+            }
+        }
+    } else {
+        // Index node: traverse child nodes
+        // ext4_extent_idx has same layout as ext4_extent but different semantics
+        const uint8_t* idx_array = block_buffer.data() + sizeof(ext4_extent_header);
+
+        for (uint16_t i = 0; i < entries; i++) {
+            // ext4_extent_idx: ei_block (4), ei_leaf_lo (4), ei_leaf_hi (2)
+            uint32_t ei_block = le32toh(*reinterpret_cast<const uint32_t*>(idx_array + i * 12));
+            uint32_t ei_leaf_lo = le32toh(*reinterpret_cast<const uint32_t*>(idx_array + i * 12 + 4));
+            uint16_t ei_leaf_hi = le16toh(*reinterpret_cast<const uint16_t*>(idx_array + i * 12 + 8));
+
+            uint64_t child_block = (static_cast<uint64_t>(ei_leaf_hi) << 32) | ei_leaf_lo;
+
+            if (child_block > 0) {
+                auto child_extents = traverse_extent_tree(fd, child_block, block_size, max_depth - 1);
+                extents.insert(extents.end(), child_extents.begin(), child_extents.end());
+            }
+        }
+    }
+#endif
+
     return extents;
 }
 
