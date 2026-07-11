@@ -8,6 +8,7 @@
 #include <optional>
 #include <array>
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/constants.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -461,6 +462,31 @@ struct alignas(1) RedundantHeader {
                static_cast<uint16_t>(next_off_1);
     }
 
+    /// @brief Check if using 1-byte offset format (REC_OLD_SHORT flag)
+    /// Reference: undrop-for-innodb/rem0rec.ic rec_get_1byte_offs_flag()
+    /// When bit 0 of byte3 is set, uses 1-byte offsets, otherwise 2-byte offsets
+    bool is_1byte_offset_format() const {
+        return (byte3 & REC_OLD_SHORT_MASK) != 0;
+    }
+
+    /// @brief Get number of fields from header
+    /// bits 10-1 of 32-bit field = ((byte2 & 0x03) << 8) | byte3 >> 1
+    uint16_t get_n_fields() const {
+        return ((static_cast<uint16_t>(byte2) & 0x03) << 8) |
+               (static_cast<uint16_t>(byte3) >> 1);
+    }
+
+    /// @brief Get the extra bytes size for this record
+    /// For 1-byte offset format: 6 + n_fields
+    /// For 2-byte offset format: 6 + 2 * n_fields
+    uint16_t get_extra_bytes_size() const {
+        uint16_t n_fields = get_n_fields();
+        if (is_1byte_offset_format()) {
+            return REC_N_OLD_EXTRA_BYTES + n_fields;
+        }
+        return REC_N_OLD_EXTRA_BYTES + 2 * n_fields;
+    }
+
     bool is_deleted() const {
         return (byte0 & 0x10) != 0;  // bit 29 of 32-bit field = deleted
     }
@@ -478,11 +504,6 @@ struct alignas(1) RedundantHeader {
     uint8_t get_n_owned() const {
         // bits 27-24 of 32-bit field = byte0 & 0x0F
         return byte0 & 0x0F;
-    }
-
-    uint16_t get_n_fields() const {
-        // bits 10-1 of 32-bit field
-        return (static_cast<uint16_t>(byte3) >> 1);
     }
 
     bool is_short() const {
@@ -642,6 +663,149 @@ namespace row_formats {
     constexpr uint32_t DYNAMIC   = 2;
     constexpr uint32_t COMPRESSED = 3;
 } // namespace row_formats
+
+// ==================== External Storage Validation ====================
+// Reference: undrop-for-innodb/rem0rec.ic and c_parser.c
+
+/**
+ * @brief Check if field type can have external storage
+ * @param mysql_type_id InnoDB internal type ID
+ * @return true if type is BLOB/TEXT (can be externally stored)
+ */
+inline bool is_blob_type(uint8_t mysql_type_id) {
+    return mysql_type_id == mysql_types::TINY_BLOB ||
+           mysql_type_id == mysql_types::MEDIUM_BLOB ||
+           mysql_type_id == mysql_types::LONG_BLOB ||
+           mysql_type_id == mysql_types::BLOB ||
+           mysql_type_id == mysql_types::JSON;
+}
+
+/**
+ * @brief Check if 2-byte offset has external storage flag
+ * @param offset Field offset value (from REDUNDANT 2-byte offset array)
+ * @return true if REC_2BYTE_EXTERN_MASK (bit 14) is set
+ */
+inline bool is_extern_2byte(uint16_t offset) {
+    return (offset & REC_2BYTE_EXTERN_MASK) != 0;
+}
+
+/**
+ * @brief Extract field size from 1-byte offset (REDUNDANT format)
+ * @param offset 1-byte field offset
+ * @return Field size, or REC_OFFS_EXTERNAL if externally stored
+ */
+inline uint16_t extract_1byte_offset(uint8_t offset) {
+    // 1-byte offset: high bit indicates SQL_NULL, rest is offset
+    if (offset & 0x80) {
+        return static_cast<uint16_t>(offset) & 0x7F;  // NULL flag, size in lower 7 bits
+    }
+    return static_cast<uint16_t>(offset);
+}
+
+/**
+ * @brief Extract field size from 2-byte offset (REDUNDANT format)
+ * @param offset 2-byte field offset
+ * @param has_extern Output: true if externally stored
+ * @return Field size
+ */
+inline uint16_t extract_2byte_offset(uint16_t offset, bool& has_extern) {
+    has_extern = is_extern_2byte(offset);
+    if (has_extern) {
+        return offset & ~REC_2BYTE_EXTERN_MASK;
+    }
+    // Check for SQL_NULL (bit 15)
+    if (offset & 0x8000) {
+        return offset & 0x7FFF;  // NULL flag, size in lower 15 bits
+    }
+    return offset;
+}
+
+// ==================== Page Record Chain Validation ====================
+// Reference: undrop-for-innodb/c_parser.c check_page()
+
+/**
+ * @brief Validate page record chain
+ * @param page_data Page data bytes
+ * @param page_size Page size
+ * @param is_compact true for COMPACT/DYNAMIC format, false for REDUNDANT
+ * @param n_records Output: number of records found (excluding system records)
+ * @return true if record chain is valid
+ */
+inline bool validate_record_chain(const uint8_t* page_data, size_t page_size,
+                                   bool is_compact, uint32_t& n_records) {
+    if (!page_data || page_size < FIL_HEADER_SIZE + 20) {
+        return false;
+    }
+
+    // Get infimum and supremum offsets based on format
+    uint16_t infimum_off = is_compact ? 99 : 100;  // PAGE_NEW_INFIMUM : PAGE_OLD_INFIMUM
+    uint16_t supremum_off = is_compact ? 112 : 113;
+
+    // Safety limits
+    uint32_t max_recs = page_size / MAX_RECORDS_DIVISOR;
+    uint16_t p_prev = 0;
+    uint16_t p = infimum_off;
+    uint32_t recs = 0;
+
+    while (p != supremum_off) {
+        // Safety check: max records limit
+        if (recs > max_recs) {
+            return false;
+        }
+        // Minimum offset check
+        if (p < MIN_RECORD_OFFSET) {
+            return false;
+        }
+        // Out of bounds check
+        if (p > page_size) {
+            return false;
+        }
+        // Circular reference detection
+        if (p == p_prev) {
+            return false;
+        }
+
+        p_prev = p;
+
+        // Get next record offset
+        if (is_compact) {
+            // COMPACT: relative offset at p - 2 (2 bytes, big-endian)
+            if (p < 2 || p + 2 > page_size) {
+                return false;
+            }
+            int16_t rel_off = (static_cast<int16_t>(page_data[p - 2]) << 8) |
+                               static_cast<int16_t>(page_data[p - 1]);
+            p = static_cast<uint16_t>(static_cast<int16_t>(p) + rel_off);
+        } else {
+            // REDUNDANT: absolute offset at p - 2 (2 bytes, big-endian)
+            if (p < 2 || p + 2 > page_size) {
+                return false;
+            }
+            p = (static_cast<uint16_t>(page_data[p - 2]) << 8) |
+                static_cast<uint16_t>(page_data[p - 1]);
+        }
+
+        recs++;
+    }
+
+    n_records = recs > 0 ? recs - 1 : 0;  // Exclude infimum
+    return true;
+}
+
+/**
+ * @brief Check page format (COMPACT vs REDUNDANT)
+ * @param page_data Page data bytes
+ * @return true if COMPACT/DYNAMIC format, false if REDUNDANT
+ */
+inline bool is_compact_format(const uint8_t* page_data) {
+    if (!page_data) {
+        return true;  // Default to COMPACT
+    }
+    // Check n_heap format bit (bit 15)
+    uint16_t n_heap = (static_cast<uint16_t>(page_data[42]) << 8) |
+                       static_cast<uint16_t>(page_data[43]);
+    return (n_heap & 0x8000) != 0;
+}
 
 } // namespace innodb
 } // namespace dbrecovery
