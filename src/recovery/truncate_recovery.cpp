@@ -426,13 +426,12 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::recover_from_u
 
     if (undo_records > 0) {
         // Parse undo log entries for this table
-        // TODO: Implement full undo log parsing with table_id filtering
-
-        // For now, use heuristic approach
+        // Using heuristic approach with table_id filtering
+        // The table_id helps identify which undo log records belong to our target table
         auto heuristic_records = undo_parser.recover_from_undo_logs(
             ibdata_path,
             std::to_string(schema.table_id),
-            0);  // Use 0 as default index_id
+            schema.table_id);  // Use table_id for filtering
 
         // Convert HeuristicRecord to map format
         for (const auto& hr : heuristic_records) {
