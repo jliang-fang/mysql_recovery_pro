@@ -49,7 +49,7 @@ std::optional<CompactRecordHeader> CompactRecordHeader::parse(const uint8_t* dat
     // The 5-byte header is: [info_bits:1][next:2][heap_no:2]
     // But the actual encoding packs flags differently
 
-    // Let's use the ibd2sql interpretation:
+    // Record header interpretation:
     // rec = (byte0 << 16) | (byte1 << 8) | byte2
     // Then extract flags from rec
 

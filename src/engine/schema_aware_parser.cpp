@@ -201,7 +201,7 @@ static std::string decode_datetime(const uint8_t* data, uint32_t& offset, uint8_
                  static_cast<uint64_t>(data[offset + 4]);
     offset += 5;
 
-    // Extract fields using ibd2sql's bit masks
+    // Extract fields using bit masks
     // YearMonth: 17 bits at position 22-38 (mask 0x7fffc00000 = 549751619584)
     uint64_t yearmonth = (t & 0x7FFFC00000ULL) >> 22;  // 549751619584 = 0x7FFFC00000
     uint32_t year = static_cast<uint32_t>(yearmonth / 13);
@@ -520,8 +520,8 @@ uint32_t TupleParser::parse_page(
     uint16_t n_recs = page_hdr->n_heap - 2;  // n_heap includes infimum+supremum
     if (n_recs == 0) return records_parsed;
 
-    // PAGE_NEW_INFIMUM = 99 (ibd2sql: self.foffset = 99)
-    // Both forward (offset) and backward (_offset) pointers start at 99
+    // PAGE_NEW_INFIMUM = 99
+    // Both forward (offset) and backward pointers start at 99
     constexpr uint16_t PAGE_NEW_INFIMUM = 99;
 
     if (PAGE_NEW_INFIMUM >= page_size) return records_parsed;
@@ -550,7 +550,7 @@ uint32_t TupleParser::parse_page(
         if (is_var) num_variable++;
     }
 
-    // Walk the record chain using ibd2sql's algorithm:
+    // Walk the record chain:
     // 1. Read 5-byte record header backward from rec_origin
     // 2. REC_NEXT = signed_offset + rec_origin
     // 3. For user records: read NULL bitmap + var sizes backward, then field data forward
@@ -575,7 +575,7 @@ uint32_t TupleParser::parse_page(
         // 24-bit rec value: rec = (rec1 << 8) + rec2
         uint32_t rec = (static_cast<uint32_t>(rec1) << 8) | static_cast<uint32_t>(rec2);
 
-        // Extract bit fields (same as ibd2sql)
+        // Extract bit fields
         bool rec_info_instant  = (rec & 0x800000) != 0;  // bit 23
         bool rec_info_version  = (rec & 0x400000) != 0;  // bit 22
         bool rec_info_deleted  = (rec & 0x200000) != 0;  // bit 21
@@ -593,7 +593,7 @@ uint32_t TupleParser::parse_page(
         }
 
         if (rec_type == innodb::REC_STATUS_ORDINARY) {
-            // Parse this user record using ibd2sql's bidirectional approach
+            // Parse this user record using bidirectional approach
             // The backward pointer starts at rec_origin (after reading header, it's at hdr_start)
             // The forward pointer starts at rec_origin
 
@@ -608,8 +608,8 @@ uint32_t TupleParser::parse_page(
                 bwd_offset--;
             }
 
-            // ✅ 新增：根据 row_version 获取活跃列 (Instant ADD COLUMN 支持)
-            // 参考ibd2sql: version_added <= row_version < version_dropped 时列存在
+            // 根据row_version获取活跃列 (Instant ADD COLUMN 支持)
+            // version_added <= row_version < version_dropped 时列存在
             auto active_cols = schema.get_active_columns(row_version);
             uint32_t active_num_cols = static_cast<uint32_t>(active_cols.size());
             uint32_t active_num_nullable = schema.get_nullable_count_for_version(row_version);
@@ -638,7 +638,7 @@ uint32_t TupleParser::parse_page(
             }
 
             // 3. Read variable-length column sizes backward
-            // Variable-length sizes are read in FORWARD column order (ibd2sql behavior)
+            // Variable-length sizes are read in FORWARD column order
             // Each size is read via read_reverse (toward lower offsets), but the
             // column iteration order matches the schema definition order.
             // is_big = char_length > 255 where char_length = mbmaxlen * character_count
@@ -652,12 +652,12 @@ uint32_t TupleParser::parse_page(
                               col.mysql_type == mt::TINY_BLOB || col.mysql_type == mt::MEDIUM_BLOB ||
                               col.mysql_type == mt::LONG_BLOB || col.mysql_type == mt::BLOB ||
                               col.mysql_type == mt::JSON;
-                // NOTE: NEWDECIMAL is NOT is_var per ibd2sql COLUMN_TYPE definitions
+                // NOTE: NEWDECIMAL is NOT is_var
                 if (!is_var) continue;
 
                 if (var_idx >= active_num_variable) break;  // safety
 
-                // is_big: char_length > 255 (ibd2sql logic)
+                // is_big: char_length > 255
                 // char_length = mbmaxlen * character_count (byte length)
                 uint32_t char_len = col.char_length > 0 ? col.char_length : col.max_length;
                 // For VARCHAR(N) with mbmaxlen>1, char_length should already be mbmaxlen*N
@@ -759,7 +759,7 @@ uint32_t TupleParser::parse_page(
                                   col.mysql_type == mt::TINY_BLOB || col.mysql_type == mt::MEDIUM_BLOB ||
                                   col.mysql_type == mt::LONG_BLOB || col.mysql_type == mt::BLOB ||
                                   col.mysql_type == mt::JSON;
-                    // NOTE: NEWDECIMAL is NOT is_var per ibd2sql
+                    // NOTE: NEWDECIMAL is NOT is_var
 
                     if (is_var) {
                         uint32_t vsize = (var_read_idx < var_lengths.size()) ?
@@ -1198,7 +1198,7 @@ std::string TupleParser::decode_field_data(
         }
         case mt::DATETIME:
         case mt::DATETIME2: {
-            // Use ibd2sql-style DATETIME decoding
+            // DATETIME decoding
             value = decode_datetime(data, offset, col.datetime_precision);
             break;
         }

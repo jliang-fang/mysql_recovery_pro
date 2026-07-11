@@ -446,7 +446,7 @@ std::vector<RecoveredBLOB> BlobScanner::scan_for_blobs_by_pattern(
 // ==================== ZBLOB Streaming Decompression ====================
 
 /**
- * ZBLOB Page Header Layout (based on ibd2sql lob.py):
+ * ZBLOB Page Header Layout:
  * Offset 0-3: FIL header space_id (should be 0 for BLOB)
  * Offset 4-7: FIL header page_no
  * Offset 8-11: Next page number (4294967295 = 0xFFFFFFFF if last)

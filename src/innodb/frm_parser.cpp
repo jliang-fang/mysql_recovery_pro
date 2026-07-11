@@ -79,14 +79,14 @@ static uint8_t mysql_to_innodb_type(uint8_t mysql_type) {
         case 251: return 26;  // LONG_BLOB -> InnoDB LONG_BLOB (type 26)
         case 252: return 27;  // BLOB -> InnoDB BLOB (type 27)
         case 253: return 16;  // VAR_STRING -> InnoDB VARCHAR (type 16)
-        case 254: return 29;  // CHAR/STRING -> InnoDB STRING (type 29, 参考ibd2sql column_type.py)
+        case 254: return 29;  // CHAR/STRING -> InnoDB STRING (type 29)
                                // CHAR在InnoDB中对于多字节字符集(utf8/utf8mb4)是变长存储
         case 255: return 30;  // GEOMETRY -> InnoDB GEOMETRY (type 30)
         default:  return mysql_type; // 对于未识别的类型，保持原值
     }
 }
 
-// InnoDB 类型定义 (参考 ibd2sql column_type.py)
+// InnoDB 类型定义
 enum class InnoDBType : uint8_t {
     DECIMAL = 1,
     TINY = 2,
@@ -313,7 +313,7 @@ bool FRMParser::read_header(const uint8_t* data, size_t size, FRMHeader& header)
     header.legacy_db_type = data[3];
 
     // Skip _0 (offset 4-5)
-    // 读取 io_size (offset 6-7) - following ibd2sql's frm2sdi.py
+    // 读取 io_size (offset 6-7)
     header.io_size = read_uint16(data + 6);
     if (header.io_size == 0) {
         header.io_size = 1024;  // 默认值
@@ -441,10 +441,7 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
             col_in_screen = 2;
             // Skip 8 bytes padding for screen transition
             pos += 8;
-            // Read terminator bytes until non-space (ibd2sql-style)
-            // ibd2sql: _terminator = self.data.read(1)
-            //          while _terminator == b' ': _terminator = self.data.read(1)
-            // Each read consumes a byte, including the final non-space terminator
+            // Read terminator bytes until non-space
             while (pos < header.frm_length && data[pos] == ' ') {
                 pos++;  // Skip space terminators
             }
@@ -526,7 +523,8 @@ bool FRMParser::read_columns(const uint8_t* data, size_t offset,
         columns.push_back(col);
     }
 
-    // Skip name section (NAMESIZE bytes) + 2 bytes (based on ibd2sql)
+
+    // Skip name section (NAMESIZE bytes) + 2 bytes
     // Read column comments
     size_t total_name_size = 0;
     for (const auto& fn : field_names) {

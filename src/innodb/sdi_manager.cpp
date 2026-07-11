@@ -101,7 +101,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                         if (col.contains("type")) {
                             if (col["type"].is_string()) {
                                 // Type is string like "LONGLONG", "VARCHAR", etc.
-                                // Map to InnoDB internal type IDs (see ibd2sql column_type.py)
+                                // Map to InnoDB internal type IDs
                                 std::string type_str = col["type"].get<std::string>();
                                 // CRITICAL: Use InnoDB internal type IDs, NOT MySQL server type IDs!
                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type_str='" << type_str << "'\n";

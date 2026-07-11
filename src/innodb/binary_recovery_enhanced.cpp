@@ -204,8 +204,8 @@ int BinaryScannerEnhanced::calculate_heuristic_score(const uint8_t* data, size_t
     int score = SCORE_ALLOCATED;  // Base score for tentative pages
 
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
-    
-    // PhotoRec-style signature detection TestDisk/ibd2sql approach
+
+    // Signature-based page detection
     if (page_type == SIG_INDEX) {
         score += SCORE_VALID_INDEX + 5;  // INDEX page (highest confidence)
     } else if (page_type == SIG_SDI) {
@@ -257,7 +257,7 @@ InnoDBSignature BinaryScannerEnhanced::extract_signature(const uint8_t* data) {
 }
 
 bool BinaryScannerEnhanced::is_valid_page_type(uint16_t type) {
-    // PhotoRec-style signature validation (TestDisk/ibd2sql approach)
+    // Signature-based page validation
     return VALID_PAGE_SIGNATURES.count(type) > 0;
 }
 
