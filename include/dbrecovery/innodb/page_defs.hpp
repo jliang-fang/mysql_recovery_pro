@@ -253,6 +253,35 @@ constexpr uint16_t BLOB_ENTRY_HEADER_SIZE = 60;
 /// @brief BLOB entry header offset in first page
 constexpr uint16_t BLOB_ENTRY_HEADER_OFFSET = 96;
 
+// ==================== BLOB Entry Chain Constants ====================
+// Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
+
+/// @brief Offset of next_entry_pageno within BLOB entry header (bytes 6-9)
+constexpr uint8_t BLOB_ENTRY_NEXT_PAGE_OFFSET = 6;
+/// @brief Offset of next_entry_offset within BLOB entry header (bytes 10-11)
+constexpr uint8_t BLOB_ENTRY_NEXT_OFFSET_OFFSET = 10;
+/// @brief Size of entry trailer (pageno, datalen, lobversion at bytes -12 to end)
+constexpr uint8_t BLOB_ENTRY_TRAILER_SIZE = 12;
+/// @brief Data length is in upper 16 bits of trailer datalen field
+constexpr uint8_t BLOB_ENTRY_DATALEN_SHIFT = 16;
+
+// ==================== 1-byte vs 2-byte Offset Constants for REDUNDANT ====================
+// Reference: undrop-for-innodb/rem0rec.ic
+
+/// @brief REC_OLD_SHORT flag (bit in record header for 1-byte offset detection)
+constexpr uint8_t REC_OLD_SHORT_MASK = 0x01;
+/// @brief Maximum data size for 1-byte offset format (127 bytes)
+constexpr uint32_t REC_1BYTE_OFFS_LIMIT = 0x7FUL;
+/// @brief External storage mask in 2-byte offset (bit 14)
+constexpr uint16_t REC_2BYTE_EXTERN_MASK = 0x4000;
+
+// ==================== Page Record Chain Validation Constants ====================
+
+/// @brief Maximum records sanity check divisor (page_size / 5)
+constexpr uint32_t MAX_RECORDS_DIVISOR = 5;
+/// @brief Minimum valid record offset
+constexpr uint16_t MIN_RECORD_OFFSET = 2;
+
 // ✅ 新增：REC_MIN_MARK_FLAG 是 REC_INFO_MIN_REC_FLAG 的别名，用于兼容不同命名习惯
 // 在 MySQL 8.0 源码中，该位被命名为 REC_MIN_MARK_FLAG（位于 info_bits 的 bit 4）
 constexpr uint8_t REC_MIN_MARK_FLAG     = 0x10;   // min mark flag (same as REC_INFO_MIN_REC_FLAG)

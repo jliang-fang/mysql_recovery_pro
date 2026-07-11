@@ -40,10 +40,15 @@ namespace innodb {
 // ==================== Constants from ibd2sql ====================
 
 /// Off-page flag for DYNAMIC/COMPRESSED row format
-constexpr uint32_t OFF_PAGE_FLAG_DYNAMIC = 16384;  // 0x4000
+/// Reference: ibd2sql/innodb_page/index.py line 108 - self.off_page_flag = 16404
+constexpr uint32_t OFF_PAGE_FLAG_DYNAMIC = 16404;  // Correct value from ibd2sql
 
 /// Off-page flag for COMPACT/REDUNDANT (Antelope) row format
+/// Reference: ibd2sql/innodb_page/index.py line 111 - self.off_page_flag = 17172
 constexpr uint32_t OFF_PAGE_FLAG_ANTLELOPE = 17172;  // 0x4314
+
+/// Alias for compatibility
+constexpr uint32_t OFF_PAGE_FLAG_COMPACT = OFF_PAGE_FLAG_ANTLELOPE;
 
 /// System column sizes
 constexpr size_t DB_TRX_ID_SIZE = 6;

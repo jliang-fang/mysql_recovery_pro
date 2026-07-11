@@ -11,6 +11,7 @@
 #include <string>
 #include <functional>
 #include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"  // For OFF_PAGE_FLAG_* constants
 
 namespace dbrecovery {
 namespace innodb {
@@ -185,6 +186,32 @@ public:
     std::vector<uint8_t> read_zblob_chain(
         const std::string& file_path,
         uint32_t first_page);
+
+    /**
+     * @brief Read FIRST_BLOB with entry chain traversal (MySQL 5.7.44+)
+     * @param page_reader Function to read a page by number
+     * @param first_page First page number
+     * @param mysql_version_id MySQL version ID (e.g., 50744 for 5.7.44)
+     * @return Complete BLOB data
+     *
+     * Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
+     * Entry header at offset 96 (60 bytes), data at offset 696 for first page
+     * Entry chain: next_entry_pageno/next_entry_offset from entry[6:12]
+     * Data: pageno/datalen/lobversion from entry[-12:]
+     */
+    std::vector<uint8_t> read_first_blob_chain(
+        const std::function<std::vector<uint8_t>(uint32_t)>& page_reader,
+        uint32_t first_page,
+        uint32_t mysql_version_id = 80000);
+
+    /**
+     * @brief Check if size value indicates off-page storage
+     * @param vsize Variable size value from record
+     * @param row_format Row format (0=REDUNDANT, 1=COMPACT, 2=DYNAMIC, 3=COMPRESSED)
+     * @param mysql_version MySQL version ID
+     * @return true if field is stored externally
+     */
+    static bool is_off_page(uint16_t vsize, uint8_t row_format, uint32_t mysql_version);
 
     /**
      * @brief Read FIRST_BLOB with entry chain traversal
@@ -384,6 +411,149 @@ inline BLOBField BlobScanner::extract_blob_pointer(const uint8_t* field_data, ui
     // BTR_EXTERN field ref is at the END of the field data
     const uint8_t* extern_ref = field_data + field_length - BTR_EXTERN_FIELD_REF_SIZE;
     return BLOBField::parse(extern_ref);
+}
+
+// ==================== FIRST_BLOB Entry Chain Traversal ====================
+// Reference: ibd2sql/innodb_page/lob.py FIRST_BLOB
+
+inline bool BlobScanner::is_off_page(uint16_t vsize, uint8_t row_format, uint32_t mysql_version) {
+    // DYNAMIC and COMPRESSED row formats use 16404 as off-page flag
+    if (row_format == row_formats::DYNAMIC || row_format == row_formats::COMPRESSED) {
+        return vsize == OFF_PAGE_FLAG_DYNAMIC;
+    }
+    // COMPACT/REDUNDANT with POST_ANTELOPE=0 (MySQL < 8.0) uses 17172
+    if (mysql_version < 80000) {
+        return vsize == OFF_PAGE_FLAG_COMPACT;
+    }
+    return vsize == OFF_PAGE_FLAG_DYNAMIC;
+}
+
+inline std::vector<uint8_t> BlobScanner::read_first_blob_chain(
+    const std::function<std::vector<uint8_t>(uint32_t)>& page_reader,
+    uint32_t first_page,
+    uint32_t mysql_version_id) {
+
+    std::vector<uint8_t> result;
+
+    // MySQL 5.7.44+ uses entry chain traversal
+    if (mysql_version_id > 50744) {
+        uint32_t current_page = first_page;
+        std::vector<uint8_t> first_page_data = page_reader(current_page);
+
+        if (first_page_data.size() < BLOB_ENTRY_HEADER_OFFSET + BLOB_ENTRY_HEADER_SIZE) {
+            return result;
+        }
+
+        // Entry header at offset 96 (60 bytes)
+        std::vector<uint8_t> entry(first_page_data.begin() + BLOB_ENTRY_HEADER_OFFSET,
+                                   first_page_data.begin() + BLOB_ENTRY_HEADER_OFFSET + BLOB_ENTRY_HEADER_SIZE);
+
+        size_t iteration_count = 0;
+        constexpr size_t MAX_ITERATIONS = 10000;  // Safety limit
+
+        while (!entry.empty() && iteration_count < MAX_ITERATIONS) {
+            iteration_count++;
+
+            // Check minimum entry size
+            if (entry.size() < BLOB_ENTRY_TRAILER_SIZE) {
+                break;
+            }
+
+            // Parse trailer: pageno, datalen, lobversion at entry[-12:]
+            // Format: struct.unpack('>3L', entry[-12:])
+            size_t trailer_offset = entry.size() - BLOB_ENTRY_TRAILER_SIZE;
+            uint32_t entry_pageno = (static_cast<uint32_t>(entry[trailer_offset]) << 24) |
+                                    (static_cast<uint32_t>(entry[trailer_offset + 1]) << 16) |
+                                    (static_cast<uint32_t>(entry[trailer_offset + 2]) << 8) |
+                                    static_cast<uint32_t>(entry[trailer_offset + 3]);
+            uint32_t entry_datalen_raw = (static_cast<uint32_t>(entry[trailer_offset + 4]) << 24) |
+                                          (static_cast<uint32_t>(entry[trailer_offset + 5]) << 16) |
+                                          (static_cast<uint32_t>(entry[trailer_offset + 6]) << 8) |
+                                          static_cast<uint32_t>(entry[trailer_offset + 7]);
+            // datalen is upper 16 bits
+            uint32_t datalen = entry_datalen_raw >> BLOB_ENTRY_DATALEN_SHIFT;
+
+            if (entry_pageno == 0) {
+                break;
+            }
+
+            // Read data from this entry's page
+            if (entry_pageno == first_page) {
+                // First page: data at offset 696
+                if (first_page_data.size() >= BLOB_FIRST_PAGE_DATA_OFFSET + datalen) {
+                    result.insert(result.end(),
+                                  first_page_data.begin() + BLOB_FIRST_PAGE_DATA_OFFSET,
+                                  first_page_data.begin() + BLOB_FIRST_PAGE_DATA_OFFSET + datalen);
+                }
+            } else {
+                // Subsequent pages: data at offset 49
+                std::vector<uint8_t> page_data = page_reader(entry_pageno);
+                if (page_data.size() >= BLOB_SUBSEQUENT_PAGE_DATA_OFFSET + datalen) {
+                    result.insert(result.end(),
+                                  page_data.begin() + BLOB_SUBSEQUENT_PAGE_DATA_OFFSET,
+                                  page_data.begin() + BLOB_SUBSEQUENT_PAGE_DATA_OFFSET + datalen);
+                }
+            }
+
+            // Get next entry in chain: next_entry_pageno, next_entry_offset from entry[6:12]
+            if (entry.size() < BLOB_ENTRY_NEXT_OFFSET_OFFSET + 2) {
+                break;
+            }
+
+            uint32_t next_entry_pageno = (static_cast<uint32_t>(entry[BLOB_ENTRY_NEXT_PAGE_OFFSET]) << 24) |
+                                          (static_cast<uint32_t>(entry[BLOB_ENTRY_NEXT_PAGE_OFFSET + 1]) << 16) |
+                                          (static_cast<uint32_t>(entry[BLOB_ENTRY_NEXT_PAGE_OFFSET + 2]) << 8) |
+                                          static_cast<uint32_t>(entry[BLOB_ENTRY_NEXT_PAGE_OFFSET + 3]);
+            uint16_t next_entry_offset = (static_cast<uint16_t>(entry[BLOB_ENTRY_NEXT_OFFSET_OFFSET]) << 8) |
+                                          static_cast<uint16_t>(entry[BLOB_ENTRY_NEXT_OFFSET_OFFSET + 1]);
+
+            // Check for end of chain (FIL_NULL = 0xFFFFFFFF)
+            if (next_entry_pageno == 0 || next_entry_pageno == FIL_NULL) {
+                break;
+            }
+
+            // Read next entry
+            std::vector<uint8_t> next_page_data = page_reader(next_entry_pageno);
+            if (next_page_data.size() < next_entry_offset + BLOB_ENTRY_HEADER_SIZE) {
+                break;
+            }
+
+            entry.assign(next_page_data.begin() + next_entry_offset,
+                        next_page_data.begin() + next_entry_offset + BLOB_ENTRY_HEADER_SIZE);
+        }
+    } else {
+        // Legacy format for MySQL 5.6 and early 5.7
+        // Simple page chain at offset 38-46
+        uint32_t current_page = first_page;
+
+        while (current_page != 0 && current_page != FIL_NULL) {
+            std::vector<uint8_t> page_data = page_reader(current_page);
+            if (page_data.size() < FIL_HEADER_SIZE + 8) {
+                break;
+            }
+
+            // Legacy format: REAL_SIZE at offset 38-41, PAGENO at offset 42-45
+            uint32_t real_size = (static_cast<uint32_t>(page_data[38]) << 24) |
+                                  (static_cast<uint32_t>(page_data[39]) << 16) |
+                                  (static_cast<uint32_t>(page_data[40]) << 8) |
+                                  static_cast<uint32_t>(page_data[41]);
+            uint32_t next_page = (static_cast<uint32_t>(page_data[42]) << 24) |
+                                  (static_cast<uint32_t>(page_data[43]) << 16) |
+                                  (static_cast<uint32_t>(page_data[44]) << 8) |
+                                  static_cast<uint32_t>(page_data[45]);
+
+            // Data starts at offset 46
+            if (page_data.size() >= 46 + real_size) {
+                result.insert(result.end(),
+                              page_data.begin() + 46,
+                              page_data.begin() + 46 + real_size);
+            }
+
+            current_page = next_page;
+        }
+    }
+
+    return result;
 }
 
 } // namespace innodb

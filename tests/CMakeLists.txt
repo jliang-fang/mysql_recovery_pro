@@ -179,3 +179,8 @@ gtest_discover_tests(test_comprehensive_recovery)
 add_executable(test_data_validation unit/test_data_validation.cpp)
 target_link_libraries(test_data_validation PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_data_validation)
+
+# BLOB chain traversal tests
+add_executable(test_blob_chain_traversal unit/test_blob_chain_traversal.cpp)
+target_link_libraries(test_blob_chain_traversal PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_blob_chain_traversal)
