@@ -1465,11 +1465,22 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
 
     size_t pos = data_start;
 
-    // DEBUG: Show initial position
+    // DEBUG: Show initial position and variable_sizes
     static int pos_init_debug = 0;
     if (pos_init_debug < 3) {
         std::cerr << "[DEBUG EXTRACT_START] data_start=" << std::hex << data_start << std::dec
                   << " (" << data_start << ") n_pk_cols_=" << n_pk_cols_ << "\n";
+        std::cerr << "[DEBUG VARSIZES] ";
+        for (size_t i = 0; i < variable_sizes.size() && i < 10; i++) {
+            std::cerr << "[" << i << "]=" << variable_sizes[i] << " ";
+        }
+        std::cerr << "\n";
+        // Show column info
+        for (size_t i = 0; i < columns.size() && i < 10; i++) {
+            std::cerr << "[DEBUG COL " << i << "] name=" << columns[i].name
+                      << " type=" << (int)columns[i].col_type
+                      << " phys_pos=" << columns[i].physical_pos << "\n";
+        }
         pos_init_debug++;
     }
 
@@ -1480,6 +1491,20 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         // CRITICAL FIX: Use col_idx to index into variable_sizes, not a separate size_idx!
         if (col_idx >= variable_sizes.size()) break;
         uint32_t field_size = variable_sizes[col_idx];
+
+        // DEBUG: Show PK column reading
+        static int pk_debug = 0;
+        if (pk_debug < 5) {
+            std::cerr << "[DEBUG PK] col_idx=" << col_idx << " name=" << col.name
+                      << " pos=" << std::hex << pos << std::dec
+                      << " field_size=" << field_size
+                      << " data: ";
+            for (size_t j = 0; j < field_size && pos + j < data_end && j < 10; j++) {
+                std::cerr << std::hex << (int)page_data[pos + j] << " ";
+            }
+            std::cerr << std::dec << "\n";
+            pk_debug++;
+        }
 
         IndexFieldValue val;
 

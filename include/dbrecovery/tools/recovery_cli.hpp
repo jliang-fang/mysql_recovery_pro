@@ -845,11 +845,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
                             if (flag == "PK" || flag == "PRIMARY" || flag == "KEY") {
                                 col.is_nullable = false;
-                                // PK INT columns are typically UNSIGNED in MySQL
-                                if (type_str == "INT" || type_str == "INTEGER" || type_str == "BIGINT" ||
-                                    type_str == "SMALLINT" || type_str == "TINYINT" || type_str == "MEDIUMINT") {
-                                    col.is_signed = false;  // UNSIGNED
-                                }
+                                // NOTE: INT PRIMARY KEY columns are SIGNED by default in MySQL
+                                // (AUTO_INCREMENT requires signed integer)
+                                // Do NOT set is_signed = false here
                             }
                             if (flag == "UNSIGNED") col.is_signed = false;
                             if (flag == "SIGNED") col.is_signed = true;

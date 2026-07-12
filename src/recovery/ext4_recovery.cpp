@@ -938,6 +938,16 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             col_def.physical_pos = phys_pos;
             index_columns.push_back(col_def);
         }
+
+        // DEBUG: Show index_columns size
+        if (config_.verbose) {
+            std::cout << "[DEBUG] index_columns size: " << index_columns.size() << "\n";
+            for (size_t i = 0; i < index_columns.size(); i++) {
+                std::cout << "  [" << i << "] " << index_columns[i].name
+                          << " type=" << (int)index_columns[i].col_type
+                          << " phys_pos=" << index_columns[i].physical_pos << "\n";
+            }
+        }
     }
 
     // Export recovered pages to CSV files with record parsing
