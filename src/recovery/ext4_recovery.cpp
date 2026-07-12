@@ -911,6 +911,8 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     col_def.col_type = 21;  // InnoDB NEWDECIMAL type
                     col_def.precision = col.numeric_precision > 0 ? col.numeric_precision : 10;
                     col_def.scale = col.numeric_scale > 0 ? col.numeric_scale : 0;
+                    std::cerr << "[DEBUG DECIMAL] Column '" << col.name << "' mysql_type=" << col.mysql_type_id
+                              << " precision=" << col_def.precision << " scale=" << col_def.scale << "\n";
                     break;
                 case 1: col_def.col_type = 2; col_def.col_length = 1; break;  // TINYINT
                 case 2: col_def.col_type = 3; col_def.col_length = 2; break;  // SMALLINT

@@ -801,6 +801,23 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             col.mysql_type_id = 4; col.column_length = 4;
                         } else if (type_str == "DOUBLE") {
                             col.mysql_type_id = 5; col.column_length = 8;
+                        } else if (type_str == "DECIMAL") {
+                            col.mysql_type_id = 246;  // MYSQL_TYPE_NEWDECIMAL
+                            if (parts.size() >= 3) {
+                                try {
+                                    col.numeric_precision = std::stoi(parts[2]);
+                                    col.column_length = col.numeric_precision;
+                                } catch (...) {
+                                    col.numeric_precision = 10;
+                                }
+                            }
+                            if (parts.size() >= 4) {
+                                try {
+                                    col.numeric_scale = std::stoi(parts[3]);
+                                } catch (...) {
+                                    col.numeric_scale = 0;
+                                }
+                            }
                         } else if (type_str == "VARCHAR" || type_str == "CHAR") {
                             col.mysql_type_id = 15; col.is_variable_length = true;
                             if (parts.size() >= 3) col.column_length = std::stoi(parts[2]);
