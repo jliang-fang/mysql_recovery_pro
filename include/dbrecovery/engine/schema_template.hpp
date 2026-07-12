@@ -109,10 +109,9 @@ struct SchemaTemplate {
         return primary_key_columns[0];
     }
 
-    // ✅ 新增：获取指定行版本的活跃列（Instant ADD COLUMN 支持）
-    // 参考ibd2sql table.py init_pkmr() 逻辑:
-    //   列存在条件: version_added <= row_version < version_dropped
-    //   version_dropped=66 表示未删除 (ibd2sql默认值)
+    // 获取指定行版本的活跃列（Instant ADD COLUMN 支持）
+    // 列存在条件: version_added <= row_version < version_dropped
+    // version_dropped=66 表示未删除
     std::vector<Column> get_active_columns(uint16_t row_version = 0) const {
         std::vector<Column> active_cols;
         for (const auto& col : columns) {

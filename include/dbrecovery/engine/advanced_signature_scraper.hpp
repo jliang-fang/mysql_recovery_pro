@@ -126,7 +126,7 @@ class InnoDBSignatureLibrary {
 public:
     // ==================== Page Type Constants ====================
 
-    /// @brief FIL_PAGE_TYPE values (from ibd2sql)
+    /// @brief FIL_PAGE_TYPE values
     static constexpr uint16_t FIL_PAGE_INDEX = 0x45BF;       // 17855
     static constexpr uint16_t FIL_PAGE_UNDO_LOG = 0x45B2;    // 17842
     static constexpr uint16_t FIL_PAGE_INODE = 0x45B3;       // 17843

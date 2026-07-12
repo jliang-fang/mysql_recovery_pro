@@ -141,7 +141,7 @@ inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(con
         return std::nullopt;
     }
 
-    // For compressed SDI (0x45BD), use ibd2sql approach:
+    // For compressed SDI (0x45BD), extract the slot offset
     // offset = struct.unpack('>h',data[97:99])[0] + 99
     if (type == FIL_PAGE_SDI_ZIP) {
         int16_t slot_offset = static_cast<int16_t>(
@@ -322,7 +322,7 @@ inline std::vector<ExtractedSDI> SDIExtractor::extract_from_page(const uint8_t* 
 
     extract_stats_.sdi_pages++;
 
-    // For compressed SDI (0x45BD), use ibd2sql approach
+    // For compressed SDI (0x45BD), extract the slot offset
     if (type == FIL_PAGE_SDI_ZIP) {
         int16_t slot_offset = static_cast<int16_t>(
             (static_cast<uint16_t>(page_data[97]) << 8) |

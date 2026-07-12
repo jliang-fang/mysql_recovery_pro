@@ -537,7 +537,6 @@ private:
 
 /**
  * @brief Parse MySQL .frm file to extract schema
- * @details Less robust than ibd2sql's implementation but sufficient for recovery
  */
 class FrmParser {
 public:

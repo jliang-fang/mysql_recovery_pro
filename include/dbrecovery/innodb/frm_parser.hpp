@@ -14,7 +14,6 @@ namespace innodb {
  * @brief FRM 文件解析器
  *
  * 从 MySQL .frm 文件中提取表结构元数据
- * 参考: ibd2sql 的 frm2sdi.py
  *
  * FRM 文件格式:
  * - 偏移 0-1: FRM_TYPE (0x01fe = 表, 0x5954 = 视图)

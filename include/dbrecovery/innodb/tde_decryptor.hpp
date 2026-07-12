@@ -255,7 +255,6 @@ inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
 /**
  * @brief MySQL Keyring file format
  *
- * Reference: ibd2sql/utils/keyring_file.py
  * MySQL Keyring stores encryption keys with XOR obfuscation
  */
 inline bool KeyringFile::load(const std::string& path) {
