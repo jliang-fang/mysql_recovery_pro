@@ -277,7 +277,6 @@ public:
      * @brief 从磁盘中恢复 rm -f 删除的 .ibd/.frm 文件
      *
      * 使用 PhotoRec 风格的文件雕刻，从磁盘原始数据中恢复删除的文件
-     * 这是 testdisk/photorec 风格的恢复方法
      *
      * @param disk_path 磁盘/镜像文件路径
      * @param output_dir 输出目录（恢复的文件将保存到这里）

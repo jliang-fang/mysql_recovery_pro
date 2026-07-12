@@ -11,7 +11,6 @@ namespace innodb {
 /**
  * @brief Recovery limits configuration
  *
- * Inspired by testdisk/PhotoRec's max_filesize mechanism.
  * Prevents memory exhaustion from malicious or corrupted files.
  */
 struct RecoveryLimits {

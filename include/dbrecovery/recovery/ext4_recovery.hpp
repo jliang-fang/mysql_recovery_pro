@@ -8,7 +8,6 @@
  * 3. Block bitmap analysis for recently freed blocks
  * 4. Inode table scanning for deleted inodes
  *
- * Reference: testdisk ext2.c, ext2p.c implementations
  * Reference: ext4 filesystem structure documentation
  */
 
@@ -344,7 +343,6 @@ private:
 
     /**
      * @brief Check if a block is free in the block bitmap
-     * Reference: testdisk ext2p.c ext2fs_test_generic_bitmap
      * @param bitmap Block bitmap for the group
      * @param block_offset Block offset within the group
      * @return true if block is free (bit is 0)

@@ -1249,9 +1249,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
             if (dbrecovery::innodb::is_sdi_page_type(page_type)) {
-                // For compressed SDI (0x45BD), use ibd2sql approach
+                // For compressed SDI (0x45BD), extract slot offset
                 if (page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP && page_size >= 100) {
-                    // ibd2sql: offset = struct.unpack('>h',data[97:99])[0] + 99
+                    // offset = struct.unpack('>h',data[97:99])[0] + 99
                     int16_t slot_offset = static_cast<int16_t>(
                         (static_cast<uint16_t>(page_data[97]) << 8) |
                         static_cast<uint16_t>(page_data[98]));
@@ -1668,7 +1668,6 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             icol.mb_maxlen = 4;  // UTF8MB4
 
             // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
-            // Reference: ibd2sql column_type.py
             if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
             else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
             else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }

@@ -14,10 +14,7 @@ namespace innodb {
 /**
  * @brief Signature registration framework for InnoDB page type detection
  *
- * Inspired by testdisk/PhotoRec's file_hint_t signature registration mechanism.
  * This allows extensible page type detection through a plugin-like architecture.
- *
- * Reference: testdisk/src/filegen.h
  */
 
 /// Maximum file/page size limits (prevent memory exhaustion)
@@ -42,7 +39,7 @@ struct SignatureCheckResult {
 using SignatureCheckFunc = std::function<SignatureCheckResult(const uint8_t* data, size_t size)>;
 
 /**
- * @brief Page signature hint structure (similar to file_hint_t in testdisk)
+ * @brief Page signature hint structure
  */
 struct PageSignatureHint {
     std::string name;                    // Signature name (e.g., "INDEX", "BLOB")
