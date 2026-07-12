@@ -10,7 +10,6 @@ namespace dbrecovery {
 namespace disk {
 
 // ==================== IBD File Signature Constants ====================
-//参考 ibd2sql 和 MySQL 源码定义的 IBD 文件特征
 
 /// @brief IBD 文件的签名/特征码（文件头特征）
 /// MySQL 5.6+ IBD 文件的 FIL_PAGE_TYPE 在偏移 24 处应该是 FIL_PAGE_INDEX (0x45BC / 17852)

@@ -16,7 +16,7 @@ namespace dbrecovery {
 namespace disk {
 
 // ==================== 增强的磁盘扫描器 ====================
-// 结合 ibd2sql 的全分区扫描和 testdisk 的 PhotoRec 文件雕刻
+// 全分区扫描和 PhotoRec 文件雕刻结合
 
 /// @brief 找到的 IBD 块信息
 struct FoundIbdBlock {

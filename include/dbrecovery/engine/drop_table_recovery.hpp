@@ -5,10 +5,6 @@
  * Recovers dropped tables by scanning system tablespace (ibdata1/mysql.ibd)
  * for deleted metadata and finding orphaned index pages.
  *
- * Based on ibd2sql's scan_drop_table.py approach:
- * - MySQL 5.7: Scan ibdata1 for SYS_TABLES, SYS_COLUMNS, SYS_INDEXES
- * - MySQL 8.0+: Scan mysql.ibd for DD tables (tables, columns, indexes)
- *
  * Algorithm:
  * 1. Read system tablespace (ibdata1 or mysql.ibd)
  * 2. Find deleted records in system tables

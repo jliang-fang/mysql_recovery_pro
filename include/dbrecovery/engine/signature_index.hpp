@@ -9,7 +9,7 @@
  *
  * This enables O(1) signature lookup instead of O(n) linear search.
  *
- * Key features from ibd2sql:
+ * Key features:
  * - FORCE mode: Iterate through every page without relying on page chains
  * - PAGE_INDEX_ID validation: Verify index_id matches expected value
  * - B+Tree traversal: Recursively find leaf pages from root
@@ -329,10 +329,10 @@ private:
     }
 };
 
-// ==================== FORCE Mode (ibd2sql Pattern) ====================
+// ==================== FORCE Mode Scanner ====================
 
 /**
- * @brief FORCE mode scanner (ibd2sql pattern)
+ * @brief FORCE mode scanner
  *
  * Iterates through every page in a file without relying on page chains.
  * For each page:
@@ -363,7 +363,7 @@ public:
     };
 
     /**
-     * @brief Scan file in FORCE mode (ibd2sql IBD2SQL_SINGLE pattern)
+     * @brief Scan file in FORCE mode
      *
      * @param data File data
      * @param size File size
@@ -493,7 +493,7 @@ private:
 // ==================== B+Tree Page Chain Traversal ====================
 
 /**
- * @brief B+Tree page chain traversal (ibd2sql FIND_LEAF_PAGE_FROM_ROOT pattern)
+ * @brief B+Tree page chain traversal
  *
  * Traverses B+Tree from root page to find leaf pages containing data records.
  */

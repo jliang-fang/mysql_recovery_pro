@@ -12,7 +12,6 @@ namespace innodb {
 /**
  * @brief MySQL character set and collation information
  *
- * Reference: ibd2sql/utils/collations.py
  * Complete mapping of MySQL character set IDs to names
  */
 
@@ -198,7 +197,6 @@ inline std::string get_charset_from_collation(uint16_t collation_id) {
 /**
  * @brief MySQL column type definitions
  *
- * Reference: ibd2sql/innodb_page/column_type.py
  * MySQL 9.0 adds VECTOR type (type code varies by version)
  */
 enum class MySQLColumnType : uint8_t {

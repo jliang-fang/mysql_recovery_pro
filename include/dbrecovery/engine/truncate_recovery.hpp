@@ -1,11 +1,11 @@
 /**
  * @file truncate_recovery.hpp
  * @brief TRUNCATE TABLE Recovery Module
- * 
- * Implements ibd2sql-style template matching for recovering data after TRUNCATE TABLE.
+ *
+ * Template matching for recovering data after TRUNCATE TABLE.
  * When a table is TRUNCATED, the .ibd file is recreated but the old data pages may
  * still exist on disk until overwritten.
- * 
+ *
  * Algorithm:
  * 1. Use known table structure as "search template"
  * 2. Scan disk for pages matching template signature
@@ -91,8 +91,8 @@ struct TruncateStats {
 
 /**
  * @brief TRUNCATE Recovery Module
- * 
- * Implements ibd2sql-style recovery for TRUNCATE TABLE scenarios.
+ *
+ * Recovery for TRUNCATE TABLE scenarios.
  * Uses known table structure as template to find and validate data pages.
  */
 class TruncateRecovery {
@@ -134,8 +134,8 @@ public:
     ~TruncateRecovery();
 
     /**
-     * @brief Recovery using disk scan (ibd2sql-style)
-     * 
+     * @brief Recovery using disk scan
+     *
      * @param config Recovery configuration
      * @param callback Callback for progress
      * @return Recovery result

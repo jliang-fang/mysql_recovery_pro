@@ -42,7 +42,7 @@ void RawDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
 }
 
 // Page validation: checks if LSN in header matches LSN in footer
-bool RawDiskCarver::is_valid_page_ibd2sql(const uint8_t* data, size_t page_size) {
+bool RawDiskCarver::is_valid_page_strict(const uint8_t* data, size_t page_size) {
     if (!data || page_size < 64) return false;
 
     // Check page type first
@@ -499,7 +499,7 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             // 1. 标准验证（宽松）
             bool standard_valid = is_valid_page(page_data, config_.page_size);
             // 2. 严格验证
-            bool strict_valid = is_valid_page_ibd2sql(page_data, config_.page_size);
+            bool strict_valid = is_valid_page_strict(page_data, config_.page_size);
 
             // 对于删除文件的恢复，放宽验证条件
             // 只要页类型有效，就尝试恢复

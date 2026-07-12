@@ -27,8 +27,6 @@ namespace recovery {
  * 3. 按index_id分组孤立页
  * 4. Schema-less启发式记录恢复
  * 5. 支持MySQL 5.6/5.7/8.0/8.4/9.0页格式
- *
- * 参考: ibd2sql SCAN_DEV_WORKER实现
  */
 class RawDiskCarver {
 public:
@@ -164,20 +162,18 @@ private:
 
     /**
      * @brief 检测是否是有效的InnoDB页 (LSN验证)
-     * 参考ibd2sql IS_PAGE: data[:4] == data[-8:-4]
      */
     static bool is_valid_page(const uint8_t* data, size_t page_size);
 
     /**
-     * @brief ibd2sql-style严格页验证
+     * @brief 严格页验证
      * 检查data[:4]+data[4:8]是否等于data[-8:-4]+data[-4:]
      * 这是一种更严格的页检测方法
      */
-    static bool is_valid_page_ibd2sql(const uint8_t* data, size_t page_size);
+    static bool is_valid_page_strict(const uint8_t* data, size_t page_size);
 
     /**
      * @brief 检测是否是INDEX页
-     * 参考ibd2sql IS_INDEX: data[24:26] == b'E\xbf' (即0x45BF)
      */
     static bool is_index_page(const uint8_t* data, size_t page_size);
 
@@ -193,7 +189,6 @@ private:
 
     /**
      * @brief 检测FRM文件签名
-     * 参考ibd2sql IS_FRM: data[:10] == b'\xfe\x01\n\x0c\x03\x00\x00\x10\x01\x00'
      */
     static bool is_frm_signature(const uint8_t* data, size_t len);
 

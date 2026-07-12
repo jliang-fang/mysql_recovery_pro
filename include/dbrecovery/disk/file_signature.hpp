@@ -2,7 +2,6 @@
  * @file file_signature.hpp
  * @brief File signature detection framework for data carving
  *
- * Reference: testdisk/src/filegen.h patterns
  * Provides extensible file signature detection for recovering various file types
  * from raw disk images during disaster recovery.
  */
@@ -22,7 +21,6 @@ namespace dbrecovery {
 namespace disk {
 
 // ==================== Constants ====================
-// Reference: testdisk filegen.h
 
 /// Maximum signature offset (testdisk uses 65535)
 constexpr uint32_t MAX_SIG_OFFSET = 65535;

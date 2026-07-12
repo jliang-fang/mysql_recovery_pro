@@ -15,8 +15,6 @@ namespace utils {
  * InnoDB uses LZ4 compression for:
  * - Compressed row format pages (FIL_PAGE_COMPRESSED, 0x45B5)
  * - ZBLOB pages (FIL_PAGE_TYPE_ZBLOB, 0x45B5)
- *
- * Reference: ibd2sql/utils/lz4.py
  */
 class LZ4Helper {
 public:
