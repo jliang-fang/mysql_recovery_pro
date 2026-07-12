@@ -275,13 +275,6 @@ ls /recovery/output/
     --num-workers=16 \
     --page-size=16384 \
     --verbose
-
-# Scan specific range only (save time)
-./mysql_recovery_pro --disk-carving \
-    --device-path=/dev/sda1 \
-    --output=/recovery/output \
-    --start-offset=0 \
-    --end-offset=107374182400  # 100GB
 ```
 
 #### XFS Optimization
@@ -602,45 +595,6 @@ sudo umount /dev/nvme0n2p1
 ```
 
 ---
-
-#### XFS Filesystem Early Test Results (2026-06-29)
-
-**Note: The following are early test results and are outdated. Latest XFS recovery has been successfully implemented (see 2026-07-03 results above).**
-
-| Test Method | DROP TABLE | TRUNCATE | rm -rf | Environment |
-|-------------|------------|----------|--------|-------------|
-| Container Volume dir | 0% | 0-0.9% | 0% | OverlayFS |
-| Bind-Mount dir | 0% | 0% | 0% | Ext4/XFS |
-| **Block Device (/dev/mapper/rl-root)** | **0%** | **0%** | **0%** | XFS + NVMe SSD |
-
-**Failure Analysis:**
-1. **XFS filesystem behavior**: Immediately releases blocks and clears metadata on deletion
-2. **SSD TRIM command**: NVMe SSD physically zeros blocks upon TRIM
-3. **System interference**: Other processes overwrite freed blocks
-
-**Feasibility Conditions for No-Backup Recovery:**
-- ❌ Modern SSD + TRIM: Data physically zeroed, unrecoverable
-- ❌ XFS/Ext4 journaling filesystems: Metadata immediately cleaned
-- ✅ **HDD (mechanical drives)**: Data may remain until overwritten
-- ✅ **Immediate filesystem unmount**: Prevents TRIM execution and overwriting
-- ✅ **Using snapshots/backups**: Only reliable recovery method
-
-**Production Environment Recommendations:**
-```bash
-# Only reliable disaster recovery: Regular backups
-# 1. Logical backup
-mysqldump --all-databases > backup.sql
-
-# 2. Physical backup (recommended)
-# Copy data files after stopping MySQL
-systemctl stop mysqld
-tar -czf /backup/mysql_$(date +%Y%m%d).tar.gz /var/lib/mysql
-
-# 3. Using LVM snapshots (best)
-lvcreate -L 10G -s -n mysql_snap /dev/vg/mysql_lv
-```
-
-**Conclusion: In SSD+XFS environments, no-backup disaster recovery is not feasible. Backup strategy is mandatory.**
 
 ### Million-Row Validation (1M rows) - Updated 2026-06-28
 

@@ -567,9 +567,22 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             col.mysql_type_id = 5;  // MYSQL_TYPE_DOUBLE
                             col.column_length = 8;
                         } else if (type_str == "DECIMAL") {
-                            col.mysql_type_id = 0;  // MYSQL_TYPE_DECIMAL
+                            col.mysql_type_id = 246;  // MYSQL_TYPE_NEWDECIMAL (more common)
+                            // parts[2] = precision, parts[3] = scale
                             if (parts.size() >= 3) {
-                                col.column_length = std::stoi(parts[2]);
+                                try {
+                                    col.numeric_precision = std::stoi(parts[2]);
+                                    col.column_length = col.numeric_precision;
+                                } catch (...) {
+                                    col.numeric_precision = 10;
+                                }
+                            }
+                            if (parts.size() >= 4) {
+                                try {
+                                    col.numeric_scale = std::stoi(parts[3]);
+                                } catch (...) {
+                                    col.numeric_scale = 0;
+                                }
                             }
                         } else if (type_str == "VARCHAR" || type_str == "CHAR") {
                             col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
@@ -1646,10 +1659,33 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             // Size from flag_parts if colon-separated format (e.g., name:VARCHAR:255)
-            if (has_colon && flag_parts.size() > 0 && icol.col_length == 0) {
-                try {
-                    icol.col_length = std::stoul(flag_parts[0]);
-                } catch (...) {}
+            // For DECIMAL: name:DECIMAL:precision:scale
+            // Note: type_upper is already calculated above for colon format check
+            if (has_colon && flag_parts.size() > 0) {
+                // Get type_upper for DECIMAL check
+                std::string type_upper_for_decimal = type_str;
+                std::transform(type_upper_for_decimal.begin(), type_upper_for_decimal.end(),
+                              type_upper_for_decimal.begin(), ::toupper);
+                auto paren_pos = type_upper_for_decimal.find('(');
+                if (paren_pos != std::string::npos) {
+                    type_upper_for_decimal = type_upper_for_decimal.substr(0, paren_pos);
+                }
+
+                // For DECIMAL/NUMERIC: flag_parts[0] is precision, flag_parts[1] is scale
+                if (type_upper_for_decimal == "DECIMAL" || type_upper_for_decimal == "NUMERIC") {
+                    try {
+                        icol.precision = std::stoul(flag_parts[0]);
+                        icol.col_length = icol.precision;
+                        if (flag_parts.size() > 1) {
+                            icol.scale = std::stoul(flag_parts[1]);
+                        }
+                    } catch (...) {}
+                } else if (icol.col_length == 0) {
+                    // For other types: flag_parts[0] is size
+                    try {
+                        icol.col_length = std::stoul(flag_parts[0]);
+                    } catch (...) {}
+                }
             }
 
             // Convert type string to InnoDB internal type ID

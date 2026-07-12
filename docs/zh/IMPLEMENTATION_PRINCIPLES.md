@@ -161,24 +161,24 @@ InnoDB 支持四种行格式：
 bool detect_valid_page(const uint8_t* data, size_t size) {
     // Step 1: 检查页类型 (大端序)
     uint16_t page_type = read_be<uint16_t>(data, 24);
-    if (page_type != FIL_PAGE_INDEX && 
+    if (page_type != FIL_PAGE_INDEX &&
         page_type != FIL_PAGE_SDI &&
         page_type != FIL_PAGE_BLOB) {
         return false;
     }
-    
-    // Step 2: 检查 LSN 合理性
+
+    // Step 2: 检查 LSN 合理性 (有效范围: 1 ~ 2^48)
     uint64_t lsn = read_be<uint64_t>(data, 16);
-    if (lsn == 0 || lsn > MAX_REASONABLE_LSN) {
+    if (lsn == 0 || lsn > (1ULL << 48)) {
         return false;
     }
-    
+
     // Step 3: 检查页号连续性
     uint32_t page_no = read_be<uint32_t>(data, 4);
-    if (page_no > MAX_REASONABLE_PAGE_NO) {
+    if (page_no > 100000000) {  // 最大1亿页
         return false;
     }
-    
+
     return true;
 }
 ```

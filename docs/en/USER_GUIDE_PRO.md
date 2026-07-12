@@ -52,11 +52,11 @@ MySQL Recovery Pro is a professional MySQL InnoDB data recovery tool that suppor
 
 | Dependency | Minimum Version | Recommended Version |
 |------------|-----------------|---------------------|
-| GCC | 11.0 | 12.0+ |
-| Clang | 14.0 | 15.0+ |
-| CMake | 3.20 | 3.25+ |
+| GCC | 9.0 | 11.0+ |
+| Clang | 10.0 | 14.0+ |
+| CMake | 3.16 | 3.20+ |
 | zlib | 1.2.11 | 1.3+ |
-| C++ Standard | C++20 | C++20 |
+| C++ Standard | C++17 | C++17 |
 
 ### Runtime Environment
 
@@ -230,6 +230,10 @@ BLOB/TEXT over 768 bytes are stored in external pages, tool automatically recons
 | `--truncate-recovery` | TRUNCATE table recovery mode | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf deletion recovery mode | `--rmrf-recovery` |
 | `--drop-table-recovery` | DROP TABLE recovery mode | `--drop-table-recovery` |
+
+**Permission Requirements**:
+- Disk carving mode (`--disk-carving`) requires **root privileges** to read block devices
+- Use `sudo` to execute recovery commands
 
 **Filesystem Support:**
 

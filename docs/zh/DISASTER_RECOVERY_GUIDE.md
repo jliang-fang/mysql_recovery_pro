@@ -274,13 +274,6 @@ ls /recovery/output/
     --num-workers=16 \
     --page-size=16384 \
     --verbose
-
-# 仅扫描特定范围（节省时间）
-./mysql_recovery_pro --disk-carving \
-    --device-path=/dev/sda1 \
-    --output=/recovery/output \
-    --start-offset=0 \
-    --end-offset=107374182400  # 100GB
 ```
 
 #### XFS优化
@@ -590,45 +583,6 @@ sudo umount /dev/nvme0n2p1
 ```
 
 ---
-
-#### XFS文件系统早期测试结果（2026-06-29）
-
-**注意：以下为早期测试，已过时。最新XFS恢复已成功实现（见上方2026-07-03结果）。**
-
-| 测试方式 | DROP TABLE | TRUNCATE | rm -rf | 测试环境 |
-|----------|------------|----------|--------|----------|
-| Container Volume目录 | 0% | 0-0.9% | 0% | OverlayFS |
-| Bind-Mount目录 | 0% | 0% | 0% | Ext4/XFS |
-| **块设备(/dev/mapper/rl-root)** | **0%** | **0%** | **0%** | XFS + NVMe SSD |
-
-**失败原因分析：**
-1. **XFS文件系统特性**：删除文件后立即释放block并清空元数据
-2. **SSD TRIM命令**：NVMe SSD收到TRIM后立即清零物理block
-3. **系统运行干扰**：其他进程覆写了已释放的block
-
-**无备份恢复的可行性条件：**
-- ❌ 现代SSD + TRIM：数据被物理清零，无法恢复
-- ❌ XFS/Ext4日志文件系统：元数据立即清理
-- ✅ **机械硬盘(HDD)**：数据可能残留直到被覆写
-- ✅ **立即卸载文件系统**：阻止TRIM执行和数据覆写
-- ✅ **使用快照/备份**：唯一可靠的恢复方案
-
-**生产环境建议：**
-```bash
-# 唯一可靠的灾难恢复方案：定期备份
-# 1. 逻辑备份
-mysqldump --all-databases > backup.sql
-
-# 2. 物理备份（推荐）
-# 停止MySQL后复制数据文件
-systemctl stop mysqld
-tar -czf /backup/mysql_$(date +%Y%m%d).tar.gz /var/lib/mysql
-
-# 3. 使用LVM快照（最佳）
-lvcreate -L 10G -s -n mysql_snap /dev/vg/mysql_lv
-```
-
-**结论：在SSD+XFS环境下，无备份灾难恢复不可行，必须依赖备份策略。**
 
 ### 大规模验证测试 (100K行) - 更新于 2026-06-28
 

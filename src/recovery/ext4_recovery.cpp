@@ -906,7 +906,13 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             // Convert MySQL server type to InnoDB storage type
             // Reference: xfs_disk_carver.cpp mysql_type_to_innodb()
             switch (col.mysql_type_id) {
-                case 1: col_def.col_type = 1; col_def.col_length = 1; break;  // TINYINT
+                case 0:   // MYSQL_TYPE_DECIMAL (old format)
+                case 246: // MYSQL_TYPE_NEWDECIMAL
+                    col_def.col_type = 21;  // InnoDB NEWDECIMAL type
+                    col_def.precision = col.numeric_precision > 0 ? col.numeric_precision : 10;
+                    col_def.scale = col.numeric_scale > 0 ? col.numeric_scale : 0;
+                    break;
+                case 1: col_def.col_type = 2; col_def.col_length = 1; break;  // TINYINT
                 case 2: col_def.col_type = 3; col_def.col_length = 2; break;  // SMALLINT
                 case 3: col_def.col_type = 4; col_def.col_length = 4; break;  // INT
                 case 4: col_def.col_type = 5; col_def.col_length = 4; break;  // FLOAT

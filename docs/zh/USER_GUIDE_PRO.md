@@ -52,11 +52,11 @@ MySQL Recovery Pro 是一款专业的 MySQL InnoDB 数据恢复工具，支持�
 
 | 依赖 | 最低版本 | 推荐版本 |
 |------|----------|----------|
-| GCC | 11.0 | 12.0+ |
-| Clang | 14.0 | 15.0+ |
-| CMake | 3.20 | 3.25+ |
+| GCC | 9.0 | 11.0+ |
+| Clang | 10.0 | 14.0+ |
+| CMake | 3.16 | 3.20+ |
 | zlib | 1.2.11 | 1.3+ |
-| C++ 标准 | C++20 | C++20 |
+| C++ 标准 | C++17 | C++17 |
 
 ### 运行环境
 
@@ -230,6 +230,10 @@ MySQL 8.0+ 使用 SDI (Serialized Dictionary Information) 存储表结构。本�
 | `--truncate-recovery` | TRUNCATE表恢复模式 | `--truncate-recovery` |
 | `--rmrf-recovery` | rm -rf删除恢复模式 | `--rmrf-recovery` |
 | `--drop-table-recovery` | DROP TABLE恢复模式 | `--drop-table-recovery` |
+
+**权限要求**：
+- 磁盘雕刻模式（`--disk-carving`）读取块设备需要 **root权限**
+- 建议使用 `sudo` 执行恢复命令
 
 **文件系统支持说明：**
 

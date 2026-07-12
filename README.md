@@ -217,54 +217,66 @@ mysql_recovery_pro/
 - SHA-256 Hash 基线验证
 - 性能度量
 
-## 构建说明
+## Build Instructions
 
 ```bash
-# 配置
+# Configure (requires CMake 3.16+, GCC 9+ or Clang 10+)
 cmake -B build -S .
 
-# 编译
+# Compile
 cmake --build build -j$(nproc)
 
-# 运行测试
+# Run tests
 cd build/tests && ctest --output-on-failure
 ```
 
-## 使用说明
+**Build Requirements:**
+- C++17 compiler (GCC 9+ or Clang 10+)
+- CMake 3.16+
+- zlib development library
+
+## Usage
 
 ```bash
-# 扫描磁盘
-./build/mysql_recovery_pro scan -i /dev/sdb -o ./output
+# Scan disk (requires root for block devices)
+sudo ./build/mysql_recovery_pro --disk-carving --device-path=/dev/sdb --output=/recovery/
 
-# 恢复 TRUNCATE 表
-./build/mysql_recovery_pro recover -i table.ibd -s schema.json -o ./recovered
+# Recover from .ibd file
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/
 
-# 极端恢复模式
-./build/mysql_recovery_pro extreme-recovery -d /dev/sdb -o ./output -t 4
+# Recover TRUNCATE table
+./build/mysql_recovery_pro --truncate-recovery --ibd=table.ibd --output=/recovery/
+
+# XFS filesystem recovery
+sudo ./build/mysql_recovery_pro --disk-carving --device-path=/dev/nvme0n2 --filesystem=xfs --output=/recovery/
 ```
 
-## 测试验证
+## Test Validation
 
 ```bash
-# 快速验证
+# Quick validation
 python3 tools/quick_validation_test.py
 
-# 完整测试（需要 Podman）
+# Full test (requires Podman)
 python3 tools/extreme_recovery_test_framework.py --test all
 
-# 单元测试
+# Unit tests
 cd build/tests && ./test_extreme_scenarios
 ```
 
-## 性能目标
+## Performance Targets
 
-- 扫描速度: ≥ 100 MB/s
-- 内存使用: < 4 GB（100GB 磁盘）
-- 恢复率: ext4 ~100%, XFS ~98.77%
+- Scan Speed: ≥ 100 MB/s
+- Memory Usage: < 4 GB (for 100GB disk)
+- Recovery Rate: ext4 ~100%, XFS ~98.77%
 
-## 版本信息
+## Version Information
 
-- 支持 MySQL 版本: 5.6, 5.7, 8.0, 8.4, 9.0
-- 支持 InnoDB 行格式: REDUNDANT, COMPACT, DYNAMIC, COMPRESSED
-- 支持 InnoDB 页大小: 4K, 8K, 16K, 32K, 64K
-- 支持文件系统: ext4, XFS
+- Supported MySQL Versions: 5.6, 5.7, 8.0, 8.4, 9.0
+- Supported InnoDB Row Formats: REDUNDANT, COMPACT, DYNAMIC, COMPRESSED
+- Supported InnoDB Page Sizes: 4K, 8K, 16K, 32K, 64K
+- Supported Filesystems: ext4, XFS
+
+## License
+
+Copyright © 2026. All rights reserved.

@@ -161,24 +161,24 @@ InnoDB supports four row formats:
 bool detect_valid_page(const uint8_t* data, size_t size) {
     // Step 1: Check page type (big-endian)
     uint16_t page_type = read_be<uint16_t>(data, 24);
-    if (page_type != FIL_PAGE_INDEX && 
+    if (page_type != FIL_PAGE_INDEX &&
         page_type != FIL_PAGE_SDI &&
         page_type != FIL_PAGE_BLOB) {
         return false;
     }
-    
-    // Step 2: Check LSN validity
+
+    // Step 2: Check LSN validity (valid range: 1 ~ 2^48)
     uint64_t lsn = read_be<uint64_t>(data, 16);
-    if (lsn == 0 || lsn > MAX_REASONABLE_LSN) {
+    if (lsn == 0 || lsn > (1ULL << 48)) {
         return false;
     }
-    
+
     // Step 3: Check page number continuity
     uint32_t page_no = read_be<uint32_t>(data, 4);
-    if (page_no > MAX_REASONABLE_PAGE_NO) {
+    if (page_no > 100000000) {  // Max 100 million pages
         return false;
     }
-    
+
     return true;
 }
 ```
