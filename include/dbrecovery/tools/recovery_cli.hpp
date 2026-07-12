@@ -826,6 +826,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             col.is_variable_length = true;
                         } else if (type_str == "JSON") {
                             col.mysql_type_id = 245; col.is_variable_length = true;
+                        } else if (type_str == "ENUM") {
+                            col.mysql_type_id = 247; col.column_length = 1;
+                        } else if (type_str == "SET") {
+                            col.mysql_type_id = 248; col.column_length = 1;
                         } else if (type_str == "DATETIME") {
                             col.mysql_type_id = 12; col.column_length = 8;
                         } else if (type_str == "DATE") {
