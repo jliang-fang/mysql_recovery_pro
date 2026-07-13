@@ -1831,14 +1831,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 explicit_signed = true;
             }
 
-            // AUTO_UNSIGNED: PK INT columns are typically UNSIGNED in MySQL
-            // If PK INT column without explicit signed/unsigned, default to unsigned
-            if (is_pk_col && (icol.col_type == 4 || icol.col_type == 2 || icol.col_type == 3 ||
-                              icol.col_type == 9 || icol.col_type == 10)) {
-                if (!explicit_signed && !icol.is_unsigned) {
-                    icol.is_unsigned = true;  // Default to unsigned for PK INT columns
-                }
-            }
+            // NOTE: MySQL INT PRIMARY KEY AUTO_INCREMENT defaults to SIGNED, not UNSIGNED
+            // AUTO_UNSIGNED was incorrect - do not auto-set unsigned for PK INT columns
+            // The is_unsigned flag should only be set if UNSIGNED is explicitly specified
+            // (which is handled above)
 
             // Count PK columns
             if (is_pk_col) {
