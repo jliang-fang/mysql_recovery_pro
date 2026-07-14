@@ -2500,6 +2500,9 @@ int main(int argc, char** argv) {
                     // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
                     icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
 
+                    // Set is_unsigned from SDI (ColumnInfo uses is_signed, IndexColumnDef uses is_unsigned)
+                    icol.is_unsigned = !col.is_signed;
+
                     index_columns.push_back(icol);
                 }
 

@@ -2502,15 +2502,102 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
         }
         // Format 2: Simple format with columns array
         else if (json.contains("columns")) {
-            schema.table_name = json.value("table_name", json.value("name", ""));
+            schema.table_name = json.value("table_name", json.value("table", json.value("name", "")));
+            std::cerr << "[DEBUG SCHEMA] Format 2: table_name=" << schema.table_name << "\n";
             uint32_t ordinal = 1;
             for (const auto& col : json["columns"]) {
                 catalog::ColumnInfo col_info;
                 col_info.name = col.value("name", "");
-                col_info.mysql_type_id = col.value("type", col.value("mysql_type_id", 0));
+                std::cerr << "[DEBUG SCHEMA] Parsing column '" << col_info.name << "'\n";
+
+                // Parse type - can be numeric (InnoDB type ID) or string (MySQL type name)
+                if (col.contains("type")) {
+                    std::cerr << "[DEBUG SCHEMA]   type field found, is_number=" << col["type"].is_number() << " is_string=" << col["type"].is_string() << "\n";
+                    if (col["type"].is_number()) {
+                        col_info.mysql_type_id = col["type"].get<uint32_t>();
+                        std::cerr << "[DEBUG SCHEMA]   numeric type ID: " << col_info.mysql_type_id << "\n";
+                    } else if (col["type"].is_string()) {
+                        // Map MySQL type strings to InnoDB type IDs
+                        std::string type_str = col["type"].get<std::string>();
+                        std::cerr << "[DEBUG SCHEMA]   type string: " << type_str << "\n";
+
+                        // Remove UNSIGNED suffix and set is_signed flag
+                        bool is_unsigned = false;
+                        if (type_str.find("_UNSIGNED") != std::string::npos) {
+                            is_unsigned = true;
+                            type_str = type_str.substr(0, type_str.find("_UNSIGNED"));
+                            std::cerr << "[DEBUG SCHEMA]   UNSIGNED detected, base type: " << type_str << "\n";
+                        }
+
+                        // Map base type string to InnoDB type ID
+                        if (type_str == "DECIMAL" || type_str == "NEWDECIMAL") col_info.mysql_type_id = 21;
+                        else if (type_str == "TINY" || type_str == "TINYINT") col_info.mysql_type_id = 2;
+                        else if (type_str == "SHORT" || type_str == "SMALLINT") col_info.mysql_type_id = 3;
+                        else if (type_str == "LONG" || type_str == "INT") col_info.mysql_type_id = 4;
+                        else if (type_str == "FLOAT") col_info.mysql_type_id = 5;
+                        else if (type_str == "DOUBLE") col_info.mysql_type_id = 6;
+                        else if (type_str == "TIMESTAMP") col_info.mysql_type_id = 7;
+                        else if (type_str == "LONGLONG" || type_str == "BIGINT") col_info.mysql_type_id = 9;
+                        else if (type_str == "INT24" || type_str == "MEDIUMINT") col_info.mysql_type_id = 10;
+                        else if (type_str == "DATE") col_info.mysql_type_id = 11;
+                        else if (type_str == "TIME") col_info.mysql_type_id = 12;
+                        else if (type_str == "DATETIME") col_info.mysql_type_id = 13;
+                        else if (type_str == "YEAR") col_info.mysql_type_id = 14;
+                        else if (type_str == "NEWDATE") col_info.mysql_type_id = 15;
+                        else if (type_str == "VARCHAR" || type_str == "CHAR") col_info.mysql_type_id = 16;
+                        else if (type_str == "BIT") col_info.mysql_type_id = 17;
+                        else if (type_str == "TIMESTAMP2") col_info.mysql_type_id = 18;
+                        else if (type_str == "DATETIME2") col_info.mysql_type_id = 19;
+                        else if (type_str == "TIME2") col_info.mysql_type_id = 20;
+                        else if (type_str == "ENUM") col_info.mysql_type_id = 22;
+                        else if (type_str == "SET") col_info.mysql_type_id = 23;
+                        else if (type_str == "TINY_BLOB" || type_str == "TINYBLOB") col_info.mysql_type_id = 24;
+                        else if (type_str == "MEDIUM_BLOB" || type_str == "MEDIUMBLOB") col_info.mysql_type_id = 25;
+                        else if (type_str == "LONG_BLOB" || type_str == "LONGBLOB") col_info.mysql_type_id = 26;
+                        else if (type_str == "BLOB") col_info.mysql_type_id = 27;
+                        else if (type_str == "VAR_STRING" || type_str == "VARBINARY") col_info.mysql_type_id = 28;
+                        else if (type_str == "STRING" || type_str == "BINARY") col_info.mysql_type_id = 29;
+                        else if (type_str == "GEOMETRY") col_info.mysql_type_id = 30;
+                        else if (type_str == "JSON") col_info.mysql_type_id = 31;
+                        else if (type_str == "TEXT") col_info.mysql_type_id = 16; // TEXT stored as VARCHAR internally
+                        else col_info.mysql_type_id = 0;
+
+                        std::cerr << "[DEBUG SCHEMA]   mapped to InnoDB type ID: " << col_info.mysql_type_id << " (is_unsigned=" << is_unsigned << ")\n";
+
+                        // Set signed/unsigned flag
+                        col_info.is_signed = !is_unsigned;
+                    }
+                }
+
                 col_info.is_nullable = col.value("is_nullable", col.value("nullable", true));
                 col_info.column_length = col.value("length", col.value("column_length", 0));
-                col_info.is_signed = !col.value("is_unsigned", col.value("unsigned", false));
+
+                // Handle is_unsigned from separate field if present
+                if (col.contains("is_unsigned")) {
+                    col_info.is_signed = !col["is_unsigned"].get<bool>();
+                } else if (col.contains("unsigned")) {
+                    col_info.is_signed = !col["unsigned"].get<bool>();
+                }
+
+                // Parse DECIMAL precision/scale
+                if (col.contains("precision")) {
+                    col_info.numeric_precision = col["precision"].get<int>();
+                }
+                if (col.contains("scale")) {
+                    col_info.numeric_scale = col["scale"].get<int>();
+                }
+
+                // Parse ENUM/SET values
+                if (col.contains("values") && col["values"].is_array()) {
+                    std::vector<std::string>* target_values =
+                        (col_info.mysql_type_id == 23) ? &col_info.set_values : &col_info.enum_values;
+                    for (const auto& val : col["values"]) {
+                        if (val.is_string()) {
+                            target_values->push_back(val.get<std::string>());
+                        }
+                    }
+                }
+
                 col_info.ordinal = ordinal;
                 col_info.physical_pos = ordinal;
 

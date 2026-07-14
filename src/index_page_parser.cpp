@@ -2470,18 +2470,33 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             }
             break;
         }
-        case 24:   // TINY_BLOB (binary)
-        case 25:   // MEDIUM_BLOB (binary)
-        case 26: { // LONG_BLOB (binary)
-            val.type = IndexFieldValue::Type::BINARY_VAL;
-            std::ostringstream oss;
-            oss << "UNHEX('";
-            for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
-                oss << std::hex << std::setw(2) << std::setfill('0')
-                    << static_cast<int>(data[offset + i]);
+        case 24:   // TINY_BLOB/TINYTEXT (InnoDB type 24)
+        case 25:   // MEDIUM_BLOB/MEDIUMTEXT (InnoDB type 25)
+        case 26: { // LONG_BLOB/LONGTEXT (InnoDB type 26)
+            // CRITICAL: InnoDB types 24/25/26 are shared by both BLOB and TEXT!
+            // TEXT has non-binary charset (collation_id != 63), BLOB is binary
+            if (col.is_binary) {
+                val.type = IndexFieldValue::Type::BINARY_VAL;
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
+                }
+                oss << "')";
+                val.str_value = oss.str();
+            } else {
+                val.type = IndexFieldValue::Type::STRING_VAL;
+                try {
+                    if (field_size > 0 && field_size <= max_size - offset) {
+                        val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
+                    } else {
+                        val.str_value = "<INVALID_SIZE>";
+                    }
+                } catch (const std::length_error&) {
+                    val.str_value = "<STRING_ALLOC_ERROR>";
+                }
             }
-            oss << "')";
-            val.str_value = oss.str();
             break;
         }
         case 29: { // STRING/CHAR/BINARY - InnoDB type 29

@@ -153,6 +153,8 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                         }
                         
                         column_info.is_nullable = col.value("is_nullable", true); // SDI stores true when nullable
+                        bool is_unsigned = col.value("is_unsigned", false);
+                        column_info.is_signed = !is_unsigned;
 
                         if (col.contains("default_value")) {
                             column_info.default_value = col["default_value"].get<std::string>();
@@ -339,6 +341,8 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     column_info.name = col.value("name", "");
                     column_info.mysql_type_id = col.value("type", 0);
                     column_info.is_nullable = col.value("is_nullable", true); // SDI stores true when nullable
+                        bool is_unsigned = col.value("is_unsigned", false);
+                        column_info.is_signed = !is_unsigned;
 
                     if (col.contains("default_value")) {
                         column_info.default_value = col["default_value"].get<std::string>();
