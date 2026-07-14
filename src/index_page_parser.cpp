@@ -2040,82 +2040,80 @@ IndexFieldValue InnoDBIndexParser::decode_column(
     switch (col.col_type) {
         // ==================== Integer Types (InnoDB storage type IDs) ====================
         case 2: {  // InnoDB TINY (TINYINT, 1 byte)
-            // CRITICAL FIX: InnoDB uses B2INT1 encoding for ALL TINYINT values
-            // B2INT1: value = byte - 128
+            // B2INT1 for signed: value = byte XOR 0x80 (stored = byte - 128)
+            // UNSIGNED: stored as raw byte value, no B2INT encoding
             val.type = IndexFieldValue::Type::INT_VAL;
-            val.int_value = static_cast<int32_t>(data[offset]) - 128;
             if (col.is_unsigned) {
-                val.str_value = std::to_string(static_cast<uint8_t>(val.int_value));
+                uint8_t raw = data[offset];
+                val.int_value = raw;
+                val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
+                val.int_value = static_cast<int32_t>(data[offset]) - 128;
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
         case 3: {  // InnoDB SHORT (SMALLINT, 2 bytes)
-            // CRITICAL FIX: InnoDB uses B2INT2 encoding for ALL SMALLINT values
-            // B2INT2: value = read_be(uint16) - 32768
+            // B2INT2 for signed: value = read_be(uint16) XOR 0x8000
+            // UNSIGNED: stored as raw big-endian uint16, no B2INT encoding
             val.type = IndexFieldValue::Type::INT_VAL;
-            val.int_value = static_cast<int32_t>(read_be<uint16_t>(data, offset)) - 32768;
             if (col.is_unsigned) {
-                val.str_value = std::to_string(static_cast<uint16_t>(val.int_value));
+                uint16_t raw = read_be<uint16_t>(data, offset);
+                val.int_value = raw;
+                val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
+                val.int_value = static_cast<int32_t>(read_be<uint16_t>(data, offset)) - 32768;
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
         case 4: {  // InnoDB LONG (INT, 4 bytes)
-            // CRITICAL FIX: InnoDB uses B2INT4 encoding for ALL INT values
-            // (both signed and unsigned). The is_unsigned flag only affects
-            // the value interpretation range, NOT the decoding method.
-            // B2INT4: value = read_be(uint32) - 2147483648
-            // This produces a signed result where:
-            //   id=1 -> read_be(0x80000001) - 2147483648 = 1
-            //   id=0 -> read_be(0x80000000) - 2147483648 = 0
+            // B2INT4 for signed: value = read_be(uint32) XOR 0x80000000
+            // UNSIGNED: stored as raw big-endian uint32, no B2INT encoding
             val.type = IndexFieldValue::Type::INT_VAL;
             uint32_t raw = read_be<uint32_t>(data, offset);
-            // For unsigned display, use the raw value (already correct after B2INT4)
-            // The B2INT4 transformation maps [0x80000000, 0xFFFFFFFF] to [0, 2147483647]
-            // which is correct for unsigned interpretation
-            val.int_value = static_cast<int64_t>(raw) - 2147483648LL;
             if (col.is_unsigned) {
-                // For unsigned, the value is already positive after B2INT4
-                val.str_value = std::to_string(static_cast<uint32_t>(val.int_value));
+                val.int_value = raw;
+                val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
+                val.int_value = static_cast<int64_t>(raw) - 2147483648LL;
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
         // InnoDB type 9 = LONGLONG (BIGINT, 8 bytes)
         case 9: {  // InnoDB LONGLONG (BIGINT, 8 bytes)
-            // CRITICAL FIX: InnoDB uses B2INT8 encoding for ALL BIGINT values
-            // B2INT8: value = read_be(uint64) - 9223372036854775808
+            // B2INT8 for signed: value = read_be(uint64) XOR 0x8000000000000000
+            // UNSIGNED: stored as raw big-endian uint64, no B2INT encoding
             val.type = IndexFieldValue::Type::INT_VAL;
             uint64_t raw = read_be<uint64_t>(data, offset);
-            val.int_value = static_cast<int64_t>(raw - 9223372036854775808ULL);
             if (col.is_unsigned) {
-                val.str_value = std::to_string(static_cast<uint64_t>(val.int_value));
+                val.int_value = static_cast<int64_t>(raw);  // may overflow for > INT64_MAX
+                val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
+                val.int_value = static_cast<int64_t>(raw - 9223372036854775808ULL);
                 val.str_value = std::to_string(val.int_value);
             }
             break;
         }
         // InnoDB type 10 = INT24 (MEDIUMINT, 3 bytes)
         case 10: {  // INT24 (MEDIUMINT, 3 bytes)
-            // CRITICAL FIX: InnoDB uses B2INT3 encoding for ALL MEDIUMINT values
-            // B2INT3: value = read_3bytes - 8388608
+            // B2INT3 for signed: value = read_3bytes - 8388608
+            // UNSIGNED: stored as raw big-endian uint24, no B2INT encoding
             val.type = IndexFieldValue::Type::INT_VAL;
             uint32_t v = (static_cast<uint32_t>(data[offset]) << 16) |
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
                          static_cast<uint32_t>(data[offset + 2]);
-            val.int_value = static_cast<int32_t>(v) - 8388608;
             if (col.is_unsigned) {
-                val.str_value = std::to_string(static_cast<uint32_t>(val.int_value));
+                val.int_value = v;
+                val.str_value = std::to_string(v);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
+                val.int_value = static_cast<int32_t>(v) - 8388608;
                 val.str_value = std::to_string(val.int_value);
             }
             break;
