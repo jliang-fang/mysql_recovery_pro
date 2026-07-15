@@ -67,6 +67,15 @@ constexpr size_t REC_HEADER_SIZE_OLD = 6;   // REDUNDANT
 /// Maximum records per page (safety limit)
 constexpr uint32_t MAX_RECORDS_PER_PAGE = 32768;
 
+} // namespace innodb
+} // namespace dbrecovery
+
+// JSON binary decoder - standalone function
+std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size);
+
+namespace dbrecovery {
+namespace innodb {
+
 /// Maximum fields per record (safety limit)
 constexpr uint32_t MAX_FIELDS_PER_RECORD = 4096;
 

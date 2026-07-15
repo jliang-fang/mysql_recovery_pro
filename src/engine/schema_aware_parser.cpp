@@ -15,6 +15,7 @@
 #include "dbrecovery/engine/schema_aware_parser.hpp"
 #include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -1249,15 +1250,8 @@ std::string TupleParser::decode_field_data(
             break;
 
         case mt::JSON: {
-            // JSON data stored inline (if not off-page) - parse as text
-            std::string result;
-            for (uint32_t i = 0; i < data_size; i++) {
-                char c = static_cast<char>(data[offset + i]);
-                if (c >= 32 && c < 127) result += c;
-                else if (c == 0) { /* skip */ }
-                else result += '?';
-            }
-            value = result;
+            // Use binary JSON decoder for proper JSON parsing
+            value = decode_json_binary(data, offset, data_size);
             offset += data_size;
             break;
         }

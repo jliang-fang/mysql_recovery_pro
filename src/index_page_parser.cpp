@@ -272,6 +272,9 @@ std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_siz
             snprintf(buf, sizeof(buf), "%.15g", val);
             return buf;
         }
+        case 0x0f: {  // OPAQUE
+            return "null";  // Opaque types handled in main decode_json_binary
+        }
         case JSON_TYPE_STRING: {
             return parse_json_string(data, offset, data_size);
         }
@@ -311,19 +314,22 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
 // 解析完整 JSON 文档
 // JSON数据格式: [TYPE] + [COUNT(ssize)] + [SIZE(ssize)] + [KEY_ENTRIES] + [VALUE_ENTRIES] + [KEYS] + [VALUES]
 // 注意: 数据不包含长度前缀，field_size就是JSON数据大小
-std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size) {
+std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size, uint8_t type_override = 0xff) {
     if (field_size < 1) return "null";
 
     // JSON数据从offset开始，第一个字节是TYPE
-    uint8_t type = data[offset];
+    uint8_t type = (type_override != 0xff) ? type_override : data[offset];
     size_t consumed = 0;
 
     // 确定ssize: small用2字节，large用4字节
     size_t ssize = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_SMALL_ARRAY ||
                     type == 0x00 || type == 0x02) ? 2 : 4;
 
-    // data_start指向TYPE之后的位置（COUNT开始）
-    size_t data_start = offset + 1;
+    // data_start指向COUNT开始的位置
+    // For nested values, data starts at offset (no separate TYPE byte)
+    // For top-level, data starts at offset + 1 (after TYPE byte)
+    bool is_nested = (type_override != 0xff);
+    size_t data_start = is_nested ? offset : offset + 1;
 
     if (data_start + ssize * 2 > offset + field_size) {
         return type <= 0x01 ? "{}" : "[]";
@@ -383,9 +389,8 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
                 size_t key_offset_val = ssize == 2 ? read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
                 size_t key_length = read_json_le16(data, ke_pos + ssize);
 
-                // KEY_OFFSET是相对于TYPE之后的偏移，所以要加1
-                // key_abs_offset = offset + 1 + key_offset_val
-                size_t key_abs_offset = offset + 1 + key_offset_val;
+                // KEY_OFFSET是相对于data_start的偏移
+                size_t key_abs_offset = data_start + key_offset_val;
                 if (key_abs_offset + key_length <= offset + field_size && key_length > 0 && key_length < 256) {
                     std::string key(reinterpret_cast<const char*>(data + key_abs_offset), key_length);
                     result += "\"" + key + "\":";
@@ -402,8 +407,8 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
             size_t val_offset = ssize == 2 ? read_json_le16(data, ve_pos + 1) : read_json_le32(data, ve_pos + 1);
 
             // 根据类型处理值
-            // val_offset是相对于TYPE之后的偏移，所以要加1
-            size_t val_abs_offset = offset + 1 + val_offset;
+            // val_offset是相对于data_start的偏移
+            size_t val_abs_offset = data_start + val_offset;
 
             if (val_type == 0x0c) {  // STRING
                 if (val_abs_offset < offset + field_size) {
@@ -442,8 +447,105 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
                     snprintf(buf, sizeof(buf), "%.15g", dbl_val);
                     result += buf;
                 }
+            } else if (val_type == 0x0f) {  // OPAQUE (custom MySQL data type)
+                // Format: [mysql_type(1B)][precision(1B)][scale(1B)][value...]
+                if (val_abs_offset + 3 <= offset + field_size) {
+                    uint8_t opaque_type = data[val_abs_offset];
+                    uint8_t opaque_prec = data[val_abs_offset + 1];
+                    uint8_t opaque_scale = data[val_abs_offset + 2];
+                    size_t val_start = val_abs_offset + 3;
+                    size_t val_len = (offset + field_size > val_start) ? (offset + field_size - val_start) : 0;
+
+                    // For DECIMAL (246): decode the packed decimal value
+                    if (opaque_type == 246 && val_len > 0 && val_len <= 20) {
+                        // DECIMAL encoding: sign byte + packed groups
+                        uint32_t int_digits = opaque_prec - opaque_scale;
+                        // Use calc_groups with reversed p1 for correct on-disk order
+                        auto groups_int = [](uint32_t d) -> std::vector<std::pair<int,int>> {
+                            std::vector<std::pair<int,int>> g;
+                            int full = d / 9, rem = d % 9;
+                            for (int i = 0; i < full; i++) g.push_back({4, 9});
+                            if (rem > 0) {
+                                int bytes = (rem < 7) ? (rem + 1) / 2 : 4;
+                                g.push_back({bytes, rem});
+                            }
+                            std::reverse(g.begin(), g.end());
+                            return g;
+                        };
+                        auto groups_frac = [](uint32_t d) -> std::vector<std::pair<int,int>> {
+                            std::vector<std::pair<int,int>> g;
+                            int full = d / 9, rem = d % 9;
+                            for (int i = 0; i < full; i++) g.push_back({4, 9});
+                            if (rem > 0) {
+                                int bytes = (rem < 7) ? (rem + 1) / 2 : 4;
+                                g.push_back({bytes, rem});
+                            }
+                            return g;
+                        };
+
+                        auto p1 = groups_int(int_digits);
+                        auto p2 = groups_frac(opaque_scale);
+
+                        std::vector<uint8_t> dec_data(data + val_start, data + val_start + val_len);
+                        bool is_neg = (dec_data[0] & 0x80) == 0;
+                        if (is_neg) {
+                            for (auto& b : dec_data) b = ~b;
+                        }
+                        dec_data[0] -= 128;
+
+                        size_t ro = 0;
+                        std::string int_str, frac_str;
+                        for (const auto& [psz, pzf] : p1) {
+                            if (ro + psz > dec_data.size()) break;
+                            uint64_t gv = 0;
+                            for (int j = 0; j < psz; j++) gv = (gv << 8) | dec_data[ro + j];
+                            ro += psz;
+                            std::string gs = std::to_string(gv);
+                            while (gs.length() < (size_t)pzf) gs = "0" + gs;
+                            int_str += gs;
+                        }
+                        for (const auto& [psz, pzf] : p2) {
+                            if (ro + psz > dec_data.size()) break;
+                            uint64_t gv = 0;
+                            for (int j = 0; j < psz; j++) gv = (gv << 8) | dec_data[ro + j];
+                            ro += psz;
+                            std::string gs = std::to_string(gv);
+                            while (gs.length() < (size_t)pzf) gs = "0" + gs;
+                            frac_str += gs;
+                        }
+                        try {
+                            uint64_t iv = std::stoull(int_str.empty() ? "0" : int_str);
+                            int_str = std::to_string(iv);
+                        } catch (...) {}
+
+                        result += (is_neg ? "-" : "") + (int_str.empty() ? "0" : int_str) + "." + frac_str;
+                    } else {
+                        // Unknown opaque type: output as hex
+                        char buf[8];
+                        snprintf(buf, sizeof(buf), "0x%02x", opaque_type);
+                        result += buf;
+                    }
+                }
             } else if (val_type <= 0x03) {  // 嵌套JSON对象/数组
-                result += val_type <= 0x01 ? "{}" : "[]";
+                // For nested values, data at val_abs_offset starts with COUNT, then SIZE
+                // The TYPE is determined by the VALUE_ENTRY type, not a separate byte
+                // e.g., {"user": {"age": 30}} -> VALUE_ENTRY type=0x00 (small object)
+                //   and data at val_abs_offset = [02 00 1f 00...] where 02 00 is COUNT
+                size_t nested_ssize = (val_type == JSON_TYPE_SMALL_OBJECT || val_type == JSON_TYPE_SMALL_ARRAY ||
+                                       val_type == 0x00 || val_type == 0x02) ? 2 : 4;
+                if (val_abs_offset + nested_ssize * 2 <= offset + field_size) {
+                    size_t nested_size = nested_ssize == 2 ?
+                        read_json_le16(data, val_abs_offset + nested_ssize) :
+                        read_json_le32(data, val_abs_offset + nested_ssize);
+                    // nested_size is total bytes from val_abs_offset to end
+                    if (val_abs_offset + nested_size <= offset + field_size) {
+                        result += decode_json_binary(data, val_abs_offset, nested_size, val_type);
+                    } else {
+                        result += val_type <= 0x01 ? "{}" : "[]";
+                    }
+                } else {
+                    result += val_type <= 0x01 ? "{}" : "[]";
+                }
             } else {
                 result += "null";
             }
@@ -1548,8 +1650,8 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     }
 
     // Step 2: Skip TRX_ID + ROLL_PTR for leaf pages (clustered index)
-    size_t pos_after_pk = pos;  // Store position after PK for debugging
     if (is_leaf && pos + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE <= data_end) {
+        size_t pos_after_pk = pos;
         pos += DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
 
         // DEBUG: Show position after TRX_ID + ROLL_PTR
@@ -1559,22 +1661,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                       << " pos after TRX+ROLL=" << std::hex << pos << std::dec
                       << " (" << pos << ")\n";
             trx_debug++;
-        }
-
-        // CRITICAL FIX: Skip 4-byte variable field offset table if present
-        // InnoDB DYNAMIC format may store a 4-byte offset table after TRX_ID+ROLL_PTR
-        // when there are variable-length fields. This table contains:
-        // - 2-byte offset to end of first variable field group
-        // - 2-byte offset to end of last variable field (e.g., datetime position)
-        // We detect this by checking if the next bytes look like offset data (small values)
-        if (n_variable_ > 0 && pos + 4 <= data_end) {
-            uint16_t val1 = (static_cast<uint16_t>(page_data[pos]) << 8) | page_data[pos + 1];
-            uint16_t val2 = (static_cast<uint16_t>(page_data[pos + 2]) << 8) | page_data[pos + 3];
-            // Check if values look like valid offsets (< 1000 relative to record start)
-            // and the first byte is 0x00 (indicating small offset values)
-            if (page_data[pos] == 0x00 && val1 < 500 && val2 < 500 && val2 > val1) {
-                pos += 4;
-            }
         }
     }
 
@@ -1631,24 +1717,6 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
         } else if (pos + field_size <= data_end) {
-            // DEBUG: Track position for first few columns
-            static int pos_debug_count = 0;
-            if (pos_debug_count < 10) {
-                std::cerr << "[DEBUG READ] Column '" << col.name << "' phys_pos=" << col.physical_pos
-                          << " col_idx=" << col_idx
-                          << " pos=" << std::hex << pos << std::dec
-                          << " field_size=" << field_size
-                          << " varlen=" << col.is_variable_length()
-                          << " data: ";
-                size_t print_len = (field_size < 30) ? field_size : 30;
-                for (size_t j = 0; j < print_len && pos + j < data_end; j++) {
-                    char c = page_data[pos + j];
-                    if (c >= 32 && c < 127) std::cerr << c;
-                    else std::cerr << "[" << std::hex << (int)(unsigned char)c << std::dec << "]";
-                }
-                std::cerr << "\n";
-                pos_debug_count++;
-            }
             val = decode_column(page_data, pos, data_end, col, field_size);
             pos += field_size;
         }
@@ -2134,10 +2202,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         case 6: {  // InnoDB DOUBLE (8 bytes)
             val.type = IndexFieldValue::Type::DOUBLE_VAL;
-            // Read as little-endian (memcpy the raw bytes directly)
             std::memcpy(&val.float_value, data + offset, 8);
             std::ostringstream oss;
-            oss << val.float_value;
+            oss << std::setprecision(15) << val.float_value;
             val.str_value = oss.str();
             break;
         }
@@ -2532,17 +2599,23 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 21: { // NEWDECIMAL - InnoDB type 21
             val.type = IndexFieldValue::Type::DECIMAL_VAL;
 
-            //
-            // DECIMAL encoding in InnoDB:
-            // 1. Sign bit in first byte: bit 7 (0x80)
-            //    - If set (positive): data is stored directly with first byte -= 128
-            //    - If not set (negative): invert all bytes, then first byte -= 128
-            // 2. Data is split into groups using map_decimal()
-            // 3. Each group: [bytes, digits] - read bytes as big-endian int, zfill to digits
-
             uint32_t precision = col.precision > 0 ? col.precision : 10;
             uint32_t scale = col.scale;
             uint32_t int_digits = precision - scale;
+
+            // Debug: hex dump of raw bytes
+            static int dec_debug = 0;
+            if (dec_debug < 3) {
+                std::cerr << "[DEBUG DECIMAL_DECODE] precision=" << precision << " scale=" << scale
+                          << " int_digits=" << int_digits << " field_size=" << field_size
+                          << " hex:";
+                for (size_t d = 0; d < field_size && offset + d < max_size; d++) {
+                    std::cerr << " " << std::hex << std::setw(2) << std::setfill('0')
+                              << (int)(unsigned char)data[offset + d];
+                }
+                std::cerr << std::dec << "\n";
+                dec_debug++;
+            }
 
             // map_decimal: [[4,9] for n//9 groups] + [[bytes,remainder_digits] if remainder>0]
             // bytes = ((remainder+1)//2) if remainder < 7, else 4
@@ -2563,6 +2636,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             };
 
             auto p1 = calc_groups(int_digits);  // Integer part groups
+            std::reverse(p1.begin(), p1.end());  // On-disk: smaller group first
             auto p2 = calc_groups(scale);        // Fractional part groups
 
             // Check sign: 0x80 bit set = positive, not set = negative
@@ -2647,7 +2721,6 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 245: { // JSON (MySQL server type)
             val.type = IndexFieldValue::Type::STRING_VAL;
             if (field_size > 0) {
-                // ✅ 修复：使用二进制 JSON 解码器
                 val.str_value = decode_json_binary(data, offset, field_size);
             } else {
                 val.str_value = "null";
