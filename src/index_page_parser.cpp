@@ -990,7 +990,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // DEBUG: Show initial position
     static int pos_init_debug = 0;
     if (pos_init_debug < 3) {
-        std::cerr << "[DEBUG POS_INIT] origin=" << std::hex << origin << std::dec
+        if (g_verbose)         std::cerr << "[DEBUG POS_INIT] origin=" << std::hex << origin << std::dec
                   << " (" << origin << ") REC_HEADER_SIZE_NEW=" << REC_HEADER_SIZE_NEW
                   << " pos=" << std::hex << pos << std::dec << " (" << pos << ")\n";
         pos_init_debug++;
@@ -1015,7 +1015,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
     // DEBUG: Show position after NULL bitmap
     static int null_pos_debug = 0;
     if (null_pos_debug < 3) {
-        std::cerr << "[DEBUG NULL_POS] null_bytes=" << null_bytes
+        if (g_verbose)         std::cerr << "[DEBUG NULL_POS] null_bytes=" << null_bytes
                   << " pos after null=" << std::hex << pos << std::dec << " (" << pos << ")"
                   << " null_bit_value=" << null_bit_value << "\n";
         null_pos_debug++;
@@ -1094,7 +1094,7 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                 // DEBUG: Log size bytes being read for first record
                 static int size_debug_count = 0;
                 if (size_debug_count < 1) {
-                    std::cerr << "[DEBUG SIZE] Reading size for col '" << col.name
+                    if (g_verbose)                     std::cerr << "[DEBUG SIZE] Reading size for col '" << col.name
                               << "' phys_pos=" << col.physical_pos
                               << " is_big=" << col.is_big
                               << " byte1=" << (int)byte1
@@ -1247,7 +1247,7 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
     // DEBUG: Show initial state
     static int chain_debug = 0;
     if (chain_debug < 2) {
-        std::cerr << "[DEBUG CHAIN] Starting at INFIMUM origin=" << current_origin
+        if (g_verbose)         std::cerr << "[DEBUG CHAIN] Starting at INFIMUM origin=" << current_origin
                   << " heap_top=" << page_hdr.heap_top << " is_compact=" << is_compact << "\n";
         chain_debug++;
     }
@@ -1259,7 +1259,7 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
             // DEBUG: Show why loop ended
             static int end_debug = 0;
             if (end_debug < 2) {
-                std::cerr << "[DEBUG END] Loop ended: current_origin=" << current_origin
+                if (g_verbose)                 std::cerr << "[DEBUG END] Loop ended: current_origin=" << current_origin
                           << " header_size=" << header_size
                           << " heap_top=" << page_hdr.heap_top << "\n";
                 end_debug++;
@@ -1267,7 +1267,7 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
             break;
         }
         if (visited.count(static_cast<uint16_t>(current_origin))) {
-            std::cerr << "[DEBUG END] Circular reference at origin=" << current_origin << "\n";
+            if (g_verbose)             std::cerr << "[DEBUG END] Circular reference at origin=" << current_origin << "\n";
             break;  // Circular reference detected
         }
         visited.insert(static_cast<uint16_t>(current_origin));
@@ -1277,7 +1277,7 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
         // DEBUG: Show each iteration
         static int iter_debug = 0;
         if (iter_debug < 10) {
-            std::cerr << "[DEBUG ITER] iteration=" << safety
+            if (g_verbose)             std::cerr << "[DEBUG ITER] iteration=" << safety
                       << " current_origin=" << current_origin
                       << " header_start=" << header_start << "\n";
             iter_debug++;
@@ -1311,7 +1311,7 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
             // DEBUG: Show next record calculation
             static int next_debug = 0;
             if (next_debug < 5) {
-                std::cerr << "[DEBUG NEXT] current_origin=" << current_origin
+                if (g_verbose)                 std::cerr << "[DEBUG NEXT] current_origin=" << current_origin
                           << " next_offset=" << hdr->next_offset
                           << " -> next_origin=" << next_origin
                           << " heap_no=" << hdr->heap_no << "\n";
@@ -1357,7 +1357,7 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     // DEBUG: Show record offset and origin
     static int rec_debug = 0;
     if (rec_debug < 5) {
-        std::cerr << "[DEBUG REC] page_no=" << page_no
+        if (g_verbose)         std::cerr << "[DEBUG REC] page_no=" << page_no
                   << " rec_offset=" << std::hex << rec_offset << std::dec
                   << " (" << rec_offset << ") rec_origin=" << std::hex << rec_origin << std::dec
                   << " (" << rec_origin << ") header_size=" << header_size
@@ -1502,7 +1502,7 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         // DEBUG: Show actual_data_start
         static int data_start_debug = 0;
         if (data_start_debug < 3) {
-            std::cerr << "[DEBUG DATA_START] actual_data_start=" << std::hex << actual_data_start << std::dec
+            if (g_verbose)             std::cerr << "[DEBUG DATA_START] actual_data_start=" << std::hex << actual_data_start << std::dec
                       << " (" << actual_data_start << ")\n";
             data_start_debug++;
         }
@@ -1570,16 +1570,16 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     // DEBUG: Show initial position and variable_sizes
     static int pos_init_debug = 0;
     if (pos_init_debug < 3) {
-        std::cerr << "[DEBUG EXTRACT_START] data_start=" << std::hex << data_start << std::dec
+        if (g_verbose)         std::cerr << "[DEBUG EXTRACT_START] data_start=" << std::hex << data_start << std::dec
                   << " (" << data_start << ") n_pk_cols_=" << n_pk_cols_ << "\n";
-        std::cerr << "[DEBUG VARSIZES] ";
+        if (g_verbose)         std::cerr << "[DEBUG VARSIZES] ";
         for (size_t i = 0; i < variable_sizes.size() && i < 10; i++) {
-            std::cerr << "[" << i << "]=" << variable_sizes[i] << " ";
+            if (g_verbose) std::cerr << "[" << i << "]=" << variable_sizes[i] << " ";
         }
-        std::cerr << "\n";
+        if (g_verbose) std::cerr << "\n";
         // Show column info
         for (size_t i = 0; i < columns.size() && i < 10; i++) {
-            std::cerr << "[DEBUG COL " << i << "] name=" << columns[i].name
+            if (g_verbose)             std::cerr << "[DEBUG COL " << i << "] name=" << columns[i].name
                       << " type=" << (int)columns[i].col_type
                       << " phys_pos=" << columns[i].physical_pos << "\n";
         }
@@ -1597,14 +1597,14 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         // DEBUG: Show PK column reading
         static int pk_debug = 0;
         if (pk_debug < 5) {
-            std::cerr << "[DEBUG PK] col_idx=" << col_idx << " name=" << col.name
+            if (g_verbose)             std::cerr << "[DEBUG PK] col_idx=" << col_idx << " name=" << col.name
                       << " pos=" << std::hex << pos << std::dec
                       << " field_size=" << field_size
                       << " data: ";
             for (size_t j = 0; j < field_size && pos + j < data_end && j < 10; j++) {
-                std::cerr << std::hex << (int)page_data[pos + j] << " ";
+                if (g_verbose) std::cerr << std::hex << (int)page_data[pos + j] << " ";
             }
-            std::cerr << std::dec << "\n";
+            if (g_verbose) std::cerr << std::dec << "\n";
             pk_debug++;
         }
 
@@ -1657,7 +1657,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         // DEBUG: Show position after TRX_ID + ROLL_PTR
         static int trx_debug = 0;
         if (trx_debug < 3) {
-            std::cerr << "[DEBUG AFTER_TRX] pos_after_pk=" << std::hex << pos_after_pk << std::dec
+            if (g_verbose)             std::cerr << "[DEBUG AFTER_TRX] pos_after_pk=" << std::hex << pos_after_pk << std::dec
                       << " pos after TRX+ROLL=" << std::hex << pos << std::dec
                       << " (" << pos << ")\n";
             trx_debug++;
@@ -1739,17 +1739,17 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     // DEBUG: Check field count and variable_sizes
     static int field_count_debug = 0;
     if (field_count_debug < 3) {
-        std::cerr << "[DEBUG FIELDS] Result has " << result.size() << " fields, columns.size()=" << columns.size()
+        if (g_verbose)         std::cerr << "[DEBUG FIELDS] Result has " << result.size() << " fields, columns.size()=" << columns.size()
                   << ", n_pk_cols_=" << n_pk_cols_ << "\n";
         // Print ALL variable_sizes
-        std::cerr << "[DEBUG VARSIZES] All " << variable_sizes.size() << " sizes: ";
+        if (g_verbose)         std::cerr << "[DEBUG VARSIZES] All " << variable_sizes.size() << " sizes: ";
         for (size_t i = 0; i < variable_sizes.size(); i++) {
-            std::cerr << "[" << i << "]=" << variable_sizes[i] << " ";
+            if (g_verbose) std::cerr << "[" << i << "]=" << variable_sizes[i] << " ";
         }
-        std::cerr << "\n";
+        if (g_verbose) std::cerr << "\n";
         // Print column names and their expected sizes
         for (size_t i = 0; i < columns.size(); i++) {
-            std::cerr << "  col[" << i << "] name=" << columns[i].name
+            if (g_verbose) std::cerr << "  col[" << i << "] name=" << columns[i].name
                       << " type=" << (int)columns[i].col_type
                       << " phys_pos=" << columns[i].physical_pos
                       << " varlen=" << columns[i].is_variable_length()
@@ -2472,7 +2472,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 // DEBUG output for first few records
                 static int binary_debug_count = 0;
                 if (binary_debug_count < 3) {
-                    std::cerr << "[DEBUG DECODE] Column '" << col.name << "' type=" << col.col_type
+                    if (g_verbose)                     std::cerr << "[DEBUG DECODE] Column '" << col.name << "' type=" << col.col_type
                               << " is_binary=" << col.is_binary << " field_size=" << field_size << "\n";
                     binary_debug_count++;
                 }
@@ -2506,7 +2506,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             // DEBUG: Log blob column decoding
             static int blob_debug_count = 0;
             if (blob_debug_count < 3 && col.name == "blob_col") {
-                std::cerr << "[DEBUG DECODE BLOB] Column '" << col.name << "' type=" << col.col_type
+                if (g_verbose)                 std::cerr << "[DEBUG DECODE BLOB] Column '" << col.name << "' type=" << col.col_type
                           << " is_binary=" << col.is_binary << " field_size=" << field_size << "\n";
                 blob_debug_count++;
             }
@@ -2606,14 +2606,14 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             // Debug: hex dump of raw bytes
             static int dec_debug = 0;
             if (dec_debug < 3) {
-                std::cerr << "[DEBUG DECIMAL_DECODE] precision=" << precision << " scale=" << scale
+                if (g_verbose)                 std::cerr << "[DEBUG DECIMAL_DECODE] precision=" << precision << " scale=" << scale
                           << " int_digits=" << int_digits << " field_size=" << field_size
                           << " hex:";
                 for (size_t d = 0; d < field_size && offset + d < max_size; d++) {
-                    std::cerr << " " << std::hex << std::setw(2) << std::setfill('0')
+                    if (g_verbose) std::cerr << " " << std::hex << std::setw(2) << std::setfill('0')
                               << (int)(unsigned char)data[offset + d];
                 }
-                std::cerr << std::dec << "\n";
+                if (g_verbose) std::cerr << std::dec << "\n";
                 dec_debug++;
             }
 
@@ -2856,7 +2856,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
         // Debug output
         static int merge_debug = 0;
         if (merge_debug < 5 && added > 0) {
-            std::cerr << "[DEBUG MERGE] page_no=" << page_no
+            if (g_verbose)             std::cerr << "[DEBUG MERGE] page_no=" << page_no
                       << " chain=" << records.size() - added
                       << " try_added=" << added
                       << " total=" << records.size() << "\n";
@@ -2918,12 +2918,12 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page_fast(
     // DEBUG: Show raw slot values
     static int slot_debug = 0;
     if (slot_debug < 3) {
-        std::cerr << "[DEBUG SLOTS] page_no=" << page_no << " n_dir_slots=" << n_dir_slots
+        if (g_verbose)         std::cerr << "[DEBUG SLOTS] page_no=" << page_no << " n_dir_slots=" << n_dir_slots
                   << " dir_offset=" << dir_offset << " raw slots:";
         for (auto s : slot_offsets) {
-            std::cerr << " " << std::hex << s << std::dec << "(" << s << ")";
+            if (g_verbose) std::cerr << " " << std::hex << s << std::dec << "(" << s << ")";
         }
-        std::cerr << "\n";
+        if (g_verbose) std::cerr << "\n";
         slot_debug++;
     }
 

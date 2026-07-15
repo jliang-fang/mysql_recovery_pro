@@ -599,7 +599,7 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
     // But sometimes the btree root is still in the inode data fork area
     if (format == XFS_DINODE_FMT_BTREE) {
         if (config_.verbose) {
-            std::cout << "[DEBUG] Inode has extent btree format (large/fragmented file)\n";
+            if (dbrecovery::innodb::g_verbose)             std::cout << "[DEBUG] Inode has extent btree format (large/fragmented file)\n";
         }
         // For btree format, the btree root is stored in the inode's data fork
         // Try to extract extent list from btree root
@@ -1478,7 +1478,7 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
         bool use_schema = external_schema_.has_value() && !external_schema_->columns.empty();
 
         if (use_schema && config_.verbose) {
-            std::cerr << "[DEBUG] Using schema-aware parsing with "
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG] Using schema-aware parsing with "
                       << external_schema_->columns.size() << " columns for index_id "
                       << index_id << std::endl;
         }
@@ -1840,7 +1840,7 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
     }
 
     if (config_.verbose) {
-        std::cerr << "[DEBUG] Schema-aware parsing found " << records.size()
+        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG] Schema-aware parsing found " << records.size()
                   << " records for index_id" << std::endl;
     }
 

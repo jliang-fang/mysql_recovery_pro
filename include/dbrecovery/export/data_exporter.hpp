@@ -8,6 +8,8 @@
 #include <sstream>
 #include <iostream>
 
+#include "dbrecovery/innodb/index_page_parser.hpp"
+
 namespace dbrecovery {
 namespace exporter {
 
@@ -57,7 +59,7 @@ public:
         // DEBUG: Check result size
         static int export_debug = 0;
         if (export_debug < 3) {
-            std::cerr << "[DEBUG EXPORT_FILE] result size=" << result.size() << "\n";
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG EXPORT_FILE] result size=" << result.size() << "\n";
             export_debug++;
         }
 

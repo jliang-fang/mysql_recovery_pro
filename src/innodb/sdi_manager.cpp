@@ -1,3 +1,4 @@
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "nlohmann/json.hpp"
 #include <stdexcept>
@@ -17,13 +18,17 @@ namespace catalog {
 namespace dbrecovery {
 namespace innodb {
 
+// Global verbose flag definition
+bool g_verbose = false;
+
 catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t payload_len) {
     catalog::TableSchema schema;
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] parse_sdi_record called with payload_len=" << payload_len << "\n";
 
     if (payload_len < 20) {
-        std::cerr << "[DEBUG] payload_len < 20, returning empty schema\n";
+        if (g_verbose)         std::cerr << "[DEBUG] payload_len < 20, returning empty schema\n";
         return schema;
     }
 
@@ -33,10 +38,11 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
     uint32_t uncompressed_len = dbrecovery::innodb::read_le<uint32_t>(payload + 12);
     uint32_t compressed_len   = dbrecovery::innodb::read_le<uint32_t>(payload + 16);
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] uncompressed_len=" << uncompressed_len << ", compressed_len=" << compressed_len << "\n";
 
     if (compressed_len == 0 || compressed_len > payload_len - 20) {
-        std::cerr << "[DEBUG] compressed_len validation failed\n";
+        if (g_verbose)         std::cerr << "[DEBUG] compressed_len validation failed\n";
         return schema;
     }
 
@@ -53,7 +59,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
 
     int ret = inflateInit2(&strm, -15); // raw deflate
     if (ret != Z_OK) {
-        std::cerr << "[DEBUG] inflateInit2 failed with ret=" << ret << "\n";
+        if (g_verbose)         std::cerr << "[DEBUG] inflateInit2 failed with ret=" << ret << "\n";
         return schema;
     }
 
@@ -64,7 +70,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
             strm.next_out = decompressed.data() + strm.total_out;
             strm.avail_out = static_cast<uInt>(decompressed.size() - strm.total_out);
         } else if (ret != Z_OK && ret != Z_STREAM_END) {
-            std::cerr << "[DEBUG] inflate failed with ret=" << ret << "\n";
+            if (g_verbose)             std::cerr << "[DEBUG] inflate failed with ret=" << ret << "\n";
             inflateEnd(&strm);
             return schema;
         }
@@ -73,10 +79,11 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
     decompressed.resize(strm.total_out);
     inflateEnd(&strm);
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] Decompressed size=" << decompressed.size() << "\n";
     // ✅ 调试：输出完整的 JSON 内容以检查字段名
     std::string json_str(decompressed.begin(), decompressed.end());
-    std::cerr << "[DEBUG SDI JSON] " << json_str.substr(0, std::min(json_str.length(), (size_t)5000)) << "\n";
+    if (g_verbose)     std::cerr << "[DEBUG SDI JSON] " << json_str.substr(0, std::min(json_str.length(), (size_t)5000)) << "\n";
 
     // Parse JSON
     try {
@@ -92,7 +99,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                 // Parse columns
                 if (table_json.contains("columns")) {
                     uint32_t ordinal = 1;
-                    std::cerr << "[DEBUG] Found " << table_json["columns"].size() << " columns in SDI\n";
+                    if (g_verbose)                     std::cerr << "[DEBUG] Found " << table_json["columns"].size() << " columns in SDI\n";
                     for (const auto& col : table_json["columns"]) {
                         catalog::ColumnInfo column_info;
                         column_info.name = col.value("name", "");
@@ -104,7 +111,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                                 // Map to InnoDB internal type IDs
                                 std::string type_str = col["type"].get<std::string>();
                                 // CRITICAL: Use InnoDB internal type IDs, NOT MySQL server type IDs!
-                                std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type_str='" << type_str << "'\n";
+                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type_str='" << type_str << "'\n";
                                 if (type_str == "DECIMAL") column_info.mysql_type_id = 1;   // InnoDB DECIMAL
                                 else if (type_str == "TINY") column_info.mysql_type_id = 2;   // InnoDB TINY (TINYINT)
                                 else if (type_str == "SHORT") column_info.mysql_type_id = 3;  // InnoDB SHORT (SMALLINT)
@@ -145,10 +152,10 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                                 else if (type_str == "TEXT") column_info.mysql_type_id = 27;
                                 else if (type_str == "LONGBLOB") column_info.mysql_type_id = 26;
                                 else column_info.mysql_type_id = 0;
-                                std::cerr << "[DEBUG SDI] Mapped to mysql_type_id=" << static_cast<int>(column_info.mysql_type_id) << "\n";
+                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Mapped to mysql_type_id=" << static_cast<int>(column_info.mysql_type_id) << "\n";
                             } else {
                                 column_info.mysql_type_id = col.value("type", 0);
-                                std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' numeric type=" << static_cast<int>(column_info.mysql_type_id) << "\n";
+                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' numeric type=" << static_cast<int>(column_info.mysql_type_id) << "\n";
                             }
                         }
                         
@@ -173,7 +180,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                             column_info.collation_id = col["collation_id"];
                             // Debug output for binary columns
                             if (column_info.collation_id == 63) {
-                                std::cerr << "[DEBUG SDI] Binary column detected: " << column_info.name
+                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Binary column detected: " << column_info.name
                                           << " collation_id=" << column_info.collation_id << "\n";
                             }
                         }
@@ -245,7 +252,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                                     target_values->push_back(decoded);
                                 }
                             }
-                            std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
+                            if (g_verbose)                             std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
                                       << target_values->size() << " elements (type="
                                       << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")\n";
                         }
@@ -297,7 +304,7 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
                     schema.columns.clear();
                     uint32_t new_ordinal = 1;
                     for (const auto& p : cols_vec) {
-                        std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
+                        if (g_verbose)                         std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
                                   << " physical_pos=" << p.second.physical_pos
                                   << " ordinal=" << p.second.ordinal
                                   << " type=" << p.second.mysql_type_id

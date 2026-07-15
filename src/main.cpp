@@ -2404,7 +2404,7 @@ int main(int argc, char** argv) {
 
                 // Debug: Print column types
                 if (verbose) {
-                    std::cout << "[DEBUG] Column types from FRM (after conversion):\n";
+                    if (dbrecovery::innodb::g_verbose)                     std::cout << "[DEBUG] Column types from FRM (after conversion):\n";
                     for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
                         std::cout << "  " << i+1 << ". " << index_columns[i].name
                                   << " type=" << static_cast<int>(index_columns[i].col_type)
@@ -2511,7 +2511,7 @@ int main(int argc, char** argv) {
 
                 // Debug: Print column types from SDI
                 if (verbose) {
-                    std::cout << "[DEBUG] Column types from SDI:\n";
+                    if (dbrecovery::innodb::g_verbose)                     std::cout << "[DEBUG] Column types from SDI:\n";
                     for (size_t i = 0; i < index_columns.size() && i < 20; i++) {
                         std::cout << "  " << i+1 << ". " << index_columns[i].name
                                   << " type=" << static_cast<int>(index_columns[i].col_type)

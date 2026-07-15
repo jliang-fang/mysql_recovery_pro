@@ -259,15 +259,16 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             }
         }
 
+        if (dbrecovery::innodb::g_verbose) 
         std::cerr << "[DEBUG] Found " << dd_table_index_ids.size() << " DD table index IDs" << std::endl;
         for (const auto& [name, id] : dd_table_index_ids) {
-            std::cerr << "[DEBUG]   " << name << " -> index_id " << id << std::endl;
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG]   " << name << " -> index_id " << id << std::endl;
         }
 
         // Step 2: If SDI parsing didn't find DD tables, try direct string search
         // This is needed for MySQL 8.0+ where DD tables are stored differently
         if (dd_table_index_ids.empty()) {
-            std::cerr << "[DEBUG] No DD table index IDs found via SDI, trying direct string search..." << std::endl;
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG] No DD table index IDs found via SDI, trying direct string search..." << std::endl;
 
             // Scan all INDEX pages for table metadata
             // We're looking for:
@@ -316,7 +317,7 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                             size_t primary_pos = page_content.rfind("PRIMARY", pos);
                             if (primary_pos != std::string::npos && primary_pos > pos - 50) {
                                 // This is a PRIMARY index record
-                                std::cerr << "[DEBUG] Found PRIMARY index: id=" << idx_id
+                                if (dbrecovery::innodb::g_verbose)                                 std::cerr << "[DEBUG] Found PRIMARY index: id=" << idx_id
                                           << ", space_id=" << sp_id << std::endl;
 
                                 // Map space_id to index_id
@@ -372,7 +373,7 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                                         uint32_t space_id = std::stoul(id_str);
                                         table_to_space_id[potential_table] = space_id;
                                         space_id_to_table[space_id] = potential_table;
-                                        std::cerr << "[DEBUG] Found table: " << potential_table
+                                        if (dbrecovery::innodb::g_verbose)                                         std::cerr << "[DEBUG] Found table: " << potential_table
                                                   << " -> space_id=" << space_id << std::endl;
                                     }
                                 }
@@ -383,8 +384,9 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                 }
             }
 
+            if (dbrecovery::innodb::g_verbose) 
             std::cerr << "[DEBUG] Found " << table_to_index_id.size() << " PRIMARY indexes" << std::endl;
-            std::cerr << "[DEBUG] Found " << table_to_space_id.size() << " tables with space_id" << std::endl;
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG] Found " << table_to_space_id.size() << " tables with space_id" << std::endl;
 
             // Create recovered table entries by matching space_id
             std::set<std::string> found_tables;
@@ -410,7 +412,7 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                     std::string sp_id_key = std::to_string(metadata.space_id);
                     if (table_to_index_id.count(sp_id_key)) {
                         metadata.primary_index_id = table_to_index_id[sp_id_key];
-                        std::cerr << "[DEBUG] Mapped " << name << " (space_id=" << metadata.space_id
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG] Mapped " << name << " (space_id=" << metadata.space_id
                                   << ") to index_id=" << metadata.primary_index_id << std::endl;
                     }
                 }
@@ -424,7 +426,7 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
 
         // Step 2.5: Parse column records from mysql.columns DD records
         // We need to scan pages for column definitions: column_name...table_id=N...type_info
-        std::cerr << "[DEBUG] Parsing column records from mysql.columns..." << std::endl;
+        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG] Parsing column records from mysql.columns..." << std::endl;
 
         // Map table_id -> columns
         std::map<uint32_t, std::vector<std::tuple<std::string, std::string, int, int>>> table_columns;
@@ -515,6 +517,7 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                                     col_len = 4;
                                 }
 
+                                if (dbrecovery::innodb::g_verbose) 
                                 std::cerr << "[DEBUG] Found column: " << col_name
                                           << " type=" << type_str << " (InnoDB type=" << col_type
                                           << ", len=" << col_len << ")" << std::endl;
@@ -528,9 +531,10 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             }
         }
 
+        if (dbrecovery::innodb::g_verbose) 
         std::cerr << "[DEBUG] Found columns for " << table_columns.size() << " tables" << std::endl;
         for (const auto& [tid, cols] : table_columns) {
-            std::cerr << "[DEBUG]   Table " << tid << ": ";
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG]   Table " << tid << ": ";
             for (const auto& [name, type_str, type, len] : cols) {
                 std::cerr << name << "(" << type_str << ") ";
             }
@@ -567,7 +571,7 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                 }
 
                 table.schema = schema;
-                std::cerr << "[DEBUG] Built schema for " << table.table_name
+                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG] Built schema for " << table.table_name
                           << " with " << schema.columns.size() << " columns" << std::endl;
             }
         }

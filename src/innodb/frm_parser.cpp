@@ -1,3 +1,4 @@
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
 #include <fstream>
 #include <iostream>
@@ -214,7 +215,7 @@ std::optional<catalog::TableSchema> FRMParser::parse(const uint8_t* data, size_t
 
         // Debug: Print type conversion for first 15 columns
         if (i < 15) {
-            std::cout << "[DEBUG FRM] Column " << i+1 << ": " << col.name
+            if (g_verbose)             std::cout << "[DEBUG FRM] Column " << i+1 << ": " << col.name
                       << " MySQL_type=0x" << std::hex << static_cast<int>(mysql_type)
                       << " -> InnoDB_type=0x" << std::hex << static_cast<int>(innodb_type) << std::dec
                       << " len=" << col_def.field_length

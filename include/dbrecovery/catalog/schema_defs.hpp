@@ -13,6 +13,7 @@
 
 // ✅ 新增：包含 page_defs.hpp 以获取 mysql_types 常量定义
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 
 namespace dbrecovery {
 namespace catalog {
@@ -383,11 +384,13 @@ struct TableSchema {
 
                 // Debug: print all column fields for the first few columns
                 if (!debug_schema) {
-                    std::cerr << "[DEBUG SDI FIELDS] Column '" << col.name << "' fields: ";
-                    for (auto it = col_json.begin(); it != col_json.end(); ++it) {
-                        std::cerr << it.key() << " ";
+                    if (dbrecovery::innodb::g_verbose) {
+                        std::cerr << "[DEBUG SDI FIELDS] Column '" << col.name << "' fields: ";
+                        for (auto it = col_json.begin(); it != col_json.end(); ++it) {
+                            std::cerr << it.key() << " ";
+                        }
+                        std::cerr << "\n";
                     }
-                    std::cerr << "\n";
                 }
 
                 if (col_json.contains("type")) {
@@ -431,14 +434,14 @@ struct TableSchema {
                         else col.mysql_type_id = 0;
                     }
                     if (!debug_schema) {
-                        std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' type=" << col.mysql_type_id << "\n";
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' type=" << col.mysql_type_id << "\n";
                     }
                 }
                 if (col_json.contains("is_nullable")) {
                     col.is_nullable = col_json["is_nullable"].get<bool>();
                 }
                 if (!debug_schema) {
-                    std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' is_nullable=" << col.is_nullable << std::endl;
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' is_nullable=" << col.is_nullable << std::endl;
                 }
                 // Parse is_signed for numeric types (affects unsigned handling)
                 if (col_json.contains("is_signed")) {
@@ -447,7 +450,7 @@ struct TableSchema {
                     col.is_signed = !col_json["is_unsigned"].get<bool>();
                 }
                 if (!debug_schema && col.mysql_type_id == 9) {
-                    std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' type=" << col.mysql_type_id
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG SCHEMA] Column '" << col.name << "' type=" << col.mysql_type_id
                               << " is_signed=" << col.is_signed << "\n";
                 }
                 // Parse DECIMAL precision/scale for type 21 (NEWDECIMAL)
@@ -476,7 +479,7 @@ struct TableSchema {
                 if (col_json.contains("collation_id")) {
                     col.collation_id = col_json["collation_id"].get<uint32_t>();
                     if (col.collation_id == 63) {
-                        std::cerr << "[DEBUG SDI] Binary column detected: " << col.name
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG SDI] Binary column detected: " << col.name
                                   << " collation_id=" << col.collation_id << "\n";
                     }
                 }
@@ -490,7 +493,7 @@ struct TableSchema {
                 if (col_json.contains("elements") && col_json["elements"].is_array()) {
                     std::vector<std::string>* target_values =
                         (col.mysql_type_id == 23) ? &col.set_values : &col.enum_values;
-                    std::cerr << "[DEBUG ENUM] Column '" << col.name << "' has "
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG ENUM] Column '" << col.name << "' has "
                               << col_json["elements"].size() << " elements\n";
                     for (const auto& elem : col_json["elements"]) {
                         if (elem.contains("name")) {
@@ -512,12 +515,12 @@ struct TableSchema {
                                     valb -= 8;
                                 }
                             }
-                            std::cerr << "[DEBUG ENUM]  element: encoded='" << encoded
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG ENUM]  element: encoded='" << encoded
                                       << "' decoded='" << decoded << "'\n";
                             target_values->push_back(decoded);
                         }
                     }
-                    std::cerr << "[DEBUG ENUM] Column '" << col.name << "' parsed "
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG ENUM] Column '" << col.name << "' parsed "
                               << target_values->size() << " values\n";
                 }
 
@@ -539,7 +542,7 @@ struct TableSchema {
 
                 // Debug: show physical_pos value for date/datetime columns
                 if (col.name == "col_date" || col.name == "col_datetime" || col.name == "col_decimal") {
-                    std::cerr << "[DEBUG POS] Column '" << col.name << "' physical_pos=" << col.physical_pos
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG POS] Column '" << col.name << "' physical_pos=" << col.physical_pos
                               << " type=" << col.mysql_type_id << "\n";
                 }
 
@@ -606,7 +609,7 @@ struct TableSchema {
                 columns.clear();
                 uint32_t new_ordinal = 1;
                 for (const auto& p : cols_vec) {
-                    std::cerr << "[DEBUG SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
                               << " physical_pos=" << p.second.physical_pos
                               << " ordinal=" << p.second.ordinal
                               << " type=" << p.second.mysql_type_id

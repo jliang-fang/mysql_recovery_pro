@@ -1,3 +1,4 @@
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/redo_log.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include <fstream>
@@ -51,6 +52,7 @@ std::vector<RedoLogRecord> RedoLogParser::parse_file(const std::string& path) {
     size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] File size: " << file_size << " for path: " << path << std::endl;
 
     if (file_size < 9) {
@@ -63,6 +65,7 @@ std::vector<RedoLogRecord> RedoLogParser::parse_file(const std::string& path) {
     file.read(reinterpret_cast<char*>(buffer.data()), file_size);
     file.close();
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] Buffer size: " << buffer.size() << std::endl;
 
     // 解析所有记录

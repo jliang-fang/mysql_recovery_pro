@@ -67,6 +67,9 @@ constexpr size_t REC_HEADER_SIZE_OLD = 6;   // REDUNDANT
 /// Maximum records per page (safety limit)
 constexpr uint32_t MAX_RECORDS_PER_PAGE = 32768;
 
+/// Global verbose flag for debug output
+extern bool g_verbose;
+
 } // namespace innodb
 } // namespace dbrecovery
 
@@ -656,6 +659,11 @@ public:
     void set_mysql_version(uint32_t version) { mysql_version_ = version; }
 
     /**
+     * @brief Enable/disable debug output
+     */
+    void set_verbose(bool verbose) { verbose_ = verbose; }
+
+    /**
      * @brief Set target INDEX_ID to filter pages (for force mode)
      * 0 = accept all INDEX pages
      */
@@ -924,6 +932,7 @@ private:
     uint32_t n_pk_cols_ = 1;
     uint32_t n_nullable_ = 0;
     uint32_t n_variable_ = 0;
+    bool verbose_ = false;
     bool recover_deleted_ = true;
     int bad_page_mode_ = 0;
     uint32_t off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;

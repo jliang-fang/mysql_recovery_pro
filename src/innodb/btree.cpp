@@ -1,3 +1,4 @@
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
@@ -1758,10 +1759,11 @@ std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_test_file
     // 验证 record_offsets_ 是否包含测试文件记录（在 'user' 位置），
     // 我们需要跳过前几个系统记录（如果有）
     if (record_offsets_.empty()) {
-        std::cerr << "[DEBUG] parse_test_file_records: no records found" << std::endl;
+        if (g_verbose)         std::cerr << "[DEBUG] parse_test_file_records: no records found" << std::endl;
         return records;
     }
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] parse_test_file_records: processing " << record_offsets_.size() << " records" << std::endl;
 
     // 确定用户记录起始位置（跳过前几个可能的系统记录）
@@ -1779,7 +1781,7 @@ std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_test_file
 
         // 验证记录大小
         if (rec_offset + 5 > page_data_.size()) {
-            std::cerr << "[DEBUG] parse_test_file_records: rec_offset " << rec_offset << " out of bounds" << std::endl;
+            if (g_verbose)             std::cerr << "[DEBUG] parse_test_file_records: rec_offset " << rec_offset << " out of bounds" << std::endl;
             continue;
         }
 
@@ -1907,6 +1909,7 @@ std::vector<std::map<std::string, std::string>> BPlusTreeParser::parse_test_file
         records.push_back(record);
     }
 
+    if (g_verbose) 
     std::cerr << "[DEBUG] parse_test_file_records: returned " << records.size() << " records" << std::endl;
     return records;
 }

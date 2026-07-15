@@ -719,7 +719,7 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
         // 优先使用外部提供的schema (如FRM文件解析)
         if (external_schema_.has_value() && !external_schema_->columns.empty()) {
             matched_schema = external_schema_;
-            std::cerr << "[DEBUG] Using external schema with " << matched_schema->columns.size()
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG] Using external schema with " << matched_schema->columns.size()
                       << " columns for index_id " << index_id << std::endl;
         } else {
             // 尝试从SDI提取的schema中匹配
@@ -1139,6 +1139,7 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
         }
     }
 
+    if (dbrecovery::innodb::g_verbose) 
     std::cerr << "[DEBUG] Schema-aware parsing found " << records.size() << " records" << std::endl;
     return records;
 }
@@ -1193,19 +1194,19 @@ catalog::TableSchema RawDiskCarver::parse_sdi_json_to_schema(const nlohmann::jso
     // Check for dd_object format (MySQL 8.0.46+ SDI format)
     if (json_obj.contains("dd_object") && json_obj["dd_object_type"] == "Table") {
         table_json = json_obj["dd_object"];
-        std::cerr << "[DEBUG SDI] Using dd_object format" << std::endl;
+        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG SDI] Using dd_object format" << std::endl;
     }
     // Check for dictionary format
     else if (json_obj.contains("dictionary")) {
         auto dict = json_obj["dictionary"];
         if (dict.contains("table")) {
             table_json = dict["table"];
-            std::cerr << "[DEBUG SDI] Using dictionary format" << std::endl;
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG SDI] Using dictionary format" << std::endl;
         }
     }
     // Skip Tablespace entries (not table schema)
     else if (json_obj.contains("dd_object_type") && json_obj["dd_object_type"] == "Tablespace") {
-        std::cerr << "[DEBUG SDI] Skipping Tablespace entry" << std::endl;
+        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG SDI] Skipping Tablespace entry" << std::endl;
         return schema;  // Empty schema
     }
 
@@ -1319,7 +1320,7 @@ catalog::TableSchema RawDiskCarver::parse_sdi_json_to_schema(const nlohmann::jso
                         target_values->push_back(decoded);
                     }
                 }
-                std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
+                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
                           << target_values->size() << " elements (type="
                           << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")" << std::endl;
             }
@@ -1418,6 +1419,7 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
             if (data[offset] == 0x78 && (data[offset + 1] == 0x9c || data[offset + 1] == 0xda ||
                                           data[offset + 1] == 0x01 || data[offset + 1] == 0x5e)) {
 
+                if (dbrecovery::innodb::g_verbose) 
                 std::cerr << "[DEBUG] Found zlib signature at offset " << offset << std::endl;
 
                 // 直接解压 zlib 数据（不包含 SDI header）
@@ -1438,7 +1440,7 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
                 // 使用自动检测窗口大小 (32 + 15 = 47) 自动检测 zlib/gzip 头
                 int ret = inflateInit2(&strm, 47);
                 if (ret != Z_OK) {
-                    std::cerr << "[DEBUG] inflateInit2 failed: " << ret << std::endl;
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] inflateInit2 failed: " << ret << std::endl;
                     continue;
                 }
 
@@ -1464,12 +1466,12 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
                 inflateEnd(&strm);
 
                 if (!decompress_ok || strm.total_out == 0) {
-                    std::cerr << "[DEBUG] Decompression failed at offset " << offset << std::endl;
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] Decompression failed at offset " << offset << std::endl;
                     continue;
                 }
 
                 decompressed.resize(strm.total_out);
-                std::cerr << "[DEBUG] Decompressed " << strm.total_out << " bytes from zlib" << std::endl;
+                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG] Decompressed " << strm.total_out << " bytes from zlib" << std::endl;
 
                 // 解析 JSON
                 try {
@@ -1484,7 +1486,7 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
                         return schema;
                     }
                 } catch (const std::exception& e) {
-                    std::cerr << "[DEBUG] JSON parse failed: " << e.what() << std::endl;
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] JSON parse failed: " << e.what() << std::endl;
                     // 继续搜索下一个 zlib 签名
                 }
             }
@@ -1503,6 +1505,7 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
             if (rec.fields.size() >= 1 && !rec.fields[0].raw_bytes.empty()) {
                 const auto& raw_bytes = rec.fields[0].raw_bytes;
 
+                if (dbrecovery::innodb::g_verbose) 
                 std::cerr << "[DEBUG] SDI record field size: " << raw_bytes.size() << std::endl;
 
                 auto schema = innodb::SDIManager::parse_sdi_record(raw_bytes.data(), raw_bytes.size());

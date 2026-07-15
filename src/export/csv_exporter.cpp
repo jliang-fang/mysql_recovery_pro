@@ -1,4 +1,5 @@
 #include "dbrecovery/export/data_exporter.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
@@ -64,7 +65,7 @@ bool CSVExporter::export_record(const std::map<std::string, std::string>& record
     // DEBUG: Check comma count
     static int comma_debug = 0;
     if (comma_debug < 5 && comma_count != headers_.size() - 1) {
-        std::cerr << "[DEBUG COMMA] expected " << (headers_.size() - 1) << " commas, got " << comma_count << "\n";
+        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG COMMA] expected " << (headers_.size() - 1) << " commas, got " << comma_count << "\n";
         comma_debug++;
     }
 
@@ -87,7 +88,7 @@ std::string CSVExporter::get_result() const {
         // DEBUG: Check row content
         static int get_result_debug = 0;
         if (get_result_debug < 3) {
-            std::cerr << "[DEBUG GET_RESULT] row length=" << row.size()
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG GET_RESULT] row length=" << row.size()
                       << " first 50 chars=" << row.substr(0, 50) << "\n";
             get_result_debug++;
         }

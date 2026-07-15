@@ -20,6 +20,7 @@
 #include "dbrecovery/innodb/sdi_extractor.hpp"
 #include "dbrecovery/innodb/btree_node_parser.hpp"
 #include "dbrecovery/innodb/record_chain_rebuilder.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/blob_chain_rebuilder.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/utils/cli_parser.hpp"
@@ -1243,7 +1244,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 🔧 修复：在打开文件之前设置页大小提示
     // 这确保 InnoDBFileReader 使用用户指定的页大小，而不是自动检测
     if (page_size > 0) {
-        std::cout << "[DEBUG] Setting page_size hint before engine open: " << page_size << std::endl;
+        if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Setting page_size hint before engine open: " << page_size << std::endl;
         engine.set_page_size(page_size);
     }
 
@@ -1469,7 +1470,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
 
         if (verbose) {
-            std::cout << "[DEBUG] Column types from FRM:\n";
+            if (dbrecovery::innodb::g_verbose)             std::cout << "[DEBUG] Column types from FRM:\n";
             for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
                 std::cout << "  " << i+1 << ". " << index_columns[i].name
                           << " type=" << static_cast<int>(index_columns[i].col_type)
@@ -1613,7 +1614,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         if (type_upper_check == "ENUM" || type_upper_check == "SET") {
                             // This is ENUM or SET with comma-separated values like ENUM('a','b','c')
                             // The comma in size_str is part of the values, not DECIMAL precision
-                            std::cerr << "[DEBUG TYPE] type_str='" << type_str << "' paren_pos=" << paren_pos << " type_upper='" << type_upper_check << "'\n";
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG TYPE] type_str='" << type_str << "' paren_pos=" << paren_pos << " type_upper='" << type_upper_check << "'\n";
                             // Parse the values
                             std::string values_str = size_str;
                             std::vector<std::string> values;
@@ -1640,7 +1641,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                                     }
                                 }
                             }
-                            std::cerr << "[DEBUG VALUES] Parsed " << values.size() << " values for " << type_upper_check << "\n";
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG VALUES] Parsed " << values.size() << " values for " << type_upper_check << "\n";
                             if (type_upper_check == "ENUM") {
                                 icol.enum_values = values;
                             } else {
@@ -1662,7 +1663,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             // DEBUG
                             static int size_debug = 0;
                             if (size_debug < 5) {
-                                std::cerr << "[DEBUG SIZE_PARSE] type_str='" << type_str << "' size_str='" << size_str
+                                if (dbrecovery::innodb::g_verbose)                                 std::cerr << "[DEBUG SIZE_PARSE] type_str='" << type_str << "' size_str='" << size_str
                                           << "' -> col_length=" << icol.col_length << "\n";
                                 size_debug++;
                             }
@@ -1856,7 +1857,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         if (verbose) {
-            std::cout << "[DEBUG] Column types from --schema:\n";
+            if (dbrecovery::innodb::g_verbose)             std::cout << "[DEBUG] Column types from --schema:\n";
             for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
                 std::cout << "  " << i+1 << ". " << index_columns[i].name
                           << " type=" << static_cast<int>(index_columns[i].col_type)
@@ -1905,7 +1906,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             // DEBUG: Check if rec.fields has more than cols.size()
             static int field_size_debug = 0;
             if (field_size_debug < 5 && !cols.empty() && rec.fields.size() != cols.size()) {
-                std::cerr << "[DEBUG FIELD SIZE] rec.fields.size()=" << rec.fields.size()
+                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG FIELD SIZE] rec.fields.size()=" << rec.fields.size()
                           << " cols.size()=" << cols.size() << "\n";
                 field_size_debug++;
             }
@@ -1928,7 +1929,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 // DEBUG: Check specific column value
                 static int col_debug = 0;
                 if (col_debug < 3 && field_name == "default_value") {
-                    std::cerr << "[DEBUG COL] default_value field type=" << static_cast<int>(field.type)
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG COL] default_value field type=" << static_cast<int>(field.type)
                               << " str_value.size()=" << field.str_value.size()
                               << " str_value first 50=";
                     for (size_t j = 0; j < 50 && j < field.str_value.size(); j++) {
@@ -1962,7 +1963,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             // DEBUG: Check record map size
             static int map_debug = 0;
             if (map_debug < 3) {
-                std::cerr << "[DEBUG MAP] record_map has " << record_map.size() << " entries, cols.size()=" << cols.size() << "\n";
+                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG MAP] record_map has " << record_map.size() << " entries, cols.size()=" << cols.size() << "\n";
                 map_debug++;
             }
             result.push_back(record_map);
@@ -1996,6 +1997,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::InnoDBIndexParser index_parser;
         index_parser.set_recover_deleted(true);
         index_parser.set_bad_page_mode(2);
+        index_parser.set_verbose(verbose);
+        dbrecovery::innodb::g_verbose = verbose;
 
         // Priority 1: Try --schema option first
         bool has_schema = parse_schema_from_string(schema_str, index_parser, verbose);
@@ -2043,7 +2046,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     // Debug: show ordinal/physical_pos values being passed
                     static bool ordinal_debug_printed = false;
                     if (!ordinal_debug_printed) {
-                        std::cerr << "[DEBUG SDI PASS] Column '" << col.name << "' ordinal=" << col.ordinal
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG SDI PASS] Column '" << col.name << "' ordinal=" << col.ordinal
                                   << " physical_pos=" << col.physical_pos << "\n";
                         ordinal_debug_printed = true;
                     }
@@ -2063,7 +2066,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         // DEBUG: Print DECIMAL column info
                         static bool decimal_debug_printed = false;
                         if (!decimal_debug_printed) {
-                            std::cout << "[DEBUG DECIMAL] Column '" << col.name
+                            if (dbrecovery::innodb::g_verbose)                             std::cout << "[DEBUG DECIMAL] Column '" << col.name
                                       << "' mysql_type_id=" << col.mysql_type_id
                                       << " numeric_precision=" << col.numeric_precision
                                       << " numeric_scale=" << col.numeric_scale << "\n";
@@ -2085,7 +2088,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         // Debug
                         static bool dt_debug = false;
                         if (!dt_debug) {
-                            std::cerr << "[DEBUG DT] Column '" << col.name << "' datetime_precision="
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG DT] Column '" << col.name << "' datetime_precision="
                                       << (int)col.datetime_precision << " -> col_def.datetime_precision="
                                       << (int)col_def.datetime_precision << "\n";
                             dt_debug = true;
@@ -2305,11 +2308,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     // Debug: print enum/set values being passed
                     for (const auto& c : columns) {
                         if (!c.enum_values.empty()) {
-                            std::cerr << "[DEBUG PASS] Column '" << c.name << "' passing "
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG PASS] Column '" << c.name << "' passing "
                                       << c.enum_values.size() << " enum_values to parser\n";
                         }
                         if (!c.set_values.empty()) {
-                            std::cerr << "[DEBUG PASS] Column '" << c.name << "' passing "
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG PASS] Column '" << c.name << "' passing "
                                       << c.set_values.size() << " set_values to parser\n";
                         }
                     }
@@ -2503,30 +2506,30 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
         // Format 2: Simple format with columns array
         else if (json.contains("columns")) {
             schema.table_name = json.value("table_name", json.value("table", json.value("name", "")));
-            std::cerr << "[DEBUG SCHEMA] Format 2: table_name=" << schema.table_name << "\n";
+            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG SCHEMA] Format 2: table_name=" << schema.table_name << "\n";
             uint32_t ordinal = 1;
             for (const auto& col : json["columns"]) {
                 catalog::ColumnInfo col_info;
                 col_info.name = col.value("name", "");
-                std::cerr << "[DEBUG SCHEMA] Parsing column '" << col_info.name << "'\n";
+                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG SCHEMA] Parsing column '" << col_info.name << "'\n";
 
                 // Parse type - can be numeric (InnoDB type ID) or string (MySQL type name)
                 if (col.contains("type")) {
-                    std::cerr << "[DEBUG SCHEMA]   type field found, is_number=" << col["type"].is_number() << " is_string=" << col["type"].is_string() << "\n";
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG SCHEMA]   type field found, is_number=" << col["type"].is_number() << " is_string=" << col["type"].is_string() << "\n";
                     if (col["type"].is_number()) {
                         col_info.mysql_type_id = col["type"].get<uint32_t>();
-                        std::cerr << "[DEBUG SCHEMA]   numeric type ID: " << col_info.mysql_type_id << "\n";
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG SCHEMA]   numeric type ID: " << col_info.mysql_type_id << "\n";
                     } else if (col["type"].is_string()) {
                         // Map MySQL type strings to InnoDB type IDs
                         std::string type_str = col["type"].get<std::string>();
-                        std::cerr << "[DEBUG SCHEMA]   type string: " << type_str << "\n";
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG SCHEMA]   type string: " << type_str << "\n";
 
                         // Remove UNSIGNED suffix and set is_signed flag
                         bool is_unsigned = false;
                         if (type_str.find("_UNSIGNED") != std::string::npos) {
                             is_unsigned = true;
                             type_str = type_str.substr(0, type_str.find("_UNSIGNED"));
-                            std::cerr << "[DEBUG SCHEMA]   UNSIGNED detected, base type: " << type_str << "\n";
+                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG SCHEMA]   UNSIGNED detected, base type: " << type_str << "\n";
                         }
 
                         // Map base type string to InnoDB type ID
@@ -2562,6 +2565,7 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
                         else if (type_str == "TEXT") col_info.mysql_type_id = 16; // TEXT stored as VARCHAR internally
                         else col_info.mysql_type_id = 0;
 
+                        if (dbrecovery::innodb::g_verbose) 
                         std::cerr << "[DEBUG SCHEMA]   mapped to InnoDB type ID: " << col_info.mysql_type_id << " (is_unsigned=" << is_unsigned << ")\n";
 
                         // Set signed/unsigned flag

@@ -204,11 +204,11 @@ bool ProgressRecoveryCLI::run_scan() {
 bool ProgressRecoveryCLI::run_parallel_recovery() {
     std::cout << "[INFO] Starting Parallel Truncate recovery...\n";
     std::cout << "[INFO] Using " << thread_count_ << " threads\n";
-    std::cout << "[DEBUG] page_size_ = " << page_size_ << " (16384 = 16384: " << (page_size_ == 16384 ? "true" : "false") << ")\n";
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] page_size_ = " << page_size_ << " (16384 = 16384: " << (page_size_ == 16384 ? "true" : "false") << ")\n";
 
     // 设置页大小提示（在打开文件之前）
     dbrecovery::recovery::ParallelRecoveryEngine engine;
-    std::cout << "[DEBUG] Setting page_size_hint_ = " << page_size_ << std::endl;
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Setting page_size_hint_ = " << page_size_ << std::endl;
     engine.set_page_size(page_size_);
 
     // 打开文件
@@ -303,12 +303,12 @@ bool ProgressRecoveryCLI::run_parallel_recovery() {
 
 bool ProgressRecoveryCLI::run_truncate_recovery() {
     std::cout << "[INFO] Starting Truncate recovery...\n";
-    std::cout << "[DEBUG] page_size_ = " << page_size_ << " (16384 = 16384: " << (page_size_ == 16384 ? "true" : "false") << ")\n";
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] page_size_ = " << page_size_ << " (16384 = 16384: " << (page_size_ == 16384 ? "true" : "false") << ")\n";
 
     dbrecovery::recovery::RecoveryEngine engine;
 
     // 设置页大小提示（在打开文件之前）
-    std::cout << "[DEBUG] Setting page_size_hint_ = " << page_size_ << std::endl;
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Setting page_size_hint_ = " << page_size_ << std::endl;
     engine.set_page_size(page_size_);
 
     if (!engine.open(ibd_path_)) {
@@ -414,7 +414,7 @@ bool ProgressRecoveryCLI::run_header_repair() {
     if (use_detect) {
         // 从页类型字段检测实际页大小
         detected_page_size = innodb::InnoDBFileReader::detect_page_size(ibd_path_);
-        std::cout << "[DEBUG] Auto-detected page size: " << detected_page_size << "\n";
+        if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Auto-detected page size: " << detected_page_size << "\n";
         
         // 如果检测失败，使用默认值
         if (detected_page_size == 0) {
@@ -422,7 +422,7 @@ bool ProgressRecoveryCLI::run_header_repair() {
         }
     } else {
         // 用户指定了页大小，使用用户指定的值
-        std::cout << "[DEBUG] Using user-specified page size: " << detected_page_size << "\n";
+        if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Using user-specified page size: " << detected_page_size << "\n";
     }
 
     // 修复页

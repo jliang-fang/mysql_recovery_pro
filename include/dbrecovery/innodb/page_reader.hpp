@@ -10,6 +10,7 @@
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/utils/file_mapper.hpp"
 
 // 前向声明 TDEDecryptor，避免循环依赖
@@ -182,11 +183,11 @@ public:
      * @param page_size 页大小
      */
     void set_page_size_hint(uint32_t page_size) {
-        std::cout << "[DEBUG] set_page_size_hint called with: " << page_size << std::endl;
+        if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] set_page_size_hint called with: " << page_size << std::endl;
         page_size_hint_ = page_size;
         // 如果文件已打开且设置了有效的页大小提示，重新计算页大小
         if (page_size > 0 && page_size <= 65536 && file_size_ > 0 && file_size_ % page_size == 0) {
-            std::cout << "[DEBUG] Applying page_size_hint: " << page_size << " to file_size: " << file_size_ << std::endl;
+            if (dbrecovery::innodb::g_verbose)             std::cout << "[DEBUG] Applying page_size_hint: " << page_size << " to file_size: " << file_size_ << std::endl;
             page_size_ = page_size;
             total_pages_ = static_cast<uint32_t>(file_size_ / page_size);
             is_valid_ = (total_pages_ > 0 || file_size_ > 0);

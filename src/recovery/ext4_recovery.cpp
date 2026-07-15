@@ -468,13 +468,14 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     auto start_time = std::chrono::high_resolution_clock::now();
 
     // Debug: Log entry
-    std::cout << "[DEBUG] Ext4Recovery::scan() starting\n" << std::flush;
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Ext4Recovery::scan() starting\n" << std::flush;
 
     if (!read_superblock(config_.device_path, superblock_)) {
         result.errors.push_back("Invalid ext4 superblock or cannot read device");
         return result;
     }
 
+    if (dbrecovery::innodb::g_verbose) 
     std::cout << "[DEBUG] Superblock read successfully\n" << std::flush;
 
     // Parse superblock information
@@ -537,16 +538,18 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
         return result;
     }
 
+    if (dbrecovery::innodb::g_verbose) 
     std::cout << "[DEBUG] Output directory created\n" << std::flush;
 
     // Create worker threads for parallel group scanning
     std::vector<std::thread> workers;
-    std::cout << "[DEBUG] Creating " << config_.num_workers << " worker threads for " << result.group_count << " groups\n" << std::flush;
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Creating " << config_.num_workers << " worker threads for " << result.group_count << " groups\n" << std::flush;
 
     for (uint32_t i = 0; i < config_.num_workers && i < result.group_count; ++i) {
         workers.emplace_back(&Ext4Recovery::group_worker_thread, this, i, progress);
     }
 
+    if (dbrecovery::innodb::g_verbose) 
     std::cout << "[DEBUG] Worker threads created, joining...\n" << std::flush;
 
     for (auto& w : workers) {
@@ -583,11 +586,11 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
 void Ext4Recovery::group_worker_thread(uint32_t worker_id,
                                        std::function<void(double, const std::string&)> progress) {
 #ifdef __linux__
-    std::cout << "[DEBUG] Worker " << worker_id << " starting\n" << std::flush;
+    if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Worker " << worker_id << " starting\n" << std::flush;
 
     int fd = open(config_.device_path.c_str(), O_RDONLY);
     if (fd < 0) {
-        std::cout << "[DEBUG] Worker " << worker_id << " failed to open device\n" << std::flush;
+        if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Worker " << worker_id << " failed to open device\n" << std::flush;
         return;
     }
 
@@ -599,6 +602,7 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
     uint16_t inode_size = inode_size_;
     uint16_t desc_size = desc_size_;
 
+    if (dbrecovery::innodb::g_verbose) 
     std::cout << "[DEBUG] Worker " << worker_id << ": block_size=" << block_size
               << " group_count=" << group_count << " blocks_per_group=" << blocks_per_group
               << " inodes_per_group=" << inodes_per_group << "\n" << std::flush;
@@ -941,7 +945,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
 
         // DEBUG: Show index_columns size
         if (config_.verbose) {
-            std::cout << "[DEBUG] index_columns size: " << index_columns.size() << "\n";
+            if (dbrecovery::innodb::g_verbose)             std::cout << "[DEBUG] index_columns size: " << index_columns.size() << "\n";
             for (size_t i = 0; i < index_columns.size(); i++) {
                 std::cout << "  [" << i << "] " << index_columns[i].name
                           << " type=" << (int)index_columns[i].col_type

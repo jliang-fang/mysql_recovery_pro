@@ -1,3 +1,4 @@
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/redo_log.hpp"
@@ -501,7 +502,7 @@ InnoDBFileReader::InnoDBFileReader(const std::string& file_path, uint32_t page_s
         page_size_ = static_cast<uint32_t>(page_size_hint_);
         total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
         is_valid_ = (total_pages_ > 0 || file_size_ > 0);
-        std::cout << "[DEBUG] Using page_size_hint: " << page_size_ << " (total_pages: " << total_pages_ << ")" << std::endl;
+        if (g_verbose)         std::cout << "[DEBUG] Using page_size_hint: " << page_size_ << " (total_pages: " << total_pages_ << ")" << std::endl;
         return;
     }
 
@@ -613,6 +614,7 @@ InnoDBFileReader::InnoDBFileReader(const std::string& file_path, uint32_t page_s
             found_valid_page_size = true;
         }
         
+        if (g_verbose)         
         std::cout << "[DEBUG] Page size " << ps << ": " << num_pages << " pages, score = " << score << std::endl;
     }
 
