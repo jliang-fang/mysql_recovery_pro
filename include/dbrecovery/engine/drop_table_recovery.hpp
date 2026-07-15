@@ -354,6 +354,7 @@ public:
         std::string data_directory;     // MySQL data directory
         std::string output_directory;   // Output for recovered data
         std::string device_path;        // Optional: raw device for deep scan
+        std::string schema_file;        // Optional: JSON schema file path
 
         uint32_t page_size = 16384;
         bool scan_deleted_only = true;  // Only scan deleted records

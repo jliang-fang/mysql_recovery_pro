@@ -1089,6 +1089,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return 1;
         }
 
+        dbrecovery::innodb::g_verbose = verbose;
         std::cout << "[INFO] Starting DROP TABLE recovery...\n";
 
         dbrecovery::engine::DropTableRecovery recovery;
@@ -1097,6 +1098,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.data_directory = data_dir;
         config.output_directory = output_dir;
         config.page_size = page_size;
+        config.schema_file = schema_file_path;
         config.export_csv = (format == "csv");
         config.export_sql = (format == "sql");
         recovery.set_config(config);

@@ -9,6 +9,7 @@
 #include "dbrecovery/utils/innodb_checksum.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/innodb/page_reader.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -163,6 +164,12 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
         // MySQL 8.0+: Parse SDI pages from mysql.ibd to get DD table schemas
         // Then scan INDEX pages for deleted records in DD tables
 
+        // Declare shared maps at this scope so they're accessible in all branches
+        std::map<uint32_t, std::string> space_id_to_table;     // Map space_id -> table name
+        std::map<uint32_t, uint32_t> space_id_to_table_id;     // Map space_id -> table_id
+        std::map<std::string, uint64_t> table_to_index_id;
+        std::map<std::string, uint32_t> table_to_space_id;
+
         // Step 1: Parse SDI pages to get DD table index IDs
         // In MySQL 8.0, SDI pages can be anywhere in the file, not just pages 3-4
         std::map<std::string, uint64_t> dd_table_index_ids;
@@ -275,10 +282,6 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             // 1. mysql.tables DD records: "schema/table" with "id=N" (space_id)
             // 2. mysql.indexes DD records: "PRIMARY" with "flags=0;id=N;root=M;space_id=X;table_id=Y"
 
-            std::map<std::string, uint32_t> table_to_space_id;
-            std::map<std::string, uint64_t> table_to_index_id;
-            std::map<uint32_t, std::string> space_id_to_table;  // Map space_id -> table name
-
             for (uint64_t page_no = 0; page_no < num_pages; ++page_no) {
                 file.seekg(page_no * page_size_, std::ios::beg);
                 file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
@@ -309,6 +312,20 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                             sp_id_str += page_content[sp_id_start++];
                         }
 
+                        // Also parse table_id from se_private_data
+                        uint32_t table_id = 0;
+                        size_t table_id_pos = page_content.find("table_id=", pos);
+                        if (table_id_pos != std::string::npos && table_id_pos < pos + 100) {
+                            size_t tid_start = table_id_pos + 9;  // Skip "table_id="
+                            std::string tid_str;
+                            while (tid_start < page_content.size() && isdigit(page_content[tid_start])) {
+                                tid_str += page_content[tid_start++];
+                            }
+                            if (!tid_str.empty()) {
+                                table_id = std::stoul(tid_str);
+                            }
+                        }
+
                         if (!id_str.empty() && !sp_id_str.empty()) {
                             uint64_t idx_id = std::stoull(id_str);
                             uint32_t sp_id = std::stoul(sp_id_str);
@@ -318,13 +335,16 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                             if (primary_pos != std::string::npos && primary_pos > pos - 50) {
                                 // This is a PRIMARY index record
                                 if (dbrecovery::innodb::g_verbose)                                 std::cerr << "[DEBUG] Found PRIMARY index: id=" << idx_id
-                                          << ", space_id=" << sp_id << std::endl;
+                                          << ", space_id=" << sp_id << ", table_id=" << table_id << std::endl;
 
                                 // Map space_id to index_id
                                 if (sp_id > 3) {  // Skip system tablespace IDs
                                     // We'll map this to a table name later using space_id
                                     space_id_to_table[sp_id] = "";  // Placeholder
                                     table_to_index_id[std::to_string(sp_id)] = idx_id;
+                                    if (table_id > 0) {
+                                        space_id_to_table_id[sp_id] = table_id;
+                                    }
                                 }
                             }
                         }
@@ -422,11 +442,23 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
 
                 recovered_tables.push_back(metadata);
             }
-        }
 
-        // Step 2.5: Parse column records from mysql.columns DD records
-        // We need to scan pages for column definitions: column_name...table_id=N...type_info
-        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG] Parsing column records from mysql.columns..." << std::endl;
+            // Step 2.5: Parse column records from mysql.columns DD records
+            // Build dynamic known_table_ids from space_id_to_table and space_id_to_table_id
+            std::map<uint32_t, std::string> known_table_ids;
+            for (const auto& [sp_id, table_name] : space_id_to_table) {
+                if (!table_name.empty()) {
+                    auto it = space_id_to_table_id.find(sp_id);
+                    if (it != space_id_to_table_id.end()) {
+                        known_table_ids[it->second] = table_name;
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG] Mapped table_id=" << it->second
+                                  << " -> " << table_name << " (space_id=" << sp_id << ")" << std::endl;
+                    }
+                }
+            }
+
+            // We need to scan pages for column definitions: column_name...table_id=N...type_info
+            if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG] Parsing column records from mysql.columns..." << std::endl;
 
         // Map table_id -> columns
         std::map<uint32_t, std::vector<std::tuple<std::string, std::string, int, int>>> table_columns;
@@ -437,14 +469,6 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
         // space_id 6 -> rmrf_test/important_records
         // space_id 7 -> drop_test/users
         // table_id for these should be around 1070-1073 based on se_private_data
-
-        // Known table_ids for our test tables (from se_private_data in indexes)
-        const std::map<uint32_t, std::string> known_table_ids = {
-            {1070, "disaster_test/critical_data"},
-            {1071, "disaster_test/recovered_data"},
-            {1072, "rmrf_test/important_records"},
-            {1073, "drop_test/users"}
-        };
 
         // Search for column records with known table_ids
         for (const auto& [table_id, table_name] : known_table_ids) {
@@ -504,6 +528,15 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                                 if (type_str.find("int") != std::string::npos) {
                                     col_type = 4;  // InnoDB LONG type
                                     col_len = 4;
+                                    if (type_str.find("bigint") != std::string::npos) {
+                                        col_len = 8;
+                                    } else if (type_str.find("tinyint") != std::string::npos) {
+                                        col_len = 1;
+                                    } else if (type_str.find("smallint") != std::string::npos) {
+                                        col_len = 2;
+                                    } else if (type_str.find("mediumint") != std::string::npos) {
+                                        col_len = 3;
+                                    }
                                 } else if (type_str.find("varchar") != std::string::npos) {
                                     col_type = 16;  // InnoDB VARCHAR type
                                     // Extract length from varchar(N)
@@ -512,9 +545,46 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                                         std::string len_str = type_str.substr(len_pos + 1);
                                         col_len = std::stoi(len_str);
                                     }
+                                } else if (type_str.find("char") != std::string::npos && type_str.find("varchar") == std::string::npos) {
+                                    col_type = 16;  // CHAR also InnoDB VARCHAR type
+                                    size_t len_pos = type_str.find('(');
+                                    if (len_pos != std::string::npos) {
+                                        std::string len_str = type_str.substr(len_pos + 1);
+                                        col_len = std::stoi(len_str);
+                                    }
                                 } else if (type_str.find("timestamp") != std::string::npos) {
                                     col_type = 18;  // InnoDB TIMESTAMP2 type
                                     col_len = 4;
+                                } else if (type_str.find("datetime") != std::string::npos) {
+                                    col_type = 19;  // InnoDB DATETIME2 type
+                                    col_len = 5;
+                                } else if (type_str.find("date") != std::string::npos) {
+                                    col_type = 15;  // InnoDB DATE type
+                                    col_len = 3;
+                                } else if (type_str.find("decimal") != std::string::npos) {
+                                    col_type = 21;  // InnoDB DECIMAL type
+                                    col_len = 8;  // Default for DECIMAL(10,2)
+                                } else if (type_str.find("text") != std::string::npos) {
+                                    col_type = 27;  // InnoDB BLOB type (TEXT=BLOB)
+                                    col_len = 10;  // Default
+                                } else if (type_str.find("blob") != std::string::npos) {
+                                    col_type = 27;  // InnoDB BLOB type
+                                    col_len = 10;
+                                } else if (type_str.find("json") != std::string::npos) {
+                                    col_type = 31;  // InnoDB JSON type
+                                    col_len = 10;
+                                } else if (type_str.find("enum") != std::string::npos) {
+                                    col_type = 5;  // InnoDB ENUM type
+                                    col_len = 2;
+                                } else if (type_str.find("set") != std::string::npos) {
+                                    col_type = 5;  // InnoDB SET type
+                                    col_len = 8;
+                                } else if (type_str.find("float") != std::string::npos) {
+                                    col_type = 3;  // InnoDB FLOAT type
+                                    col_len = 4;
+                                } else if (type_str.find("double") != std::string::npos) {
+                                    col_type = 6;  // InnoDB DOUBLE type
+                                    col_len = 8;
                                 }
 
                                 if (dbrecovery::innodb::g_verbose) 
@@ -564,13 +634,20 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
                     col.mysql_type_id = col_type;
                     col.column_length = col_len;
                     col.ordinal = ordinal;
-                    col.physical_pos = ordinal;  // Same as ordinal for now
-                    col.is_nullable = false;  // Assume not nullable
+                    col.physical_pos = ordinal;  // Same as ordinal for DD-discovered columns
+                    col.is_nullable = true;  // Default nullable (safer for parsing)
+                    col.is_signed = true;  // Default signed
+                    col.charset_id = 45;  // utf8mb4_general_ci default
+                    col.collation_id = 45;
+                    col.numeric_precision = (col_type == 4) ? 10 : 0;  // INT default
+                    col.numeric_scale = 0;
+                    col.datetime_precision = 0;
 
                     schema.columns[ordinal++] = col;
                 }
 
                 table.schema = schema;
+                table.table_id = table_id;  // Set the actual table_id
                 if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG] Built schema for " << table.table_name
                           << " with " << schema.columns.size() << " columns" << std::endl;
             }
@@ -787,6 +864,8 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
 
         recovered_tables.push_back(metadata);
     }
+
+    }  // close is_mysql80_format() block
 
     return recovered_tables;
 }
@@ -1322,8 +1401,62 @@ DropTableRecovery::Result DropTableRecovery::recover(
             }
         }
 
-        // Step 2: If we have recovered table metadata, scan for orphaned pages
-        if (!result.recovered_tables.empty()) {
+        // Step 2: Scan for orphaned pages
+        // If we have recovered table metadata OR a schema file, proceed with scanning
+        bool has_schema = !config_.schema_file.empty();
+        if (!result.recovered_tables.empty() || has_schema) {
+
+            // Load schema from file if provided
+            catalog::TableSchema loaded_schema;
+            if (has_schema) {
+                try {
+                    std::ifstream sf(config_.schema_file);
+                    if (sf) {
+                        nlohmann::json schema_json = nlohmann::json::parse(sf);
+                        int ordinal = 0;
+                        for (const auto& col_json : schema_json) {
+                            catalog::ColumnInfo col;
+                            col.name = col_json.value("name", "");
+                            col.mysql_type_id = col_json.value("mysql_type_id", 0);
+                            col.is_nullable = col_json.value("is_nullable", true);
+                            col.is_signed = col_json.value("is_signed", true);
+                            col.column_length = col_json.value("column_length", 0);
+                            col.ordinal = col_json.value("ordinal", ordinal);
+                            col.physical_pos = col_json.value("physical_pos", ordinal);
+                            col.charset_id = col_json.value("charset_id", 45);
+                            col.collation_id = col_json.value("collation_id", 45);
+                            col.numeric_precision = col_json.value("numeric_precision", 0);
+                            col.numeric_scale = col_json.value("numeric_scale", 0);
+                            col.datetime_precision = col_json.value("datetime_precision", 0);
+                            col.enum_values = col_json.value("enum_values", std::vector<std::string>{});
+                            col.set_values = col_json.value("set_values", std::vector<std::string>{});
+                            loaded_schema.columns[ordinal] = col;
+                            ordinal++;
+                        }
+                        std::cout << "[INFO] Loaded schema from " << config_.schema_file
+                                  << " with " << loaded_schema.columns.size() << " columns\n";
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[WARN] Failed to load schema file: " << e.what() << "\n";
+                    has_schema = false;
+                }
+            }
+
+            // Apply loaded schema to recovered tables
+            if (has_schema && !loaded_schema.columns.empty()) {
+                if (result.recovered_tables.empty()) {
+                    RecoveredTableMetadata meta;
+                    meta.table_name = "recovered";
+                    meta.schema = loaded_schema;
+                    result.recovered_tables.push_back(meta);
+                } else {
+                    for (auto& table : result.recovered_tables) {
+                        loaded_schema.table_name = table.table_name;
+                        table.schema = loaded_schema;
+                    }
+                }
+            }
+
             // Collect all primary index IDs to scan for
             std::vector<uint64_t> primary_index_ids;
             for (const auto& table : result.recovered_tables) {
@@ -1375,8 +1508,10 @@ DropTableRecovery::Result DropTableRecovery::recover(
                     }
                 }
             } else if (!config_.data_directory.empty()) {
-                // Scan data directory for .ibd files
-                if (progress) progress(0.3, "Scanning data directory for orphaned pages...");
+                // Scan data directory for existing .ibd files (for tables that haven't been
+                // physically deleted yet, or for recovering from backup IBD files)
+                // Note: For actually dropped tables, use --device-path for disk carving
+                if (progress) progress(0.3, "Scanning data directory for .ibd files...");
 
                 auto ibd_files = find_ibd_files();
 
@@ -1386,30 +1521,55 @@ DropTableRecovery::Result DropTableRecovery::recover(
                     progress(0.4, oss.str());
                 }
 
-                // Scan each .ibd file for orphaned INDEX pages
+                // Scan each .ibd file for INDEX pages matching known index IDs
                 for (const auto& ibd_path : ibd_files) {
-                    RawDiskIOEngine engine;
-                    if (!engine.open(ibd_path)) continue;
+                    // Use InnoDBFileReader for proper page-boundary reading
+                    innodb::InnoDBFileReader reader(ibd_path);
+                    if (!reader.is_valid()) {
+                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG] Cannot open " << ibd_path << " as valid IBD file\n";
+                        continue;
+                    }
 
-                    page_scanner_ = std::make_unique<OrphanedPageScanner>(engine);
+                    uint32_t total_pages = reader.get_total_pages();
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] Reading " << ibd_path << ": "
+                              << total_pages << " pages, page_size=" << reader.get_page_size() << std::endl;
 
-                    // Scan for all primary index IDs
-                    auto orphaned_pages = page_scanner_->scan_by_index_ids(
-                        primary_index_ids, config_.page_size);
+                    // Read all pages and collect INDEX pages
+                    std::vector<OrphanedPageScanner::OrphanedPage> index_pages;
+                    for (uint32_t pg = 0; pg < total_pages; pg++) {
+                        auto page_data = reader.read_page_raw(pg);
+                        if (page_data.empty() || page_data.size() < 50) continue;
 
-                    // Extract records
+                        uint16_t page_type = (static_cast<uint16_t>(page_data[24]) << 8) | page_data[25];
+                        if (page_type == 0x45BF) {  // INDEX page
+                            OrphanedPageScanner::OrphanedPage op;
+                            op.page_number = pg;
+                            op.page_size = reader.get_page_size();
+                            op.disk_offset = static_cast<uint64_t>(pg) * reader.get_page_size();
+                            op.data = std::move(page_data);
+                            op.index_id = (static_cast<uint64_t>(op.data[66]) << 56) |
+                                         (static_cast<uint64_t>(op.data[67]) << 48) |
+                                         (static_cast<uint64_t>(op.data[68]) << 40) |
+                                         (static_cast<uint64_t>(op.data[69]) << 32) |
+                                         (static_cast<uint64_t>(op.data[70]) << 24) |
+                                         (static_cast<uint64_t>(op.data[71]) << 16) |
+                                         (static_cast<uint64_t>(op.data[72]) << 8)  |
+                                         static_cast<uint64_t>(op.data[73]);
+                            index_pages.push_back(std::move(op));
+                        }
+                    }
+
+                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] Found " << index_pages.size()
+                              << " INDEX pages in " << ibd_path << std::endl;
+
+                    // Extract records using schema
                     for (auto& table : result.recovered_tables) {
-                        if (table.primary_index_id == 0) continue;
+                        if (table.schema.columns.empty()) continue;
 
-                        auto it = orphaned_pages.find(table.primary_index_id);
-                        if (it == orphaned_pages.end() || it->second.empty()) continue;
-
-                        auto records = extract_records(it->second, table.schema);
+                        auto records = extract_records(index_pages, table.schema);
                         if (!records.empty()) {
                             result.records_per_table[table.table_id] += records.size();
                             result.total_records += records.size();
-
-                            // Export recovered data
                             export_data(table.table_name, table.schema, records);
                         }
                     }
@@ -1463,32 +1623,82 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
 
     std::vector<std::map<std::string, std::string>> all_records;
 
+    if (schema.columns.empty()) {
+        std::cout << "[DEBUG DROP] schema.columns is EMPTY! schema.table_name=" << schema.table_name << std::endl;
+        return all_records;
+    }
+
     // Build column definitions for InnoDBIndexParser
     std::vector<innodb::IndexColumnDef> col_defs;
+    uint32_t n_pk = 0;
+    std::set<std::string> pk_col_names;
+
+    // Find PK columns from indexes
+    for (const auto& idx_info : schema.indexes) {
+        if (idx_info.is_primary) {
+            for (const auto& col_name : idx_info.columns) {
+                pk_col_names.insert(col_name);
+            }
+        }
+    }
+
     for (const auto& [idx, col] : schema.columns) {
         innodb::IndexColumnDef def;
         def.name = col.name;
         def.col_type = col.mysql_type_id;
         def.is_nullable = col.is_nullable;
-        def.is_unsigned = !col.is_signed;  // ColumnInfo uses is_signed, invert it
+        def.is_unsigned = !col.is_signed;
         def.col_length = col.column_length;
         def.precision = col.numeric_precision;
         def.scale = col.numeric_scale;
         def.datetime_precision = col.datetime_precision;
         def.enum_values = col.enum_values;
         def.set_values = col.set_values;
+        def.char_set_id = col.charset_id;
+        def.mb_maxlen = 4;  // utf8mb4 default
+        if (col.charset_id == 63) {
+            def.mb_maxlen = 1;  // binary charset
+        } else if (col.charset_id == 8 || col.charset_id == 83) {
+            def.mb_maxlen = 1;  // latin1, utf8
+        }
+
+        // CRITICAL: Set physical_pos and ordinal_position for correct InnoDB storage order
+        def.ordinal_position = col.ordinal;
+        def.physical_pos = col.physical_pos;
+
+        // Set is_big for variable-length columns
+        if (def.is_variable_length()) {
+            def.is_big = (def.col_length * def.mb_maxlen > 255);
+        }
+
+        // Set is_binary based on charset
+        def.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (def.col_type != 31);
+
+        // Check if PK column
+        if (pk_col_names.count(col.name) > 0) {
+            n_pk++;
+        }
+
         col_defs.push_back(def);
+    }
+
+    if (n_pk == 0 && !col_defs.empty()) {
+        n_pk = 1;  // Default: first column is PK
     }
 
     // Create parser with schema
     innodb::InnoDBIndexParser parser;
-    parser.set_columns(col_defs, false, 1);
-    parser.set_recover_deleted(true);  // Include deleted records
-    parser.set_bad_page_mode(1);  // Fast mode for damaged pages
+    parser.set_columns(col_defs, false, n_pk);
+    parser.set_recover_deleted(false);  // Only recover non-deleted records
+    parser.set_bad_page_mode(0);  // Normal mode for properly structured pages
 
     // Process each orphaned page
     for (const auto& page : pages) {
         if (page.data.empty() || page.data.size() < 100) continue;
+
+        // Verify this is an INDEX page (type 0x45BF)
+        uint16_t page_type = (static_cast<uint16_t>(page.data[24]) << 8) | page.data[25];
+        if (page_type != 0x45BF) continue;
 
         // Check if this is a leaf page (level 0)
         // Page header: offset 26-27 = level (big-endian)
@@ -1498,6 +1708,17 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
         try {
             // Use InnoDBIndexParser to extract records
             auto records = parser.parse_page(page.data.data(), page.page_size, page.page_number);
+
+            if (!records.empty() && all_records.empty()) {
+                std::cout << "[DEBUG DROP] First record on page " << page.page_number
+                          << " fields=" << records[0].fields.size()
+                          << " cols=" << col_defs.size() << std::endl;
+                for (size_t i = 0; i < std::min(records[0].fields.size(), col_defs.size()); i++) {
+                    std::cout << "[DEBUG DROP]   field[" << i << "] name=" << col_defs[i].name
+                              << " value='" << records[0].fields[i].str_value.substr(0, 40) << "'"
+                              << " size=" << records[0].fields[i].str_value.size() << std::endl;
+                }
+            }
 
             for (const auto& rec : records) {
                 std::map<std::string, std::string> record_map;

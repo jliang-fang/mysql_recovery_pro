@@ -19,6 +19,7 @@
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include <fstream>
 #include <iostream>
 #include <algorithm>
@@ -655,6 +656,66 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
 
     std::vector<std::map<std::string, std::string>> records;
 
+    // Collect known column names from schema
+    std::vector<std::string> col_names;
+    if (!schema.columns.empty()) {
+        for (const auto& [idx, col] : schema.columns) {
+            col_names.push_back(col.name);
+        }
+    }
+
+    // If we have schema, try InnoDBIndexParser first for high-quality recovery
+    if (!schema.columns.empty()) {
+        std::vector<innodb::IndexColumnDef> col_defs;
+        uint32_t n_pk = 0;
+        for (const auto& [idx, col] : schema.columns) {
+            innodb::IndexColumnDef def;
+            def.name = col.name;
+            def.col_type = col.mysql_type_id;
+            def.is_nullable = col.is_nullable;
+            def.is_unsigned = !col.is_signed;
+            def.col_length = col.column_length;
+            def.precision = col.numeric_precision;
+            def.scale = col.numeric_scale;
+            def.datetime_precision = col.datetime_precision;
+            def.enum_values = col.enum_values;
+            def.set_values = col.set_values;
+            def.char_set_id = col.charset_id;
+            def.ordinal_position = col.ordinal;
+            def.physical_pos = col.physical_pos;
+            def.mb_maxlen = 4;
+            if (col.charset_id == 63) def.mb_maxlen = 1;
+            else if (col.charset_id == 8 || col.charset_id == 83) def.mb_maxlen = 1;
+            if (def.is_variable_length()) def.is_big = (def.col_length * def.mb_maxlen > 255);
+            def.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (def.col_type != 31);
+            col_defs.push_back(def);
+        }
+        if (n_pk == 0 && !col_defs.empty()) n_pk = 1;
+
+        innodb::InnoDBIndexParser parser;
+        parser.set_columns(col_defs, false, n_pk);
+        parser.set_recover_deleted(true);
+        parser.set_bad_page_mode(2);  // Try mode for truncated pages
+
+        auto index_records = parser.parse_ibd_force(ibd_path);
+        if (!index_records.empty()) {
+            for (const auto& rec : index_records) {
+                std::map<std::string, std::string> record;
+                for (size_t i = 0; i < rec.fields.size() && i < col_names.size(); i++) {
+                    record[col_names[i]] = rec.fields[i].str_value;
+                }
+                if (record.size() >= 2) {
+                    records.push_back(record);
+                }
+            }
+            if (!records.empty()) {
+                std::cout << "[INFO] Detected " << records.size()
+                          << " records via InnoDBIndexParser (schema-aware)\n";
+                return records;
+            }
+        }
+    }
+
     /**
      * PhotoRec-style residual data detection:
      *
@@ -764,7 +825,12 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
                                 }
 
                                 if (!value.empty()) {
-                                    std::string col_name = "col_" + std::to_string(col_idx);
+                                    std::string col_name;
+                                    if (col_idx < col_names.size()) {
+                                        col_name = col_names[col_idx];
+                                    } else {
+                                        col_name = "col_" + std::to_string(col_idx);
+                                    }
                                     record[col_name] = value;
                                 }
 

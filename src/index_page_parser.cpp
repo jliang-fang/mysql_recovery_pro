@@ -2837,30 +2837,31 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
         }
     }
 
-    // CRITICAL FIX: Always try brute force scan to catch any missed records
-    // Even when recovery rate seems good (only missing ~1 per page), we need to catch all
-    // The page directory method may miss records at chain boundaries
-    auto try_records = parse_page_try(page_data, page_size, page_no);
-    if (try_records.size() > 0) {
-        std::set<uint16_t> seen_heap_no;
-        for (const auto& rec : records) {
-            seen_heap_no.insert(rec.heap_no);
-        }
-        size_t added = 0;
-        for (const auto& rec : try_records) {
-            if (seen_heap_no.insert(rec.heap_no).second) {
-                records.push_back(rec);
-                added++;
+    // Only merge brute force results if chain recovery missed records
+    // When chain recovers expected count (matching n_recs), skip brute force
+    // to avoid false positives from empty/unused page space
+    if (records.size() < page_hdr->n_recs) {
+        auto try_records = parse_page_try(page_data, page_size, page_no);
+        if (try_records.size() > 0) {
+            std::set<uint16_t> seen_heap_no;
+            for (const auto& rec : records) {
+                seen_heap_no.insert(rec.heap_no);
             }
-        }
-        // Debug output
-        static int merge_debug = 0;
-        if (merge_debug < 5 && added > 0) {
-            if (g_verbose)             std::cerr << "[DEBUG MERGE] page_no=" << page_no
-                      << " chain=" << records.size() - added
-                      << " try_added=" << added
-                      << " total=" << records.size() << "\n";
-            merge_debug++;
+            size_t added = 0;
+            for (const auto& rec : try_records) {
+                if (seen_heap_no.insert(rec.heap_no).second) {
+                    records.push_back(rec);
+                    added++;
+                }
+            }
+            static int merge_debug = 0;
+            if (merge_debug < 5 && added > 0) {
+                if (g_verbose)                 std::cerr << "[DEBUG MERGE] page_no=" << page_no
+                          << " chain=" << records.size() - added
+                          << " try_added=" << added
+                          << " total=" << records.size() << "\n";
+                merge_debug++;
+            }
         }
     }
 
