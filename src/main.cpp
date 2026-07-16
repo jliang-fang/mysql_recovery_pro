@@ -530,7 +530,11 @@ int main(int argc, char** argv) {
     std::string database = parser.get_option("database", "recovered_db");
 
     // ✅ 验证必选参数
-    if (ibd_path.empty() && data_dir.empty() && batch.empty() && disk_path.empty() && !device_scan && !drop_recovery && !schemaless_recovery) {
+    if (g_verbose) {
+        std::cerr << "[DEBUG] ibd_path='" << ibd_path << "' data_dir='" << data_dir
+                  << "' pre_truncate_ibd='" << pre_truncate_ibd << "' truncate_recovery=" << truncate_recovery << "\n";
+    }
+    if (ibd_path.empty() && data_dir.empty() && batch.empty() && disk_path.empty() && !device_scan && !drop_recovery && !schemaless_recovery && pre_truncate_ibd.empty()) {
         std::cerr << "[ERROR] IBD file path, data directory, batch file, or disk path is required\n";
         std::cerr << "\nUsage:\n";
         std::cerr << "  ./build/mysql_recovery_pro --ibd=<path> [options]\n";
@@ -2598,10 +2602,35 @@ int main(int argc, char** argv) {
                 truncate_recovery.enable_disk_scan(true);
                 truncate_recovery.enable_undo_log(!system_tablespace.empty());
 
-                // Create a minimal schema
+                // Create schema from SDI/CLI-provided column definitions
                 dbrecovery::catalog::TableSchema schema;
                 schema.table_name = result_table;
                 schema.page_size = page_size;
+
+                // Populate schema columns from index_columns (extracted from SDI or --schema)
+                if (!index_columns.empty()) {
+                    for (size_t ci = 0; ci < index_columns.size(); ci++) {
+                        const auto& icol = index_columns[ci];
+                        dbrecovery::catalog::ColumnInfo col_info;
+                        col_info.name = icol.name;
+                        col_info.ordinal = icol.ordinal_position;
+                        col_info.physical_pos = icol.physical_pos;
+                        col_info.mysql_type_id = icol.col_type;
+                        col_info.is_nullable = icol.is_nullable;
+                        col_info.is_signed = !icol.is_unsigned;
+                        col_info.column_length = icol.col_length;
+                        col_info.charset_id = icol.char_set_id;
+                        col_info.numeric_precision = icol.precision;
+                        col_info.numeric_scale = icol.scale;
+                        col_info.datetime_precision = icol.datetime_precision;
+                        col_info.enum_values = icol.enum_values;
+                        col_info.set_values = icol.set_values;
+                        schema.columns[ci] = col_info;
+                    }
+                    if (g_verbose) {
+                        std::cout << "[DEBUG TRUNCATE] Schema populated with " << index_columns.size() << " columns\n";
+                    }
+                }
 
                 auto truncate_result = truncate_recovery.recover(actual_ibd_path, schema,
                     [](double progress, const std::string& msg) {

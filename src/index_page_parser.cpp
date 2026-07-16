@@ -448,18 +448,47 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
                     result += buf;
                 }
             } else if (val_type == 0x0f) {  // OPAQUE (custom MySQL data type)
-                // Format: [mysql_type(1B)][precision(1B)][scale(1B)][value...]
-                if (val_abs_offset + 3 <= offset + field_size) {
+                // Format: [mysql_type(1B)] [precision(1B)] [unknown(1B)] [scale(1B)] [sign(1B)] [value...]
+                // Note: In MySQL 8.0's JSON binary, the opaque decimal format has
+                // an extra byte between precision and scale compared to decimal2bin.
+                // We read: type, precision, _, scale, sign, then groups.
+                if (val_abs_offset + 5 <= offset + field_size) {
                     uint8_t opaque_type = data[val_abs_offset];
                     uint8_t opaque_prec = data[val_abs_offset + 1];
-                    uint8_t opaque_scale = data[val_abs_offset + 2];
-                    size_t val_start = val_abs_offset + 3;
-                    size_t val_len = (offset + field_size > val_start) ? (offset + field_size - val_start) : 0;
+                    // uint8_t opaque_unknown = data[val_abs_offset + 2];  // always 0x0a
+                    uint8_t opaque_scale = data[val_abs_offset + 3];
+                    uint8_t opaque_sign = data[val_abs_offset + 4];
+                    size_t val_start = val_abs_offset + 5;
+                    size_t max_avail = (offset + field_size > val_start) ? (offset + field_size - val_start) : 0;
+
+                    // Compute actual value length from precision and scale
+                    auto count_decimal_bytes = [](uint32_t prec, uint32_t scale) -> size_t {
+                        if (prec < scale) return 0;
+                        uint32_t int_digits = prec - scale;
+                        auto group_bytes = [](uint32_t digits) -> size_t {
+                            size_t bytes = 0;
+                            int full = digits / 9;
+                            int rem = digits % 9;
+                            bytes += full * 4;
+                            if (rem > 0) {
+                                bytes += (rem < 7) ? (rem + 1) / 2 : 4;
+                            }
+                            return bytes;
+                        };
+                        return group_bytes(int_digits) + group_bytes(scale);
+                    };
 
                     // For DECIMAL (246): decode the packed decimal value
-                    if (opaque_type == 246 && val_len > 0 && val_len <= 20) {
-                        // DECIMAL encoding: sign byte + packed groups
+                    if (opaque_type == 246) {
+                        size_t expected_len = count_decimal_bytes(opaque_prec, opaque_scale);
+                        size_t val_len = std::min(expected_len, max_avail);
+
+                        if (val_len > 0 && val_len <= 20) {
+                        // DECIMAL encoding: groups for int_part and frac_part
+                        // sign byte is at val_start-1 (opaque_sign)
                         uint32_t int_digits = opaque_prec - opaque_scale;
+                        bool is_neg = (opaque_sign & 0x80) == 0;
+
                         // Use calc_groups with reversed p1 for correct on-disk order
                         auto groups_int = [](uint32_t d) -> std::vector<std::pair<int,int>> {
                             std::vector<std::pair<int,int>> g;
@@ -487,11 +516,9 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
                         auto p2 = groups_frac(opaque_scale);
 
                         std::vector<uint8_t> dec_data(data + val_start, data + val_start + val_len);
-                        bool is_neg = (dec_data[0] & 0x80) == 0;
                         if (is_neg) {
                             for (auto& b : dec_data) b = ~b;
                         }
-                        dec_data[0] -= 128;
 
                         size_t ro = 0;
                         std::string int_str, frac_str;
@@ -525,6 +552,7 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
                         snprintf(buf, sizeof(buf), "0x%02x", opaque_type);
                         result += buf;
                     }
+                }
                 }
             } else if (val_type <= 0x03) {  // 嵌套JSON对象/数组
                 // For nested values, data at val_abs_offset starts with COUNT, then SIZE
