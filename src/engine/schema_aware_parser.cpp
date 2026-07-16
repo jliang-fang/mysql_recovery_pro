@@ -1238,13 +1238,15 @@ std::string TupleParser::decode_field_data(
         }
         case mt::SET: {
             // SET stored as bitmap (1-8 bytes, big-endian)
-            if (!col.set_values.empty()) {
+            // Read bitmap as big-endian
+            uint64_t bits = 0;
+            for (uint32_t i = 0; i < data_size && i < 8; i++) {
+                bits = (bits << 8) | data[offset + i];
+            }
+            if (bits == 0) {
+                value = "";  // Empty SET
+            } else if (!col.set_values.empty()) {
                 std::string result;
-                // Read bitmap as big-endian
-                uint64_t bits = 0;
-                for (uint32_t i = 0; i < data_size && i < 8; i++) {
-                    bits = (bits << 8) | data[offset + i];
-                }
                 for (size_t i = 0; i < col.set_values.size() && i < 64; i++) {
                     if (bits & (1ULL << i)) {
                         if (!result.empty()) result += ",";

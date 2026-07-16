@@ -2780,21 +2780,31 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         case 23:
         case 248: {
             val.type = IndexFieldValue::Type::STRING_VAL;
-            if (field_size > 0 && !col.set_values.empty()) {
-                uint64_t bits = 0;
-                for (size_t i = 0; i < field_size; i++) {
-                    bits = (bits << 8) | data[offset + i];
-                }
+            val.raw_bytes.clear();  // Clear raw_bytes since we decoded the value
+            uint64_t bits = 0;
+            for (size_t i = 0; i < field_size && i < 8; i++) {
+                bits = (bits << 8) | data[offset + i];
+            }
+            if (bits == 0) {
+                val.str_value = "";
+            } else if (!col.set_values.empty()) {
                 std::string result;
-                for (size_t n = 0; n < col.set_values.size(); n++) {
+                for (size_t n = 0; n < col.set_values.size() && n < 64; n++) {
                     if ((bits & (1ULL << n)) != 0) {
                         if (!result.empty()) result += ",";
                         result += col.set_values[n];
                     }
                 }
-                val.str_value = result.empty() ? "" : result;
+                val.str_value = result;
             } else {
-                val.str_value = "<SET>";
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (size_t i = 0; i < field_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
+                }
+                oss << "')";
+                val.str_value = oss.str();
             }
             break;
         }

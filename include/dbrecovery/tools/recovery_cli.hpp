@@ -1948,8 +1948,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 } else if (!field.str_value.empty()) {
                     // str_value contains the decoded value (text, UNHEX format, etc.)
                     record_map[field_name] = field.str_value;
+                } else if (field.type == dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL) {
+                    // STRING_VAL with empty str_value = empty string (e.g. empty SET)
+                    record_map[field_name] = "";
                 } else if (!field.raw_bytes.empty()) {
-                    // raw_bytes fallback (should rarely happen now)
+                    // raw_bytes fallback for non-string types
                     std::ostringstream hex_ss;
                     hex_ss << "UNHEX('";
                     for (uint8_t b : field.raw_bytes) {
