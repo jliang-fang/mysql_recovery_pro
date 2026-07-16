@@ -1458,6 +1458,8 @@ int main(int argc, char** argv) {
                     tcol.mysql_type = static_cast<uint8_t>(col.mysql_type_id);
                     tcol.is_nullable = col.is_nullable;
                     tcol.is_primary_key = (pos == 1);
+                    tcol.enum_values = col.enum_values;
+                    tcol.set_values = col.set_values;
                     schema_template.columns.push_back(tcol);
                     if (tcol.is_primary_key) {
                         schema_template.primary_key_columns.push_back(
@@ -1478,6 +1480,8 @@ int main(int argc, char** argv) {
                         tcol.mysql_type = static_cast<uint8_t>(col.mysql_type_id);
                         tcol.is_nullable = col.is_nullable;
                         tcol.max_length = col.column_length;
+                        tcol.enum_values = col.enum_values;
+                        tcol.set_values = col.set_values;
                         schema_template.columns.push_back(tcol);
                     }
                     has_schema = true;

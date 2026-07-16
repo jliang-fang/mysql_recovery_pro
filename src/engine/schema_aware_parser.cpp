@@ -1219,6 +1219,53 @@ std::string TupleParser::decode_field_data(
             }
             break;
         }
+        case mt::ENUM: {
+            // ENUM stored as 1 or 2 byte index (big-endian)
+            uint32_t idx = 0;
+            if (data_size == 1) {
+                idx = data[offset];
+            } else if (data_size >= 2) {
+                idx = (static_cast<uint32_t>(data[offset]) << 8) | data[offset + 1];
+            }
+            // InnoDB stores ENUM starting at index 1, convert to 0-based
+            if (idx > 0 && idx - 1 < col.enum_values.size()) {
+                value = col.enum_values[idx - 1];
+            } else {
+                value = "<ENUM_" + std::to_string(idx) + ">";
+            }
+            offset += data_size;
+            break;
+        }
+        case mt::SET: {
+            // SET stored as bitmap (1-8 bytes, big-endian)
+            if (!col.set_values.empty()) {
+                std::string result;
+                // Read bitmap as big-endian
+                uint64_t bits = 0;
+                for (uint32_t i = 0; i < data_size && i < 8; i++) {
+                    bits = (bits << 8) | data[offset + i];
+                }
+                for (size_t i = 0; i < col.set_values.size() && i < 64; i++) {
+                    if (bits & (1ULL << i)) {
+                        if (!result.empty()) result += ",";
+                        result += col.set_values[i];
+                    }
+                }
+                value = result;
+            } else {
+                // No set_values available, output as hex
+                std::ostringstream oss;
+                oss << "UNHEX('";
+                for (uint32_t i = 0; i < data_size; i++) {
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
+                }
+                oss << "')";
+                value = oss.str();
+            }
+            offset += data_size;
+            break;
+        }
         case mt::BIT: {
             uint32_t byte_len = (col.max_length + 7) / 8;
             if (byte_len == 0) byte_len = data_size;

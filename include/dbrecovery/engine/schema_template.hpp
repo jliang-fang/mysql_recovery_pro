@@ -59,6 +59,10 @@ struct SchemaTemplate {
         uint16_t version_added = 0;    // 列被添加的行版本 (0=初始创建)
         uint16_t version_dropped = 66; // 列被删除的行版本 (66=未删除)
         uint32_t physical_pos = 0;     // InnoDB物理存储位置
+
+        // ✅ ENUM/SET 值列表
+        std::vector<std::string> enum_values;  // ENUM 类型的可选值列表
+        std::vector<std::string> set_values;   // SET 类型的可选值列表
     };
 
     std::vector<Column> columns;
