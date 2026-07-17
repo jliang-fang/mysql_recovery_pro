@@ -209,13 +209,35 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
         }
     }
 
-    // Strategy 2: Always run signature scan for maximum recovery
-    // Signature scan finds pages that inode scan might miss
+    // Strategy 2: Scan free space blocks for InnoDB pages
+    // This finds data from deleted files (e.g. DROP TABLE) whose inode metadata was zeroed
+    if (config_.scan_free_space) {
+        size_t pages_before = result.pages_recovered;
+        if (config_.verbose) {
+            std::cout << "[INFO] Running free block scan (found "
+                      << pages_before << " via inode scan)\n";
+        }
+        scan_free_blocks(progress);
+
+        {
+            std::lock_guard<std::mutex> lock(result_mutex_);
+            result.pages_by_index_id = last_result_.pages_by_index_id;
+            result.pages_recovered = last_result_.pages_recovered;
+        }
+
+        if (config_.verbose) {
+            std::cout << "[INFO] Free block scan found "
+                      << (result.pages_recovered - pages_before) << " additional pages\n";
+        }
+    }
+
+    // Strategy 3: Always run signature scan for maximum recovery
+    // Signature scan finds pages that other strategies might miss
     if (config_.signature_scan) {
         size_t pages_before = result.pages_recovered;
         if (config_.verbose) {
             std::cout << "[INFO] Running signature scan for additional pages (found "
-                      << pages_before << " via inode scan)\n";
+                      << pages_before << " via inode + free block scan)\n";
         }
         signature_scan(progress);
 
@@ -231,7 +253,7 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
         }
     }
 
-    // Strategy 3: Raw data pattern scan for non-page-aligned records
+    // Strategy 4: Raw data pattern scan for non-page-aligned records
     // This helps recover data from TRUNCATE where page headers are corrupted
     if (config_.signature_scan && result.pages_recovered < 1000) {
         size_t pages_before = result.pages_recovered;
@@ -927,6 +949,184 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
 uint64_t XfsDiskCarver::block_to_disk_offset(uint64_t fsblock) const {
     uint32_t block_size = be32toh(superblock_.sb_blocksize);
     return fsblock * block_size;
+}
+
+// ==================== Free Block Scanning ====================
+
+void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::string&)> progress) {
+#ifdef __linux__
+    // Walk XFS free space BNO btree and scan each free block for InnoDB page signatures.
+    // This is the XFS equivalent of ext4's scan_freed_blocks - it finds data blocks
+    // that were freed (e.g. by DROP TABLE) but whose inode metadata was zeroed.
+
+    uint32_t block_size = be32toh(superblock_.sb_blocksize);
+    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+    uint32_t ag_count = be32toh(superblock_.sb_agcount);
+    uint16_t sect_size = be16toh(superblock_.sb_sectsize);
+
+    if (block_size == 0 || ag_blocks == 0) return;
+
+    uint32_t page_size = config_.page_size;
+    uint32_t blocks_per_page = page_size / block_size;
+    if (blocks_per_page == 0) blocks_per_page = 1;
+
+    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    if (fd < 0) return;
+
+    std::atomic<uint64_t> blocks_scanned{0};
+    std::atomic<uint64_t> pages_found{0};
+    auto last_progress_time = std::chrono::steady_clock::now();
+
+    // Process each AG
+    for (uint32_t ag_index = 0; ag_index < ag_count && !should_stop_.load(); ag_index++) {
+        // Read AGF
+        uint64_t agf_offset = static_cast<uint64_t>(ag_index) *
+                             static_cast<uint64_t>(ag_blocks) *
+                             static_cast<uint64_t>(block_size) +
+                             static_cast<uint64_t>(sect_size);
+
+        xfs_agf agf;
+        if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) continue;
+        if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) continue;
+
+        uint32_t bno_root = be32toh(agf.agf_roots[0]);
+        uint32_t bno_level = be32toh(agf.agf_levels[0]);
+        if (bno_root == 0) continue;
+
+        // Walk free space BNO btree to collect free extents
+        // Use iterative stack-based traversal
+        struct StackEntry {
+            uint32_t block_num;
+            int depth;
+        };
+        std::vector<StackEntry> stack;
+        stack.push_back({bno_root, 0});
+
+        std::vector<std::pair<uint64_t, uint64_t>> free_extents;  // (start_block, count)
+
+        while (!stack.empty() && !should_stop_.load()) {
+            auto entry = stack.back();
+            stack.pop_back();
+
+            if (entry.depth >= 10 || entry.block_num == 0 || entry.block_num >= ag_blocks) continue;
+
+            uint64_t block_offset = static_cast<uint64_t>(ag_index) *
+                                   static_cast<uint64_t>(ag_blocks) *
+                                   static_cast<uint64_t>(block_size) +
+                                   static_cast<uint64_t>(entry.block_num) * block_size;
+
+            std::vector<uint8_t> buf(block_size);
+            if (pread(fd, buf.data(), block_size, block_offset) != static_cast<ssize_t>(block_size)) continue;
+
+            uint32_t magic = read_be<uint32_t>(buf.data(), 0);
+            // Check for alloc btree magic (BNO = by block number)
+            if (magic != XFS_ABTB_MAGIC && magic != XFS_ABTB_CRC_MAGIC) continue;
+
+            bool is_crc = (magic == XFS_ABTB_CRC_MAGIC);
+            size_t hdr_size = is_crc ? 56 : 16;
+            if (block_size < hdr_size) continue;
+
+            uint16_t level = read_be<uint16_t>(buf.data(), 4);
+            uint16_t numrecs = read_be<uint16_t>(buf.data(), 6);
+            if (numrecs == 0 || numrecs > 1000) continue;
+
+            if (level > 0) {
+                // Internal node: push children
+                size_t ptr_offset = (hdr_size + block_size) / 2;
+                for (uint16_t i = 0; i < numrecs && ptr_offset + 4 <= block_size; i++) {
+                    uint32_t child = read_be<uint32_t>(buf.data(), ptr_offset + i * 4);
+                    if (child != 0 && child < ag_blocks) {
+                        stack.push_back({child, entry.depth + 1});
+                    }
+                }
+            } else {
+                // Leaf node: extract free extent records
+                // xfs_alloc_rec: ar_startblock (4), ar_blockcount (4) = 8 bytes
+                size_t rec_offset = hdr_size;
+                for (uint16_t i = 0; i < numrecs && rec_offset + 8 <= block_size; i++) {
+                    uint32_t start = read_be<uint32_t>(buf.data(), rec_offset);
+                    uint32_t count = read_be<uint32_t>(buf.data(), rec_offset + 4);
+                    rec_offset += 8;
+
+                    if (start > 0 && count > 0 && start + count <= ag_blocks) {
+                        uint64_t abs_start = static_cast<uint64_t>(ag_index) * ag_blocks + start;
+                        free_extents.push_back({abs_start, count});
+                    }
+                }
+            }
+        }
+
+        // Scan each free extent for InnoDB pages
+        uint64_t ag_base = static_cast<uint64_t>(ag_index) * ag_blocks;
+        for (const auto& [start_block, count] : free_extents) {
+            if (should_stop_.load()) break;
+
+            // Scan at page-aligned offsets within this free extent
+            uint64_t extent_start = ag_base + start_block;
+            uint64_t extent_end = extent_start + count;
+
+            for (uint64_t fsblock = extent_start; fsblock + blocks_per_page <= extent_end;
+                 fsblock += blocks_per_page) {
+                uint64_t disk_offset = fsblock * block_size;
+                std::vector<uint8_t> page_data(page_size);
+
+                if (pread(fd, page_data.data(), page_size, disk_offset) != static_cast<ssize_t>(page_size)) {
+                    continue;
+                }
+
+                blocks_scanned.fetch_add(1);
+
+                if (page_data.size() >= 26) {
+                    uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+                    if (page_type == FIL_PAGE_INDEX) {
+                        uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+                        uint32_t page_no = (page_data.size() >= 12) ?
+                            read_be<uint32_t>(page_data.data(), 8) : 0;
+
+                        if (index_id > 0 && index_id < 1000000000000ULL) {
+                            XfsPageInfo page_info;
+                            page_info.disk_offset = disk_offset;
+                            page_info.inode_number = 0;  // Unknown - from free block scan
+                            page_info.page_no = page_no;
+                            page_info.index_id = index_id;
+                            page_info.page_type = page_type;
+                            page_info.data.resize(page_size);
+                            std::memcpy(page_info.data.data(), page_data.data(), page_size);
+
+                            {
+                                std::lock_guard<std::mutex> lock(result_mutex_);
+                                last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
+                                last_result_.pages_recovered++;
+                            }
+                            pages_found.fetch_add(1);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Progress reporting
+        auto now = std::chrono::steady_clock::now();
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_progress_time).count();
+        if (progress && elapsed_ms >= config_.progress_interval_ms) {
+            double pct = static_cast<double>(ag_index + 1) / ag_count;
+            std::ostringstream oss;
+            oss << "Free blocks scanned: " << blocks_scanned.load()
+                << " pages found: " << pages_found.load()
+                << " AG " << (ag_index + 1) << "/" << ag_count;
+            progress(pct, oss.str());
+            last_progress_time = now;
+        }
+    }
+
+    close(fd);
+
+    if (config_.verbose) {
+        std::cout << "[INFO] Free block scan: scanned=" << blocks_scanned.load()
+                  << " pages_found=" << pages_found.load() << "\n";
+    }
+#endif
 }
 
 // ==================== Signature Scan Fallback ====================

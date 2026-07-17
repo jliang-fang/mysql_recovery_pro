@@ -470,6 +470,9 @@ private:
     // Direct signature scan fallback
     void signature_scan(std::function<void(double, const std::string&)> progress);
 
+    // Free space block scanning (XFS equivalent of ext4 scan_freed_blocks)
+    void scan_free_blocks(std::function<void(double, const std::string&)> progress);
+
     // Raw data pattern scan for non-page-aligned records
     void raw_data_scan(std::function<void(double, const std::string&)> progress);
 
