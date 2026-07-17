@@ -14,6 +14,7 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/utils/lz4_helper.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -885,6 +886,53 @@ std::vector<uint8_t> XfsDiskCarver::read_extent_data(const xfs_extent& ext) {
 #endif
 }
 
+// ==================== Compressed Page Detection and Decompression ====================
+
+// Check if a data block looks like a compressed InnoDB page (ZSD header)
+// Compressed pages have ZSD at offset 0 with version=1, valid orig_size
+static bool is_compressed_page(const uint8_t* data, size_t size) {
+    if (size < 38 + 32) return false;  // Need at least FIL header + ZSD
+
+    // ZSD fields (all little-endian)
+    // offset 0: zip_size (2 bytes) - page size in 512-byte units
+    // offset 2: version (2 bytes) - compression version, typically 1
+    // offset 14: orig_size (4 bytes) - original uncompressed page size
+
+    uint16_t version = dbrecovery::innodb::read_le<uint16_t>(data, 2);
+    if (version != 1) return false;  // Only version 1 is known
+
+    uint16_t zip_size = dbrecovery::innodb::read_le<uint16_t>(data, 0);
+    // zip_size should be 8, 16, or 32 (4KB, 8KB, or 16KB compressed page)
+    if (zip_size != 8 && zip_size != 16 && zip_size != 32) return false;
+
+    uint32_t orig_size = dbrecovery::innodb::read_le<uint32_t>(data, 14);
+    // orig_size should be a valid InnoDB page size (4K, 8K, 16K, 32K, 64K)
+    if (orig_size != 4096 && orig_size != 8192 && orig_size != 16384 &&
+        orig_size != 32768 && orig_size != 65536) return false;
+
+    // zlen at offset 8 should be non-zero and <= zip_size * 512
+    uint16_t zlen = dbrecovery::innodb::read_le<uint16_t>(data, 8);
+    if (zlen == 0 || zlen > zip_size * 512) return false;
+
+    return true;
+}
+
+// Try to decompress a compressed InnoDB page
+// Returns decompressed data on success, empty vector on failure
+static std::vector<uint8_t> try_decompress_page(const uint8_t* data, size_t size) {
+    if (!is_compressed_page(data, size)) return {};
+
+    uint32_t orig_size = dbrecovery::innodb::read_le<uint32_t>(data, 14);
+    uint16_t zlen = dbrecovery::innodb::read_le<uint16_t>(data, 8);
+
+    // Compressed payload starts after ZSD (32 bytes)
+    constexpr size_t ZSD_SIZE = 32;
+    if (size < ZSD_SIZE + zlen) return {};
+
+    return dbrecovery::utils::LZ4Helper::decompress(
+        data + ZSD_SIZE, zlen, orig_size);
+}
+
 // ==================== Parse Pages from Extent ====================
 
 std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
@@ -907,6 +955,28 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
 
         uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
 
+        // Try compressed page detection first (ZSD header at offset 0)
+        std::vector<uint8_t> decompressed;
+        const uint8_t* effective_data = page_data;
+        size_t effective_size = config_.page_size;
+
+        if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
+            page_type != FIL_PAGE_SDI_ZIP) {
+            // Check if this is a compressed page
+            auto decomp = try_decompress_page(page_data, config_.page_size);
+            if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
+                // Re-read page type from decompressed data
+                uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
+                if (decomp_type == FIL_PAGE_INDEX || decomp_type == FIL_PAGE_SDI ||
+                    decomp_type == FIL_PAGE_SDI_ZIP) {
+                    decompressed = std::move(decomp);
+                    effective_data = decompressed.data();
+                    effective_size = decompressed.size();
+                    page_type = decomp_type;
+                }
+            }
+        }
+
         // Accept INDEX and SDI pages
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
             page_type != FIL_PAGE_SDI_ZIP) {
@@ -915,8 +985,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
 
         // For INDEX pages, extract index_id
         uint64_t index_id = 0;
-        if (page_type == FIL_PAGE_INDEX && config_.page_size >= 74) {
-            index_id = read_be<uint64_t>(page_data, 66);
+        if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
+            index_id = read_be<uint64_t>(effective_data, 66);
             if (index_id == 0) {
                 continue;  // Invalid index_id
             }
@@ -924,8 +994,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
 
         // Extract page_no
         uint32_t page_no = 0;
-        if (config_.page_size >= 12) {
-            page_no = read_be<uint32_t>(page_data, 8);
+        if (effective_size >= 12) {
+            page_no = read_be<uint32_t>(effective_data, 8);
         }
 
         // Create page info
@@ -935,8 +1005,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         page_info.page_no = page_no;
         page_info.index_id = index_id;
         page_info.page_type = page_type;
-        page_info.data.resize(config_.page_size);
-        std::memcpy(page_info.data.data(), page_data, config_.page_size);
+        page_info.data.resize(effective_size);
+        std::memcpy(page_info.data.data(), effective_data, effective_size);
 
         pages.push_back(std::move(page_info));
     }
@@ -1078,20 +1148,48 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
 
                 if (page_data.size() >= 26) {
                     uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
-                    if (page_type == FIL_PAGE_INDEX) {
-                        uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
-                        uint32_t page_no = (page_data.size() >= 12) ?
-                            read_be<uint32_t>(page_data.data(), 8) : 0;
+
+                    // Try compressed page detection
+                    std::vector<uint8_t> decompressed;
+                    const uint8_t* effective_data = page_data.data();
+                    size_t effective_size = page_size;
+
+                    if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
+                        page_type != FIL_PAGE_SDI_ZIP) {
+                        auto decomp = try_decompress_page(page_data.data(), page_size);
+                        if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
+                            uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
+                            if (decomp_type == FIL_PAGE_INDEX || decomp_type == FIL_PAGE_SDI ||
+                                decomp_type == FIL_PAGE_SDI_ZIP) {
+                                decompressed = std::move(decomp);
+                                effective_data = decompressed.data();
+                                effective_size = decompressed.size();
+                                page_type = decomp_type;
+                            }
+                        }
+                    }
+
+                    if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
+                        page_type == FIL_PAGE_SDI_ZIP) {
+                        uint64_t index_id = 0;
+                        if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
+                            index_id = read_be<uint64_t>(effective_data, 66);
+                        }
+                        if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                            index_id = 0xFFFFFF00 | page_type;
+                        }
+                        uint32_t page_no = (effective_size >= 12) ?
+                            read_be<uint32_t>(effective_data, 8) : 0;
 
                         if (index_id > 0 && index_id < 1000000000000ULL) {
                             XfsPageInfo page_info;
                             page_info.disk_offset = disk_offset;
-                            page_info.inode_number = 0;  // Unknown - from free block scan
+                            page_info.inode_number = 0;
                             page_info.page_no = page_no;
                             page_info.index_id = index_id;
                             page_info.page_type = page_type;
-                            page_info.data.resize(page_size);
-                            std::memcpy(page_info.data.data(), page_data.data(), page_size);
+                            page_info.data.resize(effective_size);
+                            std::memcpy(page_info.data.data(), effective_data, effective_size);
 
                             {
                                 std::lock_guard<std::mutex> lock(result_mutex_);
@@ -1231,12 +1329,30 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                 // Check page type
                 uint16_t page_type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
 
+                // Try compressed page detection if regular page type doesn't match
+                std::vector<uint8_t> decompressed;
+                const uint8_t* effective_data = page_data;
+                size_t effective_size = config_.page_size;
+
+                if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
+                    page_type != FIL_PAGE_SDI_ZIP) {
+                    auto decomp = try_decompress_page(page_data, config_.page_size);
+                    if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
+                        uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
+                        if (decomp_type == FIL_PAGE_INDEX || decomp_type == FIL_PAGE_SDI ||
+                            decomp_type == FIL_PAGE_SDI_ZIP) {
+                            decompressed = std::move(decomp);
+                            effective_data = decompressed.data();
+                            effective_size = decompressed.size();
+                            page_type = decomp_type;
+                        }
+                    }
+                }
+
                 if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
                     uint64_t index_id = 0;
-                    if (page_type == FIL_PAGE_INDEX && config_.page_size >= 74) {
-                        index_id = read_be<uint64_t>(page_data, 66);
-                        // Accept all INDEX pages, even with index_id=0
-                        // (may be system tables or partially corrupted)
+                    if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
+                        index_id = read_be<uint64_t>(effective_data, 66);
                     }
 
                     if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
@@ -1244,8 +1360,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     }
 
                     // Validate page by checking LSN consistency
-                    // LSN should be > 0 for valid pages
-                    uint64_t lsn = read_be<uint64_t>(page_data, 16);
+                    uint64_t lsn = read_be<uint64_t>(effective_data, 16);
                     if (lsn == 0 && index_id == 0) {
                         continue;  // Skip obviously invalid pages
                     }
@@ -1254,9 +1369,9 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     page_info.disk_offset = chunk_start + i;
                     page_info.page_type = page_type;
                     page_info.index_id = index_id;
-                    page_info.page_no = read_be<uint32_t>(page_data, 8);
-                    page_info.data.resize(config_.page_size);
-                    std::memcpy(page_info.data.data(), page_data, config_.page_size);
+                    page_info.page_no = read_be<uint32_t>(effective_data, 8);
+                    page_info.data.resize(effective_size);
+                    std::memcpy(page_info.data.data(), effective_data, effective_size);
 
                     std::lock_guard<std::mutex> lock(result_mutex_);
                     last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));

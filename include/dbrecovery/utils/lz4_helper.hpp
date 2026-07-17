@@ -86,7 +86,7 @@ public:
 
         int result = LZ4_decompress_safe(
             reinterpret_cast<const char*>(src),
-            reinterpret_cast<const char*>(dest),
+            reinterpret_cast<char*>(dest),
             static_cast<int>(src_len),
             static_cast<int>(dest_size)
         );
