@@ -1732,7 +1732,15 @@ int main(int argc, char** argv) {
                     icol.datetime_precision = col.datetime_precision;
                     icol.ordinal_position = col.ordinal_position;
                     icol.physical_pos = col.physical_pos;  // CRITICAL: InnoDB storage order
-                    icol.mb_maxlen = 4;  // utf8mb4
+
+                    // Determine mb_maxlen from charset
+                    // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
+                    uint8_t cs_id = static_cast<uint8_t>(col.charset_id);
+                    switch (cs_id) {
+                        case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
+                        case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
+                        default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
+                    }
                     icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                     icol.enum_values = col.enum_values;
                     icol.set_values = col.set_values;
@@ -1822,7 +1830,7 @@ int main(int argc, char** argv) {
 
                 std::string type_upper = type_str;
                 std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
-                icol.mb_maxlen = 4;  // utf8mb4
+                icol.mb_maxlen = 4;  // default utf8mb4 for manual schema
 
                 // MySQL type codes (from MySQL source, matching FRM file values):
                 // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
@@ -2245,7 +2253,7 @@ int main(int argc, char** argv) {
 
                 std::string type_upper = type_str;
                 std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
-                icol.mb_maxlen = 4;
+                icol.mb_maxlen = 4;  // default utf8mb4 for manual schema
 
                 // MySQL type codes (from MySQL source, matching FRM file values):
                 // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
@@ -2361,7 +2369,19 @@ int main(int argc, char** argv) {
                     icol.col_length = col.column_length;
                     icol.is_nullable = col.is_nullable;
                     icol.is_unsigned = !col.is_signed;  // Use is_signed field
-                    icol.mb_maxlen = 4;  // UTF8MB4
+
+                    // Use charset/collation from FRM to determine binary status and mb_maxlen
+                    uint8_t charset_id = static_cast<uint8_t>(col.charset_id);
+                    uint8_t collation_id = static_cast<uint8_t>(col.collation_id);
+                    icol.is_binary = (charset_id == 63 || collation_id == 63) && (icol.col_type != 31);
+
+                    // Determine mb_maxlen from charset:
+                    // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
+                    switch (charset_id) {
+                        case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
+                        case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
+                        default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
+                    }
 
                     // Set precision/scale for DECIMAL types (InnoDB type 21)
                     if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
@@ -2378,12 +2398,12 @@ int main(int argc, char** argv) {
                     // For multi-byte charsets (utf8/utf8mb4), CHAR is stored as variable-length
                     switch (col.mysql_type_id) {
                         case 16:  // VARCHAR (InnoDB type)
-                            icol.is_big = (col.column_length * 4 > 255);
+                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                             break;
                         case 29:  // STRING/CHAR (InnoDB type 29)
-                            // CHAR(N) with utf8mb4 has byte length = N * 4
+                            // CHAR with multi-byte charset: byte length = N * mb_maxlen
                             // is_big = true when byte length > 255
-                            icol.is_big = (col.column_length * 4 > 255);
+                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                             break;
                         case 24:  // TINY_BLOB
                         case 25:  // MEDIUM_BLOB
@@ -2454,7 +2474,14 @@ int main(int argc, char** argv) {
                     icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
                     icol.col_length = col.column_length;
                     icol.is_nullable = col.is_nullable;
-                    icol.mb_maxlen = 4;  // UTF8MB4
+
+                    // Determine mb_maxlen from charset
+                    uint8_t cs_id2 = static_cast<uint8_t>(col.charset_id);
+                    switch (cs_id2) {
+                        case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
+                        case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
+                        default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
+                    }
 
                     // Set datetime_precision for temporal types
                     icol.datetime_precision = col.datetime_precision;
@@ -2481,10 +2508,10 @@ int main(int argc, char** argv) {
                     // For multi-byte charsets (utf8/utf8mb4), CHAR (type 29) is stored as variable-length
                     switch (col.mysql_type_id) {
                         case 16:  // VARCHAR (InnoDB type)
-                            icol.is_big = (col.column_length * 4 > 255);
+                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                             break;
-                        case 29:  // STRING/CHAR (InnoDB type) - variable-length for utf8mb4!
-                            icol.is_big = (col.column_length * 4 > 255);
+                        case 29:  // STRING/CHAR (InnoDB type) - variable-length for multi-byte charsets
+                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                             break;
                         case 24:  // TINY_BLOB
                         case 25:  // MEDIUM_BLOB

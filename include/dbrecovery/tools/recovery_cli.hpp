@@ -1425,7 +1425,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             icol.col_length = col.column_length;
             icol.is_nullable = col.is_nullable;
             icol.is_unsigned = !col.is_signed;
-            icol.mb_maxlen = 4;  // UTF8MB4
+
+            // Determine mb_maxlen from charset_id (extracted from FRM)
+            // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
+            uint8_t charset_id = static_cast<uint8_t>(col.charset_id);
+            switch (charset_id) {
+                case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
+                case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
+                default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
+            }
 
             // ✅ 关键：设置 ordinal_position 和 physical_pos
             // 对于 MySQL 5.6/5.7 FRM 文件，physical_pos 通常等于 ordinal_position
@@ -1443,10 +1451,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             icol.enum_values = col.enum_values;
             icol.set_values = col.set_values;
 
+            // Set datetime_precision from column length for temporal types
+            // InnoDB types: 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2
+            // FRM field_length includes fractional seconds display: base + precision + 1
+            if (col.mysql_type_id == 18 || col.mysql_type_id == 19 || col.mysql_type_id == 20) {
+                uint32_t base_len = (col.mysql_type_id == 20) ? 10 : 19;
+                if (col.column_length > base_len) {
+                    icol.datetime_precision = col.column_length - base_len - 1;
+                }
+            }
+
             // Determine if variable length based on InnoDB type
             switch (col.mysql_type_id) {
                 case 16:  // VARCHAR
-                    icol.is_big = (col.column_length * 4 > 255);
+                    icol.is_big = (col.column_length * icol.mb_maxlen > 255);
+                    break;
+                case 29:  // STRING/CHAR
+                    // CHAR with multi-byte charset: is_big when byte_len > 255
+                    icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                     break;
                 case 24: case 25: case 26: case 27: case 31:  // BLOB variants, JSON
                     icol.is_big = true;

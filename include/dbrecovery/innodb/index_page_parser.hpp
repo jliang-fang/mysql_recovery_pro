@@ -137,15 +137,13 @@ struct IndexColumnDef {
             return true;
         }
 
-        // CRITICAL FIX: Type 29 (STRING) is used for both CHAR and BINARY
-        // - CHAR with multi-byte charset (utf8mb4): stored as variable-length
-        // - BINARY: stored as fixed-length (always N bytes)
-        // - CHAR with single-byte charset (latin1): stored as fixed-length
-        // We use is_binary flag to distinguish:
-        // - is_binary=true: BINARY type -> fixed-length
-        // - is_binary=false: CHAR type with multi-byte charset -> variable-length
+        // Type 29 (STRING) is used for both CHAR and BINARY
+        // - BINARY (is_binary=true): always fixed-length
+        // - CHAR with multi-byte charset (mb_maxlen > 1, e.g. utf8/utf8mb4): variable-length
+        // - CHAR with single-byte charset (mb_maxlen == 1, e.g. latin1): fixed-length
         if (col_type == 29) {
-            return !is_binary;  // CHAR is variable, BINARY is fixed
+            if (is_binary) return false;     // BINARY: fixed-length
+            return mb_maxlen > 1;            // CHAR: variable only for multi-byte charset
         }
 
         return false;
@@ -186,13 +184,17 @@ struct IndexColumnDef {
             case 22: return enum_storage_size();    // ENUM (InnoDB type 22)
             case 23: return set_storage_size();     // SET (InnoDB type 23)
             case 29:
-                // CRITICAL FIX: Type 29 is used for both CHAR and BINARY
+                // Type 29 is used for both CHAR and BINARY
                 // - BINARY (is_binary=true): fixed-length = col_length bytes
-                // - CHAR (is_binary=false): variable-length = 0 (size stored in record)
+                // - CHAR single-byte (mb_maxlen == 1, e.g. latin1): fixed-length = col_length
+                // - CHAR multi-byte (mb_maxlen > 1, e.g. utf8mb4): variable-length
                 if (is_binary) {
-                    return col_length > 0 ? col_length : 1;  // BINARY is fixed-length
+                    return col_length > 0 ? col_length : 1;
                 }
-                return 0;  // CHAR is variable-length for utf8mb4
+                if (mb_maxlen <= 1) {
+                    return col_length > 0 ? col_length : 1;  // Single-byte CHAR is fixed-length
+                }
+                return 0;  // Multi-byte CHAR is variable-length
             default: return 0;   // Variable-length
         }
     }
