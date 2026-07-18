@@ -2,6 +2,7 @@
 #define DBRECOVERY_INNODB_CHECKSUM_VERIFIER_HPP
 
 #include "dbrecovery/innodb/page_types_v2.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 #include <cstdint>
 #include <vector>
 #include <optional>
@@ -326,29 +327,36 @@ inline uint32_t ChecksumVerifier::calculate_checksum(const uint8_t* data, size_t
 }
 
 inline uint32_t ChecksumVerifier::get_stored_checksum(const uint8_t* data, size_t size) {
-    // 读取存储的校验和 (在页末尾)
-    if (size < 60) {
+    // InnoDB stores checksum at page_size - 8, algorithm ID at page_size - 4
+    if (size < 8) {
         return 0;
     }
-    
-    // CRC32: 在 FIL_PAGE_END_LSN (偏移 8)
-    // 其他算法: 在页末尾
-    return read_le<uint32_t>(data, size - 4);
+    return read_le<uint32_t>(data, size - 8);
 }
 
 inline ChecksumResult ChecksumVerifier::verify_checksum(const uint8_t* data, size_t size) {
     stats_.pages_verified++;
-    
-    uint32_t stored = get_stored_checksum(data, size);
-    uint32_t calculated = calculate_checksum(data, size);
-    
-    if (stored == calculated) {
+
+    // Delegate to the canonical implementation in innodb_checksum.hpp
+    // which properly handles: reading from page_size-8, zeroing checksum
+    // fields before computing, dual-checksum fallback (CRC32C + INNODB),
+    // and MySQL 5.6 vs 5.7+ detection.
+    auto canonical_result = validate_page_checksum(data, size, false);
+
+    if (canonical_result.is_valid) {
         stats_.checksums_valid++;
-        return make_valid_result(calculated, stored, algorithm_);
+        return make_valid_result(
+            canonical_result.computed_checksum,
+            canonical_result.stored_checksum,
+            algorithm_);
     }
-    
+
     stats_.checksums_invalid++;
-    return make_invalid_result(calculated, stored, algorithm_, "Checksum mismatch");
+    return make_invalid_result(
+        canonical_result.computed_checksum,
+        canonical_result.stored_checksum,
+        algorithm_,
+        "Checksum mismatch (tried CRC32C and INNODB)");
 }
 
 inline bool ChecksumVerifier::verify_header(const uint8_t* data, size_t size) {
@@ -356,25 +364,70 @@ inline bool ChecksumVerifier::verify_header(const uint8_t* data, size_t size) {
         stats_.headers_invalid++;
         return false;
     }
-    
+
+    // Validate page type is a known InnoDB page type
+    uint16_t page_type = read_le<uint16_t>(data, 22);  // FIL_PAGE_TYPE offset
+    if (!verify_page_type(page_type)) {
+        stats_.headers_invalid++;
+        return false;
+    }
+
+    // Validate checksum consistency between header (offset 0, big-endian)
+    // and trailer (page_size-8, little-endian)
+    uint32_t header_checksum = read_be<uint32_t>(data, 0);
+    uint32_t trailer_checksum = read_le<uint32_t>(data, size - 8);
+    if (header_checksum == 0 && trailer_checksum == 0) {
+        // Checksums disabled
+        stats_.headers_valid++;
+        return true;
+    }
+
+    // Verify LSN is non-zero (page number > 0 should have non-zero LSN)
+    uint32_t page_no = read_le<uint32_t>(data, 4);
+    uint64_t lsn = read_le<uint64_t>(data, 8);
+    if (page_no > 0 && lsn == 0) {
+        stats_.headers_invalid++;
+        return false;
+    }
+
     stats_.headers_valid++;
     return true;
 }
 
 inline bool ChecksumVerifier::verify_page_type(uint16_t page_type) {
-    // 检查页类型是否有效
+    // All valid InnoDB FIL page types
     switch (page_type) {
-        case 0x0000:  // ALLOCATED
-        case 0x45bf:  // INDEX
-        case 0x45bb:  // UNDO_LOG
-        case 0x45bd:  // INODE
-        case 0x45be:  // IBUF_FREE_LIST
-        case 0x45b8:  // TRX_SYS
-        case 0x45b9:  // FSP_HDR
-        case 0x45ba:  // XDES
-        case 0x45b7:  // BLOB
-        case 0x5441:  // SDI
-        case 0x5a5a:  // SDI2
+        case 0x0000:  // FIL_PAGE_TYPE_ALLOCATED
+        case 0x0002:  // FIL_PAGE_UNDO_LOG (0x45BB little-endian)
+        case 0x0003:  // FIL_PAGE_INODE
+        case 0x0004:  // FIL_PAGE_IBUF_FREE_LIST
+        case 0x0005:  // FIL_PAGE_IBUF_BITMAP
+        case 0x0006:  // FIL_PAGE_TYPE_SYS
+        case 0x0007:  // FIL_PAGE_TYPE_TRX_SYS
+        case 0x0008:  // FIL_PAGE_TYPE_FSP_HDR
+        case 0x0009:  // FIL_PAGE_TYPE_XDES
+        case 0x000A:  // FIL_PAGE_TYPE_BLOB
+        case 0x000B:  // FIL_PAGE_TYPE_ZBLOB
+        case 0x000C:  // FIL_PAGE_TYPE_ZBLOB2
+        case 0x000D:  // FIL_PAGE_TYPE_UNKNOWN
+        case 0x000E:  // FIL_PAGE_COMPRESSED
+        case 0x000F:  // FIL_PAGE_ENCRYPTED
+        case 0x45BD:  // FIL_PAGE_TYPE_BLOB (big-endian)
+        case 0x45BE:  // FIL_PAGE_TYPE_SDI (uncompressed SDI)
+        case 0x45BF:  // FIL_PAGE_INDEX
+        case 0x45B2:  // FIL_PAGE_UNDO_LOG (big-endian)
+        case 0x45B3:  // FIL_PAGE_INODE (big-endian)
+        case 0x45B4:  // FIL_PAGE_IBUF_FREE_LIST (big-endian)
+        case 0x45B5:  // FIL_PAGE_IBUF_BITMAP (big-endian)
+        case 0x45B6:  // FIL_PAGE_TYPE_SYS (big-endian)
+        case 0x45B7:  // FIL_PAGE_TYPE_TRX_SYS (big-endian)
+        case 0x45B8:  // FIL_PAGE_TYPE_FSP_HDR (big-endian)
+        case 0x45B9:  // FIL_PAGE_TYPE_XDES (big-endian)
+        case 0x45BA:  // FIL_PAGE_TYPE_BLOB (big-endian)
+        case 0x45BB:  // FIL_PAGE_TYPE_ZBLOB (big-endian)
+        case 0x45BC:  // FIL_PAGE_TYPE_ZBLOB2 (big-endian)
+        case 0x5440:  // FIL_PAGE_SDI (compressed SDI big-endian)
+        case 0x5441:  // FIL_PAGE_TYPE_SDI (big-endian)
             return true;
         default:
             return false;
@@ -420,7 +473,7 @@ inline PageHealthInfo ChecksumVerifier::check_page_health(const uint8_t* data, s
     }
     
     // 检查页类型
-    uint16_t page_type = read_le<uint16_t>(data, 24);
+    uint16_t page_type = read_le<uint16_t>(data, 22);  // FIL_PAGE_TYPE at offset 22 (2 bytes)
     if (!verify_page_type(page_type)) {
         info.type_valid = false;
         info.status_message = "Invalid page type";

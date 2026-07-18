@@ -694,16 +694,19 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
     if (blocks_per_page == 0) blocks_per_page = 4;  // Default: 16KB page / 4KB block = 4
 
     // Scan at page-aligned offsets within this group
-    // Limit the number of pages we scan per group to avoid overflow
-    uint32_t max_pages_per_group = blocks_per_group / blocks_per_page;
-    if (max_pages_per_group > 8192) max_pages_per_group = 8192;  // Safety limit
+    // We need to scan EVERY possible 16KB-aligned offset, not just
+    // offsets that are multiples of blocks_per_page from group start.
+    // InnoDB pages are always at 16KB boundaries relative to the start
+    // of the file, but the file may not start at a 16KB boundary
+    // within the block group.
+    //
+    // Strategy: scan at every 16KB (page_size) offset within each group
+    uint32_t max_pages_per_group = (blocks_per_group * block_size) / config_.page_size;
+    if (max_pages_per_group > 8192) max_pages_per_group = 8192;
 
     for (uint32_t page_idx = 0; page_idx < max_pages_per_group; page_idx++) {
-        uint32_t block_offset = page_idx * blocks_per_page;
-        if (block_offset >= blocks_per_group) break;
-
-        uint64_t block_num = group_start_block + block_offset;
-        uint64_t disk_offset = block_to_disk_offset(block_num);
+        uint64_t disk_offset = static_cast<uint64_t>(group_index) * blocks_per_group * block_size
+                              + static_cast<uint64_t>(page_idx) * config_.page_size;
 
         // Safety check: don't read beyond device
         if (disk_offset + config_.page_size > max_offset) break;
@@ -716,16 +719,39 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
             blocks_scanned_.fetch_add(1);
 
             // Check for InnoDB page type at offset 24
-            if (page_data.size() >= 26) {
+            if (page_data.size() >= 38) {
                 uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
-                // Check for INDEX page type (0x45BF)
-                if (page_type == FIL_PAGE_INDEX) {
-                    uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+                // Accept ALL valid InnoDB page types, not just INDEX
+                // FSP_HDR=8, IBUF_BITMAP=5, INODE=2, INDEX=0x45BF,
+                // XDES=11, BLOB=0x45BD, etc.
+                bool is_valid_type = false;
+                switch (page_type) {
+                    case 2:    // FIL_PAGE_INODE
+                    case 5:    // FIL_PAGE_IBUF_BITMAP
+                    case 8:    // FIL_PAGE_TYPE_FSP_HDR
+                    case 11:   // FIL_PAGE_TYPE_XDES
+                    case 0x45BD: // FIL_PAGE_TYPE_BLOB
+                    case 0x45BF: // FIL_PAGE_INDEX
+                        is_valid_type = true;
+                        break;
+                    default:
+                        break;
+                }
 
-                    if (index_id > 0 && index_id < 1000000000000) {  // Sanity check for index_id
+                if (is_valid_type) {
+                    // Try to read index_id from page (offset 66 for INDEX pages)
+                    // For non-INDEX pages, use page_no (offset 4) as identifier
+                    uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+                    if (index_id == 0 || index_id > 1000000000000) {
+                        // For non-INDEX pages, use space_id/page_no as identifier
+                        uint32_t space_id = read_be<uint32_t>(page_data.data(), 34);
+                        index_id = space_id > 0 ? space_id : page_type;
+                    }
+
+                    if (index_id > 0 && index_id < 1000000000000) {
                         Ext4BlockInfo block_info;
-                        block_info.block_number = block_num;
+                        block_info.block_number = disk_offset / block_size;
                         block_info.disk_offset = disk_offset;
                         block_info.block_group = group_index;
                         block_info.is_freed = true;
@@ -1036,27 +1062,63 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                         total_records++;
                     }
                 } else {
-                    // Schema-less parsing (original behavior)
+                    // Schema-less parsing: use parsed fields (same as XFS schemaless)
                     auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
 
                     for (const auto& rec : records) {
-                        // Write record info
-                        out << (page.disk_offset / config_.page_size) << ","
-                            << index_id << ","
-                            << rec.trx_id << ","
-                            << rec.roll_ptr << ",\"";
+                        // Skip empty records
+                        if (rec.fields.empty() && rec.raw_data.empty()) continue;
 
-                        // Escape and write record data
-                        for (uint8_t byte : rec.raw_data) {
-                            if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
-                                out << static_cast<char>(byte);
-                            } else if (byte == '"' || byte == '\\') {
-                                out << '\\' << static_cast<char>(byte);
-                            } else {
-                                out << '.';
+                        bool first_field = true;
+
+                        // If we have parsed fields, output them
+                        if (!rec.fields.empty()) {
+                            for (const auto& field : rec.fields) {
+                                if (!first_field) out << ",";
+                                first_field = false;
+
+                                if (field.is_null) {
+                                    out << "NULL";
+                                } else if (!field.str_value.empty()) {
+                                    // Quote strings with special chars
+                                    const auto& val = field.str_value;
+                                    if (val.find(',') != std::string::npos ||
+                                        val.find('"') != std::string::npos ||
+                                        val.find('\n') != std::string::npos) {
+                                        out << "\"";
+                                        for (char c : val) {
+                                            if (c == '"') out << "\"\"";
+                                            else out << c;
+                                        }
+                                        out << "\"";
+                                    } else {
+                                        out << val;
+                                    }
+                                } else if (field.int_value != 0 || field.type == dbrecovery::innodb::IndexFieldValue::Type::INT_VAL) {
+                                    out << field.int_value;
+                                } else {
+                                    // Fallback: hex-encode raw bytes
+                                    out << "0x";
+                                    for (uint8_t byte : field.raw_bytes) {
+                                        out << std::hex << std::setw(2) << std::setfill('0')
+                                            << static_cast<int>(byte);
+                                    }
+                                    out << std::dec;
+                                }
                             }
+                        } else {
+                            // No parsed fields: output raw_data as hex
+                            out << "\"";
+                            for (uint8_t byte : rec.raw_data) {
+                                if (byte >= 32 && byte < 127 && byte != '"' && byte != '\\') {
+                                    out << static_cast<char>(byte);
+                                } else {
+                                    out << '.';
+                                }
+                            }
+                            out << "\"";
                         }
-                        out << "\"\n";
+                        out << "\n";
                         total_records++;
                     }
                 }

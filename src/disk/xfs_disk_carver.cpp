@@ -629,8 +629,10 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
         // This is a simplified approach - full btree traversal would be needed for large files
 
         // Check if we have a btree root block in the inode
-        // btree root starts at offset 176 for v5 inode
-        size_t btree_start = 176;
+        // btree root starts after inode core: 100 for v4 (version 2), 176 for v5 (version 3)
+        uint8_t di_version = inode_core.di_version;
+        size_t inode_core_size = (di_version >= 3) ? 176 : 100;
+        size_t btree_start = inode_core_size;
         if (btree_start + 16 > inode_size) {
             return std::nullopt;  // Not enough space for btree header
         }
@@ -700,8 +702,10 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
     }
 
     // Parse extent list (stored after inode core)
-    // Extent records start at offset sizeof(xfs_dinode_core) or 176 bytes for v5 inode
-    size_t extent_start = 176;  // Fixed offset for v5 inode
+    // v4 inode core is 100 bytes, v5 inode core is 176 bytes
+    uint8_t di_version = inode_core.di_version;
+    size_t inode_core_size_ext = (di_version >= 3) ? 176 : 100;
+    size_t extent_start = inode_core_size_ext;
     size_t extent_size = sizeof(xfs_bmbt_rec);
 
     XfsExtentInfo info;

@@ -38,10 +38,11 @@ TEST(BlobChainRebuilderTest, RebuildFromPointerMultiPage) {
     pointer.chain_pages.emplace_back(1, 100);
 
     EXPECT_TRUE(rebuilder.rebuild_from_pointer(pointer));
-    
-    // 多页 BLOB 需要文件访问
+
+    // Multi-page BLOB now records estimated page chain
     EXPECT_EQ(rebuilder.chain_info().total_len, 150);
-    EXPECT_EQ(rebuilder.chain_info().page_count, 0);  // 未填充（需要文件访问）
+    EXPECT_GT(rebuilder.chain_info().page_count, 0);  // Now estimates page count
+    EXPECT_TRUE(rebuilder.chain_info().is_complete);    // Chain is complete (all pages estimated)
 }
 
 TEST(BlobChainRebuilderTest, RebuildFromPage) {

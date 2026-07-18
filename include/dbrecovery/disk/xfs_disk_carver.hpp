@@ -553,12 +553,12 @@ inline bool is_deleted_inode(const xfs_dinode_core& inode) {
 
     // Deleted inodes have:
     // - Valid magic (0x494E)
-    // - Zero mode (file type)
-    // - Zero nlink
-    // - Version 3 (v5 XFS)
+    // - Zero mode (file type cleared)
+    // - Zero nlink (no links remaining)
+    // - Version >= 2 (v4 XFS: version 2, v5 XFS: version 3)
     return (magic == XFS_DINODE_MAGIC) &&
            (mode == 0) &&
-           (inode.di_version == 3);
+           (inode.di_version >= 2);  // Support both v4 (version 2) and v5 (version 3)
 }
 
 // Check if inode has recoverable data

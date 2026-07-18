@@ -12,6 +12,7 @@
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/utils/lz4_helper.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -201,27 +202,39 @@ inline std::vector<ScannedPage> CompressedTableRecovery::scan_pages() {
 }
 
 inline bool CompressedTableRecovery::is_page_compressed(const uint8_t* page_data, size_t page_size) {
-    if (page_size < 38) {
-        return false;
+    if (page_size < 38 + 32) {
+        return false;  // Need at least FIL header (38 bytes) + ZSD header (32 bytes)
     }
 
-    // 检查页类型是否为压缩页
+    // Check page type is FIL_PAGE_COMPRESSED (0x45B5)
     uint16_t page_type = read_le<uint16_t>(page_data, 16);
     if (page_type != FIL_PAGE_COMPRESSED) {
         return false;
     }
 
-    // 检查压缩标志
-    // 压缩页在 BTR_HEADER 后有压缩信息
-    if (page_size >= 80) {
-        uint16_t flags = read_le<uint16_t>(page_data, 80);
-        // 检查是否设置了压缩标志
-        if (flags & 0x0080) {  // DICT_TF_COMPACT | DICT_TF_ZIP
-            return true;
-        }
-    }
+    // Validate ZSD (Zero Space Descriptor) header at start of page data
+    // ZSD layout (all little-endian):
+    //   offset 0: zip_size (2 bytes) — compressed page size in 512-byte units
+    //   offset 2: version (2 bytes) — compression version, 1 = InnoDB compression
+    //   offset 8: zlen (2 bytes) — compressed data length
+    //   offset 14: orig_size (4 bytes) — original uncompressed page size
 
-    return false;
+    uint16_t version = read_le<uint16_t>(page_data, 2);
+    if (version != 1) return false;
+
+    uint16_t zip_size = read_le<uint16_t>(page_data, 0);
+    // Valid compressed page sizes: 8=4KB, 16=8KB, 32=16KB
+    if (zip_size != 8 && zip_size != 16 && zip_size != 32) return false;
+
+    uint32_t orig_size = read_le<uint32_t>(page_data, 14);
+    // orig_size must be a valid InnoDB page size
+    if (orig_size != 4096 && orig_size != 8192 && orig_size != 16384 &&
+        orig_size != 32768 && orig_size != 65536) return false;
+
+    uint16_t zlen = read_le<uint16_t>(page_data, 8);
+    if (zlen == 0 || zlen > static_cast<uint16_t>(zip_size * 512)) return false;
+
+    return true;
 }
 
 inline std::vector<uint8_t> CompressedTableRecovery::decompress_page_data(
@@ -229,22 +242,64 @@ inline std::vector<uint8_t> CompressedTableRecovery::decompress_page_data(
 
     auto start = std::chrono::high_resolution_clock::now();
 
-    std::vector<uint8_t> decompressed(expected_size, 0);
-
-    // 使用 zlib 解压缩
-    uLong dest_len = static_cast<uLong>(expected_size);
-    int result = uncompress(decompressed.data(), &dest_len,
-                            compressed_data, static_cast<uLong>(compressed_size));
-
-    auto end = std::chrono::high_resolution_clock::now();
-    stats_.decompress_time_ms += std::chrono::duration<double, std::milli>(end - start).count();
-
-    if (result == Z_OK && dest_len == expected_size) {
-        stats_.decompressed_pages++;
-        return decompressed;
+    // ZSD header is 32 bytes at the start of the compressed page
+    constexpr size_t ZSD_HEADER_SIZE = 32;
+    if (compressed_size < ZSD_HEADER_SIZE) {
+        return {};
     }
 
-    return {};
+    // Read ZSD fields
+    uint16_t zlen = read_le<uint16_t>(compressed_data, 8);
+    uint16_t compression_type = read_le<uint16_t>(compressed_data, 18);
+
+    // Compressed payload starts after ZSD header
+    const uint8_t* payload = compressed_data + ZSD_HEADER_SIZE;
+    size_t payload_size = std::min(static_cast<size_t>(zlen), compressed_size - ZSD_HEADER_SIZE);
+
+    std::vector<uint8_t> decompressed(expected_size, 0);
+
+    auto end_decompress = [&](bool success, size_t actual_size) {
+        auto end = std::chrono::high_resolution_clock::now();
+        stats_.decompress_time_ms += std::chrono::duration<double, std::milli>(end - start).count();
+        if (success && actual_size == expected_size) {
+            stats_.decompressed_pages++;
+            return decompressed;
+        }
+        return std::vector<uint8_t>{};
+    };
+
+    // Try zlib first (compression_type 0 or unspecified)
+    if (compression_type == 0) {
+        uLong dest_len = static_cast<uLong>(expected_size);
+        int result = uncompress(decompressed.data(), &dest_len,
+                                payload, static_cast<uLong>(payload_size));
+        if (result == Z_OK) {
+            return end_decompress(true, dest_len);
+        }
+    }
+
+    // Try LZ4 (compression_type 1 or fallback)
+    // MySQL 8.0+ uses LZ4 by default for KEY_BLOCK_SIZE compression
+    {
+        auto lz4_result = dbrecovery::utils::LZ4Helper::decompress(
+            payload, payload_size, expected_size);
+        if (!lz4_result.empty()) {
+            decompressed = std::move(lz4_result);
+            return end_decompress(true, decompressed.size());
+        }
+    }
+
+    // If zlib was not tried yet, try it as fallback
+    if (compression_type != 0) {
+        uLong dest_len = static_cast<uLong>(expected_size);
+        int result = uncompress(decompressed.data(), &dest_len,
+                                payload, static_cast<uLong>(payload_size));
+        if (result == Z_OK) {
+            return end_decompress(true, dest_len);
+        }
+    }
+
+    return end_decompress(false, 0);
 }
 
 inline std::vector<std::map<std::string, std::string>> CompressedTableRecovery::parse_page_records(

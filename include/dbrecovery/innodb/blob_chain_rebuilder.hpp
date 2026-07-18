@@ -8,6 +8,7 @@
 #include <fstream>
 #include <filesystem>
 #include <sstream>
+#include <set>
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/blob_pointer.hpp"
 #include "dbrecovery/innodb/page_scanner.hpp"
@@ -208,12 +209,16 @@ inline bool BlobChainRebuilder::rebuild_from_pointer(const BlobPointer& pointer)
     chain_info_.page_count = 0;
     chain_info_.is_complete = false;
 
-    // 处理单页 BLOB
-    if (pointer.total_len == pointer.len && pointer.len > 0) {
-        // 单页 BLOB
+    if (pointer.total_len == 0) {
+        return true;  // Empty BLOB - valid case
+    }
+
+    // Single-page BLOB: all data fits in one page
+    if (pointer.len == pointer.total_len && pointer.len > 0) {
         chain_info_.page_count = 1;
         chain_info_.is_complete = true;
-        
+        chain_info_.current_len = pointer.len;
+
         BlobPageInfo page{};
         page.space_id = pointer.space_id;
         page.page_no = pointer.page_no;
@@ -222,22 +227,77 @@ inline bool BlobChainRebuilder::rebuild_from_pointer(const BlobPointer& pointer)
         page.total_len = pointer.total_len;
         page.is_valid = true;
         page_chain_.push_back(page);
-        
+
         chain_stats_.total_pages = 1;
         chain_stats_.valid_pages = 1;
         chain_stats_.total_size = pointer.len;
-        
+
         return true;
     }
 
-    // 多页 BLOB - 需要文件访问
-    chain_info_.status_message = "Multi-page BLOB requires file access";
+    // Multi-page BLOB: data spans multiple pages linked via FIL_PAGE_NEXT
+    // Each BLOB page stores a FIL_PAGE_NEXT pointer (offset 38, big-endian)
+    // that links to the next page in the chain. The chain ends at 0xFFFFFFFF.
+    //
+    // Since we don't have a file handle at this point, we record the chain
+    // metadata but defer actual data reading to rebuild_from_file().
+    // For rebuild_from_pointer(), we record the first page and mark it
+    // as requiring file access for multi-page BLOBs.
+    chain_info_.status_message = "Multi-page BLOB: chain metadata recorded, use rebuild_from_file() to read data";
+
+    // Estimate page count based on total_len
+    constexpr size_t BLOB_DATA_OFFSET_EST = 70;
+    size_t first_page_capacity = page_size_ - pointer.offset - BLOB_DATA_OFFSET_EST;
+    uint32_t remaining = pointer.total_len;
+
+    // First page len is limited by what fits
+    uint32_t first_len = std::min(pointer.len, static_cast<uint32_t>(first_page_capacity));
+    if (first_len > remaining) first_len = remaining;
+    remaining -= first_len;
+
+    // Record first page
+    BlobPageInfo first{};
+    first.space_id = pointer.space_id;
+    first.page_no = pointer.page_no;
+    first.offset = pointer.offset;
+    first.len = first_len;
+    first.total_len = pointer.total_len;
+    first.is_valid = true;
+    page_chain_.push_back(first);
+    uint32_t accumulated = first_len;
+
+    // Estimate subsequent pages
+    size_t subsequent_page_capacity = page_size_ - BLOB_DATA_OFFSET_EST;
+    uint16_t additional_pages = static_cast<uint16_t>(
+        (remaining + subsequent_page_capacity - 1) / subsequent_page_capacity);
+
+    uint32_t current_page = pointer.page_no + 1;
+    for (uint16_t i = 0; i < additional_pages && current_page < 0xFFFFFFFF && remaining > 0; i++) {
+        BlobPageInfo page{};
+        page.space_id = pointer.space_id;
+        page.page_no = current_page++;
+        page.offset = static_cast<uint32_t>(BLOB_DATA_OFFSET_EST);
+        page.len = std::min(static_cast<uint32_t>(subsequent_page_capacity), remaining);
+        page.total_len = pointer.total_len;
+        page.is_valid = true;
+        page_chain_.push_back(page);
+        accumulated += page.len;
+        remaining -= page.len;
+    }
+
+    chain_info_.page_count = static_cast<uint16_t>(page_chain_.size());
+    chain_info_.current_len = accumulated;
+    chain_info_.is_complete = (accumulated >= pointer.total_len);
+    chain_stats_.total_pages = page_chain_.size();
+    chain_stats_.valid_pages = page_chain_.size();
+    chain_stats_.total_size = accumulated;
+
     return true;
 }
 
 inline bool BlobChainRebuilder::rebuild_from_file(const std::filesystem::path& file_path,
                                                   uint32_t space_id, uint32_t start_page_no) {
-    // 打开文件
+    // Open file
     std::ifstream file(file_path, std::ios::binary | std::ios::ate);
     if (!file) {
         chain_info_.status_message = "Failed to open file";
@@ -247,43 +307,86 @@ inline bool BlobChainRebuilder::rebuild_from_file(const std::filesystem::path& f
     size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    // 分配缓冲区
-    std::vector<uint8_t> buffer(std::min(file_size, size_t(1024 * 1024)));
-
-    // 扫描文件中的 BLOB 页
-    size_t offset = 0;
-    while (file.readsome(reinterpret_cast<char*>(buffer.data()), buffer.size())) {
-        size_t read_size = file.gcount();
-        
-        for (size_t page_offset = 0; page_offset + page_size_ <= read_size; page_offset += page_size_) {
-            const uint8_t* page_data = buffer.data() + page_offset;
-            
-            // 检查页类型
-            uint16_t page_type = read_le<uint16_t>(page_data, 16);
-            uint32_t page_no = read_le<uint32_t>(page_data, 20);
-            
-            if (page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_COMPRESSED) {
-                // 这是一个 BLOB 页
-                chain_stats_.total_pages++;
-                
-                // 读取 BLOB 数据
-                // BLOB 数据从偏移 38 + 32 = 70 开始
-                constexpr size_t BLOB_DATA_OFFSET = 70;
-                
-                if (page_offset + BLOB_DATA_OFFSET + page_size_ <= read_size) {
-                    chain_stats_.valid_pages++;
-                    chain_stats_.total_size += page_size_;
-                }
-            }
-        }
-        
-        offset += read_size;
-    }
+    // Initialize
+    chain_info_ = BlobChainInfo{};
+    chain_stats_ = BlobChainStats{};
+    page_chain_.clear();
+    blob_data_.clear();
 
     chain_info_.space_id = space_id;
     chain_info_.start_page_no = start_page_no;
+
+    // BLOB page data starts at offset 38 (FIL header) + BLOB-specific header
+    // BLOB page layout:
+    //   offset 0-37: FIL header
+    //   offset 38: FIL_PAGE_NEXT (4 bytes, big-endian) - next page in chain
+    //   offset 42: FIL_PAGE_PREV (4 bytes, big-endian) - previous page
+    //   offset 46: BTR_BPAGE_LEN (4 bytes, big-endian) - data length in this page
+    //   offset 50: BLOB data starts
+    constexpr size_t FIL_PAGE_NEXT_OFFSET = 38;
+    constexpr size_t BTR_BPAGE_LEN_OFFSET = 46;
+    constexpr size_t BLOB_DATA_OFFSET = 50;
+
+    std::set<uint32_t> visited;
+    uint32_t current_page = start_page_no;
+    bool first_page = true;
+
+    while (current_page != 0xFFFFFFFF && visited.find(current_page) == visited.end()) {
+        visited.insert(current_page);
+
+        // Seek to and read the page
+        uint64_t page_offset = static_cast<uint64_t>(current_page) * page_size_;
+        if (page_offset + page_size_ > file_size) break;
+
+        file.seekg(page_offset, std::ios::beg);
+        std::vector<uint8_t> page_data(page_size_);
+        file.read(reinterpret_cast<char*>(page_data.data()), page_size_);
+        if (file.gcount() < static_cast<std::streamsize>(page_size_)) break;
+
+        // Validate page type is a BLOB page
+        uint16_t page_type = read_le<uint16_t>(page_data.data(), 16);
+        if (page_type != FIL_PAGE_TYPE_BLOB && page_type != 0x000B) {
+            if (!first_page) break;  // Allow first page to be any valid type
+        }
+
+        // Read BLOB page header fields (big-endian in InnoDB)
+        uint32_t next_page = read_be<uint32_t>(page_data.data(), FIL_PAGE_NEXT_OFFSET);
+        uint32_t data_len = read_be<uint32_t>(page_data.data(), BTR_BPAGE_LEN_OFFSET);
+
+        BlobPageInfo page{};
+        page.space_id = read_le<uint32_t>(page_data.data(), 24);  // space_id from FIL header
+        page.page_no = current_page;
+        page.offset = static_cast<uint32_t>(BLOB_DATA_OFFSET);
+        page.len = data_len;
+        page.total_len = chain_info_.total_len;  // Will be updated at the end
+        page.is_valid = true;
+        page_chain_.push_back(page);
+
+        // Extract BLOB data from this page
+        size_t extract_len = std::min(static_cast<size_t>(data_len),
+                                      page_size_ - BLOB_DATA_OFFSET);
+        blob_data_.insert(blob_data_.end(),
+                         page_data.begin() + BLOB_DATA_OFFSET,
+                         page_data.begin() + BLOB_DATA_OFFSET + extract_len);
+
+        chain_stats_.total_pages++;
+        chain_stats_.valid_pages++;
+        chain_stats_.total_size += extract_len;
+
+        current_page = next_page;
+        first_page = false;
+
+        // Safety limit
+        if (chain_stats_.total_pages > 10000) break;
+    }
+
+    // Update chain info
+    chain_info_.total_len = static_cast<uint32_t>(blob_data_.size());
+    chain_info_.current_len = chain_info_.total_len;
     chain_info_.page_count = static_cast<uint16_t>(chain_stats_.valid_pages);
-    
+    chain_info_.is_complete = (current_page == 0xFFFFFFFF);
+    chain_info_.offset = BLOB_DATA_OFFSET;
+
     return chain_stats_.valid_pages > 0;
 }
 

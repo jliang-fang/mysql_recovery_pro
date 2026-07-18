@@ -174,9 +174,19 @@ inline void EncryptedTableRecovery::add_table_key(uint32_t key_id, const std::ve
 }
 
 inline bool EncryptedTableRecovery::load_keyring(const std::string& keyring_path) {
-    // TODO: 实现 Keyring 文件加载
-    // 这里返回 true 表示可以继续尝试恢复
-    return true;
+    KeyringFile keyring;
+    if (!keyring.load(keyring_path)) {
+        return false;
+    }
+
+    for (const auto& entry : keyring.entries) {
+        // Hash key name to numeric key_id for use during per-table key derivation
+        uint32_t key_id = static_cast<uint32_t>(
+            std::hash<std::string>{}(entry.key_name));
+        decryptor_.add_table_key(key_id, entry.key_data, entry.algorithm);
+    }
+
+    return !keyring.entries.empty();
 }
 
 inline void EncryptedTableRecovery::set_try_recovery_without_key(bool try_recovery) {
