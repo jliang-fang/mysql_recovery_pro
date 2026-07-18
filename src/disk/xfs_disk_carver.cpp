@@ -44,6 +44,9 @@ using dbrecovery::innodb::InnoDBIndexParser;
 constexpr uint16_t FIL_PAGE_INDEX = 0x45BF;
 constexpr uint16_t FIL_PAGE_SDI = 0x45BE;
 constexpr uint16_t FIL_PAGE_SDI_ZIP = 0x45BD;
+constexpr uint16_t FIL_PAGE_TYPE_BLOB = 0x45BD;   // Same as SDI_ZIP (BLOB page type)
+constexpr uint16_t FIL_PAGE_TYPE_ZBLOB = 0x45BA;  // Compressed BLOB page
+constexpr uint16_t FIL_PAGE_TYPE_ZBLOB2 = 0x45BB; // Compressed BLOB page v2
 constexpr size_t FIL_PAGE_TYPE_ABS = 24;
 constexpr size_t FIL_HEADER_SIZE = 38;
 
@@ -78,16 +81,67 @@ bool XfsDiskCarver::read_superblock(const std::string& device_path, xfs_superblo
     }
 
     // XFS superblock is at offset 0 (first sector)
-    ssize_t bytes_read = read(fd, &sb, sizeof(xfs_superblock));
-    close(fd);
-
-    if (bytes_read != sizeof(xfs_superblock)) {
-        return false;
+    ssize_t bytes_read = pread(fd, &sb, sizeof(xfs_superblock), 0);
+    if (bytes_read == sizeof(xfs_superblock)) {
+        uint32_t magic = be32toh(sb.sb_magicnum);
+        if (magic == XFS_SB_MAGIC) {
+            close(fd);
+            return true;
+        }
     }
 
-    // Check magic number (big-endian)
-    uint32_t magic = be32toh(sb.sb_magicnum);
-    return magic == XFS_SB_MAGIC;
+    // Primary superblock invalid or corrupted - try secondary superblocks
+    // XFS has backup superblocks in each AG (AG 1, 2, 3, ...)
+    // Try the first few AGs for backup superblocks
+    std::cerr << "[WARN] Primary XFS superblock invalid, trying backup superblocks...\n";
+
+    // We need at least enough data to read sb_agblocks and sb_agcount
+    // to know where the backup SBs are. Try reading the primary SB again
+    // with relaxed validation to get filesystem geometry.
+    // If primary is completely unreadable, try known locations.
+    uint32_t block_size = 4096;  // Default XFS block size
+    uint32_t ag_blocks = 0;
+    uint32_t ag_count = 0;
+
+    // Try to get geometry from partial/old primary SB
+    if (bytes_read >= static_cast<ssize_t>(offsetof(xfs_superblock, sb_agcount) + 8)) {
+        // Attempt to read geometry from old-style superblock offsets
+        // XFS v4 sb is 208 bytes, v5 is 264 bytes
+        // sb_blocksize at offset 16, sb_agblocks at offset 32, sb_agcount at offset 36
+        uint32_t raw_bs = be32toh(*reinterpret_cast<uint32_t*>(
+            reinterpret_cast<uint8_t*>(&sb) + 16));
+        if (raw_bs >= 512 && raw_bs <= 65536 && (raw_bs & (raw_bs - 1)) == 0) {
+            block_size = raw_bs;
+        }
+        ag_blocks = be32toh(*reinterpret_cast<uint32_t*>(
+            reinterpret_cast<uint8_t*>(&sb) + 32));
+        ag_count = be32toh(*reinterpret_cast<uint32_t*>(
+            reinterpret_cast<uint8_t*>(&sb) + 36));
+    }
+
+    // If we couldn't get geometry from primary, try fixed offsets for backup SBs
+    if (ag_blocks == 0 || ag_count == 0 || ag_blocks > 1000000000 || ag_count > 1000) {
+        ag_blocks = 8192;   // Reasonable default
+        ag_count = 4;       // Try at least 4 AGs
+    }
+
+    // Try backup superblocks in each AG
+    for (uint32_t ag = 1; ag < std::min(ag_count, 32u); ag++) {
+        uint64_t offset = static_cast<uint64_t>(ag) * static_cast<uint64_t>(ag_blocks) * block_size;
+        bytes_read = pread(fd, &sb, sizeof(xfs_superblock), offset);
+        if (bytes_read == sizeof(xfs_superblock)) {
+            uint32_t magic = be32toh(sb.sb_magicnum);
+            if (magic == XFS_SB_MAGIC) {
+                std::cerr << "[INFO] Found valid XFS superblock in AG " << ag
+                          << " (offset " << offset << ")\n";
+                close(fd);
+                return true;
+            }
+        }
+    }
+
+    close(fd);
+    return false;
 #else
     return false;
 #endif
@@ -650,17 +704,19 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
         uint16_t level = be16toh(btree_hdr.bb_level);
         uint16_t numrecs = be16toh(btree_hdr.bb_numrecs);
 
-        if (level == 0 && numrecs > 0 && numrecs < 100) {
+        if (level == 0 && numrecs > 0 && numrecs < 1000) {
             // Leaf level - records are directly in the btree block
             // For short form CRC btree, records start at offset 56 (XFS_BTREE_SBLOCK_CRC_LEN)
-            size_t rec_offset = btree_start + 56;
+            // For non-CRC, records start at offset 16
+            size_t btree_hdr_size = (btree_magic == 0x42B33D42) ? 56 : 16;
+            size_t rec_offset = btree_start + btree_hdr_size;
             size_t rec_size = sizeof(xfs_bmbt_rec);
 
             XfsExtentInfo info;
             info.inode_number = ag_inode + ag_index * ag_blocks;
             info.file_size = file_size;
             info.is_deleted = is_deleted;
-            info.next_unlinked = be32toh(inode_core.di_next_unlinked);  // For chain traversal
+            info.next_unlinked = be32toh(inode_core.di_next_unlinked);
             info.mtime.t_sec = be32toh(inode_core.di_mtime.t_sec);
             info.mtime.t_nsec = be32toh(inode_core.di_mtime.t_nsec);
             info.ctime.t_sec = be32toh(inode_core.di_ctime.t_sec);
@@ -680,6 +736,54 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
                 if (ext.block_offset + ext.block_count <= fs_size) {
                     info.extents.push_back(ext);
                 }
+            }
+
+            if (!info.extents.empty()) {
+                return info;
+            }
+        } else if (level > 0 && numrecs > 0 && numrecs < 1000) {
+            // Multi-level extent btree: read child blocks to collect leaf extents
+            // This handles large, highly fragmented files with many extents
+            // For CRC btree, keys and pointers start at offset 56
+            size_t btree_hdr_size = (btree_magic == 0x42B33D42) ? 56 : 16;
+            size_t key_offset = btree_start + btree_hdr_size;
+            size_t ptr_offset = (btree_hdr_size + be32toh(superblock_.sb_blocksize)) / 2;
+
+            XfsExtentInfo info;
+            info.inode_number = ag_inode + ag_index * ag_blocks;
+            info.file_size = file_size;
+            info.is_deleted = is_deleted;
+            info.next_unlinked = be32toh(inode_core.di_next_unlinked);
+            info.mtime.t_sec = be32toh(inode_core.di_mtime.t_sec);
+            info.mtime.t_nsec = be32toh(inode_core.di_mtime.t_nsec);
+            info.ctime.t_sec = be32toh(inode_core.di_ctime.t_sec);
+            info.ctime.t_nsec = be32toh(inode_core.di_ctime.t_nsec);
+
+            // Read child blocks and extract extent records from leaf nodes
+            uint32_t block_size = be32toh(superblock_.sb_blocksize);
+            int fd = open(config_.device_path.c_str(), O_RDONLY);
+            if (fd >= 0) {
+                // Collect child block numbers from pointer array
+                std::vector<uint32_t> child_blocks;
+                for (uint16_t i = 0; i < numrecs; i++) {
+                    uint32_t child = read_be<uint32_t>(inode_data.data(), ptr_offset + i * 4);
+                    if (child != 0 && child < be32toh(superblock_.sb_agblocks)) {
+                        child_blocks.push_back(child);
+                    }
+                }
+
+                // Process each child block (potentially multi-level)
+                for (uint32_t child_block : child_blocks) {
+                    // Calculate disk offset for the child block (AG-relative to absolute)
+                    uint64_t child_disk_offset = static_cast<uint64_t>(ag_index) *
+                        static_cast<uint64_t>(be32toh(superblock_.sb_agblocks)) * block_size +
+                        static_cast<uint64_t>(child_block) * block_size;
+
+                    // Recursively walk btree levels to collect leaf records
+                    collect_extent_leaf_records(fd, child_disk_offset, block_size, level - 1, &info);
+                }
+
+                close(fd);
             }
 
             if (!info.extents.empty()) {
@@ -827,9 +931,15 @@ void XfsDiskCarver::process_recovered_inode(int fd, uint32_t ag_index, uint32_t 
         return;
     }
 
+    // Validate extents against free space BNO btree to filter out reallocated blocks
+    auto validated_extents = validate_extents_against_free_space(fd, ag_index, extent_info.extents);
+    if (validated_extents.empty()) {
+        return;  // All extents have been reallocated
+    }
+
     std::vector<XfsPageInfo> recovered_pages;
 
-    for (const auto& ext : extent_info.extents) {
+    for (const auto& ext : validated_extents) {
         if (ext.state == XFS_EXT_UNWRITTEN) {
             continue;  // Skip unwritten extents
         }
@@ -965,14 +1075,18 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         size_t effective_size = config_.page_size;
 
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-            page_type != FIL_PAGE_SDI_ZIP) {
+            page_type != FIL_PAGE_SDI_ZIP &&
+            page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
+            page_type != FIL_PAGE_TYPE_ZBLOB2) {
             // Check if this is a compressed page
             auto decomp = try_decompress_page(page_data, config_.page_size);
             if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
                 // Re-read page type from decompressed data
                 uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
                 if (decomp_type == FIL_PAGE_INDEX || decomp_type == FIL_PAGE_SDI ||
-                    decomp_type == FIL_PAGE_SDI_ZIP) {
+                    decomp_type == FIL_PAGE_SDI_ZIP ||
+                    decomp_type == FIL_PAGE_TYPE_BLOB || decomp_type == FIL_PAGE_TYPE_ZBLOB ||
+                    decomp_type == FIL_PAGE_TYPE_ZBLOB2) {
                     decompressed = std::move(decomp);
                     effective_data = decompressed.data();
                     effective_size = decompressed.size();
@@ -981,9 +1095,11 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
             }
         }
 
-        // Accept INDEX and SDI pages
+        // Accept INDEX, SDI, BLOB, and ZBLOB pages
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-            page_type != FIL_PAGE_SDI_ZIP) {
+            page_type != FIL_PAGE_SDI_ZIP &&
+            page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
+            page_type != FIL_PAGE_TYPE_ZBLOB2) {
             continue;
         }
 
@@ -994,6 +1110,17 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
             if (index_id == 0) {
                 continue;  // Invalid index_id
             }
+        }
+
+        // For SDI pages, use pseudo index_id
+        if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+            index_id = 0xFFFFFF00 | page_type;
+        }
+
+        // For BLOB/ZBLOB pages, use pseudo index_id based on page type
+        if (page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+            page_type == FIL_PAGE_TYPE_ZBLOB2) {
+            index_id = 0xFFFF0000 | page_type;
         }
 
         // Extract page_no
@@ -1173,8 +1300,12 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                         }
                     }
 
+                    // Accept BLOB and ZBLOB page types for comprehensive data recovery
                     if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
-                        page_type == FIL_PAGE_SDI_ZIP) {
+                        page_type == FIL_PAGE_SDI_ZIP ||
+                        page_type == FIL_PAGE_TYPE_BLOB || page_type == 0x45BD ||
+                        page_type == FIL_PAGE_TYPE_ZBLOB || page_type == 0x45BA ||
+                        page_type == FIL_PAGE_TYPE_ZBLOB2 || page_type == 0x45BB) {
                         uint64_t index_id = 0;
                         if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
                             index_id = read_be<uint64_t>(effective_data, 66);
@@ -1227,6 +1358,219 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
     if (config_.verbose) {
         std::cout << "[INFO] Free block scan: scanned=" << blocks_scanned.load()
                   << " pages_found=" << pages_found.load() << "\n";
+    }
+#endif
+}
+
+// ==================== Free Space Extent Validation ====================
+// Validates recovered extents against the free space BNO btree.
+// This ensures that blocks from deleted inode extents haven't been reallocated.
+// Matches xfs_undelete's OnlyWithinAGF/TreeCheck algorithm.
+
+std::vector<xfs_extent> XfsDiskCarver::validate_extents_against_free_space(
+    int fd, uint32_t ag_index, const std::vector<xfs_extent>& extents) {
+#ifdef __linux__
+    std::vector<xfs_extent> valid_extents;
+
+    uint32_t block_size = be32toh(superblock_.sb_blocksize);
+    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+    uint16_t sect_size = be16toh(superblock_.sb_sectsize);
+
+    // Read AGF to get free space btree root
+    uint64_t ag_offset = static_cast<uint64_t>(ag_index) * ag_blocks * block_size;
+    uint64_t agf_offset = ag_offset + sect_size;
+
+    xfs_agf agf;
+    if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) return extents;
+    if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) return extents;
+
+    uint32_t bno_root = be32toh(agf.agf_roots[0]);
+    if (bno_root == 0 || bno_root >= ag_blocks) return extents;
+
+    for (const auto& ext : extents) {
+        // Convert absolute fsblock to AG-relative
+        uint64_t ag_base = static_cast<uint64_t>(ag_index) * ag_blocks;
+        uint64_t rel_start = ext.block_offset - ag_base;
+        uint64_t rel_end = rel_start + ext.block_count;
+
+        if (rel_start >= ag_blocks) continue;
+
+        uint64_t extent_begin = rel_start;
+        uint64_t extent_end = rel_end;
+        uint64_t file_offset_accum = 0;
+
+        // Recursively check this extent against the free space btree
+        std::vector<xfs_extent> sub_extents;
+        free_space_tree_check(fd, ag_index, ag_offset, block_size,
+                             bno_root, &extent_begin, &extent_end,
+                             ext, file_offset_accum, &sub_extents);
+
+        for (auto& sub : sub_extents) {
+            valid_extents.push_back(std::move(sub));
+        }
+    }
+
+    return valid_extents;
+#else
+    return extents;
+#endif
+}
+
+void XfsDiskCarver::free_space_tree_check(
+    int fd, uint32_t ag_index, uint64_t ag_offset, uint32_t block_size,
+    uint32_t block_num, uint64_t* extent_begin, uint64_t* extent_end,
+    const xfs_extent& original_ext, uint64_t& file_offset_accum,
+    std::vector<xfs_extent>* valid_extents) {
+#ifdef __linux__
+    if (*extent_begin >= *extent_end) return;
+
+    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+    if (block_num == 0 || block_num >= ag_blocks) return;
+
+    uint64_t block_offset = ag_offset + static_cast<uint64_t>(block_num) * block_size;
+    std::vector<uint8_t> buf(block_size);
+    if (pread(fd, buf.data(), block_size, block_offset) != static_cast<ssize_t>(block_size)) return;
+
+    uint32_t magic = read_be<uint32_t>(buf.data(), 0);
+    if (magic != XFS_ABTB_MAGIC && magic != XFS_ABTB_CRC_MAGIC) return;
+
+    bool is_crc = (magic == XFS_ABTB_CRC_MAGIC);
+    size_t hdr_size = is_crc ? 56 : 16;
+    if (block_size < hdr_size) return;
+
+    uint16_t level = read_be<uint16_t>(buf.data(), 4);
+    uint16_t numrecs = read_be<uint16_t>(buf.data(), 6);
+    if (numrecs == 0 || numrecs > 1000) return;
+
+    if (level > 0) {
+        // Internal node: read keys and pointers, binary search
+        size_t key_offset = hdr_size;
+        size_t ptr_offset = (hdr_size + block_size) / 2;
+
+        // Find the rightmost child that could contain our extent
+        // Keys are (startblock, blockcount), sorted by startblock
+        uint16_t right = numrecs - 1;
+        for (uint16_t i = 0; i < numrecs && key_offset + 8 <= block_size; i++) {
+            uint32_t key_start = read_be<uint32_t>(buf.data(), key_offset);
+            key_offset += 8;  // xfs_alloc_key_t: ar_startblock(4) + ar_blockcount(4)
+            if (key_start <= *extent_begin) {
+                right = i;
+            }
+        }
+
+        // Read the pointer at index 'right'
+        uint32_t child_block = read_be<uint32_t>(buf.data(), ptr_offset + right * 4);
+        free_space_tree_check(fd, ag_index, ag_offset, block_size,
+                             child_block, extent_begin, extent_end,
+                             original_ext, file_offset_accum, valid_extents);
+    } else {
+        // Leaf node: process records
+        // xfs_alloc_rec: ar_startblock(4) + ar_blockcount(4) = 8 bytes
+        size_t rec_offset = hdr_size;
+
+        for (uint16_t i = 0; i < numrecs && rec_offset + 8 <= block_size; i++) {
+            uint32_t rec_start = read_be<uint32_t>(buf.data(), rec_offset);
+            uint32_t rec_count = read_be<uint32_t>(buf.data(), rec_offset + 4);
+            rec_offset += 8;
+            if (rec_count == 0) continue;
+
+            uint64_t rec_begin = rec_start;
+            uint64_t rec_end = rec_start + rec_count;
+
+            // Check overlap with our extent range
+            if (*extent_begin >= rec_end) continue;  // Extent is to the right
+            if (*extent_end <= rec_begin) break;      // Extent is to the left (sorted, so we're done)
+
+            // Overlap found: add the overlapping region
+            uint64_t overlap_begin = std::max(rec_begin, *extent_begin);
+            uint64_t overlap_end = std::min(rec_end, *extent_end);
+
+            if (overlap_begin < overlap_end) {
+                xfs_extent valid_ext;
+                valid_ext.block_offset = ag_offset / block_size +
+                    static_cast<uint64_t>(ag_index) * ag_blocks + overlap_begin;
+                valid_ext.block_count = overlap_end - overlap_begin;
+                valid_ext.file_offset = original_ext.file_offset + file_offset_accum;
+                valid_ext.state = 0;
+                valid_extents->push_back(valid_ext);
+            }
+
+            // Advance to the end of this record
+            file_offset_accum += (overlap_end - *extent_begin);
+            *extent_begin = overlap_end;
+
+            if (*extent_begin >= *extent_end) return;
+        }
+    }
+#endif
+}
+
+// ==================== Multi-Level Extent Btree Traversal ====================
+// Recursively walks extent btree blocks to collect leaf-level extent records.
+// This handles large, highly fragmented files where the extent btree has
+// multiple levels (root -> internal nodes -> leaves).
+
+void XfsDiskCarver::collect_extent_leaf_records(
+    int fd, uint64_t block_disk_offset, uint32_t block_size,
+    int level, XfsExtentInfo* info) {
+#ifdef __linux__
+    if (level < 0 || level > 10) return;  // Safety limits
+
+    std::vector<uint8_t> buf(block_size);
+    if (pread(fd, buf.data(), block_size, block_disk_offset) != static_cast<ssize_t>(block_size)) return;
+
+    uint32_t magic = read_be<uint32_t>(buf.data(), 0);
+    // Check for BMAP btree magic (CRC or non-CRC)
+    bool is_crc = (magic == 0x42B33D42);  // XFS_BMAP_CRC_MAGIC
+    bool is_valid = is_crc || (magic == 0x424D4D42);  // XFS_BMAP_MAGIC
+    if (!is_valid) return;
+
+    size_t hdr_size = is_crc ? 56 : 16;
+    uint16_t bb_level = read_be<uint16_t>(buf.data(), 4);
+    uint16_t numrecs = read_be<uint16_t>(buf.data(), 6);
+    if (numrecs == 0 || numrecs > 1000) return;
+
+    if (level == 0) {
+        // Leaf node: extract extent records
+        // xfs_bmbt_rec: 128-bit (16 bytes) packed format
+        constexpr size_t BMAP_REC_SIZE = sizeof(xfs_bmbt_rec);
+        size_t rec_offset = hdr_size;
+        for (uint16_t i = 0; i < numrecs && rec_offset + BMAP_REC_SIZE <= block_size; i++) {
+            xfs_bmbt_rec rec;
+            std::memcpy(&rec, buf.data() + rec_offset, BMAP_REC_SIZE);
+            rec_offset += BMAP_REC_SIZE;
+
+            xfs_extent ext = parse_extent(rec);
+            if (ext.block_count > 0 && ext.state != XFS_EXT_UNWRITTEN) {
+                uint64_t fs_size = be64toh(superblock_.sb_dblocks);
+                if (ext.block_offset + ext.block_count <= fs_size) {
+                    info->extents.push_back(ext);
+                }
+            }
+        }
+    } else {
+        // Internal node: read keys + pointers, recurse into children
+        size_t key_offset = hdr_size;
+        size_t ptr_offset = (hdr_size + block_size) / 2;
+
+        for (uint16_t i = 0; i < numrecs; i++) {
+            uint64_t child_block = 0;
+            if (is_crc) {
+                // CRC format uses 8-byte pointers
+                child_block = read_be<uint64_t>(buf.data(), ptr_offset + i * 8);
+            } else {
+                // Non-CRC format uses 4-byte pointers
+                child_block = read_be<uint32_t>(buf.data(), ptr_offset + i * 4);
+            }
+
+            if (child_block != 0 && child_block < be32toh(superblock_.sb_agblocks)) {
+                uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+                uint64_t child_disk_offset = block_disk_offset -
+                    (block_disk_offset % (static_cast<uint64_t>(ag_blocks) * block_size)) +
+                    child_block * block_size;
+                collect_extent_leaf_records(fd, child_disk_offset, block_size, level, info);
+            }
+        }
     }
 #endif
 }
@@ -1339,7 +1683,9 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                 size_t effective_size = config_.page_size;
 
                 if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-                    page_type != FIL_PAGE_SDI_ZIP) {
+                    page_type != FIL_PAGE_SDI_ZIP &&
+                    page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
+                    page_type != FIL_PAGE_TYPE_ZBLOB2) {
                     auto decomp = try_decompress_page(page_data, config_.page_size);
                     if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
                         uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
@@ -1353,13 +1699,21 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     }
                 }
 
-                if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
+                    page_type == FIL_PAGE_SDI_ZIP ||
+                    page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+                    page_type == FIL_PAGE_TYPE_ZBLOB2) {
                     uint64_t index_id = 0;
                     if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
                         index_id = read_be<uint64_t>(effective_data, 66);
                     }
 
                     if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
+                        index_id = 0xFFFFFF00 | page_type;
+                    }
+
+                    if (page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+                        page_type == FIL_PAGE_TYPE_ZBLOB2) {
                         index_id = 0xFFFFFF00 | page_type;
                     }
 

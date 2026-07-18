@@ -467,6 +467,23 @@ private:
     // Walk free space btree (for extent validation)
     void walk_free_space_btree(uint32_t ag_index, const xfs_agf& agf);
 
+    // Validate recovered extents against free space BNO btree
+    // Returns only the sub-extents that fall within free blocks (not reallocated)
+    std::vector<xfs_extent> validate_extents_against_free_space(
+        int fd, uint32_t ag_index, const std::vector<xfs_extent>& extents);
+
+    // Recursive free space tree check for a single extent
+    void free_space_tree_check(
+        int fd, uint32_t ag_index, uint64_t ag_offset, uint32_t block_size,
+        uint32_t block_num, uint64_t* extent_begin, uint64_t* extent_end,
+        const xfs_extent& original_ext, uint64_t& file_offset_accum,
+        std::vector<xfs_extent>* valid_extents);
+
+    // Recursive extent btree leaf record collection for multi-level btrees
+    void collect_extent_leaf_records(
+        int fd, uint64_t block_disk_offset, uint32_t block_size,
+        int level, XfsExtentInfo* info);
+
     // Direct signature scan fallback
     void signature_scan(std::function<void(double, const std::string&)> progress);
 

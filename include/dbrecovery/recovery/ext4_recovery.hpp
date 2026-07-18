@@ -393,6 +393,9 @@ private:
     // Traverse multi-level extent tree (for large files)
     std::vector<ext4_extent> traverse_extent_tree(int fd, uint64_t root_block, uint32_t block_size, int max_depth);
 
+    // Traverse extent tree starting from inode's i_block (handles first level in inode)
+    std::vector<ext4_extent> traverse_extent_tree_from_inode(int fd, const ext4_inode& inode, uint32_t block_size);
+
     // Scan freed blocks in block bitmap
     void scan_freed_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap);
 

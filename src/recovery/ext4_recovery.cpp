@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <cstring>
+#include <cstdint>
 #include <algorithm>
 #include <filesystem>
 #include <sstream>
@@ -72,15 +73,56 @@ bool Ext4Recovery::read_superblock(const std::string& device_path, ext4_superblo
 
     // ext4 superblock is at offset 1024 (0x400)
     ssize_t bytes_read = pread(fd, &sb, sizeof(ext4_superblock), EXT4_SUPERBLOCK_OFFSET);
-    close(fd);
 
-    if (bytes_read != sizeof(ext4_superblock)) {
-        return false;
+    if (bytes_read == sizeof(ext4_superblock)) {
+        uint16_t magic = le16toh(sb.s_magic);
+        if (magic == EXT2_SUPER_MAGIC) {
+            close(fd);
+            return true;
+        }
     }
 
-    // Check magic number (little-endian)
-    uint16_t magic = le16toh(sb.s_magic);
-    return magic == EXT2_SUPER_MAGIC;
+    // Primary superblock invalid - try backup superblocks
+    // ext4 backup superblocks exist at the start of each block group:
+    // Groups 0, 1, and powers of 3, 5, 7
+    // The most reliable backup is at group 1 (block_size * blocks_per_group)
+    // If we can't read from primary, try reading geometry from partial primary SB
+    std::cerr << "[WARN] Primary ext4 superblock invalid, trying backup superblocks...\n";
+
+    uint32_t block_size = 1024;   // Default ext4 block size
+    uint32_t blocks_per_group = 8192;  // Default
+
+    // Try to get geometry from primary SB even if magic is wrong
+    if (bytes_read >= static_cast<ssize_t>(offsetof(ext4_superblock, s_log_block_size) + 8)) {
+        uint32_t log_block_size = le32toh(sb.s_log_block_size);
+        if (log_block_size <= 6) {
+            block_size = EXT4_SUPERBLOCK_OFFSET << log_block_size;
+        }
+        uint32_t bpg = le32toh(sb.s_blocks_per_group);
+        if (bpg > 0 && bpg < 100000000) {
+            blocks_per_group = bpg;
+        }
+    }
+
+    // Try backup superblock at group 1 (most common backup location)
+    for (int backup_group : {1, 3, 5, 7, 9, 25, 27, 32, 49, 64, 81, 100, 125, 128, 243, 256, 343, 512, 625, 729}) {
+        uint64_t backup_offset = static_cast<uint64_t>(backup_group) *
+                                static_cast<uint64_t>(blocks_per_group) * block_size +
+                                EXT4_SUPERBLOCK_OFFSET;
+        bytes_read = pread(fd, &sb, sizeof(ext4_superblock), backup_offset);
+        if (bytes_read == sizeof(ext4_superblock)) {
+            uint16_t magic = le16toh(sb.s_magic);
+            if (magic == EXT2_SUPER_MAGIC) {
+                std::cerr << "[INFO] Found valid ext4 superblock in group " << backup_group
+                          << " (offset " << backup_offset << ")\n";
+                close(fd);
+                return true;
+            }
+        }
+    }
+
+    close(fd);
+    return false;
 #else
     return false;
 #endif
@@ -280,9 +322,9 @@ std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint
     ext4_inode inode_raw;
     memset(&inode_raw, 0, sizeof(inode_raw));
     ssize_t bytes_read = pread(fd, &inode_raw, inode_size, inode_offset);
-    close(fd);
 
     if (bytes_read != inode_size) {
+        close(fd);
         return std::nullopt;
     }
 
@@ -305,11 +347,16 @@ std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint
     info.file_size = size_lo | size_hi;
 
     if (info.file_size == 0) {
+        close(fd);
         return std::nullopt;  // Empty inode
     }
 
-    // Parse extents
+    // Parse extents — try direct first, then multi-level traversal
     info.extents = parse_extents(inode_raw);
+    if (info.extents.empty() && info.file_size >= config_.page_size) {
+        info.extents = traverse_extent_tree_from_inode(fd, inode_raw, block_size_);
+    }
+    close(fd);
 
     if (info.extents.empty()) {
         return std::nullopt;  // No data extents
@@ -371,11 +418,58 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(const ext4_inode& inode) {
         // Same size as ext4_extent (12 bytes each)
         const uint8_t* idx_array = reinterpret_cast<const uint8_t*>(inode.i_block) + sizeof(ext4_extent_header);
 
-        // For multi-level extent trees, we need to read external blocks
-        // This requires device access, which is not available in this context
-        // The caller should handle this by calling traverse_extent_tree()
-        // For now, we return empty and let the caller handle multi-level trees
+        // We need fd and block_size to traverse — caller should provide via overload
+        // Mark that multi-level traversal is needed
     }
+
+    return extents;
+}
+
+// ==================== Multi-level Extent Tree Traversal from Inode ====================
+
+std::vector<ext4_extent> Ext4Recovery::traverse_extent_tree_from_inode(
+    int fd, const ext4_inode& inode, uint32_t block_size) {
+
+    std::vector<ext4_extent> extents;
+
+#ifdef __linux__
+    uint32_t flags = le32toh(inode.i_flags);
+    if (!(flags & 0x80000)) return extents;  // EXT4_EXTENTS_FL
+
+    const ext4_extent_header* header = reinterpret_cast<const ext4_extent_header*>(inode.i_block);
+    if (le16toh(header->eh_magic) != EXT4_EXTENT_MAGIC) return extents;
+
+    uint16_t entries = le16toh(header->eh_entries);
+    uint16_t depth = le16toh(header->eh_depth);
+
+    if (depth == 0) {
+        // Direct extents — same as parse_extents but with fd context
+        const ext4_extent* ext_array = reinterpret_cast<const ext4_extent*>(
+            inode.i_block + sizeof(ext4_extent_header));
+        for (uint16_t i = 0; i < entries && i <= 4; i++) {
+            ext4_extent ext;
+            ext.ee_block = le32toh(ext_array[i].ee_block);
+            ext.ee_len = le16toh(ext_array[i].ee_len);
+            ext.ee_start_hi = le16toh(ext_array[i].ee_start_hi);
+            ext.ee_start_lo = le32toh(ext_array[i].ee_start_lo);
+            if (ext.ee_len > 0) extents.push_back(ext);
+        }
+        return extents;
+    }
+
+    // depth > 0: read index entries from inode's i_block, recurse into child blocks
+    const uint8_t* idx_array = reinterpret_cast<const uint8_t*>(inode.i_block) + sizeof(ext4_extent_header);
+    for (uint16_t i = 0; i < entries && i <= 4; i++) {
+        uint32_t ei_leaf_lo = le32toh(*reinterpret_cast<const uint32_t*>(idx_array + i * 12 + 4));
+        uint16_t ei_leaf_hi = le16toh(*reinterpret_cast<const uint16_t*>(idx_array + i * 12 + 8));
+        uint64_t child_block = (static_cast<uint64_t>(ei_leaf_hi) << 32) | ei_leaf_lo;
+
+        if (child_block > 0) {
+            auto child_extents = traverse_extent_tree(fd, child_block, block_size, depth);
+            extents.insert(extents.end(), child_extents.begin(), child_extents.end());
+        }
+    }
+#endif
 
     return extents;
 }
@@ -689,24 +783,26 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
     // Safety check: ensure we don't read beyond device
     uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group * block_size;
 
-    // InnoDB pages are 16KB, spanning multiple 4KB blocks
-    uint32_t blocks_per_page = config_.page_size / block_size;
-    if (blocks_per_page == 0) blocks_per_page = 4;  // Default: 16KB page / 4KB block = 4
+    // InnoDB pages are 16KB, spanning multiple ext4 blocks.
+    // Since InnoDB pages within a file are at 16KB offsets, but the file
+    // may start at any block boundary, we scan at page_size steps but
+    // also at N offsets within each page_size window to catch misaligned pages.
+    // For 1024-byte blocks: scan at 1KB step within 16KB windows.
+    // For 4096-byte blocks: scan at 4KB step (already page-aligned since 16384/4096=4).
 
-    // Scan at page-aligned offsets within this group
-    // We need to scan EVERY possible 16KB-aligned offset, not just
-    // offsets that are multiples of blocks_per_page from group start.
-    // InnoDB pages are always at 16KB boundaries relative to the start
-    // of the file, but the file may not start at a 16KB boundary
-    // within the block group.
-    //
-    // Strategy: scan at every 16KB (page_size) offset within each group
-    uint32_t max_pages_per_group = (blocks_per_group * block_size) / config_.page_size;
-    if (max_pages_per_group > 8192) max_pages_per_group = 8192;
+    uint32_t scan_step = block_size;
+    uint32_t max_offsets = (blocks_per_group > 524288) ? 524288 : blocks_per_group;
 
-    for (uint32_t page_idx = 0; page_idx < max_pages_per_group; page_idx++) {
+    for (uint32_t blk = 0; blk < max_offsets; blk++) {
+        // Only scan blocks that are freed (bit=0 in bitmap)
+        uint32_t byte_idx = blk / 8;
+        uint32_t bit_idx = blk % 8;
+        if (byte_idx < bitmap.size() && (bitmap[byte_idx] & (1 << bit_idx)) != 0) {
+            continue;  // Skip allocated blocks
+        }
+
         uint64_t disk_offset = static_cast<uint64_t>(group_index) * blocks_per_group * block_size
-                              + static_cast<uint64_t>(page_idx) * config_.page_size;
+                              + static_cast<uint64_t>(blk) * block_size;
 
         // Safety check: don't read beyond device
         if (disk_offset + config_.page_size > max_offset) break;
@@ -715,16 +811,14 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
         std::vector<uint8_t> page_data(config_.page_size);
         ssize_t bytes_read = pread(fd, page_data.data(), config_.page_size, disk_offset);
 
-        if (bytes_read == config_.page_size) {
+        if (bytes_read == static_cast<ssize_t>(config_.page_size)) {
             blocks_scanned_.fetch_add(1);
 
             // Check for InnoDB page type at offset 24
             if (page_data.size() >= 38) {
                 uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
-                // Accept ALL valid InnoDB page types, not just INDEX
-                // FSP_HDR=8, IBUF_BITMAP=5, INODE=2, INDEX=0x45BF,
-                // XDES=11, BLOB=0x45BD, etc.
+                // Accept ALL valid InnoDB page types
                 bool is_valid_type = false;
                 switch (page_type) {
                     case 2:    // FIL_PAGE_INODE
@@ -733,6 +827,8 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
                     case 11:   // FIL_PAGE_TYPE_XDES
                     case 0x45BD: // FIL_PAGE_TYPE_BLOB
                     case 0x45BF: // FIL_PAGE_INDEX
+                    case 0x45BA: // FIL_PAGE_TYPE_ZBLOB (compressed BLOB)
+                    case 0x45BB: // FIL_PAGE_TYPE_ZBLOB2 (compressed BLOB v2)
                         is_valid_type = true;
                         break;
                     default:
@@ -843,6 +939,9 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
         if (is_deleted && file_size >= config_.page_size) {
             // Parse extents to find data blocks
             std::vector<ext4_extent> extents = parse_extents(inode_raw);
+            if (extents.empty() && file_size >= config_.page_size) {
+                extents = traverse_extent_tree_from_inode(fd, inode_raw, block_size);
+            }
 
             for (const auto& ext : extents) {
                 uint32_t ext_len = le16toh(ext.ee_len);
@@ -855,8 +954,15 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
                     continue;
                 }
 
-                // Read blocks from this extent
-                for (uint32_t blk = 0; blk < ext_len && blk < 1000; blk++) {
+                // Read at page-aligned offsets within this extent
+                // InnoDB pages are 16KB-aligned within the file, but the file
+                // itself may start at any 1024-byte block boundary in ext4.
+                // We scan every page_size (16KB) offset within the extent.
+                uint32_t ext_blocks = ext_len;
+                uint32_t blocks_per_page = config_.page_size / block_size;
+                if (blocks_per_page == 0) blocks_per_page = 16;
+
+                for (uint32_t blk = 0; blk < ext_blocks && blk < 100000; blk += blocks_per_page) {
                     uint64_t block_num = ext_start + blk;
                     uint64_t disk_offset = block_num * block_size;
 
@@ -867,13 +973,33 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
                     std::vector<uint8_t> page_data(config_.page_size);
                     ssize_t page_read = pread(fd, page_data.data(), config_.page_size, disk_offset);
 
-                    if (page_read == config_.page_size) {
-                        // Check for InnoDB INDEX page
-                        if (page_data.size() >= 26) {
+                    if (page_read == static_cast<ssize_t>(config_.page_size)) {
+                        // Check for valid InnoDB page types
+                        if (page_data.size() >= 38) {
                             uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
-                            if (page_type == FIL_PAGE_INDEX) {
+                            bool is_valid_type = false;
+                            switch (page_type) {
+                                case 2:    // FIL_PAGE_INODE
+                                case 5:    // FIL_PAGE_IBUF_BITMAP
+                                case 8:    // FIL_PAGE_TYPE_FSP_HDR
+                                case 11:   // FIL_PAGE_TYPE_XDES
+                                case 0x45BD: // FIL_PAGE_TYPE_BLOB
+                                case 0x45BF: // FIL_PAGE_INDEX
+                                case 0x45BA: // FIL_PAGE_TYPE_ZBLOB
+                                case 0x45BB: // FIL_PAGE_TYPE_ZBLOB2
+                                    is_valid_type = true;
+                                    break;
+                                default:
+                                    break;
+                            }
+
+                            if (is_valid_type) {
                                 uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+                                if (index_id == 0 || index_id > 1000000000000) {
+                                    uint32_t space_id = read_be<uint32_t>(page_data.data(), 34);
+                                    index_id = space_id > 0 ? space_id : page_type;
+                                }
 
                                 if (index_id > 0 && index_id < 1000000000000) {
                                     Ext4BlockInfo block_info;

@@ -516,12 +516,25 @@ run_disaster_scenario() {
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
 
-    # Analyze results
+    # Analyze results — count all records across ALL CSV files
+    # Schema-aware recovery produces named CSV files (all_types.csv, etc.)
+    # Schema-less recovery produces index_N.csv files with raw parsed data
     local recovered_count=0
     local csv_file="${output_dir}/all_types.csv"
     if [ -f "$csv_file" ]; then
         recovered_count=$(wc -l < "$csv_file" 2>/dev/null || echo 0)
         recovered_count=$((recovered_count - 1 > 0 ? recovered_count - 1 : 0))
+    else
+        # Schema-less mode: count records across all CSV files
+        recovered_count=0
+        for f in "${output_dir}"/*.csv; do
+            if [ -f "$f" ]; then
+                local csv_lines
+                csv_lines=$(wc -l < "$f" 2>/dev/null || echo 0)
+                recovered_count=$((recovered_count + csv_lines - 1))  # Subtract header per file
+            fi
+        done
+        recovered_count=$((recovered_count > 0 ? recovered_count : 0))
     fi
 
     local golden_count=$(cat "${RESULTS_DIR}/${fs_type}_count_all_types.txt" 2>/dev/null || echo 0)
