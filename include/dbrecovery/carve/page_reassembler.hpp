@@ -23,6 +23,8 @@
 #include <fstream>
 #include <filesystem>
 #include <cstring>
+#include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 
 namespace dbrecovery {
 namespace carve {
@@ -44,6 +46,7 @@ struct PageIdentity {
     uint64_t disk_offset;       // Physical offset on disk
     std::vector<uint8_t> data;  // Full page data (16384 bytes typically)
     uint32_t page_size;         // Actual page size (4096/8192/16384/32768/65536)
+    bool is_synthetic = false;  // True for generated gap placeholders
 
     std::string page_type_name() const {
         switch (page_type) {
@@ -63,6 +66,7 @@ struct PageIdentity {
             << ", type=" << page_type_name()
             << ", lsn=" << lsn
             << ", cksum=" << (checksum_valid ? "OK" : "FAIL")
+            << ", provenance=" << (is_synthetic ? "synthetic" : "physical")
             << ", disk_off=0x" << std::hex << disk_offset << std::dec
             << ", size=" << page_size << "}";
         return oss.str();
@@ -106,6 +110,7 @@ struct PageGap {
 struct ReassemblyStats {
     uint32_t total_pages_found = 0;
     uint32_t total_pages_used = 0;
+    uint32_t synthetic_pages_written = 0;
     uint32_t total_gaps = 0;
     uint32_t critical_gaps = 0;
     uint32_t spaces_reconstructed = 0;
@@ -303,6 +308,9 @@ inline std::vector<uint8_t> PageFragmentReassembler::create_placeholder(
     uint32_t space_id, uint32_t page_no, uint32_t page_size) {
 
     std::vector<uint8_t> placeholder(page_size, 0);
+    if (page_size < dbrecovery::innodb::FIL_HEADER_SIZE) {
+        return placeholder;
+    }
 
     // Write minimal FIL header for the placeholder
     // FIL_PAGE_SPACE_ID at offset 34 (4 bytes, big-endian)
