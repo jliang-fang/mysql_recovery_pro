@@ -100,27 +100,34 @@ constexpr uint32_t TRX_SYS_RSEG_ARRAY = 108;  // Offset of rollback segment arra
 constexpr uint32_t TRX_SYS_RSEG_SLOT_SIZE = 8;  // Each slot is 8 bytes (space:page)
 constexpr uint32_t TRX_SYS_N_RSEGS = 128;     // Maximum rollback segments
 
-std::optional<uint32_t> read_rseg_slot(
+struct RsegSlot {
+    uint32_t space_id;
+    uint32_t page_no;
+};
+
+std::optional<RsegSlot> read_rseg_slot(
     const uint8_t* data, size_t size, uint32_t slot_id) {
-    
+
     if (!data || slot_id >= TRX_SYS_N_RSEGS) {
         return std::nullopt;
     }
-    
+
     uint32_t offset = TRX_SYS_RSEG_ARRAY + slot_id * TRX_SYS_RSEG_SLOT_SIZE;
     if (offset + 8 > size) {
         return std::nullopt;
     }
-    
-    uint32_t space_id = read_le<uint32_t>(data, offset);
-    uint32_t page_no = read_le<uint32_t>(data, offset + 4);
-    
+
+    RsegSlot slot{
+        read_le<uint32_t>(data, offset),
+        read_le<uint32_t>(data, offset + 4)
+    };
+
     // Filter out empty slots (0:0)
-    if (space_id == 0 && page_no == 0) {
+    if (slot.space_id == 0 && slot.page_no == 0) {
         return std::nullopt;
     }
-    
-    return (space_id << 16) | page_no;  // Combine space and page
+
+    return slot;
 }
 
 // ==================== UndoLogParser Implementation ====================
@@ -264,7 +271,7 @@ std::vector<UndoLogEntry> UndoLogParser::parse_rollback_segment(
         return all_entries;
     }
 
-    const uint32_t current_start_page = *slot_opt & 0xFFFF;
+    const uint32_t current_start_page = slot_opt->page_no;
     if (current_start_page == 0 || current_start_page >= page_count) {
         return all_entries;
     }
@@ -865,8 +872,8 @@ std::vector<UndoLogParser::ReassembledChain> UndoLogParser::heuristic_reassemble
         const uint8_t* trx_data = trx_sys_page.data();
         for (uint32_t i = 0; i < TRX_SYS_N_RSEGS; i++) {
             auto slot = read_rseg_slot(trx_data, trx_sys_page.size(), i);
-            if (slot.has_value() && slot.value() > 0) {
-                rseg_list.push_back(slot.value());
+            if (slot.has_value()) {
+                rseg_list.push_back(i);
             }
         }
     }

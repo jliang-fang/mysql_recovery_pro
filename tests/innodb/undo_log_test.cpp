@@ -163,6 +163,42 @@ TEST(UndoLogRollbackTest, ParseRollbackSegment) {
     std::remove(temp_path.c_str());
 }
 
+TEST(UndoLogRollbackTest, PreservesFullRollbackSlotIdentity) {
+    constexpr size_t page_size = 16384;
+    constexpr uint32_t trx_sys_page_no = 5;
+    constexpr uint32_t undo_page_no = 0x10005;
+    const std::string temp_path = "/tmp/test_ibdata_full_rseg_slot.bin";
+
+    std::vector<uint8_t> trx_sys_page(page_size, 0);
+    write_le<uint32_t>(trx_sys_page.data(), 108, 0x12345678);
+    write_le<uint32_t>(trx_sys_page.data(), 112, undo_page_no);
+
+    std::vector<uint8_t> undo_page(page_size, 0);
+    const size_t record_end = write_insert_record(undo_page, 40, {"full"});
+    write_page_header(undo_page, static_cast<uint16_t>(record_end), 1);
+
+    {
+        std::ofstream file(temp_path, std::ios::binary | std::ios::trunc);
+        ASSERT_TRUE(file.is_open());
+        file.seekp(static_cast<std::streamoff>(trx_sys_page_no) * page_size);
+        file.write(reinterpret_cast<const char*>(trx_sys_page.data()),
+                   static_cast<std::streamsize>(trx_sys_page.size()));
+        file.seekp(static_cast<std::streamoff>(undo_page_no) * page_size);
+        file.write(reinterpret_cast<const char*>(undo_page.data()),
+                   static_cast<std::streamsize>(undo_page.size()));
+    }
+
+    UndoLogParser parser;
+    const auto entries = parser.parse_rollback_segment(temp_path, 0);
+
+    ASSERT_EQ(entries.size(), 1u);
+    ASSERT_EQ(entries[0].fields.size(), 1u);
+    EXPECT_EQ(std::string(entries[0].fields[0].data.begin(),
+                          entries[0].fields[0].data.end()), "full");
+
+    std::remove(temp_path.c_str());
+}
+
 // Test statistics tracking
 TEST(UndoLogStatsTest, GetParserStats) {
     std::vector<uint8_t> page(16384, 0);
@@ -177,7 +213,6 @@ TEST(UndoLogStatsTest, GetParserStats) {
     auto stats = parser.get_stats();
     EXPECT_EQ(stats.total_undo_records, 0u);
 }
-
 } // namespace innodb
 } // namespace dbrecovery
 
