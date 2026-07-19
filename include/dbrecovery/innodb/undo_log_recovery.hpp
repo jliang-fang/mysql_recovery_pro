@@ -443,26 +443,65 @@ inline std::vector<std::map<std::string, std::string>> UndoLogRecovery::apply_ro
 
     recovered_records_.clear();
 
-    // 对于每个事务链，按相反顺序应用记录（回滚）
     for (const auto& chain : chains) {
-        // 反向遍历记录
+        // Walk records in reverse order (newest-first = rollback direction)
         for (auto it = chain.records.rbegin(); it != chain.records.rend(); ++it) {
             const auto& record = *it;
 
-            // 根据记录类型处理
             switch (record.type) {
-                case UndoLogType::INSERT:
-                    // INSERT 的回滚是 DELETE
-                    // 这里可以记录删除操作
+                case UndoLogType::INSERT: {
+                    // INSERT rollback = DELETE — record the PK so we know what was removed
+                    std::map<std::string, std::string> row;
+                    row["_undo_action"] = "DELETE";
+                    row["_trx_id"] = std::to_string(record.trx_id);
+                    row["_page_no"] = std::to_string(record.page_no);
+                    for (const auto& [field_no, value] : record.field_values) {
+                        row["col_" + std::to_string(field_no)] =
+                            std::string(value.begin(), value.end());
+                    }
+                    recovered_records_.push_back(row);
                     break;
-                case UndoLogType::UPDATE:
-                    // UPDATE 的回滚是反向 UPDATE
-                    // 这里可以记录回滚后的数据
+                }
+                case UndoLogType::UPDATE: {
+                    // UPDATE rollback — restore old field values
+                    std::map<std::string, std::string> row;
+                    row["_undo_action"] = "RESTORE";
+                    row["_trx_id"] = std::to_string(record.trx_id);
+                    row["_page_no"] = std::to_string(record.page_no);
+                    for (const auto& [field_no, value] : record.field_values) {
+                        row["col_" + std::to_string(field_no)] =
+                            std::string(value.begin(), value.end());
+                    }
+                    recovered_records_.push_back(row);
                     break;
-                case UndoLogType::DELETE:
-                    // DELETE 的回滚是 INSERT
-                    // 这里可以记录插入操作
+                }
+                case UndoLogType::DELETE: {
+                    // DELETE rollback = INSERT — restore the deleted row
+                    std::map<std::string, std::string> row;
+                    row["_undo_action"] = "INSERT";
+                    row["_trx_id"] = std::to_string(record.trx_id);
+                    row["_page_no"] = std::to_string(record.page_no);
+                    for (const auto& [field_no, value] : record.field_values) {
+                        row["col_" + std::to_string(field_no)] =
+                            std::string(value.begin(), value.end());
+                    }
+                    recovered_records_.push_back(row);
                     break;
+                }
+                case UndoLogType::TRUNCATE: {
+                    // TRUNCATE rollback — restore all pre-truncate data from undo
+                    std::map<std::string, std::string> row;
+                    row["_undo_action"] = "TRUNCATE_ROLLBACK";
+                    row["_trx_id"] = std::to_string(record.trx_id);
+                    row["_page_no"] = std::to_string(record.page_no);
+                    row["_space_id"] = std::to_string(record.space_id);
+                    for (const auto& [field_no, value] : record.field_values) {
+                        row["col_" + std::to_string(field_no)] =
+                            std::string(value.begin(), value.end());
+                    }
+                    recovered_records_.push_back(row);
+                    break;
+                }
                 default:
                     break;
             }

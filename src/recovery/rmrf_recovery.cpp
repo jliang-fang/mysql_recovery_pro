@@ -445,9 +445,12 @@ bool RmrfRecovery::reconstruct_from_file(const std::string& file_path,
                 allocated_pages++;
                 break;
             default:
-                // Check if it looks like a corrupted index page (invalid type but looks like data)
-                if (page_type == innodb::FIL_PAGE_TYPE_BLOB || page_type == 0) {
-                    index_pages++;  // Treat as potentially valid index page
+                // Treat BLOB/ZBLOB/COMPRESSED pages as potentially valid
+                if (page_type == innodb::FIL_PAGE_TYPE_BLOB || page_type == 0 ||
+                    page_type == 0x45BA || page_type == 0x45BB ||  // ZBLOB, ZBLOB2
+                    page_type == innodb::FIL_PAGE_COMPRESSED ||
+                    page_type == innodb::FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+                    index_pages++;
                 } else {
                     corrupted_pages++;
                 }
@@ -1376,7 +1379,11 @@ bool RmrfRecovery::validate_page_checksum(
 }
 
 /**
- * @brief 计算 CRC32C 校验和
+ * @brief Compute CRC32C checksum (Castagnoli polynomial)
+ *
+ * InnoDB uses CRC32C (polynomial 0x1EDC6F41) for page checksums
+ * since MySQL 5.7. This implementation uses reflected input/output
+ * as required by the InnoDB page format.
  */
 uint32_t RmrfRecovery::compute_crc32c(const uint8_t* data, size_t len) {
     uint32_t crc = 0xFFFFFFFF;
@@ -1384,7 +1391,7 @@ uint32_t RmrfRecovery::compute_crc32c(const uint8_t* data, size_t len) {
         crc ^= data[i];
         for (int j = 0; j < 8; ++j) {
             if (crc & 1) {
-                crc = (crc >> 1) ^ 0xEDB88320;
+                crc = (crc >> 1) ^ 0x82F63B78;  // CRC32C reflected polynomial
             } else {
                 crc >>= 1;
             }
