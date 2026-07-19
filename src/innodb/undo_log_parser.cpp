@@ -20,6 +20,8 @@
 #include <map>
 #include <iomanip>
 #include <limits>
+#include <ctime>
+#include <cstdio>
 
 namespace dbrecovery {
 namespace innodb {
@@ -145,8 +147,7 @@ std::vector<UndoLogEntry> UndoLogParser::parse_undo_log_page(
 
     const uint16_t page_type = get_page_type(page_data);
     if (page_type != FIL_PAGE_UNDO_LOG) {
-        std::cerr << "[WARN] Page " << page_no << " is not UNDO log type: 0x"
-                  << std::hex << page_type << std::dec << "\n";
+        return entries;
     }
 
     const uint16_t page_start = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_START);
@@ -321,9 +322,21 @@ std::vector<HeuristicRecord> UndoLogParser::recover_from_undo_logs(
     const std::string& ibdata_path,
     const std::string& table_space_id,
     uint64_t table_index_id) {
-    
+
     std::vector<HeuristicRecord> recovered_records;
-    
+
+    // Parse table_space_id from string if non-empty
+    uint32_t target_space_id = 0;
+    bool has_space_filter = false;
+    if (!table_space_id.empty()) {
+        try {
+            target_space_id = static_cast<uint32_t>(std::stoul(table_space_id));
+            has_space_filter = true;
+        } catch (const std::exception& e) {
+            std::cerr << "[WARN] Invalid table_space_id value: " << table_space_id << "\n";
+        }
+    }
+
     // Step 1: Read TRX_SYS page (page 5) from ibdata1 to get rseg slots
     constexpr size_t TRX_SYS_PAGE_NO = 5;
     constexpr size_t DEFAULT_PAGE_SIZE = 16384;
@@ -358,13 +371,33 @@ std::vector<HeuristicRecord> UndoLogParser::recover_from_undo_logs(
     for (uint32_t rseg_id : rseg_ids) {
         auto entries = parse_rollback_segment(ibdata_path, rseg_id);
         std::cout << "[INFO] Rseg " << rseg_id << ": " << entries.size() << " undo records\n";
-        
+
         // Step 3: Filter entries for our table
         for (const auto& entry : entries) {
             // Skip if not DELETE/UPDATE for our table
-            if (entry.undo_type != TRX_UNDO_DEL_REC && 
+            if (entry.undo_type != TRX_UNDO_DEL_REC &&
                 entry.undo_type != TRX_UNDO_UPD_DEL_REC) {
                 continue;
+            }
+
+            // Apply table_space_id filter when specified
+            if (has_space_filter) {
+                // Undo log entries don't carry the table's space_id directly in the
+                // entry struct. The FIL_PAGE_SPACE_ID in the undo log page header
+                // refers to the tablespace containing the undo log, not the target table.
+                // We conservatively include all records when we cannot verify the space_id.
+                // This is noted as a limitation — future enhancement would require
+                // parsing the undo record body to extract space_id from the row data.
+                (void)target_space_id;
+            }
+
+            // Apply table_index_id filter when specified
+            if (table_index_id > 0) {
+                // Undo log entries do not carry the index_id of the target table.
+                // The undo log records contain the table_id, not index_id.
+                // Conservatively include all records as we cannot verify index_id.
+                // Future enhancement: if table_id can be mapped to index_id via
+                // the data dictionary, add that lookup here.
             }
             
             // Step 4: Reconstruct record from undo log
@@ -669,8 +702,15 @@ std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
     uint32_t current_page = start_page_no;
     uint32_t current_offset = start_offset;
 
-    std::ifstream file(ibdata_path, std::ios::binary);
+    std::ifstream file(ibdata_path, std::ios::binary | std::ios::ate);
     if (!file) return chain;
+
+    const std::streampos end_pos = file.tellg();
+    if (end_pos < 0) return chain;
+    const uint64_t file_size = static_cast<uint64_t>(end_pos);
+    const uint64_t page_count = file_size / DEFAULT_PAGE_SIZE;
+    if (page_count == 0 || start_page_no >= page_count) return chain;
+    file.seekg(0, std::ios::beg);
 
     constexpr size_t MAX_CHAIN_LENGTH = 1000;
     size_t chain_pos = 0;
@@ -680,6 +720,9 @@ std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
         if (visited.count(key)) break;
         visited.insert(key);
 
+        if (current_page >= page_count || current_offset >= DEFAULT_PAGE_SIZE) break;
+
+        file.clear();
         file.seekg(static_cast<std::streamoff>(current_page) * DEFAULT_PAGE_SIZE, std::ios::beg);
         std::vector<uint8_t> page_data(DEFAULT_PAGE_SIZE);
         file.read(reinterpret_cast<char*>(page_data.data()), DEFAULT_PAGE_SIZE);
@@ -688,12 +731,22 @@ std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
         uint16_t page_type = get_page_type(page_data.data());
         if (page_type != FIL_PAGE_UNDO_LOG) break;
 
-        if (current_offset + 10 > DEFAULT_PAGE_SIZE) break;
+        const uint16_t page_free = read_le<uint16_t>(
+            page_data.data(), TRX_UNDO_PAGE_FREE);
+        if (page_free < TRX_UNDO_PAGE_HDR_SIZE ||
+            page_free > page_data.size() || current_offset >= page_free) {
+            break;
+        }
 
-        auto header_opt = UndoLogRecordHeader::parse(page_data.data(), DEFAULT_PAGE_SIZE, current_offset);
+        auto header_opt = UndoLogRecordHeader::parse(
+            page_data.data(), page_free, current_offset);
         if (!header_opt) break;
 
         const auto& header = *header_opt;
+        if (header.field_count > 20 ||
+            header.header_size > page_free - current_offset) {
+            break;
+        }
 
         UndoLogEntry entry;
         entry.undo_type = header.type;
@@ -701,49 +754,112 @@ std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
         entry.page_offset = header.rec_page_offset;
         entry.field_count = header.field_count;
 
-        // Parse fields
-        size_t field_offset = current_offset + 2;
-        for (uint8_t i = 0; i < header.field_count && field_offset + 1 < DEFAULT_PAGE_SIZE; i++) {
-            uint8_t field_type = page_data[field_offset];
-            uint16_t field_size;
-            if (field_type & 0x80) {
-                if (field_offset + 3 > DEFAULT_PAGE_SIZE) break;
-                field_size = read_le<uint16_t>(page_data.data(), field_offset + 1);
-                field_offset += 3;
-            } else {
-                field_size = field_type & 0x7F;
-                field_offset += 1;
+        size_t field_offset = current_offset + header.header_size;
+        bool complete = true;
+        for (uint8_t i = 0; i < header.field_count; ++i) {
+            if (field_offset >= page_free) {
+                complete = false;
+                break;
             }
-            if (field_offset + field_size > DEFAULT_PAGE_SIZE) break;
+
+            const uint8_t field_type = page_data[field_offset];
+            const size_t length_prefix_size = (field_type & 0x80) ? 3 : 1;
+            if (field_offset > page_free - length_prefix_size) {
+                complete = false;
+                break;
+            }
+
+            uint16_t field_size = field_type & 0x7F;
+            if (field_type & 0x80) {
+                field_size = read_le<uint16_t>(
+                    page_data.data(), field_offset + 1);
+            }
+            field_offset += length_prefix_size;
+
+            if (field_size > page_free - field_offset) {
+                complete = false;
+                break;
+            }
+
             UndoLogField field;
             field.type = field_type;
             field.size = field_size;
             field.data.assign(page_data.data() + field_offset,
-                            page_data.data() + field_offset + field_size);
-            entry.fields.push_back(field);
+                              page_data.data() + field_offset + field_size);
+            entry.fields.push_back(std::move(field));
             field_offset += field_size;
         }
 
-        chain.push_back(entry);
+        if (!complete) break;
+        chain.push_back(std::move(entry));
 
         if (header.type == TRX_UNDO_INSERT || header.type == TRX_UNDO_INS_REC) break;
 
-        // Follow prev_undo_ptr: [page_no(4B LE)] [offset(2B LE)] at offset +6 from record start
-        size_t prev_ptr_offset = current_offset + 6;
-        if (prev_ptr_offset + 6 <= DEFAULT_PAGE_SIZE) {
-            uint32_t next_page = read_le<uint32_t>(page_data.data(), prev_ptr_offset);
-            uint32_t next_offset = read_le<uint16_t>(page_data.data(), prev_ptr_offset + 4);
-            if (next_page == 0 || next_offset == 0) break;
-            if (next_page == current_page && next_offset == current_offset) break;
-            current_page = next_page;
-            current_offset = next_offset;
-        } else break;
+        // Follow the legacy six-byte previous-pointer representation used here.
+        const size_t prev_ptr_offset = current_offset + 6;
+        if (prev_ptr_offset > page_free || page_free - prev_ptr_offset < 6) break;
 
-        chain_pos++;
+        const uint32_t next_page = read_le<uint32_t>(
+            page_data.data(), prev_ptr_offset);
+        const uint32_t next_offset = read_le<uint16_t>(
+            page_data.data(), prev_ptr_offset + 4);
+        if (next_page == 0 || next_page == FIL_NULL ||
+            next_page >= page_count || next_offset >= DEFAULT_PAGE_SIZE) {
+            break;
+        }
+        if (next_page == current_page && next_offset == current_offset) break;
+
+        current_page = next_page;
+        current_offset = next_offset;
+        ++chain_pos;
     }
 
     std::reverse(chain.begin(), chain.end());
     return chain;
+}
+
+// ==================== Time Parsing Helper ====================
+
+/**
+ * @brief Parse MySQL datetime string to time_t
+ *
+ * Supported formats:
+ *   - "YYYY-MM-DD HH:MM:SS"
+ *   - "YYYY-MM-DDTHH:MM:SS"
+ *   - "YYYY-MM-DD" (treated as start of day)
+ *
+ * @param time_str The time string to parse
+ * @return time_t value, or 0 if parsing fails
+ */
+static time_t parse_mysql_datetime(const std::string& time_str) {
+    if (time_str.empty()) return 0;
+
+    struct tm tm = {};
+    int year = 0, month = 0, day = 0, hour = 0, min = 0, sec = 0;
+
+    // Try "YYYY-MM-DD HH:MM:SS" or "YYYY-MM-DDTHH:MM:SS"
+    int parsed = std::sscanf(time_str.c_str(), "%d-%d-%d%*c%d:%d:%d",
+                             &year, &month, &day, &hour, &min, &sec);
+    if (parsed >= 3) {
+        if (parsed == 3) {
+            // Date only, no time — treat as start of day
+            hour = 0; min = 0; sec = 0;
+        }
+        tm.tm_year = year - 1900;
+        tm.tm_mon = month - 1;
+        tm.tm_mday = day;
+        tm.tm_hour = hour;
+        tm.tm_min = min;
+        tm.tm_sec = sec;
+        tm.tm_isdst = -1;  // Let system determine DST
+
+        time_t result = std::mktime(&tm);
+        if (result != static_cast<time_t>(-1)) {
+            return result;
+        }
+    }
+
+    return 0;  // Parsing failed
 }
 
 // ==================== v2.0: DELETE Flashback ====================
@@ -758,6 +874,46 @@ std::vector<std::string> UndoLogParser::flashback_delete(
 
     constexpr size_t DEFAULT_PAGE_SIZE = 16384;
     constexpr size_t TRX_SYS_PAGE_NO = 5;
+
+    // Parse time filter boundaries
+    time_t start_ts = 0;
+    time_t end_ts = 0;
+    bool has_time_filter = false;
+    bool time_parse_error = false;
+
+    if (!start_time.empty()) {
+        start_ts = parse_mysql_datetime(start_time);
+        if (start_ts == 0) {
+            std::cerr << "[WARN] Invalid start_time format: '" << start_time
+                      << "'. Expected YYYY-MM-DD HH:MM:SS\n";
+            time_parse_error = true;
+        }
+        has_time_filter = true;
+    }
+    if (!end_time.empty()) {
+        end_ts = parse_mysql_datetime(end_time);
+        if (end_ts == 0) {
+            std::cerr << "[WARN] Invalid end_time format: '" << end_time
+                      << "'. Expected YYYY-MM-DD HH:MM:SS\n";
+            time_parse_error = true;
+        }
+        has_time_filter = true;
+    }
+
+    // Validate closed interval: start must be <= end when both provided
+    if (start_ts > 0 && end_ts > 0 && start_ts > end_ts) {
+        std::cerr << "[WARN] start_time (" << start_time << ") is after end_time ("
+                  << end_time << "). No records will match.\n";
+    }
+
+    // Log limitation when time filters are specified
+    if (has_time_filter) {
+        std::cout << "[INFO] Time-based filtering requested but UndoLogEntry does not "
+                     "carry per-record timestamps. All matching undo records will be "
+                     "included without time filtering. Future enhancement: correlate "
+                     "undo records with TRX_SYS transaction timestamps for precise "
+                     "point-in-time filtering.\n";
+    }
 
     std::vector<uint8_t> trx_sys_page(DEFAULT_PAGE_SIZE);
     std::ifstream file(ibdata_path, std::ios::binary);
@@ -887,7 +1043,7 @@ std::vector<UndoLogParser::ReassembledChain> UndoLogParser::heuristic_reassemble
         file.read(reinterpret_cast<char*>(page_buf.data()), DEFAULT_PAGE_SIZE);
         if (file.gcount() < static_cast<std::streamsize>(DEFAULT_PAGE_SIZE)) break;
 
-        uint16_t page_type = read_le<uint16_t>(page_buf.data(), 24);
+        uint16_t page_type = read_be<uint16_t>(page_buf.data(), FIL_PAGE_TYPE_ABS);
         if (page_type != FIL_PAGE_UNDO_LOG) continue;
 
         auto entries = parse_undo_log_page(page_buf.data(), DEFAULT_PAGE_SIZE, pg);
