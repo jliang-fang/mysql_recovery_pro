@@ -830,12 +830,8 @@ std::vector<std::map<std::string, std::string>> RecoveryEngine::extract_records_
     const catalog::TableSchema& schema,
     const std::vector<uint8_t>& page_data,
     uint32_t page_no) const {
-    std::vector<std::map<std::string, std::string>> records;
-    // TODO: 实现测试格式记录提取逻辑
-    (void)schema;
-    (void)page_data;
-    (void)page_no;
-    return records;
+    // Delegate to standard page-based record extraction
+    return extract_records_from_page(page_data, schema, page_no);
 }
 
 std::vector<std::map<std::string, std::string>> RecoveryEngine::deduplicate_records(
