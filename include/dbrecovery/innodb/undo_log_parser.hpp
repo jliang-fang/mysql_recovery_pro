@@ -84,6 +84,22 @@ public:
         const std::string& ibdata_path, uint32_t rseg_id);
 
     /**
+     * @brief Parse undo logs from a standalone undo tablespace (MySQL 8.0+)
+     * @param undo_tablespace_path Path to undo_001, undo_002, etc.
+     * @return All undo log entries found
+     */
+    std::vector<UndoLogEntry> parse_undo_tablespace(
+        const std::string& undo_tablespace_path);
+
+    /**
+     * @brief Scan and parse all undo tablespaces in a directory
+     * @param data_dir MySQL data directory containing undo_* files
+     * @return All undo log entries from all undo tablespaces
+     */
+    std::vector<UndoLogEntry> parse_all_undo_tablespaces(
+        const std::string& data_dir);
+
+    /**
      * @brief Recover records from undo logs for a specific table
      * @param ibdata_path Path to ibdata1
      * @param table_space_id Target table space ID

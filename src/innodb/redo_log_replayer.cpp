@@ -115,15 +115,62 @@ bool RedoLogReplayer::apply_redo_record(uint32_t page_no, const RedoLogRecord& r
             break;
         }
 
-        case MLOG_REC_INSERT: {
-            // Record insert - simplified
-            // Would need schema to properly reconstruct record
+        case MLOG_REC_INSERT:
+        case MLOG_COMP_REC_INSERT: {
+            // Record insert - parse record offset and data, place into page
+            // Format: [2B] record_offset [variable] record_data
+            if (record.r_data.size() < 4) {
+                break;
+            }
+            size_t pos = 0;
+            uint8_t rec_type = record.r_data[pos++];
+            if (record.r_data.size() < pos + 2) break;
+            uint16_t insert_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+            pos += 2;
+
+            size_t rec_len = record.r_data.size() - pos;
+            if (rec_len > 0 && insert_offset + rec_len <= page_data.size()) {
+                std::memcpy(page_data.data() + insert_offset, record.r_data.data() + pos, rec_len);
+                // Update PAGE_HEAP_TOP and PAGE_N_RECS
+                uint16_t heap_top = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 38 + 20);
+                if (insert_offset + rec_len > heap_top) {
+                    dbrecovery::innodb::write_le<uint16_t>(page_data.data(), 38 + 20,
+                        static_cast<uint16_t>(insert_offset + rec_len));
+                }
+                uint16_t n_recs = dbrecovery::innodb::read_le<uint16_t>(page_data.data(), 38 + 16);
+                dbrecovery::innodb::write_le<uint16_t>(page_data.data(), 38 + 16, n_recs + 1);
+            }
             break;
         }
 
-        case MLOG_REC_UPDATE: {
-            // Record update - simplified
-            // Would need schema to properly reconstruct record
+        case MLOG_REC_UPDATE:
+        case MLOG_COMP_REC_UPDATE: {
+            // Record update - parse update vector and apply to page
+            // Format: [2B] record_offset [1B] n_fields [for each: 2B field_off 2B len data]
+            if (record.r_data.size() < 5) {
+                break;
+            }
+            size_t pos = 0;
+            uint8_t rec_type = record.r_data[pos++];
+            if (record.r_data.size() < pos + 2) break;
+            uint16_t rec_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+            pos += 2;
+
+            if (pos < record.r_data.size()) {
+                uint8_t n_fields = record.r_data[pos++];
+                for (uint8_t i = 0; i < n_fields && pos + 4 <= record.r_data.size(); i++) {
+                    uint16_t field_offset = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+                    pos += 2;
+                    uint16_t data_len = dbrecovery::innodb::read_le<uint16_t>(record.r_data.data(), pos);
+                    pos += 2;
+                    if (pos + data_len <= record.r_data.size() &&
+                        rec_offset + field_offset + data_len <= page_data.size()) {
+                        std::memcpy(page_data.data() + rec_offset + field_offset,
+                                    record.r_data.data() + pos, data_len);
+                    }
+                    pos += data_len;
+                }
+            }
             break;
         }
 

@@ -13,6 +13,8 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <filesystem>
+#include <set>
 #include <set>
 #include <optional>
 
@@ -212,22 +214,32 @@ std::vector<UndoLogEntry> UndoLogParser::parse_undo_log_page(
 
 std::vector<UndoLogEntry> UndoLogParser::parse_rollback_segment(
     const std::string& ibdata_path, uint32_t rseg_id) {
-    
+
     std::vector<UndoLogEntry> all_entries;
-    
+
     std::ifstream file(ibdata_path, std::ios::binary);
     if (!file) {
         std::cerr << "[ERROR] Cannot open ibdata: " << ibdata_path << "\n";
         return all_entries;
     }
-    
+
     // Get file size
     file.seekg(0, std::ios::end);
     size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
-    
-    // Read rollback segment slot
-    auto slot_opt = read_rseg_slot(nullptr, file_size, rseg_id);
+
+    // Read TRX_SYS page (page 5) to get the rollback segment slot
+    constexpr size_t TRX_SYS_PAGE_NO = 5;
+    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
+    std::vector<uint8_t> trx_sys_page(DEFAULT_PAGE_SIZE);
+
+    if (file_size >= (TRX_SYS_PAGE_NO + 1) * DEFAULT_PAGE_SIZE) {
+        file.seekg(TRX_SYS_PAGE_NO * DEFAULT_PAGE_SIZE, std::ios::beg);
+        file.read(reinterpret_cast<char*>(trx_sys_page.data()), DEFAULT_PAGE_SIZE);
+    }
+
+    // Read rollback segment slot from TRX_SYS page
+    auto slot_opt = read_rseg_slot(trx_sys_page.data(), trx_sys_page.size(), rseg_id);
     if (!slot_opt) {
         return all_entries;
     }
@@ -272,13 +284,32 @@ std::vector<HeuristicRecord> UndoLogParser::recover_from_undo_logs(
     
     std::vector<HeuristicRecord> recovered_records;
     
-    // Step 1: Find all rollback segments
+    // Step 1: Read TRX_SYS page (page 5) from ibdata1 to get rseg slots
+    constexpr size_t TRX_SYS_PAGE_NO = 5;
+    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
+
+    std::vector<uint8_t> trx_sys_page;
+    std::ifstream ibd(ibdata_path, std::ios::binary);
+    if (ibd.is_open()) {
+        trx_sys_page.resize(DEFAULT_PAGE_SIZE);
+        ibd.seekg(TRX_SYS_PAGE_NO * DEFAULT_PAGE_SIZE);
+        ibd.read(reinterpret_cast<char*>(trx_sys_page.data()), DEFAULT_PAGE_SIZE);
+        ibd.close();
+    }
+
     std::vector<uint32_t> rseg_ids;
+    const uint8_t* trx_data = trx_sys_page.empty() ? nullptr : trx_sys_page.data();
     for (uint32_t i = 0; i < TRX_SYS_N_RSEGS; i++) {
-        auto slot_opt = read_rseg_slot(nullptr, 96 * 1024 * 1024, i);  // Default ibdata size
+        auto slot_opt = read_rseg_slot(trx_data, trx_sys_page.size(), i);
         if (slot_opt) {
             rseg_ids.push_back(i);
         }
+    }
+
+    if (trx_data == nullptr) {
+        std::cout << "[WARN] Could not read TRX_SYS page from " << ibdata_path
+                  << ", undo log recovery unavailable\n";
+        return recovered_records;
     }
     
     std::cout << "[INFO] Found " << rseg_ids.size() << " rollback segments\n";
@@ -511,8 +542,77 @@ size_t UndoLogParser::scan_all_rollback_segments(const std::string& ibdata_path)
     stats_.total_undo_pages = 0;
     stats_.total_undo_records = static_cast<uint32_t>(total_records);
     stats_.recoverable_records = 0;
-    
+
     return total_records;
+}
+
+// ==================== Undo Tablespace Support (MySQL 8.0+) ====================
+
+std::vector<UndoLogEntry> UndoLogParser::parse_undo_tablespace(
+    const std::string& undo_tablespace_path) {
+
+    std::vector<UndoLogEntry> all_entries;
+
+    std::ifstream file(undo_tablespace_path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return all_entries;
+    }
+
+    uint64_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
+    if (file_size < DEFAULT_PAGE_SIZE) {
+        return all_entries;
+    }
+
+    uint32_t total_pages = static_cast<uint32_t>(file_size / DEFAULT_PAGE_SIZE);
+    std::vector<uint8_t> page_buffer(DEFAULT_PAGE_SIZE);
+
+    for (uint32_t page_no = 0; page_no < total_pages; page_no++) {
+        file.seekg(static_cast<std::streamoff>(page_no) * DEFAULT_PAGE_SIZE, std::ios::beg);
+        file.read(reinterpret_cast<char*>(page_buffer.data()), DEFAULT_PAGE_SIZE);
+
+        // Check page type at FIL_PAGE_TYPE_ABS (24) using big-endian read
+        uint16_t page_type = read_be<uint16_t>(page_buffer.data(), FIL_PAGE_TYPE_ABS);
+        if (page_type != FIL_PAGE_UNDO_LOG) {
+            continue;
+        }
+
+        auto entries = parse_undo_log_page(page_buffer.data(), DEFAULT_PAGE_SIZE, page_no);
+        all_entries.insert(all_entries.end(), entries.begin(), entries.end());
+    }
+
+    stats_.total_undo_pages += static_cast<uint32_t>(total_pages);
+    stats_.total_undo_records += static_cast<uint32_t>(all_entries.size());
+
+    return all_entries;
+}
+
+std::vector<UndoLogEntry> UndoLogParser::parse_all_undo_tablespaces(
+    const std::string& data_dir) {
+
+    std::vector<UndoLogEntry> all_entries;
+
+    try {
+        for (const auto& entry : std::filesystem::directory_iterator(data_dir)) {
+            if (!entry.is_regular_file()) continue;
+
+            std::string filename = entry.path().filename().string();
+            // MySQL 8.0 undo tablespace naming: undo_001, undo_002, etc.
+            // Also handle innodb_undo_001, undo_1, undo_2 variants
+            if (filename.find("undo_") == 0 || filename.find("innodb_undo") == 0) {
+                std::cout << "[INFO] Scanning undo tablespace: " << filename << std::endl;
+                auto entries = parse_undo_tablespace(entry.path().string());
+                std::cout << "[INFO]   Found " << entries.size() << " undo records" << std::endl;
+                all_entries.insert(all_entries.end(), entries.begin(), entries.end());
+            }
+        }
+    } catch (const std::filesystem::filesystem_error& e) {
+        std::cerr << "[WARN] Error scanning undo tablespaces: " << e.what() << std::endl;
+    }
+
+    return all_entries;
 }
 
 } // namespace innodb

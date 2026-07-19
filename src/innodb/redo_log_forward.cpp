@@ -1,7 +1,10 @@
 #include "dbrecovery/innodb/redo_log_forward.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <iostream>
 #include <algorithm>
 #include <fstream>
+#include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
@@ -248,35 +251,285 @@ bool RedoLogRollforward::apply_redo_operations(const std::vector<RedoLogRecord>&
 }
 
 bool RedoLogRollforward::apply_insert(const RedoOperation& op) {
-    // 解析插入记录
     if (op.data.size() < 5) {
         return false;
     }
 
-    // 简化实现：记录插入操作
-    // 实际需要解析记录格式并插入到页中
+    auto page_opt = get_page(op.page_no);
+    if (!page_opt) {
+        return false;
+    }
+
+    auto& page_data = pages_[op.page_no];
+
+    // Redo log insert record format (simplified):
+    // [2B] record offset within page (where to insert)
+    // [1B] info_bits + n_owned
+    // [2B] next_offset (heap_no in REDUNDANT)
+    // [variable] record body
+    //
+    // For MLOG_COMP_REC_INSERT (type 30), the format is:
+    // [1B] record type/flags
+    // [2B] record offset (little-endian)
+    // [variable] record data including offset table, null bitmap, fields
+    //
+    // For MLOG_REC_INSERT (type 10, REDUNDANT format):
+    // [1B] record type/flags
+    // [variable] record data
+
+    size_t pos = 0;
+    uint8_t rec_type = op.data[pos++];
+
+    if (rec_type == MLOG_COMP_REC_INSERT || rec_type == MLOG_REC_INSERT) {
+        // COMPACT/DYNAMIC insert: [2B offset] [variable record data]
+        if (op.data.size() < pos + 2) {
+            return false;
+        }
+        uint16_t insert_offset = read_le<uint16_t>(op.data.data(), pos);
+        pos += 2;
+
+        size_t rec_len = op.data.size() - pos;
+        if (rec_len == 0 || insert_offset + rec_len > page_data.size()) {
+            return false;
+        }
+
+        // Copy record data into page at specified offset
+        std::memcpy(page_data.data() + insert_offset, op.data.data() + pos, rec_len);
+
+        // Update PAGE_HEAP_TOP if record extends beyond current heap top
+        uint16_t heap_top = read_le<uint16_t>(page_data.data(),
+            FIL_HEADER_SIZE + 20); // PAGE_HEAP_TOP at FIL_HEADER + 20
+        if (insert_offset + rec_len > heap_top) {
+            write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 20,
+                static_cast<uint16_t>(insert_offset + rec_len));
+        }
+
+        // Increment PAGE_N_RECS
+        uint16_t n_recs = read_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 16);
+        write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 16, n_recs + 1);
+
+        // Update page directory: append new slot for this record
+        // PAGE_N_DIR_SLOTS is at FIL_HEADER + 4, low 15 bits
+        uint16_t dir_field = read_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 4);
+        uint16_t n_dir_slots = dir_field & 0x7FFF;
+        uint16_t dir_flags = dir_field & 0x8000;
+        uint16_t last_dir_offset = FIL_HEADER_SIZE + 38; // PAGE_HEADER size
+
+        // Page directory grows downward from PAGE_DIR_END (near page trailer)
+        // Each slot is 2 bytes pointing to a record offset
+        uint16_t dir_end = page_data.size() - 8; // before FIL trailer
+        uint16_t new_slot_pos = dir_end - (n_dir_slots * 2);
+
+        if (new_slot_pos >= heap_top + 4) {
+            write_le<uint16_t>(page_data.data(), new_slot_pos, insert_offset);
+            write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 4,
+                ((n_dir_slots + 1) & 0x7FFF) | dir_flags);
+        }
+
+        // Recompute checksum
+        uint32_t cksum = compute_crc32c_checksum(page_data.data(), page_data.size());
+        write_le<uint32_t>(page_data.data(), 0, cksum);
+        write_le<uint32_t>(page_data.data(), page_data.size() - 4, cksum);
+
+        return true;
+    }
+
+    // Generic insert: append record data to page heap area
+    uint16_t heap_top = read_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 20);
+    size_t rec_len = op.data.size() - pos;
+
+    if (heap_top + rec_len > page_data.size() - 8) {
+        return false; // no space for record + trailer
+    }
+
+    std::memcpy(page_data.data() + heap_top, op.data.data() + pos, rec_len);
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 20,
+        static_cast<uint16_t>(heap_top + rec_len));
+
+    uint16_t n_recs = read_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 16);
+    write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 16, n_recs + 1);
+
+    uint32_t cksum = compute_crc32c_checksum(page_data.data(), page_data.size());
+    write_le<uint32_t>(page_data.data(), 0, cksum);
+    write_le<uint32_t>(page_data.data(), page_data.size() - 4, cksum);
+
     return true;
 }
 
 bool RedoLogRollforward::apply_update(const RedoOperation& op) {
-    // 解析更新记录
     if (op.data.size() < 5) {
         return false;
     }
 
-    // 简化实现：记录更新操作
-    // 实际需要解析更新字段并应用到页中
+    auto page_opt = get_page(op.page_no);
+    if (!page_opt) {
+        return false;
+    }
+
+    auto& page_data = pages_[op.page_no];
+
+    // Redo log update record format:
+    // [2B] record offset within page (target record)
+    // [2B] field_no + len (update spec)
+    // [variable] replacement field data
+    //
+    // MLOG_COMP_REC_UPDATE (type 31):
+    // [1B] record type/flags
+    // [2B] record offset (little-endian)
+    // [2B] update vector offset within record
+    // [2B] update data length
+    // [variable] update data
+
+    size_t pos = 0;
+    uint8_t rec_type = op.data[pos++];
+
+    if (rec_type == MLOG_COMP_REC_UPDATE || rec_type == MLOG_REC_UPDATE) {
+        if (op.data.size() < pos + 2) {
+            return false;
+        }
+        uint16_t rec_offset = read_le<uint16_t>(op.data.data(), pos);
+        pos += 2;
+
+        if (rec_offset >= page_data.size()) {
+            return false;
+        }
+
+        // Parse the update vector
+        // Format: n_fields (1B), then for each field: field_no(2B) + len(2B) + data(len)
+        if (pos >= op.data.size()) {
+            return false;
+        }
+        uint8_t n_fields = op.data[pos++];
+
+        for (uint8_t i = 0; i < n_fields && pos + 4 <= op.data.size(); i++) {
+            uint16_t field_offset = read_le<uint16_t>(op.data.data(), pos);
+            pos += 2;
+            uint16_t data_len = read_le<uint16_t>(op.data.data(), pos);
+            pos += 2;
+
+            if (pos + data_len > op.data.size()) {
+                return false;
+            }
+
+            uint32_t target_offset = rec_offset + field_offset;
+            if (target_offset + data_len > page_data.size()) {
+                continue;
+            }
+
+            std::memcpy(page_data.data() + target_offset, op.data.data() + pos, data_len);
+            pos += data_len;
+        }
+
+        // Recompute checksum after update
+        uint32_t cksum = compute_crc32c_checksum(page_data.data(), page_data.size());
+        write_le<uint32_t>(page_data.data(), 0, cksum);
+        write_le<uint32_t>(page_data.data(), page_data.size() - 4, cksum);
+
+        return true;
+    }
+
+    // Generic field-level byte update
+    if (op.data.size() < pos + 4) {
+        return false;
+    }
+    uint16_t update_offset = read_le<uint16_t>(op.data.data(), pos);
+    pos += 2;
+    size_t update_len = op.data.size() - pos;
+
+    if (update_offset + update_len > page_data.size()) {
+        return false;
+    }
+
+    std::memcpy(page_data.data() + update_offset, op.data.data() + pos, update_len);
+
+    uint32_t cksum = compute_crc32c_checksum(page_data.data(), page_data.size());
+    write_le<uint32_t>(page_data.data(), 0, cksum);
+    write_le<uint32_t>(page_data.data(), page_data.size() - 4, cksum);
+
     return true;
 }
 
 bool RedoLogRollforward::apply_delete(const RedoOperation& op) {
-    // 解析删除记录
     if (op.data.size() < 2) {
         return false;
     }
 
-    // 简化实现：记录删除操作
-    // 实际需要解析删除的记录偏移并标记为删除
+    auto page_opt = get_page(op.page_no);
+    if (!page_opt) {
+        return false;
+    }
+
+    auto& page_data = pages_[op.page_no];
+
+    // Redo log delete record format:
+    // [2B] record offset within page
+    //
+    // MLOG_COMP_REC_DELETE (type 32):
+    // [1B] record type/flags
+    // [2B] record offset (little-endian)
+    // Optional: [2B] next record offset to fix chain
+
+    size_t pos = 0;
+    uint8_t rec_type = op.data[pos++];
+
+    uint16_t rec_offset;
+    if (rec_type == MLOG_COMP_REC_DELETE || rec_type == MLOG_REC_DELETE) {
+        if (op.data.size() < pos + 2) {
+            return false;
+        }
+        rec_offset = read_le<uint16_t>(op.data.data(), pos);
+        pos += 2;
+    } else {
+        // Direct offset as first 2 bytes
+        rec_offset = read_le<uint16_t>(op.data.data(), 0);
+    }
+
+    if (rec_offset >= page_data.size() || rec_offset < FIL_HEADER_SIZE + 38) {
+        return false;
+    }
+
+    // Set delete-mark flag on the record
+    // In COMPACT/DYNAMIC format: info_bits is at rec_offset - 1 (last byte of offset table)
+    // The delete-mark bit is REC_INFO_DELETED_FLAG (0x20)
+    // Record header: [info_bits(1B)] [next_offset(2B)]
+    // For COMPACT: info_bits is at the byte before the record data starts
+
+    // Try to locate info_bits:
+    // - In COMPACT/DYNAMIC, the record's header starts after the offset table entries
+    // - We need to find the offset table first, then the record data follows
+    // - info_bits is the first byte of the record body (not the offset table)
+    //
+    // Simplified approach: try to find and set delete flag at the record header
+    // The record header starts with info_bits at the record offset
+
+    // Check if we're dealing with a COMPACT-style record by looking at the page format
+    uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+    if (page_type != FIL_PAGE_INDEX) {
+        return false;
+    }
+
+    // For COMPACT/DYNAMIC: info_bits is the first byte after the offset table entries
+    // The offset table entries (2 bytes each, stored in reverse) end at the record start
+    // So we need to walk back from the record offset to find where data begins
+    //
+    // Since we don't have the full schema here, use a heuristic:
+    // The record offset from the redo log typically points to the beginning of the
+    // record body (after offset table). info_bits is the first byte there.
+
+    uint8_t info_bits = page_data[rec_offset];
+    page_data[rec_offset] = info_bits | REC_INFO_DELETED_FLAG;  // Set delete-mark flag
+
+    // Decrement PAGE_N_RECS
+    uint16_t n_recs = read_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 16);
+    if (n_recs > 0) {
+        write_le<uint16_t>(page_data.data(), FIL_HEADER_SIZE + 16, n_recs - 1);
+    }
+
+    // Recompute checksum
+    uint32_t cksum = compute_crc32c_checksum(page_data.data(), page_data.size());
+    write_le<uint32_t>(page_data.data(), 0, cksum);
+    write_le<uint32_t>(page_data.data(), page_data.size() - 4, cksum);
+
     return true;
 }
 

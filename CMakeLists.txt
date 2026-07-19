@@ -103,11 +103,6 @@ set(SOURCES
     # ✅ 新增：Canonical InnoDB page checksum implementation
     src/innodb/innodb_checksum_impl.cpp
     # ✅ 新增：io_uring 高性能 I/O
-    src/disk/io_uring_scanner.cpp
-    # ✅ 新增：MySQL版本检测器
-    src/common/mysql_version_detector.cpp
-    # ✅ 新增：统一校验和实现
-    src/innodb/innodb_checksum_impl.cpp
     # ✅ 新增：引擎模块实现
     src/engine/raw_disk_engine.cpp
     src/engine/signature_scraper.cpp
@@ -138,11 +133,7 @@ set(SOURCES
 
 # 根据平台选择性地添加文件
 if(ENV_PLATFORM_LINUX)
-    list(APPEND SOURCES
-        src/platform/linux/file_system_linux.cpp
-        src/platform/linux/memory_linux.cpp
-        src/platform/linux/thread_linux.cpp
-    )
+    # Linux platform files already listed in main SOURCES above
 elseif(ENV_PLATFORM_MACOS)
     list(APPEND SOURCES
         src/platform/macos/file_system_macos.cpp

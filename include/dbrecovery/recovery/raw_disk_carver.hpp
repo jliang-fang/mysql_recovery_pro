@@ -14,9 +14,13 @@
 
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/carve/page_reassembler.hpp"
 
 namespace dbrecovery {
 namespace recovery {
+
+// Re-export from carve namespace for convenience
+using ReassemblyStats = dbrecovery::carve::ReassemblyStats;
 
 /**
  * @brief RawDiskCarver - PhotoRec风格的原始磁盘数据雕刻
@@ -133,6 +137,22 @@ public:
      * @brief 扫描并恢复 (一体化流程)
      */
     RecoveryResult scan_and_recover(std::function<void(double, const std::string&)> progress = nullptr);
+
+    /**
+     * @brief 重新组装扫描到的页到逻辑表空间文件 (Deep Carve v2.0)
+     *
+     * 将裸盘扫描中发现的分散 InnoDB 页按照 SPACE_ID 分组、PAGE_NO 排序、
+     * 去重，并合成为逻辑上完整的 .ibd 文件。
+     *
+     * @param scan_result 扫描结果 (来自 scan() 调用)
+     * @param output_dir 输出目录 (存放合成的 .ibd 文件)
+     * @param progress 进度回调
+     * @return 重组统计信息
+     */
+    ReassemblyStats reassemble_to_tablespaces(
+        const ScanResult& scan_result,
+        const std::string& output_dir,
+        std::function<void(double, const std::string&)> progress = nullptr);
 
     /**
      * @brief 获取上次扫描结果

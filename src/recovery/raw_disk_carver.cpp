@@ -4,6 +4,8 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/utils/lz4_helper.hpp"
 #include "nlohmann/json.hpp"
 
 #include <chrono>
@@ -48,6 +50,30 @@ bool RawDiskCarver::is_valid_page_strict(const uint8_t* data, size_t page_size) 
     // Check page type first
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
 
+    // For compressed pages, try LZ4 decompression first then validate
+    if (page_type == FIL_PAGE_COMPRESSED || page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+        // For compressed+encrypted, decryption is needed first — skip for now
+        if (page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+            return true;  // Accept as valid, TDE handling happens downstream
+        }
+        // Try LZ4 decompression: compressed data starts after ZSD header (32 bytes)
+        if (page_size > 32) {
+            uint32_t orig_size = read_le<uint32_t>(data, 14);
+            uint16_t zlen = read_le<uint16_t>(data, 8);
+            if (zlen > 0 && zlen < page_size - 32) {
+                auto decompressed = dbrecovery::utils::LZ4Helper::decompress(data + 32, zlen, orig_size);
+                if (!decompressed.empty()) {
+                    // Validate decompressed page
+                    uint16_t decomp_type = read_be<uint16_t>(decompressed.data(), FIL_PAGE_TYPE_ABS);
+                    if (decomp_type == FIL_PAGE_INDEX) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;  // Can't validate compressed page
+    }
+
     // Valid page types
     switch (page_type) {
         case FIL_PAGE_INDEX:        // 0x45BF
@@ -55,6 +81,7 @@ bool RawDiskCarver::is_valid_page_strict(const uint8_t* data, size_t page_size) 
         case FIL_PAGE_SDI_ZIP:      // 0x45BD
         case FIL_PAGE_UNDO_LOG:     // 0x45B2
         case FIL_PAGE_COMPRESSED:   // 0x45B5
+        case FIL_PAGE_COMPRESSED_AND_ENCRYPTED: // 0x45B7
         case FIL_PAGE_TYPE_ALLOCATED: // 0x0000
         case 0x0003:  // FIL_PAGE_INODE
         case 0x0005:  // FIL_PAGE_IBUF_BITMAP
@@ -111,6 +138,7 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
             case FIL_PAGE_SDI_ZIP:      // 0x45BD - 压缩SDI页/BLOB页
             case FIL_PAGE_UNDO_LOG:     // 0x45B2 - Undo日志页
             case FIL_PAGE_COMPRESSED:   // 0x45B5 - 压缩页
+            case FIL_PAGE_COMPRESSED_AND_ENCRYPTED: // 0x45B7
             case FIL_PAGE_TYPE_ALLOCATED: // 0x0000 - 已分配
             case 0x0003:  // FIL_PAGE_INODE
             case 0x0005:  // FIL_PAGE_IBUF_BITMAP
@@ -118,6 +146,21 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
                 is_valid_type = true;
                 break;
             default:
+                // Try LZ4 decompression for potentially compressed pages
+                if (page_size > 32) {
+                    uint32_t orig_size = read_le<uint32_t>(data, 14);
+                    uint16_t zlen = read_le<uint16_t>(data, 8);
+                    if (zlen > 0 && zlen < page_size - 32 && orig_size > 0 && orig_size < 65536) {
+                        auto decompressed = dbrecovery::utils::LZ4Helper::decompress(data + 32, zlen, orig_size);
+                        if (!decompressed.empty() && decompressed.size() >= FIL_PAGE_TYPE_ABS + 2) {
+                            uint16_t decomp_type = read_be<uint16_t>(decompressed.data(), FIL_PAGE_TYPE_ABS);
+                            if (decomp_type == FIL_PAGE_INDEX) {
+                                is_valid_type = true;
+                                break;
+                            }
+                        }
+                    }
+                }
                 return false;
         }
 
@@ -818,6 +861,58 @@ RawDiskCarver::RecoveryResult RawDiskCarver::scan_and_recover(
     return recover(scan_result, [&](double pct, const std::string& msg) {
         if (progress) progress(0.7 + pct * 0.3, msg);
     });
+}
+
+dbrecovery::carve::ReassemblyStats RawDiskCarver::reassemble_to_tablespaces(
+    const ScanResult& scan_result,
+    const std::string& output_dir,
+    std::function<void(double, const std::string&)> progress) {
+
+    dbrecovery::carve::PageFragmentReassembler reassembler;
+
+    // Convert FoundPage objects to PageIdentity objects
+    for (const auto& found : scan_result.all_found_pages) {
+        dbrecovery::carve::PageIdentity page_id;
+        page_id.space_id = found.space_id;
+        page_id.page_no = found.page_no;
+        page_id.page_type = (found.type == RawDiskCarver::PageType::INDEX)  ? 17855 :
+                            (found.type == RawDiskCarver::PageType::SDI)    ? 17854 :
+                            (found.type == RawDiskCarver::PageType::SDI_ZIP) ? 17853 :
+                            (found.type == RawDiskCarver::PageType::UNDO_LOG) ? 17842 :
+                            (found.type == RawDiskCarver::PageType::BLOB)   ? 17853 : 0;
+        page_id.lsn = 0; // Will be extracted during validation
+        page_id.checksum = 0;
+        page_id.checksum_valid = true; // Already validated by scanner
+        page_id.is_compressed = false;
+        page_id.is_encrypted = false;
+        page_id.disk_offset = found.offset;
+        page_id.data = found.data;
+        page_id.page_size = config_.page_size;
+
+        // Try to extract LSN from page data
+        if (found.data.size() >= 24) {
+            page_id.lsn = dbrecovery::innodb::read_be<uint64_t>(found.data.data(), 16);
+        }
+
+        reassembler.add_page(page_id);
+    }
+
+    if (progress) {
+        progress(0.1, "Grouping " + std::to_string(scan_result.all_found_pages.size()) +
+                 " pages by SPACE_ID...");
+    }
+
+    auto stats = reassembler.reassemble(output_dir);
+
+    if (progress) {
+        progress(1.0, "Reassembly complete: " + std::to_string(stats.spaces_reconstructed) +
+                 " tablespaces reconstructed");
+    }
+
+    // Print the report
+    std::cout << reassembler.generate_report() << std::endl;
+
+    return stats;
 }
 
 const RawDiskCarver::ScanResult& RawDiskCarver::get_last_scan_result() const {
