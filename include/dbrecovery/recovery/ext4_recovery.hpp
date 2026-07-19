@@ -387,8 +387,8 @@ private:
     // Read inode from inode table
     std::optional<Ext4InodeInfo> read_inode(uint32_t group_index, uint32_t local_inode);
 
-    // Parse extents from inode
-    std::vector<ext4_extent> parse_extents(const ext4_inode& inode);
+    // Parse extents from inode (fd and block_size needed for legacy indirect block mapping)
+    std::vector<ext4_extent> parse_extents(int fd, const ext4_inode& inode, uint32_t block_size);
 
     // Traverse multi-level extent tree (for large files)
     std::vector<ext4_extent> traverse_extent_tree(int fd, uint64_t root_block, uint32_t block_size, int max_depth);

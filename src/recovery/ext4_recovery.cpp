@@ -18,6 +18,7 @@
 #include <thread>
 #include <vector>
 #include <fstream>
+#include <functional>
 
 #ifdef __linux__
 #include <sys/stat.h>
@@ -352,7 +353,7 @@ std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint
     }
 
     // Parse extents — try direct first, then multi-level traversal
-    info.extents = parse_extents(inode_raw);
+    info.extents = parse_extents(fd, inode_raw, block_size_);
     if (info.extents.empty() && info.file_size >= config_.page_size) {
         info.extents = traverse_extent_tree_from_inode(fd, inode_raw, block_size_);
     }
@@ -370,7 +371,7 @@ std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint
 
 // ==================== Extent Parsing ====================
 
-std::vector<ext4_extent> Ext4Recovery::parse_extents(const ext4_inode& inode) {
+std::vector<ext4_extent> Ext4Recovery::parse_extents(int fd, const ext4_inode& inode, uint32_t block_size) {
     std::vector<ext4_extent> extents;
 
     // Check if inode uses extents (flag bit 4)
@@ -378,7 +379,103 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(const ext4_inode& inode) {
     bool uses_extents = (flags & 0x80000) != 0;  // EXT4_EXTENTS_FL
 
     if (!uses_extents) {
-        // Legacy block mapping - not implemented
+        // Legacy block mapping — direct/indirect block pointers
+        // i_block[0..11]: direct blocks
+        // i_block[12]: single indirect
+        // i_block[13]: double indirect
+        // i_block[14]: triple indirect
+        uint32_t blk_sz = block_size;
+
+        auto read_block = [&](uint64_t block_num) -> std::vector<uint8_t> {
+            std::vector<uint8_t> buf(blk_sz);
+            ssize_t n = pread(fd, buf.data(), blk_sz,
+                              static_cast<off_t>(block_num) * blk_sz);
+            if (n != static_cast<ssize_t>(blk_sz)) buf.clear();
+            return buf;
+        };
+
+        // Helper: read indirect block pointers (4 bytes each, little-endian)
+        std::function<std::vector<uint64_t>(uint64_t, int, uint32_t)> read_indirect_blocks;
+        read_indirect_blocks = [&](uint64_t indirect_block, int level,
+                                   uint32_t bsz) -> std::vector<uint64_t> {
+            std::vector<uint64_t> result;
+            if (level <= 0) return result;
+
+            auto blk_data = read_block(indirect_block);
+            if (blk_data.empty()) return result;
+
+            uint32_t entries_per_block = bsz / 4;
+            for (uint32_t i = 0; i < entries_per_block && i * 4 + 3 < blk_data.size(); i++) {
+                uint64_t entry = blk_data[i * 4] |
+                                 (static_cast<uint64_t>(blk_data[i * 4 + 1]) << 8) |
+                                 (static_cast<uint64_t>(blk_data[i * 4 + 2]) << 16) |
+                                 (static_cast<uint64_t>(blk_data[i * 4 + 3]) << 24);
+                if (entry == 0) continue;
+
+                if (level == 1) {
+                    result.push_back(entry);
+                } else {
+                    auto sub_blocks = read_indirect_blocks(entry, level - 1, bsz);
+                    result.insert(result.end(), sub_blocks.begin(), sub_blocks.end());
+                }
+            }
+            return result;
+        };
+
+        // Collect all block numbers
+        std::vector<uint64_t> all_blocks;
+
+        // Direct blocks: i_block[0..11]
+        for (int i = 0; i < 12; i++) {
+            uint32_t blk = le32toh(inode.i_block[i]);
+            if (blk != 0) all_blocks.push_back(blk);
+        }
+
+        // Single indirect: i_block[12]
+        uint32_t s_indirect = le32toh(inode.i_block[12]);
+        if (s_indirect != 0) {
+            auto indirect_blocks = read_indirect_blocks(s_indirect, 1, blk_sz);
+            all_blocks.insert(all_blocks.end(), indirect_blocks.begin(), indirect_blocks.end());
+        }
+
+        // Double indirect: i_block[13]
+        uint32_t d_indirect = le32toh(inode.i_block[13]);
+        if (d_indirect != 0) {
+            auto indirect_blocks = read_indirect_blocks(d_indirect, 2, blk_sz);
+            all_blocks.insert(all_blocks.end(), indirect_blocks.begin(), indirect_blocks.end());
+        }
+
+        // Triple indirect: i_block[14]
+        uint32_t t_indirect = le32toh(inode.i_block[14]);
+        if (t_indirect != 0) {
+            auto indirect_blocks = read_indirect_blocks(t_indirect, 3, blk_sz);
+            all_blocks.insert(all_blocks.end(), indirect_blocks.begin(), indirect_blocks.end());
+        }
+
+        // Convert to extents (contiguous runs)
+        if (!all_blocks.empty()) {
+            std::sort(all_blocks.begin(), all_blocks.end());
+
+            ext4_extent ext;
+            ext.ee_block = 0;
+            ext.ee_start_lo = static_cast<uint32_t>(all_blocks[0] & 0xFFFFFFFF);
+            ext.ee_start_hi = static_cast<uint16_t>((all_blocks[0] >> 32) & 0xFFFF);
+            ext.ee_len = 1;
+
+            for (size_t i = 1; i < all_blocks.size(); i++) {
+                if (all_blocks[i] == all_blocks[i - 1] + 1) {
+                    ext.ee_len++;
+                } else {
+                    extents.push_back(ext);
+                    ext.ee_block += ext.ee_len;
+                    ext.ee_start_lo = static_cast<uint32_t>(all_blocks[i] & 0xFFFFFFFF);
+                    ext.ee_start_hi = static_cast<uint16_t>((all_blocks[i] >> 32) & 0xFFFF);
+                    ext.ee_len = 1;
+                }
+            }
+            extents.push_back(ext);
+        }
+
         return extents;
     }
 
@@ -829,6 +926,8 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
                     case 0x45BF: // FIL_PAGE_INDEX
                     case 0x45BA: // FIL_PAGE_TYPE_ZBLOB (compressed BLOB)
                     case 0x45BB: // FIL_PAGE_TYPE_ZBLOB2 (compressed BLOB v2)
+                    case 0x45B5: // FIL_PAGE_COMPRESSED
+                    case 0x45B7: // FIL_PAGE_COMPRESSED_AND_ENCRYPTED
                         is_valid_type = true;
                         break;
                     default:
@@ -938,7 +1037,7 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
         // Only process deleted regular files with potential InnoDB data
         if (is_deleted && file_size >= config_.page_size) {
             // Parse extents to find data blocks
-            std::vector<ext4_extent> extents = parse_extents(inode_raw);
+            std::vector<ext4_extent> extents = parse_extents(fd, inode_raw, block_size);
             if (extents.empty() && file_size >= config_.page_size) {
                 extents = traverse_extent_tree_from_inode(fd, inode_raw, block_size);
             }

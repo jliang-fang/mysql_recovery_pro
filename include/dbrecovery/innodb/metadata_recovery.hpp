@@ -323,11 +323,38 @@ inline std::vector<ColumnInfo> MetadataRecovery::infer_columns_from_records(cons
 
 inline MetadataRecoveryResult MetadataRecovery::recover_from_file(const std::string& path) {
     MetadataRecoveryResult result;
-    
-    // TODO: 实现文件读取和元数据恢复
-    result.status = MetadataRecoveryStatus::INCOMPLETE;
-    result.error_message = "File recovery not yet implemented";
-    
+
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        result.status = MetadataRecoveryStatus::INCOMPLETE;
+        result.error_message = "Cannot open file: " + path;
+        return result;
+    }
+
+    size_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    std::vector<uint8_t> buffer(file_size);
+    file.read(reinterpret_cast<char*>(buffer.data()), file_size);
+    file.close();
+
+    if (file_size < 16384) {
+        result.status = MetadataRecoveryStatus::INCOMPLETE;
+        result.error_message = "File too small to contain InnoDB metadata";
+        return result;
+    }
+
+    // Use existing scan_for_metadata to find tables
+    result.tables = scan_for_metadata(buffer.data(), buffer.size());
+
+    if (result.tables.empty()) {
+        result.status = MetadataRecoveryStatus::INCOMPLETE;
+        result.error_message = "No table metadata found in file";
+    } else {
+        result.status = MetadataRecoveryStatus::COMPLETE;
+        result.total_tables_found = result.tables.size();
+    }
+
     return result;
 }
 
