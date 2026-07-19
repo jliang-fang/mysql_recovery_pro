@@ -38,6 +38,9 @@
 #include "dbrecovery/innodb/schema_inferrer.hpp"
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
+#include "dbrecovery/innodb/partition_table_recovery.hpp"
+#include "dbrecovery/innodb/shared_tablespace_recovery.hpp"
+#include "dbrecovery/innodb/ddl_change_detector.hpp"
 
 namespace fs = std::filesystem;
 
@@ -230,7 +233,15 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--salvage-mode\033[0m             Emergency salvage mode for severely corrupted pages\n";
     std::cout << "                                 Brute-force scans for any parseable row fragments\n";
     std::cout << "  \033[1m--report-format=<fmt>\033[0m      Recovery report format: json,text,html (default: text)\n";
-    std::cout << "  \033[1m--report-path=<path>\033[0m       Path for recovery report file (default: <output>/recovery_report)\n\n";
+    std::cout << "  \033[1m--report-path=<path>\033[0m       Path for recovery report file (default: <output>/recovery_report)\n";
+    std::cout << "  \033[1m--partition-recovery\033[0m      Recover all partitions of a partitioned table\n";
+    std::cout << "                                 Uses --data-dir to locate partition .ibd files\n";
+    std::cout << "  \033[1m--list-partitions\033[0m          List all partition tables found in data directory\n";
+    std::cout << "  \033[1m--extract-table=<name>\033[0m    Extract table from shared/system tablespace (ibdata1)\n";
+    std::cout << "                                 Requires --system-tablespace\n";
+    std::cout << "  \033[1m--list-tables\033[0m             List all user tables in shared/system tablespace\n";
+    std::cout << "  \033[1m--detect-ddl-changes\033[0m      Detect schema version changes from data pages\n";
+    std::cout << "                                 Helps identify INSTANT ADD COLUMN history\n\n";
     std::cout << "\033[1mBatch Operations:\033[0m\n";
     std::cout << "  \033[1m--batch=<file>\033[0m             Process files from a list (one per line)\n";
     std::cout << "  \033[1m--output-format=<fmt>\033[0m      Output format for batch: csv|sql|json\n\n";
@@ -470,6 +481,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string undo_tablespace = parser_.get_option("undo-tablespace", "");
     std::string report_format = parser_.get_option("report-format", "text");
     std::string report_path = parser_.get_option("report-path", "");
+
+    // v2.0: Partition table recovery
+    bool partition_recovery = parser_.get_bool_option("partition-recovery", false);
+    bool list_partitions = parser_.get_bool_option("list-partitions", false);
+
+    // Shared tablespace recovery
+    std::string extract_table_name = parser_.get_option("extract-table", "");
+    bool list_ts_tables = parser_.get_bool_option("list-tables", false);
+
+    // DDL change chain detection
+    bool detect_ddl_changes = parser_.get_bool_option("detect-ddl-changes", false);
 
     // v2.0: Page reassembly mode
     if (reassemble_mode) {
@@ -727,6 +749,211 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         } else {
             std::cout << "[WARN] No data could be salvaged\n";
         }
+        return 0;
+    }
+
+    // v2.0: Partition table recovery
+    if (partition_recovery || list_partitions) {
+        if (data_dir.empty()) {
+            std::cerr << "[ERROR] --partition-recovery/--list-partitions requires --data-dir\n";
+            return 1;
+        }
+
+        dbrecovery::innodb::PartitionTableScanner scanner(page_size);
+        scanner.set_data_directory(data_dir);
+
+        if (list_partitions) {
+            std::cout << "[INFO] Scanning for partition tables in: " << data_dir << "\n";
+            auto tables = scanner.scan();
+            if (tables.empty()) {
+                std::cout << "[INFO] No partition tables found\n";
+            } else {
+                std::cout << "[INFO] Found " << tables.size() << " partition table(s):\n";
+                for (const auto& table : tables) {
+                    auto partitions = scanner.get_partitions(table);
+                    std::cout << "  Table: " << table << " (" << partitions.size() << " partitions)\n";
+                    for (const auto& p : partitions) {
+                        std::cout << "    - " << p.partition_name << " (" << p.ibd_path << ")\n";
+                    }
+                }
+            }
+            return 0;
+        }
+
+        // Full partition recovery
+        std::string table_name = parser_.get_option("table-name", "");
+        if (table_name.empty()) {
+            std::cerr << "[ERROR] --partition-recovery requires --table-name\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] v2.0 Partition Table Recovery\n";
+        std::cout << "[INFO] Table: " << table_name << "\n";
+        std::cout << "[INFO] Data directory: " << data_dir << "\n";
+
+        dbrecovery::innodb::PartitionTableRecovery pt_recovery(page_size);
+        pt_recovery.set_data_directory(data_dir);
+        pt_recovery.set_table_name(table_name);
+
+        // Load schema if available
+        auto pt_schema = load_schema_from_file(schema_file_path);
+        if (pt_schema.has_value()) {
+            pt_recovery.set_schema(pt_schema.value());
+        }
+
+        auto partitions = scanner.get_partitions(table_name);
+        if (partitions.empty()) {
+            std::cerr << "[ERROR] No partitions found for table: " << table_name << "\n";
+            return 1;
+        }
+
+        for (const auto& p : partitions) {
+            pt_recovery.add_partition(p);
+        }
+
+        auto records = pt_recovery.recover();
+        auto& pt_stats = pt_recovery.get_stats();
+
+        std::cout << "[INFO] Partitions: " << pt_stats.total_partitions
+                  << ", recovered: " << pt_stats.recovered_partitions
+                  << ", failed: " << pt_stats.failed_partitions << "\n";
+        std::cout << "[INFO] Total records: " << pt_stats.total_records << "\n";
+        std::cout << "[INFO] Time: " << std::fixed << std::setprecision(2)
+                  << pt_stats.recovery_time_ms << "ms\n";
+
+        if (!records.empty()) {
+            fs::create_directories(output_dir);
+            std::string out_path = output_dir + "/" + table_name + "_recovered.csv";
+            std::ofstream out(out_path);
+            if (!records.empty()) {
+                // Write header
+                auto& first_row = records[0];
+                bool first_col = true;
+                for (const auto& col : first_row) {
+                    if (!first_col) out << ",";
+                    out << col.first;
+                    first_col = false;
+                }
+                out << "\n";
+                for (const auto& row : records) {
+                    first_col = true;
+                    for (const auto& col : first_row) {
+                        if (!first_col) out << ",";
+                        out << col.second;
+                        first_col = false;
+                    }
+                    out << "\n";
+                }
+            }
+            std::cout << "[INFO] Output written to: " << out_path << "\n";
+        }
+
+        return 0;
+    }
+
+    // v2.0: Shared tablespace recovery (extract table from ibdata1)
+    if (!extract_table_name.empty() || list_ts_tables) {
+        std::string ts_path = system_tablespace.empty() ? ibd_path : system_tablespace;
+        if (ts_path.empty()) {
+            std::cerr << "[ERROR] --extract-table/--list-tables requires --system-tablespace\n";
+            return 1;
+        }
+
+        dbrecovery::innodb::SharedTablespaceRecovery ts_recovery(page_size);
+        ts_recovery.set_tablespace_path(ts_path);
+        ts_recovery.set_output_dir(output_dir);
+
+        if (list_ts_tables) {
+            std::cout << "[INFO] Listing tables in: " << ts_path << "\n";
+            auto tables = ts_recovery.list_tables();
+            if (tables.empty()) {
+                std::cout << "[INFO] No user tables found (SDI pages may not be present)\n";
+            } else {
+                std::cout << "[INFO] Found " << tables.size() << " table(s):\n";
+                for (const auto& t : tables) {
+                    std::cout << "  " << t.schema_name << "." << t.table_name
+                              << " (space_id=" << t.space_id
+                              << ", table_id=" << t.table_id << ")\n";
+                }
+            }
+            return 0;
+        }
+
+        std::cout << "[INFO] Extracting table '" << extract_table_name
+                  << "' from " << ts_path << "\n";
+
+        // Find the table's space_id by listing
+        auto tables = ts_recovery.list_tables();
+        uint32_t target_space_id = 0;
+        for (const auto& t : tables) {
+            if (t.table_name == extract_table_name ||
+                (t.schema_name + "." + t.table_name) == extract_table_name) {
+                target_space_id = t.space_id;
+                break;
+            }
+        }
+
+        if (target_space_id == 0) {
+            std::cerr << "[ERROR] Table not found: " << extract_table_name << "\n";
+            std::cerr << "[INFO] Use --list-tables to see available tables\n";
+            return 1;
+        }
+
+        fs::create_directories(output_dir);
+        std::string out_ibd = output_dir + "/" + extract_table_name + "_extracted.ibd";
+
+        if (ts_recovery.extract_table(target_space_id, out_ibd)) {
+            auto& ts_stats = ts_recovery.get_stats();
+            std::cout << "[INFO] Extracted to: " << out_ibd << "\n";
+            std::cout << "[INFO] Pages scanned: " << ts_stats.total_pages_scanned
+                      << ", data pages: " << ts_stats.data_pages_found
+                      << ", SDI pages: " << ts_stats.sdi_pages_found << "\n";
+            std::cout << "[INFO] Time: " << std::fixed << std::setprecision(2)
+                      << ts_stats.recovery_time_ms << "ms\n";
+        } else {
+            std::cerr << "[ERROR] Extraction failed\n";
+            return 1;
+        }
+
+        return 0;
+    }
+
+    // v2.0: DDL change chain detection
+    if (detect_ddl_changes) {
+        if (ibd_path.empty()) {
+            std::cerr << "[ERROR] --detect-ddl-changes requires --ibd\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] Detecting DDL change chain in: " << ibd_path << "\n";
+
+        dbrecovery::innodb::DDLChangeChainDetector detector(page_size);
+        auto analysis = detector.detect(ibd_path);
+
+        std::cout << "\n" << analysis.summary << "\n";
+        std::cout << "Pages scanned: " << analysis.total_pages_scanned
+                  << ", with records: " << analysis.total_pages_with_records << "\n";
+
+        if (analysis.has_instant_ddl) {
+            std::cout << "\n[WARN] INSTANT DDL detected! Multiple column counts found.\n";
+            std::cout << "Schema versions found:\n";
+            for (size_t i = 0; i < analysis.versions.size(); i++) {
+                const auto& ver = analysis.versions[i];
+                std::cout << "  Version " << (i+1) << ": " << ver.column_count
+                          << " columns (" << ver.page_count << " pages";
+                if (!ver.page_numbers.empty()) {
+                    std::cout << ", pages " << ver.page_numbers.front()
+                              << "-" << ver.page_numbers.back();
+                }
+                std::cout << ")\n";
+            }
+            std::cout << "\n[INFO] To recover all versions:\n";
+            std::cout << "  1. Recover with the LATEST column count for most data\n";
+            std::cout << "  2. Use --infer-schema on older version pages for historical schema\n";
+        } else if (!analysis.versions.empty()) {
+            std::cout << "Column count: " << analysis.versions[0].column_count << "\n";
+        }
+
         return 0;
     }
 

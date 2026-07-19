@@ -317,7 +317,7 @@ inline std::vector<std::map<std::string, std::string>> PartitionTableRecovery::r
 
     for (const auto& partition : partitions_) {
         auto partition_records = recover_partition(partition);
-        records.insert(records.end(), partition_records.begin(), partition_records.end());
+        records_.insert(records_.end(), partition_records.begin(), partition_records.end());
 
         if (!partition_records.empty()) {
             stats_.recovered_partitions++;
@@ -326,12 +326,12 @@ inline std::vector<std::map<std::string, std::string>> PartitionTableRecovery::r
         }
     }
 
-    stats_.total_records = records.size();
+    stats_.total_records = records_.size();
 
     auto total_end = std::chrono::high_resolution_clock::now();
     stats_.recovery_time_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
 
-    return records;
+    return records_;
 }
 
 // ==================== 分区表扫描器 ====================
