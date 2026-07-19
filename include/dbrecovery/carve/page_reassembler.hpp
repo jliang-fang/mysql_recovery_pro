@@ -517,6 +517,7 @@ inline bool PageFragmentReassembler::write_composed_ibd(
                 sorted_pages.empty() ? 0 : sorted_pages[0].space_id,
                 pno, page_size);
             out.write(reinterpret_cast<const char*>(placeholder.data()), page_size);
+            stats_.synthetic_pages_written++;
         }
     }
 
