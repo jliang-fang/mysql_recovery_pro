@@ -70,9 +70,10 @@ struct MetadataRecoveryResult {
     MetadataRecoveryStatus status;
     std::vector<TableMetadata> tables;
     std::string error_message;
-    size_t pages_scanned;
-    size_t pages_found;
-    
+    size_t pages_scanned = 0;
+    size_t pages_found = 0;
+    size_t total_tables_found = 0;
+
     std::string to_string() const;
 };
 
@@ -351,7 +352,7 @@ inline MetadataRecoveryResult MetadataRecovery::recover_from_file(const std::str
         result.status = MetadataRecoveryStatus::INCOMPLETE;
         result.error_message = "No table metadata found in file";
     } else {
-        result.status = MetadataRecoveryStatus::COMPLETE;
+        result.status = MetadataRecoveryStatus::SUCCESS;
         result.total_tables_found = result.tables.size();
     }
 
