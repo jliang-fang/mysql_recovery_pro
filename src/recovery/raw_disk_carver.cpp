@@ -251,11 +251,11 @@ uint32_t RawDiskCarver::extract_space_id(const uint8_t* data, size_t page_size) 
 
 /**
  * @brief 从页数据提取page_no
- * page_no在offset 8-12 (4字节大端序) - 这是FIL_PAGE_OFFSET
+ * page_no在offset 4-7 (FIL_PAGE_OFFSET, 4字节大端序)
  */
 uint32_t RawDiskCarver::extract_page_no(const uint8_t* data, size_t page_size) {
-    if (!data || page_size < 12) return 0;
-    return read_be<uint32_t>(data, 8);
+    if (!data || page_size < 8) return 0;
+    return read_be<uint32_t>(data, FIL_PAGE_OFFSET);
 }
 
 /**
