@@ -1,5 +1,6 @@
 #include "dbrecovery/export/data_exporter.hpp"
 #include <sstream>
+#include <algorithm>
 
 namespace dbrecovery {
 namespace exporter {
@@ -16,24 +17,22 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
 
     oss << "INSERT INTO `" << table_name_ << "` (";
 
-    // 确定列顺序
+    // Determine column order
     std::vector<std::string> columns;
     if (!column_order_.empty()) {
-        // 使用指定的列顺序
         columns = column_order_;
     } else {
-        // 使用 map 的顺序（字母排序）
-        for (const auto& [key, value] : record) {
-            columns.push_back(key);
+        for (const auto& kv : record) {
+            columns.push_back(kv.first);
         }
+        std::sort(columns.begin(), columns.end());
     }
 
-    // 构建列名列表
+    // Build column names
     bool first = true;
     for (const auto& col_name : columns) {
         auto it = record.find(col_name);
-        if (it == record.end()) continue;  // 跳过不存在的列
-
+        if (it == record.end()) continue;
         if (!first) oss << ", ";
         oss << "`" << col_name << "`";
         first = false;
@@ -41,21 +40,17 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
 
     oss << ") VALUES (";
 
-    // 构建值列表
+    // Build values
     first = true;
     for (const auto& col_name : columns) {
         auto it = record.find(col_name);
-        if (it == record.end()) continue;  // 跳过不存在的列
-
+        if (it == record.end()) continue;
         if (!first) oss << ", ";
 
         const std::string& value = it->second;
-
-        // 处理 NULL 值
         if (value == "NULL") {
             oss << "NULL";
         } else {
-            // 转义SQL特殊字符（遵循 MySQL ANSI_QUOTES 模式）
             std::string escaped_value;
             for (char c : value) {
                 switch (c) {
@@ -65,11 +60,10 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
                     case '\\': escaped_value += "\\\\"; break;
                     case '\'': escaped_value += "''"; break;
                     case '"': escaped_value += "\"\""; break;
-                    case '\x1a': escaped_value += "\\Z"; break; // Ctrl+Z
+                    case '\x1a': escaped_value += "\\Z"; break;
                     default: escaped_value += c;
                 }
             }
-
             oss << "'" << escaped_value << "'";
         }
         first = false;
@@ -82,10 +76,66 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
 }
 
 std::string SQLOutputter::get_result() const {
+    return get_result_batch(1);  // Default: one INSERT per row
+}
+
+std::string SQLOutputter::get_result_batch(size_t batch_size) const {
     std::ostringstream oss;
 
-    for (const auto& stmt : sql_statements_) {
-        oss << stmt << "\n";
+    if (sql_statements_.empty()) return "";
+
+    // Determine column names from first statement
+    if (!column_order_.empty()) {
+        oss << "INSERT INTO `" << table_name_ << "` (";
+        bool first = true;
+        for (const auto& col : column_order_) {
+            if (!first) oss << ", ";
+            oss << "`" << col << "`";
+            first = false;
+        }
+        oss << ") VALUES\n";
+    }
+
+    size_t batch_count = 0;
+    for (size_t i = 0; i < sql_statements_.size(); i++) {
+        if (batch_size > 1) {
+            // Batch mode: extract VALUES part and group
+            const std::string& stmt = sql_statements_[i];
+            size_t values_pos = stmt.find("VALUES (");
+            if (values_pos == std::string::npos) {
+                oss << stmt << "\n";
+                continue;
+            }
+
+            std::string values_part = stmt.substr(values_pos + 7);  // Skip "VALUES"
+            // Remove trailing ");"
+            if (values_part.size() >= 2 && values_part.back() == ';')
+                values_part.pop_back();
+            if (values_part.size() >= 1 && values_part.back() == ')')
+                values_part.pop_back();
+
+            if (batch_count == 0) {
+                // Start new batch with column names
+                if (column_order_.empty()) {
+                    // Extract column names from first statement
+                    size_t col_end = stmt.find(") VALUES");
+                    std::string col_part = stmt.substr(0, col_end + 1);
+                    oss << col_part << " VALUES\n";
+                }
+            }
+
+            oss << "(" << values_part << ")";
+            batch_count++;
+
+            if (batch_count >= batch_size || i == sql_statements_.size() - 1) {
+                oss << ";\n";
+                batch_count = 0;
+            } else {
+                oss << ",\n";
+            }
+        } else {
+            oss << sql_statements_[i] << "\n";
+        }
     }
 
     return oss.str();

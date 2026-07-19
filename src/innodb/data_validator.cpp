@@ -649,9 +649,20 @@ bool DataRepairer::repair_page_checksum(std::vector<uint8_t>& page_data, uint32_
         return false;
     }
 
-    // 简化实现：设置校验和为 0
-    write_le<uint32_t>(page_data.data(), 24, 0);
-    write_le<uint32_t>(page_data.data(), 28, 0);
+    // Compute CRC32C checksum (skip checksum field at offset 0)
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 4; i < page_data.size(); i++) {
+        crc ^= page_data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 1) ? ((crc >> 1) ^ 0x82F63B78) : (crc >> 1);
+        }
+    }
+    uint32_t checksum = ~crc;
+
+    // Write checksum to FIL header (offset 0, both header and footer)
+    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), 0, checksum);
+    dbrecovery::innodb::write_le<uint32_t>(page_data.data(), page_data.size() - 8, checksum);
+    (void)page_no;
 
     return true;
 }

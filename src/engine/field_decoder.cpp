@@ -122,19 +122,35 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
             break;
         }
         case 245: { // JSON
-            // ✅ 修复：JSON 使用小端 2 字节长度前缀
-            if (rec_ptr + 2 > page_base_ + page_size_) {
-                return nullptr;
-            }
+            // JSON uses little-endian 2-byte length prefix
+            if (rec_ptr + 2 > page_base_ + page_size_) return nullptr;
             uint16_t json_len = dbrecovery::innodb::read_le<uint16_t>(rec_ptr, 0);
             field_len = 2 + json_len;
-
-            // ✅ 新增：边界检查
-            if (rec_ptr + field_len > page_base_ + page_size_) {
-                return nullptr;
-            }
+            if (rec_ptr + field_len > page_base_ + page_size_) return nullptr;
             break;
         }
+        case 30: { // GEOMETRY (InnoDB type 30)
+            // Same layout as JSON: 2-byte length prefix + data (SRID + WKB)
+            if (rec_ptr + 2 > page_base_ + page_size_) return nullptr;
+            uint16_t geom_len = dbrecovery::innodb::read_le<uint16_t>(rec_ptr, 0);
+            field_len = 2 + geom_len;
+            if (rec_ptr + field_len > page_base_ + page_size_) return nullptr;
+            break;
+        }
+        case 247: // ENUM
+        case 248: // SET
+            // ENUM: 1 or 2 bytes depending on value count
+            // SET: 1,2,3,4,8 bytes depending on member count
+            field_len = (col_info.enum_values.size() <= 255) ? 1 : 2;
+            if (col_info.mysql_type_id == 248) { // SET
+                uint32_t set_count = col_info.set_values.size();
+                field_len = (set_count <= 8) ? 1 :
+                            (set_count <= 16) ? 2 :
+                            (set_count <= 24) ? 3 :
+                            (set_count <= 32) ? 4 : 8;
+            }
+            if (rec_ptr + field_len > page_base_ + page_size_) return nullptr;
+            break;
         case DATETIME2:  // 18
         case TIMESTAMP2: { // 17
             // DATETIME2/TIMESTAMP2 处理（根据精度）
@@ -181,6 +197,38 @@ const uint8_t* FieldDecoder::DecodeNextField(const uint8_t* rec_ptr, int field_i
                 }
             }
             break;
+        case TIME:     // 12
+        case TIME2:    // 20
+            // TIME stored as 3 bytes (HH:MM:SS) or 3-6 bytes with microseconds
+            field_len = 3;
+            break;
+        case YEAR:     // 14
+            field_len = 1;
+            break;
+        case BIT: {    // 17
+            // BIT(N) stored as (N+7)/8 bytes
+            uint32_t bit_count = col_info.column_length;
+            field_len = (bit_count + 7) / 8;
+            break;
+        }
+        case DECIMAL:  // 1 — old DECIMAL (pre-5.0), stored as fixed-length binary
+        case NEWDECIMAL: { // 21 — DECIMAL(M,D), packed binary format
+            // NEWDECIMAL: stored as (precision/9*4 + remainder) bytes
+            // For schemaless recovery, use a reasonable default
+            int precision = col_info.column_length;
+            if (precision <= 0) precision = 10;
+            int int_digits = precision - 2;  // default scale=2
+            if (int_digits < 1) int_digits = 1;
+            int int_bytes = (int_digits / 9) * 4;
+            int remainder = int_digits % 9;
+            if (remainder > 0) int_bytes += (remainder + 1) / 2;
+            int frac_digits = 2;
+            int frac_bytes = (frac_digits / 9) * 4;
+            int rem_f = frac_digits % 9;
+            if (rem_f > 0) frac_bytes += (rem_f + 1) / 2;
+            field_len = int_bytes + frac_bytes;
+            break;
+        }
         default:
             // 默认假设为固定长度字段
             field_len = 4;

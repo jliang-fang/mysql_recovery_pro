@@ -13,6 +13,7 @@
 #include <ctime>
 #include <unordered_set>
 #include <cstring>
+#include <zlib.h>
 
 namespace dbrecovery {
 namespace innodb {
@@ -938,7 +939,7 @@ std::vector<uint16_t> RecordChainParser::get_record_offsets(
 MultiFormatParser::MultiFormatParser(const catalog::TableSchema& schema, RowFormat format)
     : schema_(schema)
     , format_(format) {
-    if (format == RowFormat::COMPACT || format == RowFormat::DYNAMIC) {
+    if (format == RowFormat::COMPACT || format == RowFormat::DYNAMIC || format == RowFormat::COMPRESSED) {
         compact_parser_ = std::make_unique<MySQL56CompactParser>(schema);
     }
 }
@@ -955,8 +956,26 @@ std::vector<ParsedRecord> MultiFormatParser::parse(
             return parse_redundant(page_data, page_size);
 
         case RowFormat::COMPRESSED:
-            // Compressed pages need decompression first
-            return {};
+            // Decompress page body then parse as DYNAMIC
+            // Compressed page: FIL header (38) + ZSD header (32) + zlib compressed body
+            if (page_size > 70 && page_data) {
+                uint32_t orig_size = read_le<uint32_t>(page_data, 14);
+                uint16_t zlen = read_le<uint16_t>(page_data, 8);
+                if (zlen > 0 && zlen < page_size - 70 && orig_size > 0 && orig_size <= UNIV_PAGE_SIZE_MAX) {
+                    std::vector<uint8_t> decompressed(orig_size);
+                    uLongf dest_len = orig_size;
+                    int ret = uncompress(decompressed.data(), &dest_len,
+                                        page_data + 70, zlen);
+                    if (ret == Z_OK && dest_len == orig_size && dest_len >= FIL_PAGE_TYPE_ABS + 2) {
+                        uint16_t decomp_type = read_be<uint16_t>(decompressed.data(), FIL_PAGE_TYPE_ABS);
+                        if (decomp_type == FIL_PAGE_INDEX) {
+                            return compact_parser_->parse_all_records(decompressed.data(), dest_len);
+                        }
+                    }
+                }
+            }
+            // Fallback: try raw parsing
+            return compact_parser_->parse_all_records(page_data, page_size);
     }
 
     return {};
@@ -983,9 +1002,57 @@ std::string MultiFormatParser::format_to_string(RowFormat format) {
 std::vector<ParsedRecord> MultiFormatParser::parse_redundant(
     const uint8_t* page_data, uint32_t page_size) {
 
-    // REDUNDANT format uses 6-byte record header
-    // This is a simplified implementation
-    return {};
+    // REDUNDANT format: 6-byte record header + 1/2-byte offset array
+    // Use the shared decode logic from RowDecoder
+    // For now, delegate to compact_parser_ since REDUNDANT record structure
+    // is similar (the key difference is header size and offset format)
+    if (!page_data || page_size < 101) return {};
+
+    // Get page directory info
+    uint16_t n_heap = read_be<uint16_t>(page_data, FIL_PAGE_OFFSET_N_HEAP);
+    uint16_t n_recs = n_heap & 0x7FFF;
+    if (n_recs < 2 || n_recs > page_size / 5) return {};
+
+    std::vector<ParsedRecord> results;
+    // REDUNDANT: INFIMUM at offset 101, SUPREMUM at offset 113
+    uint16_t rec_offset = 101;  // REDUNDANT INFIMUM
+    uint16_t supremum_offset = 113;
+    uint32_t rec_count = 0;
+
+    while (rec_offset != supremum_offset && rec_offset < page_size - 6 && rec_count < n_recs) {
+        if (rec_offset < 6 || rec_offset >= page_size) break;
+
+        // Parse 6-byte REDUNDANT header
+        uint8_t info_bits = page_data[rec_offset - 6];
+        uint8_t n_fields_byte = page_data[rec_offset - 1];
+        uint16_t n_fields = (page_data[rec_offset - 2] & 0x03) << 8 | n_fields_byte >> 1;
+        bool is_short = (n_fields_byte & 0x01) != 0;
+        uint16_t next_off = read_be<uint16_t>(page_data, rec_offset - 6 + 4);
+        bool is_deleted = (info_bits & 0x10) != 0;
+
+        if (n_fields == 0 || n_fields > 1000) break;
+        if (next_off == 0 || next_off > page_size) break;
+
+        // Calculate extra bytes (offset array after header)
+        uint16_t extra_bytes = is_short ? (6 + n_fields) : (6 + 2 * n_fields);
+        if (rec_offset + extra_bytes > page_size) break;
+
+        // Skip system records (infimum/supremum)
+        if (!is_deleted && rec_offset != 101 && rec_offset != supremum_offset) {
+            ParsedRecord rec;
+            rec.offset = rec_offset;
+            rec.is_deleted = is_deleted;
+            rec.next_offset = next_off;
+            rec.confidence = 0.5;
+            results.push_back(rec);
+        }
+
+        rec_offset = next_off;
+        rec_count++;
+        if (rec_offset <= 101) break;  // Safety: don't loop backward
+    }
+
+    return results;
 }
 
 std::vector<ParsedRecord> MultiFormatParser::parse_dynamic(

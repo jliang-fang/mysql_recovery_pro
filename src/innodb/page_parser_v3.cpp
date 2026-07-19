@@ -1,10 +1,27 @@
 #include "dbrecovery/innodb/page_parser_v3.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
 #include <iostream>
 #include <algorithm>
 #include <cstring>
 
 namespace dbrecovery {
 namespace innodb {
+
+// CRC32C lookup table (Castagnoli polynomial 0x82F63B78)
+static uint32_t crc32c_table[256];
+static bool crc32c_table_init = false;
+
+static void init_crc32c() {
+    if (crc32c_table_init) return;
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t crc = i;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 1) ? ((crc >> 1) ^ 0x82F63B78) : (crc >> 1);
+        }
+        crc32c_table[i] = crc;
+    }
+    crc32c_table_init = true;
+}
 
 // ==================== PageParserV3 实现 ====================
 
@@ -60,7 +77,15 @@ PageParseResult PageParserV3::parse() {
     result_.next_page = chain.second;
 
     // 8. 验证页健康状态
-    result_.checksum_valid = true; // 简化实现
+    uint32_t stored_checksum = read_le<uint32_t>(data_, 0);
+    result_.checksum_stored = stored_checksum;
+    init_crc32c();
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 4; i < size_; i++) {
+        crc = (crc >> 8) ^ crc32c_table[(crc ^ data_[i]) & 0xFF];
+    }
+    result_.checksum_computed = crc ^ 0xFFFFFFFF;
+    result_.checksum_valid = (stored_checksum == result_.checksum_computed);
 
     return result_;
 }

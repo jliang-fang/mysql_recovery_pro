@@ -30,6 +30,7 @@ enum class MySQLVersion : uint8_t {
     MYSQL_57 = 57,      // MySQL 5.7.x
     MYSQL_80 = 80,      // MySQL 8.0.x
     MYSQL_84 = 84,      // MySQL 8.4.x
+    MYSQL_90 = 90,      // MySQL 9.0.x (backward compatible with 8.4 page formats)
 };
 
 // ==================== 行格式枚举 ====================

@@ -529,6 +529,13 @@ int main(int argc, char** argv) {
     std::string user = parser.get_option("user", "root");
     std::string database = parser.get_option("database", "recovered_db");
 
+    // CRC32C checksum verification during page scanning
+    bool checksum_verify = parser.get_bool_option("checksum-verify", true);
+    bool skip_checksum = parser.get_bool_option("skip-checksum", false);
+
+    // Unified disk carving pipeline (XFS/ext4 → decompress → CRC32C → SDI → schema-aware → export)
+    bool unified_carve = parser.get_bool_option("unified-carve", false);
+
     // ✅ 验证必选参数
     if (g_verbose) {
         std::cerr << "[DEBUG] ibd_path='" << ibd_path << "' data_dir='" << data_dir

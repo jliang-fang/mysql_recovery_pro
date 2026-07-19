@@ -80,9 +80,7 @@ IBDExporter::IBDExporter(uint32_t page_size) : page_size_(page_size) {
 IBDExporter::~IBDExporter() = default;
 
 bool IBDExporter::export_record(const std::map<std::string, std::string>& record) {
-    // 简化实现：记录存储在内存中，实际 IBD 导出需要更复杂的实现
-    // 这里仅标记记录已处理
-    (void)record;
+    stored_records_.push_back(record);
     return true;
 }
 

@@ -11,6 +11,8 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
+#include <nlohmann/json.hpp>
 
 namespace dbrecovery {
 namespace innodb {
@@ -456,14 +458,21 @@ inline std::vector<ExtractedSDI> SDIExtractor::extract_from_file(const std::file
 }
 
 inline std::optional<catalog::TableSchema> SDIExtractor::parse_sdi_json(const std::string& sdi_json) {
-    // 使用 SDIManager 解析 SDI JSON
-    // 这里需要实现 JSON 解析逻辑
-    // 由于简化实现，返回 nullopt
-    // 实际实现应该使用 nlohmann::json 解析 SDI JSON
+    if (sdi_json.empty()) return std::nullopt;
 
-    // 简化实现：返回空的表结构
-    // 实际应该解析 SDI JSON 并提取表结构信息
-    return std::nullopt;
+    try {
+        auto j = nlohmann::json::parse(sdi_json);
+
+        // MySQL 8.0 SDI format: the dd_object contains table/column metadata
+        catalog::TableSchema schema;
+        schema.from_json(j);
+
+        if (schema.table_name.empty()) return std::nullopt;
+        return schema;
+    } catch (const std::exception& e) {
+        std::cerr << "[SDI] JSON parse error: " << e.what() << std::endl;
+        return std::nullopt;
+    }
 }
 
 } // namespace innodb

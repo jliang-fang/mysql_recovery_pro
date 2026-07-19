@@ -487,7 +487,18 @@ PageParseResult PageParserV2::parse() {
     result_.next_page = chain.second;
 
     // 8. 验证页健康状态
-    result_.checksum_valid = true; // 简化实现
+    uint32_t stored_checksum = read_le<uint32_t>(data_, 0);
+    result_.checksum_stored = stored_checksum;
+    // Compute CRC32C (Castagnoli polynomial, bit-by-bit)
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 4; i < size_; i++) {
+        crc ^= data_[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 1) ? ((crc >> 1) ^ 0x82F63B78) : (crc >> 1);
+        }
+    }
+    result_.checksum_computed = crc ^ 0xFFFFFFFF;
+    result_.checksum_valid = (stored_checksum == result_.checksum_computed);
 
     return result_;
 }
@@ -780,11 +791,18 @@ bool PageHealthChecker::validate_checksum(const uint8_t* data, size_t size,
         return false;
     }
 
-    // 读取存储的校验和
-    *stored = read_le<uint32_t>(data, 24);
+    // 读取存储的校验和 (at offset 0 in FIL header)
+    *stored = read_le<uint32_t>(data, 0);
 
-    // 计算校验和（简化实现）
-    *computed = 0; // 实际应使用 CRC32C
+    // Compute CRC32C over page content (skip checksum field)
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 4; i < size; i++) {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 1) ? ((crc >> 1) ^ 0x82F63B78) : (crc >> 1);
+        }
+    }
+    *computed = crc ^ 0xFFFFFFFF;
 
     return true;
 }

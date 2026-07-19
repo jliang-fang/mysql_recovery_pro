@@ -199,7 +199,10 @@ std::string CliParser::get_full_help(const std::string& program_name) {
     oss << "  --disk=<path>              Scan raw disk/partition for deleted .ibd files\n";
     oss << "  --frm=<path>               Parse table schema from .frm file\n";
     oss << "  --scan-device              Enable PhotoRec-style device scanning\n";
-    oss << "  --drop-recovery            Enable DROP TABLE recovery from disk\n\n";
+    oss << "  --drop-recovery            Enable DROP TABLE recovery from disk\n";
+    oss << "  --unified-carve            Unified pipeline: carving→decompress→CRC32C→SDI→export\n";
+    oss << "  --checksum-verify          Verify pages using CRC32C checksum (default: on)\n";
+    oss << "  --skip-checksum            Skip CRC32C verification for faster scanning\n\n";
 
     oss << "Enhanced Modes:\n";
     oss << "  --scan                     Scan mode: scan data directory for tables\n";

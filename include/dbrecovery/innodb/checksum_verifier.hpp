@@ -251,10 +251,9 @@ inline PageHealthInfo make_invalid_health(const std::string& message) {
 // ==================== ChecksumVerifier ====================
 
 inline uint32_t ChecksumVerifier::crc32c(const uint8_t* data, size_t size, uint32_t init_crc) {
-    // 使用硬件加速的 CRC32C (如果可用)
     uint32_t crc = init_crc;
-    
-    // 简化实现：使用标准 CRC32C 多项式 0x1EDC6F41
+
+    // CRC32C (Castagnoli polynomial 0x1EDC6F41, reflected 0x82F63B78)
     for (size_t i = 0; i < size; i++) {
         crc ^= data[i];
         for (int j = 0; j < 8; j++) {
@@ -420,7 +419,7 @@ inline bool ChecksumVerifier::verify_page_type(uint16_t page_type) {
         case 0x45B4:  // FIL_PAGE_IBUF_FREE_LIST (big-endian)
         case 0x45B5:  // FIL_PAGE_IBUF_BITMAP (big-endian)
         case 0x45B6:  // FIL_PAGE_TYPE_SYS (big-endian)
-        case 0x45B7:  // FIL_PAGE_TYPE_TRX_SYS (big-endian)
+        case 0x45B7:  // FIL_PAGE_COMPRESSED_AND_ENCRYPTED (big-endian)
         case 0x45B8:  // FIL_PAGE_TYPE_FSP_HDR (big-endian)
         case 0x45B9:  // FIL_PAGE_TYPE_XDES (big-endian)
         case 0x45BA:  // FIL_PAGE_TYPE_BLOB (big-endian)

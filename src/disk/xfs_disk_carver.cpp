@@ -47,6 +47,8 @@ constexpr uint16_t FIL_PAGE_SDI_ZIP = 0x45BD;
 constexpr uint16_t FIL_PAGE_TYPE_BLOB = 0x45BD;   // Same as SDI_ZIP (BLOB page type)
 constexpr uint16_t FIL_PAGE_TYPE_ZBLOB = 0x45BA;  // Compressed BLOB page
 constexpr uint16_t FIL_PAGE_TYPE_ZBLOB2 = 0x45BB; // Compressed BLOB page v2
+constexpr uint16_t FIL_PAGE_COMPRESSED = 0x45B5;  // Compressed page
+constexpr uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 0x45B7; // Compressed+Encrypted
 constexpr size_t FIL_PAGE_TYPE_ABS = 24;
 constexpr size_t FIL_HEADER_SIZE = 38;
 
@@ -660,13 +662,26 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
     // - di_mode == 0 (no file type)
     // - di_nlink == 0 (no links)
     // - di_format == XFS_DINODE_FMT_EXTENTS (extent list)
+    // - di_version >= 3 (V5 XFS only — V4 inodes have unreliable post-deletion data)
 
     uint16_t mode = be16toh(inode_core.di_mode);
     uint32_t nlink = be32toh(inode_core.di_nlink);
     uint8_t format = inode_core.di_format;
+    uint8_t di_version = inode_core.di_version;
 
-    // Accept deleted inodes OR regular inodes with extents (for debugging)
-    bool is_deleted = (mode == 0);
+    // Strict deleted-inode validation (matching xfs_undelete heuristics)
+    bool is_deleted = (mode == 0) && (nlink == 0) && (di_version >= 3);
+
+    if (!is_deleted) {
+        // Also accept regular files with extent format (for non-destructive recovery)
+        bool is_regular_file = (mode != 0) && (nlink > 0) && (format == XFS_DINODE_FMT_EXTENTS);
+        if (!is_regular_file) {
+            if (config_.verbose && dbrecovery::innodb::g_verbose)
+                std::cerr << "[DEBUG] Skipping inode: mode=" << mode << " nlink=" << nlink
+                          << " version=" << (int)di_version << " format=" << (int)format << "\n";
+            return std::nullopt;
+        }
+    }
 
     // Get file size from inode core
     uint64_t file_size = be64toh(inode_core.di_size);
@@ -684,7 +699,6 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
 
         // Check if we have a btree root block in the inode
         // btree root starts after inode core: 100 for v4 (version 2), 176 for v5 (version 3)
-        uint8_t di_version = inode_core.di_version;
         size_t inode_core_size = (di_version >= 3) ? 176 : 100;
         size_t btree_start = inode_core_size;
         if (btree_start + 16 > inode_size) {
@@ -807,7 +821,6 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
 
     // Parse extent list (stored after inode core)
     // v4 inode core is 100 bytes, v5 inode core is 176 bytes
-    uint8_t di_version = inode_core.di_version;
     size_t inode_core_size_ext = (di_version >= 3) ? 176 : 100;
     size_t extent_start = inode_core_size_ext;
     size_t extent_size = sizeof(xfs_bmbt_rec);
@@ -1077,7 +1090,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
             page_type != FIL_PAGE_SDI_ZIP &&
             page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
-            page_type != FIL_PAGE_TYPE_ZBLOB2) {
+            page_type != FIL_PAGE_TYPE_ZBLOB2 &&
+            page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
             // Check if this is a compressed page
             auto decomp = try_decompress_page(page_data, config_.page_size);
             if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
@@ -1099,7 +1113,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
             page_type != FIL_PAGE_SDI_ZIP &&
             page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
-            page_type != FIL_PAGE_TYPE_ZBLOB2) {
+            page_type != FIL_PAGE_TYPE_ZBLOB2 &&
+            page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
             continue;
         }
 
@@ -1286,7 +1301,8 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                     size_t effective_size = page_size;
 
                     if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-                        page_type != FIL_PAGE_SDI_ZIP) {
+                        page_type != FIL_PAGE_SDI_ZIP &&
+                        page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
                         auto decomp = try_decompress_page(page_data.data(), page_size);
                         if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
                             uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
@@ -1443,23 +1459,27 @@ void XfsDiskCarver::free_space_tree_check(
     if (numrecs == 0 || numrecs > 1000) return;
 
     if (level > 0) {
-        // Internal node: read keys and pointers, binary search
+        // Internal node: binary search for the child containing extent_begin
+        // Keys are (startblock, blockcount), sorted by startblock
+        // xfs_alloc_key_t: ar_startblock(4) + ar_blockcount(4) = 8 bytes
         size_t key_offset = hdr_size;
         size_t ptr_offset = (hdr_size + block_size) / 2;
 
-        // Find the rightmost child that could contain our extent
-        // Keys are (startblock, blockcount), sorted by startblock
-        uint16_t right = numrecs - 1;
-        for (uint16_t i = 0; i < numrecs && key_offset + 8 <= block_size; i++) {
-            uint32_t key_start = read_be<uint32_t>(buf.data(), key_offset);
-            key_offset += 8;  // xfs_alloc_key_t: ar_startblock(4) + ar_blockcount(4)
+        // Binary search: find the rightmost key <= extent_begin
+        uint16_t left = 0, right = numrecs;
+        while (left < right) {
+            uint16_t mid = (left + right) / 2;
+            uint32_t key_start = read_be<uint32_t>(buf.data(), key_offset + mid * 8);
             if (key_start <= *extent_begin) {
-                right = i;
+                left = mid + 1;
+            } else {
+                right = mid;
             }
         }
+        uint16_t child_idx = (left > 0) ? (left - 1) : 0;
 
-        // Read the pointer at index 'right'
-        uint32_t child_block = read_be<uint32_t>(buf.data(), ptr_offset + right * 4);
+        // Read the pointer at child_idx
+        uint32_t child_block = read_be<uint32_t>(buf.data(), ptr_offset + child_idx * 4);
         free_space_tree_check(fd, ag_index, ag_offset, block_size,
                              child_block, extent_begin, extent_end,
                              original_ext, file_offset_accum, valid_extents);
@@ -1685,7 +1705,8 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                 if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
                     page_type != FIL_PAGE_SDI_ZIP &&
                     page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
-                    page_type != FIL_PAGE_TYPE_ZBLOB2) {
+                    page_type != FIL_PAGE_TYPE_ZBLOB2 &&
+                    page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
                     auto decomp = try_decompress_page(page_data, config_.page_size);
                     if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
                         uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
@@ -2289,6 +2310,8 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_sch
     bool is_valid_page = (page_type == FIL_PAGE_INDEX ||
                           page_type == FIL_PAGE_SDI ||
                           page_type == FIL_PAGE_SDI_ZIP ||
+                          page_type == FIL_PAGE_COMPRESSED ||
+                          page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED ||
                           page_type == 0);  // Unknown/corrupted page
 
     if (!is_valid_page) return records;

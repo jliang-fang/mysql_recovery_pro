@@ -14,13 +14,12 @@ struct FieldValue {
 
 class RowDecoder {
 public:
-    // null_bytes: NULL位图占用的字节数（非位数），计算公式：(nullable_columns + 7) / 8
     RowDecoder(const uint8_t* page_base, size_t page_size, uint32_t null_bytes)
-        : page_base_(page_base), 
+        : page_base_(page_base),
           size_(page_size),
           null_bytes_(null_bytes),
-          nullable_columns_(null_bytes * 8) { // 反推可支持的最大列数
-        
+          nullable_columns_(null_bytes * 8) {
+
         if (null_bytes > 0 && page_base_ == nullptr) {
             throw std::invalid_argument("Page base pointer is null but null_bytes > 0");
         }
@@ -28,24 +27,20 @@ public:
 
     uint32_t get_nullable_columns() const { return nullable_columns_; }
 
-    // ✅ 新增：支持传入表结构的解码方法
+    // Decode a record at given origin offset using schema info
+    // Supports COMPACT, DYNAMIC, and REDUNDANT row formats
     std::vector<FieldValue> decode_record(size_t origin, const catalog::TableSchema& schema) const;
-    
-    // 辅助方法：检查字段是否为 NULL（修正为正序存储）
+
+    // Check if field is NULL (COMPACT/DYNAMIC format)
     bool is_null(uint32_t col_idx, const uint8_t* null_ptr) const {
         if (col_idx >= nullable_columns_) return false;
-        
         uint32_t byte_idx = col_idx / 8;
         uint32_t bit_idx = col_idx % 8;
-        
-        // ✅ 修复：COMPACT 格式使用正序存储（低位在前）
-        // 列0对应bit0，列1对应bit1...列7对应bit7，然后是下一个字节
         return (null_ptr[byte_idx] & (1U << bit_idx)) != 0;
     }
-    
-    // ✅ 新增：获取NULL位图起始指针（供外部使用）
+
     const uint8_t* get_null_bitmap_ptr() const {
-        return page_base_ + 1; // 跳过记录头
+        return page_base_ + 1;
     }
 
 private:

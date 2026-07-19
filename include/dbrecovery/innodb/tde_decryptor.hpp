@@ -11,6 +11,7 @@
 #include <fstream>
 
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -241,13 +242,41 @@ inline void TDEDecryptor::add_table_key(uint32_t key_id, const std::vector<uint8
 }
 
 inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
-    if (size < 44) {
+    if (size < 44) return false;
+
+    // TDE page header starts at byte 0 of the page body (after FIL header at offset 38)
+    // The FIL header's page type field tells us if this is an index page
+    // For TDE detection, we look at the encryption algorithm byte at FIL_PAGE_DATA+0
+    // which is at offset 38 from page start
+
+    // First validate this looks like an InnoDB page: check FIL_PAGE_TYPE
+    uint16_t page_type = read_le<uint16_t>(data, 24);  // FIL_PAGE_TYPE at offset 24
+    if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
+        page_type != FIL_PAGE_SDI_ZIP && page_type != 0) {
+        // Not a recognizable page type, skip encryption check
         return false;
     }
 
-    // 检查 TDE 页头标志
-    uint8_t algo = data[0];
-    return algo >= 0x01 && algo <= 0x09;
+    // Check encryption algorithm byte at TDE header offset
+    // TDE header: 1 byte algorithm | 1 byte key_id | 4 bytes key_version | 16 bytes IV | ...
+    // The algorithm field values: 1=AES-128, 2=AES-192, 3=AES-256
+    uint8_t algo = data[38];  // First byte after FIL header (38 bytes)
+    if (algo >= 1 && algo <= 9) {
+        // Additional validation: check that the page size is reasonable
+        // and that we're not looking at random data
+        uint32_t checksum = read_le<uint32_t>(data, 0);
+        // For encrypted pages, the FIL checksum may be 0 or stored differently
+        // but the page should not be all zeros
+        bool all_zero = true;
+        for (size_t i = 0; i < std::min(size, size_t(100)); i++) {
+            if (data[i] != 0) { all_zero = false; break; }
+        }
+        if (all_zero) return false;
+
+        return true;
+    }
+
+    return false;
 }
 
 // ==================== KeyringFile ====================

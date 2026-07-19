@@ -69,6 +69,8 @@ constexpr uint16_t FIL_PAGE_SDI_ZIP     = 17853; // 0x45BD — Compressed SDI me
 constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 17853; // 0x45BD — BLOB page (same as SDI_ZIP)
 /// @brief Compressed BLOB page type (0x45B5 = 17845)
 constexpr uint16_t FIL_PAGE_COMPRESSED  = 17845; // 0x45B5 — Compressed page
+/// @brief Compressed AND Encrypted page type (0x45B7 = 17847)
+constexpr uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 17847; // 0x45B7 — Compressed+Encrypted page
 
 // Page type validation functions (using big-endian read values)
 inline bool is_valid_index_page_type(uint16_t type) {
@@ -82,6 +84,8 @@ inline bool is_valid_page_type(uint16_t type) {
            type == FIL_PAGE_SDI ||           // 0x45BE = 17854 (uncompressed SDI)
            type == FIL_PAGE_SDI_ZIP ||       // 0x45BD = 17853 (compressed SDI)
            type == FIL_PAGE_TYPE_BLOB ||     // 0x45BD = 17853 (same as SDI_ZIP)
+           type == FIL_PAGE_COMPRESSED ||    // 0x45B5 = 17845
+           type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED || // 0x45B7 = 17847
            type == FIL_PAGE_TYPE_ALLOCATED;  // 0x0000 = 0
 }
 
@@ -119,6 +123,7 @@ inline std::string page_type_to_string(uint16_t type) {
         case FIL_PAGE_TYPE_ALLOCATED:  return "FIL_PAGE_TYPE_ALLOCATED"; // 0x0000
         case FIL_PAGE_SDI:             return "FIL_PAGE_SDI";        // 0x45BE (uncompressed)
         case FIL_PAGE_COMPRESSED:      return "FIL_PAGE_COMPRESSED"; // 0x45B5
+        case FIL_PAGE_COMPRESSED_AND_ENCRYPTED: return "FIL_PAGE_COMPRESSED_AND_ENCRYPTED"; // 0x45B7
         default: {
             // Handle 0x45BD which is used for both SDI_ZIP and BLOB
             if (type == FIL_PAGE_SDI_ZIP) {

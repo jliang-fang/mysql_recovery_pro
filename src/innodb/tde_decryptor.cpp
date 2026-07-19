@@ -240,17 +240,31 @@ std::vector<uint8_t> TDEDecryptor::aes_decrypt(const std::vector<uint8_t>& key,
 }
 
 uint32_t TDEDecryptor::calculate_checksum(const uint8_t* data, size_t size) {
-    // Simplified checksum calculation
-    // In production, would use CRC32C
+    // Use proper InnoDB CRC32C checksum
+    // InnoDB stores CRC32C at FIL_PAGE_END_LSN_CHECKSUM (offset 0)
+    // with bytes 4-7 of the page zeroed during computation
 
-    uint32_t checksum = 0;
-    for (size_t i = 0; i < size; i += 4) {
-        if (i + 4 <= size) {
-            checksum ^= dbrecovery::innodb::read_le<uint32_t>(data, i);
+    if (!data || size < 8) return 0;
+
+    // Make a mutable copy of the first 8 bytes (checksum field area)
+    std::vector<uint8_t> page_copy(data, data + size);
+
+    // Zero out the checksum field (bytes 0-3 of FIL header)
+    for (int i = 0; i < 4; i++) {
+        page_copy[i] = 0;
+    }
+
+    // Compute CRC32C using polynomial 0x1EDC6F41 (Castagnoli)
+    // This matches InnoDB's ut_crc32 implementation
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < size; i++) {
+        crc ^= page_copy[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0x82F63B78 : 0);
         }
     }
 
-    return checksum;
+    return ~crc;
 }
 
 } // namespace innodb

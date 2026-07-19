@@ -390,11 +390,31 @@ inline std::vector<uint8_t> BlobParser::read_blob(
 
 inline std::optional<BlobPointer> BlobParser::extract_pointer(const std::vector<uint8_t>& row_data,
                                                               uint16_t col_idx) {
-    // 简化实现：假设 BLOB 指针在行数据末尾
+    // BLOB pointer is 20 bytes at offset determined by column position.
+    // For COMPACT/DYNAMIC format, BLOB fields store the 20-byte BTR_EXTERN
+    // reference at the field's data position (variable-length).
+    // Without schema, we scan backward from the end of row data for a valid pointer.
     if (row_data.size() < 20) {
         return std::nullopt;
     }
-    
+
+    // Try multiple candidate positions starting from end of data
+    // The most recent BLOB column's pointer will be at the end
+    // Earlier BLOB columns' pointers are further back
+    // Since we don't have schema positions, try a window scan
+    size_t search_end = row_data.size();
+    for (int pass = static_cast<int>(col_idx); pass >= 0 && search_end >= 20; pass--) {
+        const uint8_t* candidate = row_data.data() + search_end - 20;
+        auto ptr = parse_pointer(candidate, 20);
+        if (ptr.has_value() && ptr->page_no != 0 && ptr->page_no != FIL_NULL) {
+            if (ptr->len > 0 && ptr->len < 256 * 1024 * 1024) {  // Sanity: < 256MB
+                return ptr;
+            }
+        }
+        search_end -= 20;  // Move back past this 20-byte pointer
+    }
+
+    // Fallback: try last 20 bytes
     return parse_pointer(row_data.data() + row_data.size() - 20, 20);
 }
 
@@ -419,18 +439,21 @@ inline bool BlobChainReconstructor::reconstruct() {
     if (pages_.empty()) {
         return false;
     }
-    
+
     // 检测循环引用
     if (detect_circular_reference()) {
         stats_.circular_references++;
         return false;
     }
-    
-    // 按页号排序
+
+    // Sort by page_no as a fallback for when FIL_PAGE_NEXT is unavailable
+    // In the general case, pages are traversed following FIL_PAGE_NEXT chain
+    // (offset 4 in FIL header, big-endian). For recovery scenarios where pages
+    // are collected individually, page_no order is a reasonable approximation.
     std::sort(pages_.begin(), pages_.end(), [](const Page& a, const Page& b) {
         return a.page_no < b.page_no;
     });
-    
+
     stats_.chains_reconstructed++;
     return true;
 }

@@ -129,6 +129,7 @@ inline bool PageScanner::is_valid_page_type(uint16_t type) {
         case FIL_PAGE_SDI:
         case FIL_PAGE_TYPE_BLOB:
         case FIL_PAGE_COMPRESSED:
+        case FIL_PAGE_COMPRESSED_AND_ENCRYPTED:
             return true;
         default:
             return false;
