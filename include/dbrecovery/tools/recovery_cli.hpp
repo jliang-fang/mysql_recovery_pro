@@ -45,6 +45,7 @@
 #include "dbrecovery/innodb/secondary_index_rescuer.hpp"
 #include "dbrecovery/innodb/offline_keyring_parser.hpp"
 #include "dbrecovery/recovery/parallel_exporter.hpp"
+#include "dbrecovery/recovery/strategy_recommender.hpp"
 
 namespace fs = std::filesystem;
 
@@ -259,7 +260,10 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "                                 Supports keyring_file (JSON), encrypted keyring, Vault export\n";
     std::cout << "  \033[1m--tde-password=<pwd>\033[0m       Password for encrypted keyring file\n";
     std::cout << "  \033[1m--parallel-export\033[0m          Export recovered records using multiple threads\n";
-    std::cout << "                                 Uses --num-workers for thread count (default: 4)\n\n";
+    std::cout << "                                 Uses --num-workers for thread count (default: 4)\n";
+    std::cout << "  \033[1m--recommend-strategy\033[0m       Analyze scenario and recommend best recovery strategy\n";
+    std::cout << "                                 Use with --scenario=DROP_TABLE|TRUNCATE|RM_RF|CORRUPTION\n";
+    std::cout << "                                 and --filesystem=ext4|xfs|ntfs|raw for best results\n\n";
     std::cout << "\033[1mBatch Operations:\033[0m\n";
     std::cout << "  \033[1m--batch=<file>\033[0m             Process files from a list (one per line)\n";
     std::cout << "  \033[1m--output-format=<fmt>\033[0m      Output format for batch: csv|sql|json\n\n";
@@ -477,6 +481,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string filesystem_type = parser_.get_option("filesystem", "ext4");
     std::transform(filesystem_type.begin(), filesystem_type.end(), filesystem_type.begin(), ::tolower);
 
+    // MySQL version hint for strategy recommendation
+    std::string mysql_version = parser_.get_option("mysql-version", "");
+    if (mysql_version.empty()) mysql_version = "8.0";  // default
+
     // Index ID filtering options
     std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
     bool exclude_system_tables = parser_.has_option("exclude-system-tables");
@@ -522,6 +530,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // Parallel export
     bool parallel_export = parser_.get_bool_option("parallel-export", false);
+
+    // P4: Strategy recommendation
+    bool recommend_strategy = parser_.get_bool_option("recommend-strategy", false);
+    std::string scenario_str = parser_.get_option("scenario", "");
+    std::string filesystem_str = parser_.get_option("filesystem", "");
 
     // v2.0: Page reassembly mode
     if (reassemble_mode) {
@@ -1211,6 +1224,23 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                       << keyring_parser.get_last_error() << "\n";
             return 1;
         }
+    }
+
+    // P4: Strategy recommendation — analyze scenario and suggest best approach
+    if (recommend_strategy) {
+        std::cout << "[INFO] P4 Recovery Strategy Recommendation Engine\n\n";
+
+        dbrecovery::recovery::StrategyRecommender recommender;
+        recommender.set_mysql_version(mysql_version);
+        recommender.set_filesystem(filesystem_str.empty() ? filesystem_type : filesystem_str);
+        recommender.set_has_schema(!schema_file_path.empty() || !frm_path.empty());
+        recommender.set_has_ibdata(!system_tablespace.empty());
+        recommender.set_has_undo_tablespace(!undo_tablespace.empty());
+
+        auto rec = recommender.recommend(scenario_str.empty() ? "UNKNOWN" : scenario_str);
+        std::cout << rec.to_text() << "\n";
+
+        return 0;
     }
 
     // v2.0: Parallel export mode — re-export existing output with multiple threads
