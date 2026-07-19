@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <cctype>
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/inference/statistical_classifier.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -615,6 +616,19 @@ public:
      * @return Inference result
      */
     Result infer_from_frm();
+
+    /**
+     * @brief v2.0: Infer schema from raw InnoDB pages using statistical classification
+     *
+     * Uses PhysicalLayoutAnalyzer to detect column count from page layout,
+     * extracts raw column values, then classifies each column's type using
+     * StatisticalTypeClassifier with 20+ likelihood functions.
+     *
+     * @param pages Vector of (page_data, page_size) pairs from INDEX pages
+     * @return Inference result with detailed type candidates per column
+     */
+    Result infer_from_raw_pages(
+        const std::vector<std::pair<const uint8_t*, size_t>>& pages);
     
     /**
      * @brief Get inferred schema

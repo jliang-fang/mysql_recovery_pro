@@ -11,6 +11,153 @@
 namespace dbrecovery {
 namespace innodb {
 
+// ==================== SchemaInferrer::infer_from_raw_pages (v2.0) ====================
+
+SchemaInferrer::Result SchemaInferrer::infer_from_raw_pages(
+    const std::vector<std::pair<const uint8_t*, size_t>>& pages) {
+
+    Result result;
+    result.success = false;
+
+    if (pages.empty()) {
+        result.error_message = "No pages provided for inference";
+        return result;
+    }
+
+    // Step 1: Analyze physical layout to detect column count
+    auto layout = inference::PhysicalLayoutAnalyzer::analyze_multiple_pages(pages);
+    if (layout.total_columns == 0) {
+        result.error_message = "Could not detect column layout from pages";
+        return result;
+    }
+
+    // Step 2: Extract raw column values
+    auto column_values = inference::PhysicalLayoutAnalyzer::extract_column_values(
+        pages, layout, 5000);
+
+    if (column_values.empty()) {
+        result.error_message = "Could not extract column values from pages";
+        return result;
+    }
+
+    // Apply column count hint if set
+    uint32_t effective_cols = static_cast<uint32_t>(column_values.size());
+    if (column_count_hint_ > 0 && column_count_hint_ < effective_cols) {
+        effective_cols = column_count_hint_;
+    }
+
+    // Step 3: Classify each column statistically
+    inference::FeatureExtractor extractor;
+    inference::StatisticalTypeClassifier classifier;
+
+    InferredSchema schema;
+    schema.table_name = table_name_hint_.empty() ? "recovered_table" : table_name_hint_;
+    schema.row_format = layout.row_format;
+    schema.page_size = 16384;
+    schema.inference_method = "statistical_classifier_v2";
+    schema.estimated_row_count = 0;
+
+    double total_confidence = 0.0;
+    std::vector<std::string> column_names;
+
+    for (uint32_t i = 0; i < effective_cols && i < column_values.size(); i++) {
+        // Skip system columns if we have enough: last 3 are DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID
+        bool is_system_col = false;
+        if (effective_cols > 3 && i >= effective_cols - 3) {
+            is_system_col = true;
+        }
+
+        auto features = inference::FeatureExtractor::extract(column_values[i]);
+        auto candidates = classifier.classify(features, 3);
+
+        InferredColumn col;
+        col.ordinal_position = i + 1;
+        col.is_nullable = features.null_ratio > 0.01;
+
+        if (is_system_col) {
+            col.name = (i == effective_cols - 3) ? "DB_TRX_ID" :
+                       (i == effective_cols - 2) ? "DB_ROLL_PTR" : "DB_ROW_ID";
+            col.type_name = (i == effective_cols - 3) ? "BIGINT" : "VARBINARY";
+            col.max_length = (i == effective_cols - 3) ? 6 : 7;
+            col.is_string_type = false;
+            col.is_integer_type = (i == effective_cols - 3);
+            col.type_id = 7;
+        } else if (!candidates.empty()) {
+            const auto& best = candidates[0];
+            col.type_name = best.type_name;
+            col.type_id = best.innodb_type_id;
+            col.max_length = static_cast<uint32_t>(features.len_max);
+            col.is_string_type = (best.type_name.find("CHAR") != std::string::npos ||
+                                 best.type_name.find("TEXT") != std::string::npos ||
+                                 best.type_name == "ENUM" || best.type_name == "SET" ||
+                                 best.type_name == "JSON");
+            col.is_integer_type = (best.type_name.find("INT") != std::string::npos ||
+                                  best.type_name == "YEAR" || best.type_name == "BIT");
+            col.is_datetime_type = (best.type_name == "DATETIME" || best.type_name == "DATE" ||
+                                   best.type_name == "TIME" || best.type_name == "TIMESTAMP");
+
+            // Detect auto-increment: integer type with sequential values and no nulls
+            if (col.is_integer_type && features.null_ratio < 0.01 &&
+                features.integer_ratio > 0.9 && features.distinct_count > 10) {
+                col.is_auto_increment = true;
+            }
+        } else {
+            col.name = "col" + std::to_string(i + 1);
+            col.type_name = "VARCHAR";
+            col.max_length = std::max(static_cast<uint32_t>(features.len_max), 255u);
+            col.is_string_type = true;
+            col.type_id = 253;
+        }
+
+        // Infer column name
+        if (!is_system_col) {
+            col.name = PatternInferenceEngine::infer_column_name(i + 1, {});
+            // Use feature-based naming
+            if (col.is_integer_type && col.is_auto_increment) {
+                col.name = "id";
+            } else if (col.type_name == "VARCHAR" && features.has_at_ratio > 0.3) {
+                col.name = "email";
+            } else if (col.is_datetime_type) {
+                col.name = (i == 0) ? "created_at" : "updated_at";
+            }
+        }
+
+        // Detect PRIMARY KEY candidates: first auto-increment or first integer column
+        if (!is_system_col && col.is_integer_type && schema.primary_key_columns.empty()) {
+            col.is_primary_key = true;
+            schema.primary_key_columns.push_back(col);
+        }
+
+        col.charset_id = col.is_string_type ? 255 : 0;
+        schema.columns.push_back(col);
+        total_confidence += candidates.empty() ? 0.3 : candidates[0].confidence;
+    }
+
+    // Calculate overall confidence
+    uint32_t user_col_count = effective_cols > 3 ? effective_cols - 3 : effective_cols;
+    if (user_col_count > 0) {
+        schema.confidence = total_confidence / user_col_count;
+    }
+    schema.confidence = std::min(std::max(schema.confidence, 0.3), 1.0);
+
+    schema_ = schema;
+    confidence_ = schema.confidence;
+
+    result.success = true;
+    result.schema = schema_;
+
+    // Add layout info as warning
+    std::ostringstream layout_info;
+    layout_info << "Detected " << layout.total_columns << " columns ("
+                << (layout.total_columns > 3 ? layout.total_columns - 3 : layout.total_columns)
+                << " user + " << (layout.total_columns > 3 ? 3 : 0) << " system), "
+                << (layout.row_format == 0 ? "REDUNDANT" : "COMPACT") << " format";
+    warnings_.push_back(layout_info.str());
+    result.warnings = warnings_;
+
+    return result;
+}
+
 // ==================== PatternInferenceEngine Implementation ====================
 
 std::optional<InferredSchema> PatternInferenceEngine::infer_schema(

@@ -34,6 +34,9 @@
 #include "dbrecovery/recovery/raw_disk_carver.hpp"
 #include "dbrecovery/disk/xfs_disk_carver.hpp"
 #include "dbrecovery/recovery/ext4_recovery.hpp"
+#include "dbrecovery/innodb/undo_log_parser.hpp"
+#include "dbrecovery/innodb/schema_inferrer.hpp"
+#include "dbrecovery/recovery/salvage_engine.hpp"
 
 namespace fs = std::filesystem;
 
@@ -209,6 +212,16 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "\033[1mCorruption Detection:\033[0m\n";
     std::cout << "  \033[1m--check-corruption\033[0m         Check for page corruption\n";
     std::cout << "  \033[1m--check-headers\033[0m            Check page headers only\n\n";
+    std::cout << "\033[1mv2.0 Advanced Features:\033[0m\n";
+    std::cout << "  \033[1m--reassemble\033[0m               Reassemble scattered pages into composed .ibd files\n";
+    std::cout << "                                 Requires --device-path for disk carving source pages\n";
+    std::cout << "  \033[1m--infer-schema\033[0m             Infer table schema from raw page data (statistical)\n";
+    std::cout << "                                 Uses StatisticalTypeClassifier with 20+ type detectors\n";
+    std::cout << "  \033[1m--undo-history\033[0m             Recover historical row versions from undo logs\n";
+    std::cout << "                                 Requires --system-tablespace or --undo-tablespace\n";
+    std::cout << "  \033[1m--undo-tablespace=<path>\033[0m   Path to standalone undo tablespace (undo_001, etc.)\n";
+    std::cout << "  \033[1m--salvage-mode\033[0m             Emergency salvage mode for severely corrupted pages\n";
+    std::cout << "                                 Brute-force scans for any parseable row fragments\n\n";
     std::cout << "\033[1mBatch Operations:\033[0m\n";
     std::cout << "  \033[1m--batch=<file>\033[0m             Process files from a list (one per line)\n";
     std::cout << "  \033[1m--output-format=<fmt>\033[0m      Output format for batch: csv|sql|json\n\n";
@@ -438,6 +451,242 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // Schema file option (JSON format)
     std::string schema_file_path = parser_.get_option("schema-file", "");
+
+    // v2.0 advanced feature flags
+    bool reassemble_mode = parser_.get_bool_option("reassemble", false);
+    bool infer_schema_mode = parser_.get_bool_option("infer-schema", false);
+    bool undo_history_mode = parser_.get_bool_option("undo-history", false);
+    bool salvage_mode = parser_.get_bool_option("salvage-mode", false);
+    std::string undo_tablespace = parser_.get_option("undo-tablespace", "");
+
+    // v2.0: Page reassembly mode
+    if (reassemble_mode) {
+        if (device_path.empty()) {
+            std::cerr << "[ERROR] --reassemble requires --device-path for raw disk carving source\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] v2.0 Page Reassembly Mode\n";
+        std::cout << "[INFO] Device: " << device_path << "\n";
+        std::cout << "[INFO] Output: " << output_dir << "\n";
+
+        dbrecovery::recovery::RawDiskCarver carver;
+        dbrecovery::recovery::RawDiskCarver::Config config;
+        config.device_path = device_path;
+        config.output_dir = output_dir;
+        config.page_size = page_size;
+        config.num_workers = num_workers;
+        config.verbose = verbose;
+        if (!target_index_ids_str.empty()) {
+            std::istringstream iss(target_index_ids_str);
+            std::string id_str;
+            while (std::getline(iss, id_str, ',')) {
+                try { config.target_index_ids.push_back(std::stoull(id_str)); } catch (...) {}
+            }
+        }
+
+        carver.set_config(config);
+        auto scan_result = carver.scan();
+        std::cout << "[INFO] Scan complete: " << scan_result.valid_pages_found
+                  << " valid pages found\n";
+
+        auto reassembly_stats = carver.reassemble_to_tablespaces(scan_result, output_dir);
+        std::cout << "[INFO] Reassembly complete: " << reassembly_stats.spaces_reconstructed
+                  << " tablespaces, " << reassembly_stats.total_pages_used << " pages, "
+                  << reassembly_stats.completeness_pct << "% complete\n";
+        std::cout << "[INFO] Gaps: " << reassembly_stats.total_gaps
+                  << " (critical: " << reassembly_stats.critical_gaps << ")\n";
+
+        return 0;
+    }
+
+    // v2.0: Schema inference mode
+    if (infer_schema_mode) {
+        std::cout << "[INFO] v2.0 Statistical Schema Inference Mode\n";
+
+        if (ibd_path.empty() && device_path.empty()) {
+            std::cerr << "[ERROR] --infer-schema requires --ibd or --device-path\n";
+            return 1;
+        }
+
+        // Collect raw pages
+        std::vector<std::pair<const uint8_t*, size_t>> raw_pages;
+        std::vector<std::vector<uint8_t>> page_buffers;
+
+        if (!ibd_path.empty()) {
+            dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
+            if (!reader.is_valid()) {
+                std::cerr << "[ERROR] Cannot open: " << ibd_path << "\n";
+                return 1;
+            }
+            uint32_t total = reader.get_total_pages();
+            for (uint32_t p = 0; p < std::min(total, 1000u); p++) {
+                auto data = reader.read_page_raw(p);
+                if (!data.empty()) {
+                    uint16_t ptype = dbrecovery::innodb::read_be<uint16_t>(
+                        data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+                    if (ptype == dbrecovery::innodb::FIL_PAGE_INDEX) {
+                        page_buffers.push_back(std::move(data));
+                    }
+                }
+            }
+            for (auto& buf : page_buffers) {
+                raw_pages.push_back({buf.data(), buf.size()});
+            }
+        }
+
+        if (raw_pages.empty()) {
+            std::cerr << "[ERROR] No INDEX pages found for schema inference\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] Analyzing " << raw_pages.size() << " INDEX pages...\n";
+
+        dbrecovery::innodb::SchemaInferrer inferrer;
+        if (!frm_path.empty()) inferrer.set_frm_path(frm_path);
+        auto result = inferrer.infer_from_raw_pages(raw_pages);
+
+        if (result.success) {
+            std::cout << "\n" << result.schema.to_ddl() << "\n";
+            std::cout << "[INFO] Confidence: " << std::fixed << std::setprecision(1)
+                      << result.schema.confidence * 100 << "%\n";
+            std::cout << "[INFO] Method: " << result.schema.inference_method << "\n";
+            for (const auto& w : result.warnings) {
+                std::cout << "[INFO] " << w << "\n";
+            }
+
+            // Write DDL to output
+            std::string ddl_path = output_dir + "/inferred_schema.sql";
+            fs::create_directories(output_dir);
+            std::ofstream ddl_file(ddl_path);
+            ddl_file << "-- Inferred schema (v2.0 statistical classifier)\n";
+            ddl_file << "-- Confidence: " << result.schema.confidence * 100 << "%\n\n";
+            ddl_file << result.schema.to_ddl();
+            std::cout << "[INFO] DDL written to: " << ddl_path << "\n";
+        } else {
+            std::cerr << "[ERROR] " << result.error_message << "\n";
+            return 1;
+        }
+        return 0;
+    }
+
+    // v2.0: Undo history mode
+    if (undo_history_mode) {
+        std::cout << "[INFO] v2.0 Undo History Recovery Mode\n";
+
+        std::string sys_ts = system_tablespace;
+        if (sys_ts.empty() && undo_tablespace.empty()) {
+            std::cerr << "[ERROR] --undo-history requires --system-tablespace or --undo-tablespace\n";
+            return 1;
+        }
+
+        dbrecovery::innodb::UndoLogParser undo_parser;
+        std::vector<dbrecovery::innodb::UndoLogEntry> all_entries;
+
+        if (!sys_ts.empty()) {
+            std::cout << "[INFO] Parsing undo from system tablespace: " << sys_ts << "\n";
+            // Scan all rollback segments (0-127)
+            for (uint32_t rseg_id = 0; rseg_id < 128; rseg_id++) {
+                auto entries = undo_parser.parse_rollback_segment(sys_ts, rseg_id);
+                if (!entries.empty()) {
+                    std::cout << "  [INFO] RSEG " << rseg_id << ": " << entries.size() << " entries\n";
+                    all_entries.insert(all_entries.end(), entries.begin(), entries.end());
+                }
+            }
+        }
+        if (!undo_tablespace.empty()) {
+            std::cout << "[INFO] Parsing undo from standalone tablespace: " << undo_tablespace << "\n";
+            auto entries = undo_parser.parse_undo_tablespace(undo_tablespace);
+            std::cout << "  [INFO] " << entries.size() << " entries\n";
+            all_entries.insert(all_entries.end(), entries.begin(), entries.end());
+        }
+
+        std::cout << "[INFO] Total undo log entries: " << all_entries.size() << "\n";
+        auto& stats = undo_parser.get_stats();
+        std::cout << "[INFO] Undo pages: " << stats.total_undo_pages
+                  << ", records: " << stats.total_undo_records
+                  << ", recoverable: " << stats.recoverable_records
+                  << ", transactions: " << stats.transactions_found << "\n";
+
+        if (!all_entries.empty()) {
+            fs::create_directories(output_dir);
+            std::string hist_path = output_dir + "/undo_history.csv";
+            std::ofstream hist_file(hist_path);
+            hist_file << "undo_type,page_no,page_offset,field_count\n";
+            for (const auto& entry : all_entries) {
+                hist_file << static_cast<int>(entry.undo_type) << ","
+                          << entry.page_no << "," << entry.page_offset << ","
+                          << static_cast<int>(entry.field_count) << "\n";
+            }
+            std::cout << "[INFO] History written to: " << hist_path << "\n";
+        }
+        return 0;
+    }
+
+    // v2.0: Salvage mode — emergency brute-force recovery
+    if (salvage_mode) {
+        std::cout << "[INFO] v2.0 Emergency Salvage Mode\n";
+
+        if (ibd_path.empty() && device_path.empty()) {
+            std::cerr << "[ERROR] --salvage-mode requires --ibd or --device-path\n";
+            return 1;
+        }
+
+        std::vector<std::pair<const uint8_t*, size_t>> raw_pages;
+        std::vector<std::vector<uint8_t>> page_buffers;
+
+        auto load_pages = [&](const std::string& path) {
+            dbrecovery::innodb::InnoDBFileReader reader(path);
+            if (!reader.is_valid()) {
+                std::cerr << "[WARN] Cannot read: " << path << "\n";
+                return;
+            }
+            uint32_t total = reader.get_total_pages();
+            for (uint32_t p = 0; p < total; p++) {
+                auto data = reader.read_page_raw(p);
+                if (!data.empty()) {
+                    page_buffers.push_back(std::move(data));
+                }
+            }
+        };
+
+        if (!ibd_path.empty()) load_pages(ibd_path);
+
+        for (auto& buf : page_buffers) {
+            raw_pages.push_back({buf.data(), buf.size()});
+        }
+
+        if (raw_pages.empty()) {
+            std::cerr << "[ERROR] No pages to salvage\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] Scanning " << raw_pages.size() << " pages...\n";
+
+        dbrecovery::recovery::SalvageEngine::Config salvage_config;
+        salvage_config.page_size = page_size;
+        salvage_config.verbose = verbose;
+        salvage_config.min_string_len = 4;
+        salvage_config.min_record_fields = 1;
+        salvage_config.min_confidence = 0.15;
+
+        dbrecovery::recovery::SalvageEngine engine(salvage_config);
+        auto result = engine.salvage_pages(raw_pages);
+
+        std::cout << result.to_report() << "\n";
+
+        if (!result.rows.empty()) {
+            fs::create_directories(output_dir);
+            std::string csv_path = output_dir + "/salvaged_data.csv";
+            if (dbrecovery::recovery::SalvageEngine::export_csv(csv_path, result.rows)) {
+                std::cout << "[INFO] Salvaged data written to: " << csv_path << "\n";
+            }
+            std::cout << "[INFO] Total rows salvaged: " << result.rows.size() << "\n";
+        } else {
+            std::cout << "[WARN] No data could be salvaged\n";
+        }
+        return 0;
+    }
 
     // Disk carving recovery mode - raw device scanning (no backup needed)
     if (disk_carving) {
