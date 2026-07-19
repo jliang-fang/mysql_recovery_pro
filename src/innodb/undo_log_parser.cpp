@@ -17,6 +17,8 @@
 #include <set>
 #include <sstream>
 #include <optional>
+#include <map>
+#include <iomanip>
 
 namespace dbrecovery {
 namespace innodb {
@@ -800,6 +802,168 @@ std::vector<std::string> UndoLogParser::reconstruct_row_from_undo(
         }
     }
     return row;
+}
+
+// ==================== v2.0: Heuristic Undo Chain Reassembly ====================
+
+std::vector<UndoLogParser::ReassembledChain> UndoLogParser::heuristic_reassemble_undo_chains(
+    const std::string& ibdata_path, uint32_t target_table_id) {
+
+    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
+    constexpr size_t TRX_SYS_PAGE_NO = 5;
+    constexpr uint32_t MAX_CHAIN_LENGTH = 1000;
+
+    std::vector<ReassembledChain> chains;
+
+    // Step 1: Collect ALL undo records from all rollback segments
+    std::vector<std::pair<UndoLogEntry, uint32_t>> all_records; // entry + rseg_id
+    std::vector<uint32_t> rseg_list;
+
+    std::ifstream file(ibdata_path, std::ios::binary | std::ios::ate);
+    if (!file) return chains;
+
+    uint64_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    // Read TRX_SYS page to get rollback segment slots
+    std::vector<uint8_t> trx_sys_page(DEFAULT_PAGE_SIZE);
+    if (file_size >= (TRX_SYS_PAGE_NO + 1) * DEFAULT_PAGE_SIZE) {
+        file.seekg(TRX_SYS_PAGE_NO * DEFAULT_PAGE_SIZE, std::ios::beg);
+        file.read(reinterpret_cast<char*>(trx_sys_page.data()), DEFAULT_PAGE_SIZE);
+
+        const uint8_t* trx_data = trx_sys_page.data();
+        for (uint32_t i = 0; i < TRX_SYS_N_RSEGS; i++) {
+            auto slot = read_rseg_slot(trx_data, trx_sys_page.size(), i);
+            if (slot.has_value() && slot.value() > 0) {
+                rseg_list.push_back(slot.value());
+            }
+        }
+    }
+
+    // Collect all undo records from all segments
+    uint32_t total_pages = static_cast<uint32_t>(file_size / DEFAULT_PAGE_SIZE);
+    std::vector<uint8_t> page_buf(DEFAULT_PAGE_SIZE);
+
+    for (uint32_t pg = 0; pg < total_pages; pg++) {
+        file.seekg(static_cast<std::streamoff>(pg) * DEFAULT_PAGE_SIZE, std::ios::beg);
+        file.read(reinterpret_cast<char*>(page_buf.data()), DEFAULT_PAGE_SIZE);
+        if (file.gcount() < static_cast<std::streamsize>(DEFAULT_PAGE_SIZE)) break;
+
+        uint16_t page_type = read_le<uint16_t>(page_buf.data(), 24);
+        if (page_type != FIL_PAGE_UNDO_LOG) continue;
+
+        auto entries = parse_undo_log_page(page_buf.data(), DEFAULT_PAGE_SIZE, pg);
+        for (auto& entry : entries) {
+            all_records.push_back({std::move(entry), pg});
+        }
+    }
+
+    if (all_records.empty()) return chains;
+
+    // Step 2: Extract table_id from each undo record's fields
+    // The first few bytes of the undo record contain the table_id at a known offset
+    struct TaggedEntry {
+        UndoLogEntry entry;
+        uint32_t table_id = 0;
+        std::string pk_hex;
+        uint64_t trx_id_guess = 0;
+    };
+    std::vector<TaggedEntry> tagged;
+
+    for (auto& [entry, rseg_pg] : all_records) {
+        TaggedEntry te;
+        te.entry = std::move(entry);
+
+        // Try to extract table_id from undo record fields
+        // In TRX_UNDO records, the undo log header contains table_id
+        // at offset 5 (4 bytes) after the type_cmpl field
+        // We approximate by checking field patterns
+        if (!te.entry.fields.empty() && te.entry.fields[0].data.size() >= 4) {
+            te.table_id = read_le<uint32_t>(te.entry.fields[0].data.data(), 0);
+        }
+
+        // Build primary key hex string from first 2 fields
+        std::ostringstream pk_oss;
+        for (size_t i = 0; i < std::min(size_t(2), te.entry.fields.size()); i++) {
+            for (uint8_t b : te.entry.fields[i].data) {
+                pk_oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+            }
+            if (i == 0 && te.entry.fields.size() > 1) pk_oss << "_";
+        }
+        te.pk_hex = pk_oss.str();
+
+        tagged.push_back(std::move(te));
+    }
+
+    // Filter by target_table_id if specified
+    if (target_table_id > 0) {
+        std::vector<TaggedEntry> filtered;
+        for (auto& te : tagged) {
+            if (te.table_id == target_table_id) {
+                filtered.push_back(std::move(te));
+            }
+        }
+        tagged = std::move(filtered);
+    }
+
+    // Step 3: Group by table_id + pk_hex prefix
+    std::map<std::string, std::vector<TaggedEntry>> groups;
+    for (auto& te : tagged) {
+        std::string key = std::to_string(te.table_id) + "_" + te.pk_hex.substr(0, 16);
+        groups[key].push_back(std::move(te));
+    }
+
+    // Step 4: For each group, sort by undo_type and build chains
+    for (auto& [key, entries] : groups) {
+        if (entries.size() < 1) continue;
+
+        ReassembledChain chain;
+        chain.table_id = entries[0].table_id;
+        chain.pk_hex = entries[0].pk_hex;
+        chain.confidence = 0.0;
+
+        // Sort: INSERT first (oldest), then UPDATE, then DELETE (newest)
+        std::sort(entries.begin(), entries.end(),
+            [](const TaggedEntry& a, const TaggedEntry& b) {
+                // INSERT comes first (oldest version)
+                int type_a = (a.entry.undo_type == TRX_UNDO_INSERT || a.entry.undo_type == TRX_UNDO_INS_REC) ? 0
+                           : (a.entry.undo_type == TRX_UNDO_UPDATE || a.entry.undo_type == TRX_UNDO_UPD_EXIST_REC) ? 1
+                           : 2;
+                int type_b = (b.entry.undo_type == TRX_UNDO_INSERT || b.entry.undo_type == TRX_UNDO_INS_REC) ? 0
+                           : (b.entry.undo_type == TRX_UNDO_UPDATE || b.entry.undo_type == TRX_UNDO_UPD_EXIST_REC) ? 1
+                           : 2;
+                if (type_a != type_b) return type_a < type_b;
+                return a.entry.page_no < b.entry.page_no;
+            });
+
+        for (auto& te : entries) {
+            chain.entries.push_back(std::move(te.entry));
+        }
+
+        // Calculate confidence based on chain quality
+        double base_conf = 0.5;
+        bool has_insert = false, has_delete = false;
+        for (const auto& e : chain.entries) {
+            if (e.undo_type == TRX_UNDO_INSERT || e.undo_type == TRX_UNDO_INS_REC) has_insert = true;
+            if (e.undo_type == TRX_UNDO_DEL_REC) has_delete = true;
+        }
+        if (has_insert) base_conf += 0.2;
+        if (has_delete) base_conf += 0.1;
+        if (chain.entries.size() >= 3) base_conf += 0.1;
+        if (chain.entries.size() >= 5) base_conf += 0.1;
+        base_conf = std::min(base_conf, 1.0);
+        chain.confidence = base_conf;
+
+        chains.push_back(std::move(chain));
+    }
+
+    // Sort chains by confidence descending
+    std::sort(chains.begin(), chains.end(),
+        [](const ReassembledChain& a, const ReassembledChain& b) {
+            return a.confidence > b.confidence;
+        });
+
+    return chains;
 }
 
 } // namespace innodb

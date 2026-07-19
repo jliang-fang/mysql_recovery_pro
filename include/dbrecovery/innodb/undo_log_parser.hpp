@@ -208,6 +208,37 @@ public:
     std::vector<std::string> reconstruct_row_from_undo(
         const std::vector<UndoLogEntry>& entries, uint32_t column_count);
 
+    /**
+     * @brief v2.0: Heuristic reassembly of broken undo chains
+     *
+     * When undo pages are partially damaged, chains may break at corruption points.
+     * This method heuristically reconnects fragments by:
+     * 1. Extracting table_id from each undo record header
+     * 2. Matching records by table_id + primary_key prefix
+     * 3. Ordering by undo_no within each transaction
+     * 4. Using LSN to resolve ambiguous ordering
+     *
+     * Each reassembled chain gets a confidence score:
+     *   - 1.0: perfect chain (no gaps in undo_no sequence)
+     *   - 0.5-0.9: matched by PK but gaps exist
+     *   - 0.0-0.5: heuristic match with low confidence
+     *
+     * @param ibdata_path Path to ibdata1 or undo tablespace
+     * @return Vector of reassembled chains with confidence scores
+     */
+    struct ReassembledChain {
+        std::vector<UndoLogEntry> entries;  // ordered oldest-first
+        double confidence = 0.0;
+        uint64_t trx_id = 0;
+        uint32_t table_id = 0;
+        std::string pk_hex;                 // hex-encoded primary key
+        std::vector<uint32_t> gap_positions; // positions where chain breaks occurred
+    };
+
+    std::vector<ReassembledChain> heuristic_reassemble_undo_chains(
+        const std::string& ibdata_path,
+        uint32_t target_table_id = 0);
+
 private:
     UndoLogStats stats_{0, 0, 0, 0};
 };

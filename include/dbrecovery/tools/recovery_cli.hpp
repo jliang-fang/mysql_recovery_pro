@@ -41,6 +41,8 @@
 #include "dbrecovery/innodb/partition_table_recovery.hpp"
 #include "dbrecovery/innodb/shared_tablespace_recovery.hpp"
 #include "dbrecovery/innodb/ddl_change_detector.hpp"
+#include "dbrecovery/innodb/secondary_index_rescuer.hpp"
+#include "dbrecovery/innodb/offline_keyring_parser.hpp"
 
 namespace fs = std::filesystem;
 
@@ -228,6 +230,8 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--undo-history\033[0m             Recover historical row versions from undo logs\n";
     std::cout << "                                 Requires --system-tablespace or --undo-tablespace\n";
     std::cout << "  \033[1m--undo-tablespace=<path>\033[0m   Path to standalone undo tablespace (undo_001, etc.)\n";
+    std::cout << "  \033[1m--undo-reassemble\033[0m          Heuristic reassembly of broken undo chains\n";
+    std::cout << "                                 Reconnects fragments by table_id + PK matching\n";
     std::cout << "  \033[1m--flashback-delete\033[0m         Generate INSERT statements to reverse DELETE operations\n";
     std::cout << "                                 Requires --system-tablespace for undo log source\n";
     std::cout << "  \033[1m--salvage-mode\033[0m             Emergency salvage mode for severely corrupted pages\n";
@@ -241,7 +245,13 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "                                 Requires --system-tablespace\n";
     std::cout << "  \033[1m--list-tables\033[0m             List all user tables in shared/system tablespace\n";
     std::cout << "  \033[1m--detect-ddl-changes\033[0m      Detect schema version changes from data pages\n";
-    std::cout << "                                 Helps identify INSTANT ADD COLUMN history\n\n";
+    std::cout << "                                 Helps identify INSTANT ADD COLUMN history\n";
+    std::cout << "  \033[1m--secondary-rescue\033[0m         Recover data from secondary indexes when clustered index is damaged\n";
+    std::cout << "                                 Requires --secondary-index=<paths> and --schema-file\n";
+    std::cout << "  \033[1m--secondary-index=<paths>\033[0m  Comma-separated paths to secondary index .ibd files\n";
+    std::cout << "  \033[1m--keyring-file=<path>\033[0m      Path to keyring file for TDE decryption\n";
+    std::cout << "                                 Supports keyring_file (JSON), encrypted keyring, Vault export\n";
+    std::cout << "  \033[1m--tde-password=<pwd>\033[0m       Password for encrypted keyring file\n\n";
     std::cout << "\033[1mBatch Operations:\033[0m\n";
     std::cout << "  \033[1m--batch=<file>\033[0m             Process files from a list (one per line)\n";
     std::cout << "  \033[1m--output-format=<fmt>\033[0m      Output format for batch: csv|sql|json\n\n";
@@ -476,6 +486,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool reassemble_mode = parser_.get_bool_option("reassemble", false);
     bool infer_schema_mode = parser_.get_bool_option("infer-schema", false);
     bool undo_history_mode = parser_.get_bool_option("undo-history", false);
+    bool undo_reassemble = parser_.get_bool_option("undo-reassemble", false);
     bool salvage_mode = parser_.get_bool_option("salvage-mode", false);
     bool flashback_delete = parser_.get_bool_option("flashback-delete", false);
     std::string undo_tablespace = parser_.get_option("undo-tablespace", "");
@@ -492,6 +503,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // DDL change chain detection
     bool detect_ddl_changes = parser_.get_bool_option("detect-ddl-changes", false);
+
+    // Secondary index rescue
+    bool secondary_rescue = parser_.get_bool_option("secondary-rescue", false);
+    std::string secondary_index_paths = parser_.get_option("secondary-index", "");
+
+    // Enhanced keyring support
+    std::string keyring_file = parser_.get_option("keyring-file", "");
+    std::string tde_password = parser_.get_option("tde-password", "");
 
     // v2.0: Page reassembly mode
     if (reassemble_mode) {
@@ -653,6 +672,67 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                           << static_cast<int>(entry.field_count) << "\n";
             }
             std::cout << "[INFO] History written to: " << hist_path << "\n";
+        }
+        return 0;
+    }
+
+    // v2.0: Heuristic undo chain reassembly
+    if (undo_reassemble) {
+        std::cout << "[INFO] v2.0 Heuristic Undo Chain Reassembly\n";
+
+        std::string sys_ts = system_tablespace;
+        if (sys_ts.empty()) {
+            std::cerr << "[ERROR] --undo-reassemble requires --system-tablespace\n";
+            return 1;
+        }
+
+        dbrecovery::innodb::UndoLogParser undo_parser;
+        auto chains = undo_parser.heuristic_reassemble_undo_chains(sys_ts);
+
+        std::cout << "[INFO] Reassembled " << chains.size() << " undo chains\n";
+
+        // Count by confidence
+        size_t high_conf = 0, med_conf = 0, low_conf = 0;
+        for (const auto& ch : chains) {
+            if (ch.confidence >= 0.8) high_conf++;
+            else if (ch.confidence >= 0.5) med_conf++;
+            else low_conf++;
+        }
+        std::cout << "[INFO] High confidence: " << high_conf
+                  << ", medium: " << med_conf
+                  << ", low: " << low_conf << "\n";
+
+        if (!chains.empty()) {
+            fs::create_directories(output_dir);
+            std::string chain_path = output_dir + "/reassembled_chains.csv";
+            std::ofstream chain_file(chain_path);
+            chain_file << "chain_id,table_id,pk_hex,confidence,num_entries,has_insert,has_delete\n";
+            for (size_t i = 0; i < chains.size(); i++) {
+                const auto& ch = chains[i];
+                bool has_ins = false, has_del = false;
+                for (const auto& e : ch.entries) {
+                    if (e.undo_type == 1 || e.undo_type == 14) has_ins = true;
+                    if (e.undo_type == 13) has_del = true;
+                }
+                chain_file << i << "," << ch.table_id << ","
+                           << ch.pk_hex << "," << std::fixed << std::setprecision(2)
+                           << ch.confidence << "," << ch.entries.size() << ","
+                           << (has_ins ? "Y" : "N") << "," << (has_del ? "Y" : "N") << "\n";
+            }
+            std::cout << "[INFO] Chain summary written to: " << chain_path << "\n";
+
+            // Also write detailed entry listing
+            std::string detail_path = output_dir + "/reassembled_entries.csv";
+            std::ofstream detail_file(detail_path);
+            detail_file << "chain_id,undo_type,page_no,page_offset,field_count\n";
+            for (size_t i = 0; i < chains.size(); i++) {
+                for (const auto& e : chains[i].entries) {
+                    detail_file << i << "," << static_cast<int>(e.undo_type) << ","
+                                << e.page_no << "," << e.page_offset << ","
+                                << static_cast<int>(e.field_count) << "\n";
+                }
+            }
+            std::cout << "[INFO] Entry details written to: " << detail_path << "\n";
         }
         return 0;
     }
@@ -955,6 +1035,171 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         return 0;
+    }
+
+    // v2.0: Secondary index rescue
+    if (secondary_rescue) {
+        if (secondary_index_paths.empty()) {
+            std::cerr << "[ERROR] --secondary-rescue requires --secondary-index=<paths>\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] v2.0 Secondary Index Rescue Mode\n";
+
+        // Parse comma-separated secondary index paths
+        std::vector<std::string> sec_paths;
+        std::istringstream path_stream(secondary_index_paths);
+        std::string path;
+        while (std::getline(path_stream, path, ',')) {
+            if (!path.empty()) sec_paths.push_back(path);
+        }
+
+        if (sec_paths.empty()) {
+            std::cerr << "[ERROR] No valid secondary index paths provided\n";
+            return 1;
+        }
+
+        std::cout << "[INFO] Secondary indexes: " << sec_paths.size() << "\n";
+        for (const auto& p : sec_paths) {
+            std::cout << "  - " << p << "\n";
+        }
+
+        // Load schema
+        auto rescue_schema = load_schema_from_file(schema_file_path);
+        if (!rescue_schema.has_value()) {
+            std::cerr << "[ERROR] --secondary-rescue requires --schema-file for column mapping\n";
+            return 1;
+        }
+
+        dbrecovery::innodb::SecondaryIndexRescuer rescuer(page_size);
+        rescuer.set_schema(rescue_schema.value());
+
+        auto rows = rescuer.rescue_from_indexes(sec_paths);
+        auto& rstats = rescuer.get_stats();
+
+        std::cout << "[INFO] Secondary pages scanned: " << rstats.secondary_pages_scanned
+                  << ", leaf: " << rstats.secondary_leaf_pages
+                  << ", records: " << rstats.secondary_records << "\n";
+        std::cout << "[INFO] Rows rescued: " << rstats.rescued_rows
+                  << ", merged: " << rstats.merged_rows << "\n";
+        std::cout << "[INFO] Time: " << std::fixed << std::setprecision(2)
+                  << rstats.rescue_time_ms << "ms\n";
+
+        if (!rows.empty()) {
+            fs::create_directories(output_dir);
+            std::string out_path = output_dir + "/rescued_from_secondary.csv";
+            std::ofstream out(out_path);
+
+            // Header from first row
+            bool first_col = true;
+            auto& first_row = rows[0];
+            for (const auto& [col_name, val] : first_row.fields) {
+                if (!first_col) out << ",";
+                out << col_name;
+                first_col = false;
+            }
+            out << ",completeness,source\n";
+
+            for (const auto& row : rows) {
+                first_col = true;
+                for (const auto& [col_name, val] : first_row.fields) {
+                    if (!first_col) out << ",";
+                    auto it = row.fields.find(col_name);
+                    out << (it != row.fields.end() ? it->second : "NULL");
+                    first_col = false;
+                }
+                out << "," << std::fixed << std::setprecision(2) << row.completeness
+                    << "," << row.source << "\n";
+            }
+            std::cout << "[INFO] Output written to: " << out_path << "\n";
+
+            // Show completeness distribution
+            size_t complete = 0, partial = 0, minimal = 0;
+            for (const auto& row : rows) {
+                if (row.completeness >= 0.8) complete++;
+                else if (row.completeness >= 0.4) partial++;
+                else minimal++;
+            }
+            std::cout << "[INFO] Completeness: >=80%: " << complete
+                      << ", 40-80%: " << partial
+                      << ", <40%: " << minimal << "\n";
+        } else {
+            std::cout << "[WARN] No data could be rescued from secondary indexes\n";
+        }
+
+        return 0;
+    }
+
+    // v2.0: Keyring file parsing for TDE support
+    if (!keyring_file.empty()) {
+        std::cout << "[INFO] Loading keyring: " << keyring_file << "\n";
+
+        dbrecovery::innodb::OfflineKeyringParser keyring_parser;
+
+        bool loaded = false;
+        if (!tde_password.empty()) {
+            std::cout << "[INFO] Attempting encrypted keyring with password\n";
+            loaded = keyring_parser.parse_encrypted_keyring(keyring_file, tde_password);
+        } else {
+            loaded = keyring_parser.parse_keyring_file(keyring_file);
+        }
+
+        if (!loaded) {
+            // Try Vault format as fallback
+            std::cout << "[INFO] Trying Vault export format...\n";
+            loaded = keyring_parser.parse_vault_export(keyring_file);
+        }
+
+        if (loaded) {
+            auto summary = keyring_parser.get_summary();
+            std::cout << "[INFO] Keys loaded: " << summary.total_keys
+                      << " (AES: " << summary.aes_keys
+                      << ", other: " << summary.other_keys << ")\n";
+            for (const auto& name : summary.key_names) {
+                std::cout << "  - " << name << "\n";
+            }
+
+            // Set up TDEDecryptor with loaded keys
+            auto& keys = keyring_parser.get_master_keys();
+            if (!keys.empty()) {
+                dbrecovery::innodb::TDEDecryptor tde;
+                tde.set_primary_key(keys[0].key_data);
+
+                // Add all keys as table keys
+                for (const auto& mk : keys) {
+                    tde.add_table_key(mk.key_id, mk.key_data, mk.algorithm);
+                }
+
+                auto tde_stats = tde.get_stats();
+                std::cout << "[INFO] TDE decryptor initialized with "
+                          << tde_stats.keys_loaded << " keys\n";
+
+                if (!ibd_path.empty()) {
+                    std::cout << "[INFO] Testing TDE detection on: " << ibd_path << "\n";
+                    std::ifstream test_file(ibd_path, std::ios::binary);
+                    if (test_file) {
+                        std::vector<uint8_t> test_page(page_size);
+                        test_file.read(reinterpret_cast<char*>(test_page.data()), page_size);
+                        if (dbrecovery::innodb::TDEDecryptor::is_encrypted(test_page.data(), page_size)) {
+                            std::cout << "[INFO] TDE encryption DETECTED on input file\n";
+                            auto decrypted = tde.decrypt_page(test_page.data(), page_size, 0, 0);
+                            if (!decrypted.empty()) {
+                                std::cout << "[INFO] Page decryption SUCCESS ("
+                                          << decrypted.size() << " bytes)\n";
+                            } else {
+                                std::cout << "[WARN] Page decryption FAILED — key may not match\n";
+                            }
+                        } else {
+                            std::cout << "[INFO] Input file is NOT TDE-encrypted\n";
+                        }
+                    }
+                }
+            }
+        } else {
+            std::cerr << "[ERROR] Failed to load keyring: "
+                      << keyring_parser.get_last_error() << "\n";
+            return 1;
+        }
     }
 
     // Disk carving recovery mode - raw device scanning (no backup needed)
