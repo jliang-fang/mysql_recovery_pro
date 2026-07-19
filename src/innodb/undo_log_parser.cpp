@@ -15,7 +15,7 @@
 #include <vector>
 #include <filesystem>
 #include <set>
-#include <set>
+#include <sstream>
 #include <optional>
 
 namespace dbrecovery {
@@ -613,6 +613,193 @@ std::vector<UndoLogEntry> UndoLogParser::parse_all_undo_tablespaces(
     }
 
     return all_entries;
+}
+
+// ==================== v2.0: Deep Undo Chain Traversal ====================
+
+std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
+    const std::string& ibdata_path,
+    uint32_t start_page_no,
+    uint32_t start_offset) {
+
+    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
+    std::vector<UndoLogEntry> chain;
+    std::set<std::pair<uint32_t, uint32_t>> visited;
+
+    uint32_t current_page = start_page_no;
+    uint32_t current_offset = start_offset;
+
+    std::ifstream file(ibdata_path, std::ios::binary);
+    if (!file) return chain;
+
+    constexpr size_t MAX_CHAIN_LENGTH = 1000;
+    size_t chain_pos = 0;
+
+    while (chain_pos < MAX_CHAIN_LENGTH) {
+        auto key = std::make_pair(current_page, current_offset);
+        if (visited.count(key)) break;
+        visited.insert(key);
+
+        file.seekg(static_cast<std::streamoff>(current_page) * DEFAULT_PAGE_SIZE, std::ios::beg);
+        std::vector<uint8_t> page_data(DEFAULT_PAGE_SIZE);
+        file.read(reinterpret_cast<char*>(page_data.data()), DEFAULT_PAGE_SIZE);
+        if (file.gcount() < static_cast<std::streamsize>(DEFAULT_PAGE_SIZE)) break;
+
+        uint16_t page_type = get_page_type(page_data.data());
+        if (page_type != FIL_PAGE_UNDO_LOG) break;
+
+        if (current_offset + 10 > DEFAULT_PAGE_SIZE) break;
+
+        auto header_opt = UndoLogRecordHeader::parse(page_data.data(), DEFAULT_PAGE_SIZE, current_offset);
+        if (!header_opt) break;
+
+        const auto& header = *header_opt;
+
+        UndoLogEntry entry;
+        entry.undo_type = header.type;
+        entry.page_no = header.rec_page_no;
+        entry.page_offset = header.rec_page_offset;
+        entry.field_count = header.field_count;
+
+        // Parse fields
+        size_t field_offset = current_offset + 2;
+        for (uint8_t i = 0; i < header.field_count && field_offset + 1 < DEFAULT_PAGE_SIZE; i++) {
+            uint8_t field_type = page_data[field_offset];
+            uint16_t field_size;
+            if (field_type & 0x80) {
+                if (field_offset + 3 > DEFAULT_PAGE_SIZE) break;
+                field_size = read_le<uint16_t>(page_data.data(), field_offset + 1);
+                field_offset += 3;
+            } else {
+                field_size = field_type & 0x7F;
+                field_offset += 1;
+            }
+            if (field_offset + field_size > DEFAULT_PAGE_SIZE) break;
+            UndoLogField field;
+            field.type = field_type;
+            field.size = field_size;
+            field.data.assign(page_data.data() + field_offset,
+                            page_data.data() + field_offset + field_size);
+            entry.fields.push_back(field);
+            field_offset += field_size;
+        }
+
+        chain.push_back(entry);
+
+        if (header.type == TRX_UNDO_INSERT || header.type == TRX_UNDO_INS_REC) break;
+
+        // Follow prev_undo_ptr: [page_no(4B LE)] [offset(2B LE)] at offset +6 from record start
+        size_t prev_ptr_offset = current_offset + 6;
+        if (prev_ptr_offset + 6 <= DEFAULT_PAGE_SIZE) {
+            uint32_t next_page = read_le<uint32_t>(page_data.data(), prev_ptr_offset);
+            uint32_t next_offset = read_le<uint16_t>(page_data.data(), prev_ptr_offset + 4);
+            if (next_page == 0 || next_offset == 0) break;
+            if (next_page == current_page && next_offset == current_offset) break;
+            current_page = next_page;
+            current_offset = next_offset;
+        } else break;
+
+        chain_pos++;
+    }
+
+    std::reverse(chain.begin(), chain.end());
+    return chain;
+}
+
+// ==================== v2.0: DELETE Flashback ====================
+
+std::vector<std::string> UndoLogParser::flashback_delete(
+    const std::string& ibdata_path,
+    const std::string& table_name,
+    const std::string& start_time,
+    const std::string& end_time) {
+
+    std::vector<std::string> sql_statements;
+
+    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
+    constexpr size_t TRX_SYS_PAGE_NO = 5;
+
+    std::vector<uint8_t> trx_sys_page(DEFAULT_PAGE_SIZE);
+    std::ifstream file(ibdata_path, std::ios::binary);
+    if (!file) return sql_statements;
+
+    file.seekg(TRX_SYS_PAGE_NO * DEFAULT_PAGE_SIZE, std::ios::beg);
+    file.read(reinterpret_cast<char*>(trx_sys_page.data()), DEFAULT_PAGE_SIZE);
+
+    const uint8_t* trx_data = trx_sys_page.data();
+    std::vector<uint32_t> rseg_list;
+    for (uint32_t i = 0; i < TRX_SYS_N_RSEGS; i++) {
+        auto slot = read_rseg_slot(trx_data, trx_sys_page.size(), i);
+        if (slot) rseg_list.push_back(i);
+    }
+
+    std::string effective_table = table_name.empty() ? "recovered_table" : table_name;
+    uint32_t total_inserts = 0;
+
+    for (uint32_t rseg_id : rseg_list) {
+        auto entries = parse_rollback_segment(ibdata_path, rseg_id);
+        for (const auto& entry : entries) {
+            if (entry.undo_type != TRX_UNDO_DEL_REC &&
+                entry.undo_type != TRX_UNDO_UPD_DEL_REC) continue;
+
+            std::vector<std::string> col_values;
+            for (const auto& field : entry.fields) {
+                if (field.data.empty()) {
+                    col_values.push_back("NULL");
+                } else {
+                    std::string val(field.data.begin(), field.data.end());
+                    std::string escaped;
+                    for (char c : val) {
+                        if (c == '\'') escaped += "''";
+                        else if (c == '\\') escaped += "\\\\";
+                        else escaped += c;
+                    }
+                    col_values.push_back("'" + escaped + "'");
+                }
+            }
+
+            if (!col_values.empty()) {
+                std::ostringstream sql;
+                sql << "INSERT INTO `" << effective_table << "` VALUES (";
+                for (size_t i = 0; i < col_values.size(); i++) {
+                    if (i > 0) sql << ", ";
+                    sql << col_values[i];
+                }
+                sql << ");";
+                sql_statements.push_back(sql.str());
+                total_inserts++;
+            }
+        }
+    }
+
+    stats_.flashback_statements = total_inserts;
+    return sql_statements;
+}
+
+// ==================== v2.0: Row Reconstruction ====================
+
+std::vector<std::string> UndoLogParser::reconstruct_row_from_undo(
+    const std::vector<UndoLogEntry>& entries, uint32_t column_count) {
+
+    std::vector<std::string> row(column_count, "NULL");
+    if (entries.empty() || column_count == 0) return row;
+
+    for (const auto& entry : entries) {
+        if (entry.undo_type == TRX_UNDO_INSERT || entry.undo_type == TRX_UNDO_INS_REC) {
+            for (size_t i = 0; i < entry.fields.size() && i < column_count; i++) {
+                if (!entry.fields[i].data.empty()) {
+                    row[i] = std::string(entry.fields[i].data.begin(), entry.fields[i].data.end());
+                }
+            }
+            continue;
+        }
+        for (size_t i = 0; i < entry.fields.size() && i < column_count; i++) {
+            if (!entry.fields[i].data.empty()) {
+                row[i] = std::string(entry.fields[i].data.begin(), entry.fields[i].data.end());
+            }
+        }
+    }
+    return row;
 }
 
 } // namespace innodb

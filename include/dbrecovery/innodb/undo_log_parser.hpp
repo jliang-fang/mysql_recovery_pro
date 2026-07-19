@@ -148,13 +148,65 @@ public:
      * @brief Get statistics about undo log analysis
      */
     struct UndoLogStats {
-        uint32_t total_undo_pages;     // Total undo log pages scanned
-        uint32_t total_undo_records;   // Total undo log records
-        uint32_t recoverable_records;  // Records that can be recovered
-        uint32_t transactions_found;   // Number of distinct transactions found
+        uint32_t total_undo_pages = 0;
+        uint32_t total_undo_records = 0;
+        uint32_t recoverable_records = 0;
+        uint32_t transactions_found = 0;
+        uint32_t flashback_statements = 0;
     };
 
     const UndoLogStats& get_stats() const { return stats_; }
+
+    /**
+     * @brief v2.0: Deep undo chain traversal — follow DB_ROLL_PTR through all undo records
+     *
+     * Given a starting undo record (from DB_ROLL_PTR), traverses the full undo chain
+     * to reconstruct all historical versions of a row.
+     *
+     * Chain traversal:
+     *   Current row → DB_ROLL_PTR → undo_record#1 (newest)
+     *     → prev_undo_ptr → undo_record#2
+     *     → ... → TRX_UNDO_INSERT (chain end / oldest version)
+     *
+     * @param ibdata_path Path to ibdata1 or undo tablespace
+     * @param start_page_no Undo page number from DB_ROLL_PTR high 16 bits
+     * @param start_offset Offset within page from DB_ROLL_PTR low 32 bits
+     * @return Ordered undo entries (oldest first) or empty if chain broken
+     */
+    std::vector<UndoLogEntry> traverse_undo_chain(
+        const std::string& ibdata_path,
+        uint32_t start_page_no,
+        uint32_t start_offset);
+
+    /**
+     * @brief v2.0: DELETE flashback — generate reverse INSERT from undo logs
+     *
+     * Scans all undo logs for TRX_UNDO_DEL_MARK records, extracts the old row
+     * values, and generates SQL INSERT statements to reverse the deletes.
+     *
+     * @param ibdata_path Path to ibdata1 or undo tablespace
+     * @param table_name Target table name for INSERT generation
+     * @param start_time Only flashback deletes after this time (empty = all)
+     * @param end_time Only flashback deletes before this time (empty = all)
+     * @return Vector of SQL INSERT strings
+     */
+    std::vector<std::string> flashback_delete(
+        const std::string& ibdata_path,
+        const std::string& table_name = "",
+        const std::string& start_time = "",
+        const std::string& end_time = "");
+
+    /**
+     * @brief v2.0: Reconstruct complete row from undo log fields
+     *
+     * Merges old values from undo log with default values for unchanged columns.
+     *
+     * @param entries Undo entries from a single undo chain (oldest first)
+     * @param column_count Expected column count
+     * @return Reconstructed row values as strings
+     */
+    std::vector<std::string> reconstruct_row_from_undo(
+        const std::vector<UndoLogEntry>& entries, uint32_t column_count);
 
 private:
     UndoLogStats stats_{0, 0, 0, 0};
