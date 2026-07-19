@@ -1,8 +1,7 @@
 #include "dbrecovery/repair/header_repairer.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
-#include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
-#include <cstring>
 #include <iostream>
 
 namespace dbrecovery {
@@ -75,9 +74,17 @@ bool HeaderRepairer::repair_page_header(uint8_t* page_data, size_t page_size) {
     // Rebuild the FIL header with correct type
     // First, preserve some important values from the corrupted page
     // Note: InnoDB stores page_no, prev_page, next_page in BIG-ENDIAN format
-    uint32_t page_no = dbrecovery::innodb::read_be<uint32_t>(page_data, 4);
-    uint32_t prev_page = dbrecovery::innodb::read_be<uint32_t>(page_data, 8);
-    uint32_t next_page = dbrecovery::innodb::read_be<uint32_t>(page_data, 12);
+    uint32_t page_no = dbrecovery::innodb::read_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_OFFSET);
+    uint32_t prev_page = dbrecovery::innodb::read_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_PREV_ABS);
+    uint32_t next_page = dbrecovery::innodb::read_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
+    uint64_t lsn = dbrecovery::innodb::read_be<uint64_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_LSN_ABS);
+    uint64_t flush_lsn = dbrecovery::innodb::read_be<uint64_t>(page_data, 26);
+    uint32_t space_id = dbrecovery::innodb::read_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_SPACE_ID);
 
     // If page_no, prev_page or next_page look corrupted, set to defaults
     if (page_no >= 0xFFFFFFF0) page_no = 0;
@@ -89,8 +96,15 @@ bool HeaderRepairer::repair_page_header(uint8_t* page_data, size_t page_size) {
     }
 
     // Restore prev/next page pointers
-    dbrecovery::innodb::write_be<uint32_t>(page_data, 8, prev_page);
-    dbrecovery::innodb::write_be<uint32_t>(page_data, 12, next_page);
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_PREV_ABS, prev_page);
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS, next_page);
+    dbrecovery::innodb::write_be<uint64_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_LSN_ABS, lsn);
+    dbrecovery::innodb::write_be<uint64_t>(page_data, 26, flush_lsn);
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_SPACE_ID, space_id);
 
     // Step 4: 修复校验和
     calculate_and_fix_checksum(page_data, page_size);
@@ -99,21 +113,13 @@ bool HeaderRepairer::repair_page_header(uint8_t* page_data, size_t page_size) {
 }
 
 uint32_t HeaderRepairer::calculate_and_fix_checksum(uint8_t* page_data, size_t page_size) {
-    // 计算 CRC32C 校验和（排除校验和字段）
-    std::vector<uint8_t> page_copy(page_size);
-    std::memcpy(page_copy.data(), page_data, page_size);
-
-    // 清零校验和字段（偏移 0-3） - checksum is at offset 0, not 24!
-    std::memset(page_copy.data() + 0, 0, 4);
-
-    uint32_t computed_crc = dbrecovery::innodb::PageReader::compute_crc32c(page_copy);
-
-    // 写入校验和字段（偏移 0-3）
-    for (int i = 0; i < 4; ++i) {
-        page_data[0 + i] = (computed_crc >> (i * 8)) & 0xFF;
+    if (!page_data || page_size < 8) {
+        return 0;
     }
 
-    return computed_crc;
+    dbrecovery::innodb::write_page_checksum(
+        page_data, page_size, dbrecovery::innodb::ChecksumAlgo::CRC32C);
+    return dbrecovery::innodb::read_stored_checksum(page_data, page_size);
 }
 
 bool HeaderRepairer::validate_page_header(const uint8_t* page_data, size_t page_size) const {
@@ -123,27 +129,19 @@ bool HeaderRepairer::validate_page_header(const uint8_t* page_data, size_t page_
 
     // 检查页类型 - correct offset is FIL_PAGE_TYPE_ABS = 24
     uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX &&
-        page_type != dbrecovery::innodb::FIL_PAGE_SDI &&
-        page_type != dbrecovery::innodb::FIL_PAGE_UNDO_LOG &&
-        page_type != dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+    if (!dbrecovery::innodb::is_valid_page_type(page_type)) {
         return false;
     }
 
     // 检查页号
-    uint32_t page_no = dbrecovery::innodb::read_le<uint32_t>(page_data, 20);
+    uint32_t page_no = dbrecovery::innodb::read_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_OFFSET);
     if (page_no >= 0xFFFFFFF0) {
         return false;
     }
 
-    // 检查校验和字段
-    uint32_t checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 24);
-    if (checksum == 0xFFFFFFFF) {
-        // NONE 校验模式，有效
-        return true;
-    }
-
-    return true;
+    return dbrecovery::innodb::validate_page_checksum(
+        page_data, page_size, false).is_valid;
 }
 
 std::optional<uint16_t> HeaderRepairer::extract_page_type(const uint8_t* page_data, size_t page_size) const {
@@ -155,11 +153,7 @@ std::optional<uint16_t> HeaderRepairer::extract_page_type(const uint8_t* page_da
     uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
     // 验证页类型是否有效
-    if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX ||
-        page_type == dbrecovery::innodb::FIL_PAGE_SDI ||
-        page_type == dbrecovery::innodb::FIL_PAGE_UNDO_LOG ||
-        page_type == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB ||
-        page_type == dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED) {
+    if (dbrecovery::innodb::is_valid_page_type(page_type)) {
         return page_type;
     }
 
@@ -176,26 +170,30 @@ bool HeaderRepairer::rebuild_page_header(uint8_t* page_data, size_t page_size,
     // checksum (offset 0-3)
     dbrecovery::innodb::write_be<uint32_t>(page_data, 0, 0);
     
-    // page_number (offset 4-7)
-    dbrecovery::innodb::write_be<uint32_t>(page_data, 4, page_no);
-    
-    // FIL_PAGE_PREV (offset 8-11)
-    dbrecovery::innodb::write_be<uint32_t>(page_data, 8, 0xFFFFFFFF);
-    
-    // FIL_PAGE_NEXT (offset 12-15)
-    dbrecovery::innodb::write_be<uint32_t>(page_data, 12, 0xFFFFFFFF);
-    
-    // LSN (offset 16-23)
-    dbrecovery::innodb::write_be<uint64_t>(page_data, 16, 0);
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_OFFSET, page_no);
+
+    // FIL_PAGE_PREV
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_PREV_ABS, 0xFFFFFFFF);
+
+    // FIL_PAGE_NEXT
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS, 0xFFFFFFFF);
+
+    // LSN
+    dbrecovery::innodb::write_be<uint64_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_LSN_ABS, 0);
     
     // type (offset FIL_PAGE_TYPE_ABS = 24)
     dbrecovery::innodb::write_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS, page_type);
     
-    // flush_lsn (offset 26-33)
+    // flush_lsn
     dbrecovery::innodb::write_be<uint64_t>(page_data, 26, 0);
-    
-    // space_id (offset 34-37)
-    dbrecovery::innodb::write_be<uint32_t>(page_data, 34, 0);
+
+    // space_id
+    dbrecovery::innodb::write_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_SPACE_ID, 0);
 
     // Step 2: 重建 Page Header
     uint8_t* page_header = page_data + 38;

@@ -417,26 +417,54 @@ void write_page_checksum(uint8_t* page, size_t page_size, ChecksumAlgo algo) {
     // Zero the checksum fields first
     std::memset(page + page_size - 8, 0, 8);
 
-    // Compute checksum
+    // Compute the checksum over the same FIL regions used by validation.
+    // The stored checksum fields and the unused FIL checksum header are excluded.
     uint32_t checksum = 0;
     uint32_t magic = 0;
 
-    switch (algo) {
-        case ChecksumAlgo::CRC32C:
-        case ChecksumAlgo::STRICT_CRC32C:
-            checksum = compute_crc32c_checksum(page, page_size);
-            magic = CHECKSUM_CRC32C_MAGIC;
-            break;
-        case ChecksumAlgo::INNODB:
-        case ChecksumAlgo::STRICT_INNODB:
-            checksum = compute_innodb_checksum(page, page_size);
-            magic = CHECKSUM_INNODB_MAGIC;
-            break;
-        case ChecksumAlgo::NONE:
-        default:
-            checksum = 0;
-            magic = CHECKSUM_NONE_MAGIC;
-            break;
+    if (page_size >= 46) {
+        const size_t first_offset = 4;
+        const size_t first_size = 26 - first_offset;
+        const size_t second_offset = 38;
+        const size_t second_size = page_size - 38 - 8;
+
+        switch (algo) {
+            case ChecksumAlgo::CRC32C:
+            case ChecksumAlgo::STRICT_CRC32C:
+                checksum = compute_crc32c_checksum(page + first_offset, first_size) ^
+                           compute_crc32c_checksum(page + second_offset, second_size);
+                magic = CHECKSUM_CRC32C_MAGIC;
+                break;
+            case ChecksumAlgo::INNODB:
+            case ChecksumAlgo::STRICT_INNODB:
+                checksum = compute_innodb_checksum(page + first_offset, first_size) +
+                           compute_innodb_checksum(page + second_offset, second_size);
+                magic = CHECKSUM_INNODB_MAGIC;
+                break;
+            case ChecksumAlgo::NONE:
+            default:
+                checksum = 0;
+                magic = CHECKSUM_NONE_MAGIC;
+                break;
+        }
+    } else {
+        switch (algo) {
+            case ChecksumAlgo::CRC32C:
+            case ChecksumAlgo::STRICT_CRC32C:
+                checksum = compute_crc32c_checksum(page, page_size);
+                magic = CHECKSUM_CRC32C_MAGIC;
+                break;
+            case ChecksumAlgo::INNODB:
+            case ChecksumAlgo::STRICT_INNODB:
+                checksum = compute_innodb_checksum(page, page_size);
+                magic = CHECKSUM_INNODB_MAGIC;
+                break;
+            case ChecksumAlgo::NONE:
+            default:
+                checksum = 0;
+                magic = CHECKSUM_NONE_MAGIC;
+                break;
+        }
     }
 
     // Write checksum value at page_size - 8

@@ -100,7 +100,8 @@ std::vector<uint8_t> create_valid_page(uint32_t page_no = 0, uint16_t page_type 
     
     // Page tail (LSN reversed)
     write_le<uint64_t>(page.data(), 16376, 1);
-    
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
+
     return page;
 }
 
@@ -398,14 +399,63 @@ TEST(HeaderRepairerTest, ExtractPageType) {
 
 TEST(HeaderRepairerTest, RebuildPageHeader) {
     HeaderRepairer repairer;
-    
+
     auto page = create_valid_page();
-    
+
     // Corrupt page header
     memset(page.data() + 38, 0xFF, 24);
-    
+
     bool success = repairer.rebuild_page_header(page.data(), page.size(), 0, FIL_PAGE_INDEX);
     EXPECT_TRUE(success);
+}
+
+TEST(HeaderRepairerTest, ValidPageDoesNotNeedRepair) {
+    HeaderRepairer repairer;
+    auto page = create_valid_page(7);
+    const auto before = page;
+
+    EXPECT_FALSE(repairer.repair_page_header(page.data(), page.size()));
+    EXPECT_EQ(page, before);
+}
+
+TEST(HeaderRepairerTest, RepairPreservesFilMetadataAndWritesCanonicalChecksum) {
+    HeaderRepairer repairer;
+    auto page = create_valid_page(7);
+    write_be<uint32_t>(page.data(), FIL_PAGE_PREV_ABS, 5);
+    write_be<uint32_t>(page.data(), FIL_PAGE_NEXT_ABS, 9);
+    write_be<uint64_t>(page.data(), FIL_PAGE_LSN_ABS, 0x0102030405060708ULL);
+    write_be<uint64_t>(page.data(), 26, 0x1112131415161718ULL);
+    write_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID, 42);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+
+    ASSERT_TRUE(repairer.repair_page_header(page.data(), page.size()));
+    EXPECT_EQ(read_be<uint32_t>(page.data(), FIL_PAGE_OFFSET), 7u);
+    EXPECT_EQ(read_be<uint32_t>(page.data(), FIL_PAGE_PREV_ABS), 5u);
+    EXPECT_EQ(read_be<uint32_t>(page.data(), FIL_PAGE_NEXT_ABS), 9u);
+    EXPECT_EQ(read_be<uint64_t>(page.data(), FIL_PAGE_LSN_ABS), 0x0102030405060708ULL);
+    EXPECT_EQ(read_be<uint64_t>(page.data(), 26), 0x1112131415161718ULL);
+    EXPECT_EQ(read_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID), 42u);
+    EXPECT_EQ(read_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS), FIL_PAGE_INDEX);
+    EXPECT_EQ(read_stored_algorithm_id(page.data(), page.size()), CHECKSUM_CRC32C_MAGIC);
+    EXPECT_TRUE(validate_page_checksum(page.data(), page.size(), true).is_valid);
+}
+
+TEST(HeaderRepairerTest, RejectsNullAndShortPages) {
+    HeaderRepairer repairer;
+    EXPECT_FALSE(repairer.repair_page_header(nullptr, 16384));
+
+    std::vector<uint8_t> short_page(73, 0);
+    EXPECT_FALSE(repairer.repair_page_header(short_page.data(), short_page.size()));
+    EXPECT_EQ(repairer.calculate_and_fix_checksum(nullptr, 16384), 0u);
+}
+
+TEST(HeaderRepairerTest, RejectsUnknownTypeWithoutIndexEvidence) {
+    HeaderRepairer repairer;
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0x1234);
+
+    EXPECT_FALSE(repairer.repair_page_header(page.data(), page.size()));
+    EXPECT_EQ(read_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS), 0x1234);
 }
 
 // ==================== Integration Tests with Test Files ====================
