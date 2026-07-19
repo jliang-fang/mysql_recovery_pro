@@ -29,9 +29,15 @@ TEST(UndoLogRollbackTest, ValidUndoLogParsing) {
     write_le<uint16_t>(page.data(), 34, 1);  // 1 record
 
     // Add a simple undo record at offset 40
-    // Format: type(1) + field_count(1) + data
-    page[40] = 1;  // TRX_UNDO_INSERT type
-    page[41] = 2;  // 2 fields
+    // Format: type(1) + field_count(1) + length-prefixed fields
+    page[40] = 1;
+    page[41] = 2;
+    page[42] = 1;
+    page[43] = 'a';
+    page[44] = 1;
+    page[45] = 'b';
+
+    write_le<uint16_t>(page.data(), 30, 46);
 
     UndoLogParser parser;
     auto entries = parser.parse_undo_log_page(page.data(), 16384, 0);

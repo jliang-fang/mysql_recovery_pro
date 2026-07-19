@@ -2,49 +2,98 @@
 #include "dbrecovery/innodb/undo_log_parser.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include <vector>
+#include <string>
+#include <algorithm>
 #include <fstream>
 #include <iostream>
+
+namespace {
+
+void write_page_header(std::vector<uint8_t>& page, uint16_t page_free,
+                       uint16_t record_count) {
+    dbrecovery::innodb::write_le<uint16_t>(page.data(), 0, 1);
+    dbrecovery::innodb::write_le<uint16_t>(page.data(), 28, 40);
+    dbrecovery::innodb::write_le<uint16_t>(page.data(), 30, page_free);
+    dbrecovery::innodb::write_le<uint16_t>(page.data(), 34, record_count);
+}
+
+size_t write_insert_record(std::vector<uint8_t>& page, size_t offset,
+                           const std::vector<std::string>& fields) {
+    page[offset++] = 1;
+    page[offset++] = static_cast<uint8_t>(fields.size());
+    for (const auto& value : fields) {
+        page[offset++] = static_cast<uint8_t>(value.size());
+        std::copy(value.begin(), value.end(), page.begin() + offset);
+        offset += value.size();
+    }
+    return offset;
+}
+
+} // namespace
 
 namespace dbrecovery {
 namespace innodb {
 
-// ==================== Undo Log Page Parsing Tests ====================
-
 // Test basic undo log page with records
 TEST(UndoLogPageTest, ParseUndoLogPage) {
-    // Create a minimal undo log page
     std::vector<uint8_t> page(16384, 0);
-
-    // Set page type to UNDO_LOG
-    write_le<uint16_t>(page.data(), 0, 1);  // TRX_UNDO_PAGE_TYPE = 1
-
-    // Write undo log page header
-    write_le<uint16_t>(page.data(), 28, 40);  // TRX_UNDO_PAGE_START
-    write_le<uint16_t>(page.data(), 30, 80);  // TRX_UNDO_PAGE_FREE
-    write_le<uint16_t>(page.data(), 34, 2);   // TRX_UNDO_PAGE_N_RECS = 2
-
-    // Add two undo records at offset 40
-    page[40] = 1;   // Record 1 type: TRX_UNDO_INSERT
-    page[41] = 2;   // 2 fields
-    page[42] = 2;   // Record 2 type: TRX_UNDO_DELETE
-    page[43] = 1;   // 1 field
+    const size_t end = write_insert_record(page, 40, {"a", "bc"});
+    write_page_header(page, static_cast<uint16_t>(end), 1);
 
     UndoLogParser parser;
-    auto entries = parser.parse_undo_log_page(page.data(), 16384, 0);
+    auto entries = parser.parse_undo_log_page(page.data(), page.size(), 0);
 
-    EXPECT_FALSE(entries.empty());
-    EXPECT_EQ(entries.size(), 2);
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].undo_type, 1);
+    EXPECT_EQ(entries[0].field_count, 2);
+    ASSERT_EQ(entries[0].fields.size(), 2u);
+    EXPECT_EQ(std::string(entries[0].fields[0].data.begin(),
+                          entries[0].fields[0].data.end()), "a");
+    EXPECT_EQ(std::string(entries[0].fields[1].data.begin(),
+                          entries[0].fields[1].data.end()), "bc");
+}
+
+TEST(UndoLogPageTest, RejectsInvalidFreeOffset) {
+    std::vector<uint8_t> page(256, 0);
+    write_page_header(page, 129, 1);
+    page[40] = 1;
+    page[41] = 0;
+
+    UndoLogParser parser;
+    EXPECT_TRUE(parser.parse_undo_log_page(page.data(), 128, 0).empty());
+}
+
+TEST(UndoLogPageTest, RejectsTruncatedField) {
+    std::vector<uint8_t> page(16384, 0);
+    page[40] = 1;
+    page[41] = 1;
+    page[42] = 5;
+    page[43] = 'x';
+    write_page_header(page, 44, 1);
+
+    UndoLogParser parser;
+    EXPECT_TRUE(parser.parse_undo_log_page(page.data(), page.size(), 0).empty());
+}
+
+TEST(UndoLogPageTest, FieldCanEndAtPageFree) {
+    std::vector<uint8_t> page(16384, 0);
+    const size_t end = write_insert_record(page, 40, {"ok"});
+    write_page_header(page, static_cast<uint16_t>(end), 1);
+
+    UndoLogParser parser;
+    auto entries = parser.parse_undo_log_page(page.data(), page.size(), 0);
+    ASSERT_EQ(entries.size(), 1u);
+    ASSERT_EQ(entries[0].fields.size(), 1u);
+    EXPECT_EQ(entries[0].fields[0].size, 2);
 }
 
 // Test empty undo log page
 TEST(UndoLogPageTest, EmptyUndoLogPage) {
     std::vector<uint8_t> page(16384, 0);
-
-    // No records
-    write_le<uint16_t>(page.data(), 34, 0);  // TRX_UNDO_PAGE_N_RECS = 0
+    write_page_header(page, 40, 0);
 
     UndoLogParser parser;
-    auto entries = parser.parse_undo_log_page(page.data(), 16384, 0);
+    auto entries = parser.parse_undo_log_page(page.data(), page.size(), 0);
 
     EXPECT_TRUE(entries.empty());
 }
@@ -63,27 +112,21 @@ TEST(UndoLogFileTest, ScanAllRollbackSegments) {
     EXPECT_EQ(total, 0u);
 }
 
-// Test page recovery with valid undo log
 TEST(UndoLogRecoveryTest, RecoverFromValidUndoLog) {
     std::vector<uint8_t> page(16384, 0);
 
-    // Set page type
-    write_le<uint16_t>(page.data(), 0, 1);
-
-    // Write undo log page header
-    write_le<uint16_t>(page.data(), 28, 40);
-    write_le<uint16_t>(page.data(), 30, 60);
-    write_le<uint16_t>(page.data(), 34, 1);
-
-    // Add a delete record
-    page[40] = 13;  // TRX_UNDO_DEL_REC = 13
-    page[41] = 2;   // 2 fields
+    write_page_header(page, 47, 1);
+    page[40] = 13;
+    page[41] = 1;
+    page[42] = 1;
+    page[43] = 'x';
 
     UndoLogParser parser;
-    auto entries = parser.parse_undo_log_page(page.data(), 16384, 0);
+    auto entries = parser.parse_undo_log_page(page.data(), page.size(), 0);
 
-    EXPECT_FALSE(entries.empty());
-    EXPECT_EQ(entries[0].undo_type, 13);  // TRX_UNDO_DEL_REC
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].undo_type, 13);
+    EXPECT_EQ(entries[0].field_count, 1);
 }
 
 // Test rollback segment parsing

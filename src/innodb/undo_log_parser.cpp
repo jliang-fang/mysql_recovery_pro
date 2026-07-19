@@ -19,6 +19,7 @@
 #include <optional>
 #include <map>
 #include <iomanip>
+#include <limits>
 
 namespace dbrecovery {
 namespace innodb {
@@ -48,41 +49,45 @@ constexpr uint16_t TRX_UNDO_PAGE_HDR_SIZE   = 40;  // Total header size
 
 // ==================== Undo Log Record Header ====================
 struct UndoLogRecordHeader {
-    uint8_t type;           // TRX_UNDO_XXX
-    uint8_t extern_storage; // External storage flag (BLOB)
-    uint16_t rec_page_no;   // Page number of the record
-    uint16_t rec_page_offset; // Offset within page
-    uint8_t sys_fields[6];  // Transaction ID & Rollback Pointer (10+12 bytes)
-    
-    // For UPDATE/DELETE operations
-    uint16_t field_sizes[20]; // Field size array (variable)
-    uint8_t field_count;        // Number of fields
-    
+    uint8_t type;
+    uint8_t extern_storage;
+    uint16_t rec_page_no;
+    uint16_t rec_page_offset;
+    uint8_t sys_fields[6];
+    uint16_t field_sizes[20];
+    uint8_t field_count;
+    size_t header_size;
+
     static std::optional<UndoLogRecordHeader> parse(
         const uint8_t* data, size_t size, size_t offset) {
-        
-        if (!data || offset + 10 > size) {
+
+        if (!data || offset >= size || size - offset < 2) {
             return std::nullopt;
         }
-        
+
         UndoLogRecordHeader header{};
         header.type = data[offset];
-        
+        header.field_count = data[offset + 1];
+
         if (header.type == TRX_UNDO_INSERT) {
-            // Insert records don't have previous version info
-            header.field_count = data[offset + 1];
+            header.header_size = 2;
             return header;
         }
-        
-        // Update/Delete records have more complex headers
-        if (offset + 15 > size) {
+
+        if (header.type != TRX_UNDO_UPD_EXIST_REC &&
+            header.type != TRX_UNDO_UPD_DEL_REC &&
+            header.type != TRX_UNDO_DEL_REC &&
+            header.type != TRX_UNDO_INS_REC) {
             return std::nullopt;
         }
-        
-        header.field_count = data[offset + 1];
+
+        if (size - offset < 6) {
+            return std::nullopt;
+        }
+
         header.rec_page_no = read_le<uint16_t>(data, offset + 2);
         header.rec_page_offset = read_le<uint16_t>(data, offset + 4);
-        
+        header.header_size = 6;
         return header;
     }
 };
@@ -122,95 +127,99 @@ std::optional<uint32_t> read_rseg_slot(
 
 std::vector<UndoLogEntry> UndoLogParser::parse_undo_log_page(
     const uint8_t* page_data, size_t page_size, uint32_t page_no) {
-    
+
     std::vector<UndoLogEntry> entries;
-    
-    if (!page_data || page_size < 100) {
+
+    constexpr size_t MIN_PAGE_SIZE = TRX_UNDO_PAGE_HDR_SIZE + 2;
+    if (!page_data || page_size < MIN_PAGE_SIZE ||
+        TRX_UNDO_PAGE_N_RECS + sizeof(uint16_t) > page_size) {
         return entries;
     }
-    
-    // Check page type
-    uint16_t page_type = get_page_type(page_data);
+
+    const uint16_t page_type = get_page_type(page_data);
     if (page_type != FIL_PAGE_UNDO_LOG) {
-        // Try to parse anyway - might be corrupted
         std::cerr << "[WARN] Page " << page_no << " is not UNDO log type: 0x"
                   << std::hex << page_type << std::dec << "\n";
     }
-    
-    // Read page header
-    uint16_t page_start = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_START);
-    uint16_t page_free = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_FREE);
-    uint16_t n_recs = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_N_RECS);
-    
-    if (page_start < TRX_UNDO_PAGE_HDR_SIZE || page_start > page_free) {
+
+    const uint16_t page_start = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_START);
+    const uint16_t page_free = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_FREE);
+    const uint16_t n_recs = read_le<uint16_t>(page_data, TRX_UNDO_PAGE_N_RECS);
+
+    if (page_start < TRX_UNDO_PAGE_HDR_SIZE ||
+        page_start > page_free ||
+        page_free > page_size) {
         return entries;
     }
-    
-    // Parse each undo log record
+
     size_t offset = page_start;
-    size_t rec_count = 0;
-    
-    while (offset < page_free && rec_count < n_recs) {
-        if (offset + 10 > page_size) {
+    for (uint16_t rec_index = 0;
+         rec_index < n_recs && offset < page_free;
+         ++rec_index) {
+        const auto header_opt = UndoLogRecordHeader::parse(
+            page_data, page_free, offset);
+        if (!header_opt) {
             break;
         }
-        
-        auto header_opt = UndoLogRecordHeader::parse(page_data, page_size, offset);
-        if (!header_opt) {
-            // Skip bad record
-            offset += 4;
-            continue;
-        }
-        
+
         const auto& header = *header_opt;
+        if (header.field_count > 20 ||
+            header.header_size > page_free - offset) {
+            break;
+        }
+
+        size_t field_offset = offset + header.header_size;
         UndoLogEntry entry;
         entry.page_no = header.rec_page_no;
         entry.page_offset = header.rec_page_offset;
         entry.undo_type = header.type;
         entry.field_count = header.field_count;
-        
-        // Parse fields based on record type
-        size_t field_offset = offset + 2;  // Skip type + field count
-        
-        for (uint8_t i = 0; i < header.field_count && field_offset + 4 < page_size; i++) {
-            uint8_t field_type = page_data[field_offset];
-            uint16_t field_size;
-            
-            if (field_type & 0x80) {
-                // Long field - 2 byte size
-                field_size = read_le<uint16_t>(page_data, field_offset + 1);
-                field_offset += 3;
-            } else {
-                // Short field - 1 byte size
-                field_size = field_type & 0x7F;
-                field_offset += 1;
-            }
-            
-            if (field_offset + field_size > page_size) {
+
+        bool complete = true;
+        for (uint8_t i = 0; i < header.field_count; ++i) {
+            if (field_offset >= page_free) {
+                complete = false;
                 break;
             }
-            
+
+            const uint8_t field_type = page_data[field_offset];
+            size_t length_prefix_size = (field_type & 0x80) ? 3 : 1;
+            if (field_offset > page_free - length_prefix_size) {
+                complete = false;
+                break;
+            }
+
+            uint16_t field_size = field_type & 0x7F;
+            if (field_type & 0x80) {
+                field_size = read_le<uint16_t>(page_data, field_offset + 1);
+            }
+
+            field_offset += length_prefix_size;
+            if (field_size > page_free - field_offset) {
+                complete = false;
+                break;
+            }
+
             UndoLogField field;
             field.type = field_type;
             field.size = field_size;
-            field.data.assign(page_data + field_offset, 
-                            page_data + field_offset + field_size);
-            
-            entry.fields.push_back(field);
+            field.data.assign(page_data + field_offset,
+                              page_data + field_offset + field_size);
+            entry.fields.push_back(std::move(field));
             field_offset += field_size;
         }
-        
-        entries.push_back(entry);
-        rec_count++;
-        
-        // Find next record - look for next record marker
-        // Undo log records are not tightly packed, need to find boundaries
-        while (offset < page_free && page_data[offset] == 0xFF) {
-            offset++;
+
+        if (!complete) {
+            break;
         }
-        offset += 10 + entry.total_size();  // Approximate next position
+
+        entries.push_back(std::move(entry));
+        if (field_offset <= offset) {
+            break;
+        }
+        offset = field_offset;
     }
-    
+
     return entries;
 }
 
@@ -218,62 +227,84 @@ std::vector<UndoLogEntry> UndoLogParser::parse_rollback_segment(
     const std::string& ibdata_path, uint32_t rseg_id) {
 
     std::vector<UndoLogEntry> all_entries;
+    constexpr size_t PAGE_SIZE = 16384;
+    constexpr size_t TRX_SYS_PAGE_NO = 5;
 
-    std::ifstream file(ibdata_path, std::ios::binary);
+    std::ifstream file(ibdata_path, std::ios::binary | std::ios::ate);
     if (!file) {
         std::cerr << "[ERROR] Cannot open ibdata: " << ibdata_path << "\n";
         return all_entries;
     }
 
-    // Get file size
-    file.seekg(0, std::ios::end);
-    size_t file_size = file.tellg();
+    const std::streampos end_pos = file.tellg();
+    if (end_pos < 0) {
+        return all_entries;
+    }
+    const uint64_t file_size = static_cast<uint64_t>(end_pos);
+    const uint64_t page_count = file_size / PAGE_SIZE;
+    if (page_count <= TRX_SYS_PAGE_NO ||
+        page_count > std::numeric_limits<uint32_t>::max()) {
+        return all_entries;
+    }
     file.seekg(0, std::ios::beg);
 
-    // Read TRX_SYS page (page 5) to get the rollback segment slot
-    constexpr size_t TRX_SYS_PAGE_NO = 5;
-    constexpr size_t DEFAULT_PAGE_SIZE = 16384;
-    std::vector<uint8_t> trx_sys_page(DEFAULT_PAGE_SIZE);
-
-    if (file_size >= (TRX_SYS_PAGE_NO + 1) * DEFAULT_PAGE_SIZE) {
-        file.seekg(TRX_SYS_PAGE_NO * DEFAULT_PAGE_SIZE, std::ios::beg);
-        file.read(reinterpret_cast<char*>(trx_sys_page.data()), DEFAULT_PAGE_SIZE);
+    std::vector<uint8_t> trx_sys_page(PAGE_SIZE);
+    const uint64_t trx_sys_offset =
+        static_cast<uint64_t>(TRX_SYS_PAGE_NO) * PAGE_SIZE;
+    file.seekg(static_cast<std::streamoff>(trx_sys_offset), std::ios::beg);
+    file.read(reinterpret_cast<char*>(trx_sys_page.data()),
+              static_cast<std::streamsize>(PAGE_SIZE));
+    if (file.gcount() != static_cast<std::streamsize>(PAGE_SIZE)) {
+        return all_entries;
     }
 
-    // Read rollback segment slot from TRX_SYS page
-    auto slot_opt = read_rseg_slot(trx_sys_page.data(), trx_sys_page.size(), rseg_id);
+    const auto slot_opt = read_rseg_slot(
+        trx_sys_page.data(), trx_sys_page.size(), rseg_id);
     if (!slot_opt) {
         return all_entries;
     }
-    
-    uint32_t space_id = *slot_opt >> 16;
-    uint32_t page_no = *slot_opt & 0xFFFF;
-    
-    // Read undo log pages (chain linked by TRX_UNDO_PAGE_HDR + 26 bytes)
+
+    const uint32_t current_start_page = *slot_opt & 0xFFFF;
+    if (current_start_page == 0 || current_start_page >= page_count) {
+        return all_entries;
+    }
+
     std::set<uint32_t> visited_pages;
-    uint32_t current_page = page_no;
-    
-    while (current_page != 0 && visited_pages.size() < 1000) {  // Limit to 1000 pages
-        if (visited_pages.count(current_page)) {
-            break;  // Loop detected
+    uint32_t current_page = current_start_page;
+    while (current_page != 0 && visited_pages.size() < 1000) {
+        if (!visited_pages.insert(current_page).second ||
+            current_page >= page_count) {
+            break;
         }
-        visited_pages.insert(current_page);
-        
-        file.seekg(static_cast<std::streamoff>(current_page) * 16384, std::ios::beg);
-        std::vector<uint8_t> page_buffer(16384);
-        file.read(reinterpret_cast<char*>(page_buffer.data()), 16384);
-        
-        auto entries = parse_undo_log_page(page_buffer.data(), 16384, current_page);
+
+        const uint64_t page_offset = static_cast<uint64_t>(current_page) * PAGE_SIZE;
+        if (page_offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+            break;
+        }
+
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(page_offset), std::ios::beg);
+        std::vector<uint8_t> page_buffer(PAGE_SIZE);
+        file.read(reinterpret_cast<char*>(page_buffer.data()),
+                  static_cast<std::streamsize>(PAGE_SIZE));
+        if (file.gcount() != static_cast<std::streamsize>(PAGE_SIZE)) {
+            break;
+        }
+
+        auto entries = parse_undo_log_page(page_buffer.data(), PAGE_SIZE, current_page);
         all_entries.insert(all_entries.end(), entries.begin(), entries.end());
-        
-        // Read next page from page header (offset 26-29 in UNDO page header)
-        uint32_t next_page = read_le<uint32_t>(page_buffer.data(), 26);
-        if (next_page == 0 || next_page == 0xFFFFFFFF) {
+
+        if (26 + sizeof(uint32_t) > page_buffer.size()) {
+            break;
+        }
+        const uint32_t next_page = read_le<uint32_t>(page_buffer.data(), 26);
+        if (next_page == 0 || next_page == 0xFFFFFFFF ||
+            next_page >= page_count) {
             break;
         }
         current_page = next_page;
     }
-    
+
     return all_entries;
 }
 
