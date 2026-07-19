@@ -1,6 +1,8 @@
 #ifndef DBRECOVERY_INNODB_UNDO_LOG_RECOVERY_HPP
 #define DBRECOVERY_INNODB_UNDO_LOG_RECOVERY_HPP
 
+#include <cstring>
+#include <fstream>
 #include <vector>
 #include <cstdint>
 #include <map>
@@ -84,7 +86,8 @@ struct UndoLogPage {
     uint32_t prev_page;
     bool is_header;
     bool is_full;
-    
+
+    std::vector<uint8_t> page_data;
     std::vector<UndoLogRecord> records;
     
     std::string to_string() const {
@@ -308,14 +311,15 @@ inline std::vector<UndoLogPage> UndoLogRecovery::scan_undo_pages() {
 
         UndoLogPage page;
         page.page_no = page_no;
-        page.space_id = read_be<uint32_t>(page_data.data(), 0);  // FIL_PAGE_SPACE_ID = 0
-        page.lsn = read_be<uint64_t>(page_data.data(), 16);       // FIL_PAGE_LSN = 16
+        page.space_id = read_be<uint32_t>(page_data.data(), FIL_PAGE_SPACE_ID);
+        page.lsn = read_be<uint64_t>(page_data.data(), FIL_PAGE_LSN_ABS);
         page.first_record = read_le<uint32_t>(page_data.data(), 38 + 8);
         page.last_record = read_le<uint32_t>(page_data.data(), 38 + 12);
         page.next_page = read_le<uint32_t>(page_data.data(), 38 + 16);
         page.prev_page = read_le<uint32_t>(page_data.data(), 38 + 20);
         page.is_header = (page_no == 0);
         page.is_full = false;
+        page.page_data = page_data;
 
         // 解析记录
         page.records = parse_records(page);
@@ -663,15 +667,15 @@ inline void UndoLogScanner::scan_directory(const std::string& dir, int depth) {
                         file.seekg(page_no * page_size_, std::ios::beg);
                         file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-                        uint16_t page_type = read_le<uint16_t>(page_data.data(), 16);
+                        uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
                         if (page_type != FIL_PAGE_UNDO_LOG) {
                             continue;
                         }
 
                         UndoLogPage page;
                         page.page_no = page_no;
-                        page.space_id = read_le<uint32_t>(page_data.data(), 24);
-                        page.lsn = read_le<uint64_t>(page_data.data(), 8);
+                        page.space_id = read_be<uint32_t>(page_data.data(), FIL_PAGE_SPACE_ID);
+                        page.lsn = read_be<uint64_t>(page_data.data(), FIL_PAGE_LSN_ABS);
                         page.next_page = read_le<uint32_t>(page_data.data(), 38 + 16);
                         page.prev_page = read_le<uint32_t>(page_data.data(), 38 + 20);
                         page.is_header = (page_no == 0);
