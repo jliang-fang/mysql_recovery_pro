@@ -11,6 +11,7 @@
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
+#include "dbrecovery/innodb/undo_log_parser.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -180,6 +181,61 @@ records,
     bool export_to_json(const std::vector<std::map<std::string, std::string>>& records,
                         const std::string& json_path);
 
+    // ==================== Undo-log-assisted recovery (Task 19) ====================
+
+    /**
+     * @brief Set path to ibdata1 or undo tablespace for undo log scanning
+     */
+    void set_undo_data_path(const std::string& path) { undo_data_path_ = path; }
+
+    /**
+     * @brief Recover deleted records from undo logs for a specific table
+     *
+     * Scans undo logs for TRX_UNDO_DEL_MARK records, reconstructs row data
+     * from undo chains, and returns records that can be INSERTed back.
+     *
+     * @param table_name Target table name (used for SQL generation context)
+     * @param schema Table schema for column naming
+     * @return Recovered records from undo logs
+     */
+    std::vector<std::map<std::string, std::string>> recover_from_undo_logs(
+        const std::string& table_name,
+        const catalog::TableSchema& schema);
+
+    /**
+     * @brief Generate DELETE flashback SQL statements from undo logs
+     *
+     * Scans undo logs for delete-marked records and generates reverse
+     * INSERT statements to undo the deletes.
+     *
+     * @param table_name Target table name for SQL generation
+     * @param start_time Optional start time filter (ISO format)
+     * @param end_time Optional end time filter (ISO format)
+     * @return Vector of SQL INSERT strings
+     */
+    std::vector<std::string> flashback_deletes(
+        const std::string& table_name = "",
+        const std::string& start_time = "",
+        const std::string& end_time = "");
+
+    /**
+     * @brief Traverse undo chains and reconstruct historical row versions
+     *
+     * For each record's DB_ROLL_PTR, follows the undo chain backward
+     * to find all previous versions of the row data.
+     *
+     * @param start_page_no Undo page number from DB_ROLL_PTR
+     * @param start_offset Offset within undo page
+     * @return Ordered undo entries (oldest first)
+     */
+    std::vector<innodb::UndoLogEntry> traverse_undo_chain(
+        uint32_t start_page_no, uint32_t start_offset);
+
+    /**
+     * @brief Get the UndoLogParser statistics
+     */
+    const innodb::UndoLogParser::UndoLogStats& get_undo_stats() const;
+
     /**
      * @brief 获取文件有效性状态
      *
@@ -242,6 +298,16 @@ private:
      * @brief TDE 解密器
      */
     innodb::TDEDecryptor tde_decryptor_;
+
+    /**
+     * @brief Undo log parser for undo-assisted recovery
+     */
+    mutable innodb::UndoLogParser undo_parser_;
+
+    /**
+     * @brief Path to ibdata1 or undo tablespace for undo log scanning
+     */
+    std::string undo_data_path_;
 
     /**
      * @brief 是否自动检测加密

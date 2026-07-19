@@ -610,7 +610,20 @@ bool RecoveryEngine::export_to_json(const std::vector<std::map<std::string, std:
 // ==================== 实现缺失的方法 ====================
 
 void RecoveryEngine::set_space_id(uint32_t space_id) {
-    // TODO: 实现空间ID设置逻辑
+    // Store space_id for TDE key derivation context
+    // The space_id identifies the tablespace for per-table key derivation
+    if (!primary_key_hex_.empty()) {
+        // Parse hex key and register as table key for this space
+        std::vector<uint8_t> key_bytes;
+        std::string clean_hex = primary_key_hex_;
+        if (clean_hex.substr(0, 2) == "0x" || clean_hex.substr(0, 2) == "0X")
+            clean_hex = clean_hex.substr(2);
+        for (size_t i = 0; i + 1 < clean_hex.length(); i += 2) {
+            key_bytes.push_back(static_cast<uint8_t>(
+                std::stoul(clean_hex.substr(i, 2), nullptr, 16)));
+        }
+        tde_decryptor_.add_table_key(space_id, key_bytes, innodb::TDEAlgorithm::AES_256_CBC);
+    }
     std::cout << "[INFO] Set space_id to: " << space_id << std::endl;
 }
 
@@ -876,6 +889,90 @@ std::vector<std::map<std::string, std::string>> RecoveryEngine::deduplicate_reco
     }
 
     return result;
+}
+
+// ==================== Undo-log-assisted recovery (Task 19) ====================
+
+std::vector<std::map<std::string, std::string>> RecoveryEngine::recover_from_undo_logs(
+    const std::string& table_name,
+    const catalog::TableSchema& schema) {
+
+    if (undo_data_path_.empty()) {
+        std::cerr << "[ERROR] Undo data path not set. Use set_undo_data_path() first.\n";
+        return {};
+    }
+
+    // Use UndoLogParser to scan undo logs and recover deleted records
+    // The parser scans for TRX_UNDO_DEL_MARK entries and reconstructs row data
+    auto undo_entries = undo_parser_.parse_all_undo_tablespaces(undo_data_path_);
+
+    std::vector<std::map<std::string, std::string>> recovered;
+
+    for (const auto& entry : undo_entries) {
+        // Only process DELETE-type undo records
+        if (entry.undo_type != 0x03) continue;  // TRX_UNDO_DEL_MARK
+
+        std::map<std::string, std::string> row;
+        row["_undo_action"] = "FLASHBACK_INSERT";
+        row["_undo_type"] = std::to_string(entry.undo_type);
+
+        for (size_t i = 0; i < entry.fields.size(); ++i) {
+            std::string col_name;
+            uint32_t ordinal = static_cast<uint32_t>(i) + 1;
+            auto it = schema.columns.find(ordinal);
+            if (it != schema.columns.end()) {
+                col_name = it->second.name;
+            } else {
+                char buf[16];
+                snprintf(buf, sizeof(buf), "field_%04zu", i);
+                col_name = buf;
+            }
+
+            const auto& field = entry.fields[i];
+            if (!field.data.empty()) {
+                row[col_name] = std::string(field.data.begin(), field.data.end());
+            } else {
+                row[col_name] = "NULL";
+            }
+        }
+
+        if (!row.empty()) {
+            recovered.push_back(std::move(row));
+        }
+    }
+
+    std::cout << "[INFO] Undo log recovery: found " << recovered.size()
+              << " records from undo logs\n";
+    return recovered;
+}
+
+std::vector<std::string> RecoveryEngine::flashback_deletes(
+    const std::string& table_name,
+    const std::string& start_time,
+    const std::string& end_time) {
+
+    if (undo_data_path_.empty()) {
+        std::cerr << "[ERROR] Undo data path not set\n";
+        return {};
+    }
+
+    return undo_parser_.flashback_delete(undo_data_path_, table_name,
+                                          start_time, end_time);
+}
+
+std::vector<innodb::UndoLogEntry> RecoveryEngine::traverse_undo_chain(
+    uint32_t start_page_no, uint32_t start_offset) {
+
+    if (undo_data_path_.empty()) {
+        std::cerr << "[ERROR] Undo data path not set\n";
+        return {};
+    }
+
+    return undo_parser_.traverse_undo_chain(undo_data_path_, start_page_no, start_offset);
+}
+
+const innodb::UndoLogParser::UndoLogStats& RecoveryEngine::get_undo_stats() const {
+    return undo_parser_.get_stats();
 }
 
 } // namespace recovery

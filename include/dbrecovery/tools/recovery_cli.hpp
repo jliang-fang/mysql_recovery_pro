@@ -3186,6 +3186,67 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] BLOB recovery enabled.\n";
     }
 
+    // v2.0: Undo-assisted recovery — enrich results with undo log data
+    if (!system_tablespace.empty() || !undo_tablespace.empty()) {
+        std::string undo_src = !undo_tablespace.empty() ? undo_tablespace : system_tablespace;
+        if (verbose) {
+            std::cout << "[INFO] Undo-assisted recovery enabled, source: " << undo_src << "\n";
+        }
+
+        engine.set_undo_data_path(undo_src);
+
+        // Extract table name from ibd_path for undo-assisted recovery
+        std::string tbl_name = "recovered_table";
+        {
+            std::string fname = fs::path(ibd_path).filename().string();
+            size_t dot = fname.find('.');
+            if (dot != std::string::npos) tbl_name = fname.substr(0, dot);
+        }
+
+        // Build a simple schema from recovered records for undo field mapping
+        dbrecovery::catalog::TableSchema undoSchema;
+        if (!recovered_records.empty() && !recovered_column_order.empty()) {
+            for (size_t i = 0; i < recovered_column_order.size(); i++) {
+                dbrecovery::catalog::ColumnInfo col;
+                col.name = recovered_column_order[i];
+                col.mysql_type_id = 16;  // VARCHAR
+                col.is_nullable = true;
+                undoSchema.columns[static_cast<uint32_t>(i) + 1] = col;
+            }
+        }
+
+        // Scan undo logs for additional deleted records
+        auto undo_records = engine.recover_from_undo_logs(tbl_name, undoSchema);
+        if (!undo_records.empty()) {
+            std::cout << "[INFO] Undo log analysis found " << undo_records.size()
+                      << " additional deleted records\n";
+
+            // Merge undo-recovered records, deduplicating by first field value
+            std::set<std::string> existing_keys;
+            for (const auto& rec : recovered_records) {
+                if (!rec.empty()) {
+                    existing_keys.insert(rec.begin()->first + "=" + rec.begin()->second);
+                }
+            }
+            for (const auto& rec : undo_records) {
+                if (!rec.empty()) {
+                    std::string key = rec.begin()->first + "=" + rec.begin()->second;
+                    if (existing_keys.find(key) == existing_keys.end()) {
+                        existing_keys.insert(key);
+                        recovered_records.push_back(rec);
+                    }
+                }
+            }
+            std::cout << "[INFO] After undo merge: " << recovered_records.size() << " total records\n";
+        }
+
+        auto& undo_stats = engine.get_undo_stats();
+        std::cout << "[INFO] Undo stats: pages=" << undo_stats.total_undo_pages
+                  << ", records=" << undo_stats.total_undo_records
+                  << ", txs=" << undo_stats.transactions_found
+                  << ", flashback=" << undo_stats.flashback_statements << "\n";
+    }
+
     // 导出结果
     std::string output_path;
     if (format == "csv") {
