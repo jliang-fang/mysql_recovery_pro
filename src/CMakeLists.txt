@@ -6,6 +6,7 @@ set(COMMON_SOURCES
     common/version_compat.cpp
     common/environment_compat.cpp
     common/environment_compat_platform.cpp
+    common/mysql_version_detector.cpp
 )
 
 # Add recovery module sources
@@ -16,11 +17,17 @@ set(RECOVERY_SOURCES
     recovery/blob_chain_rebuilder.cpp
     recovery/disaster_recovery.cpp
     recovery/truncate_recovery.cpp
+    recovery/disk_scanner.cpp
+    recovery/parallel_engine.cpp
 )
 
 # Add innodb module sources
 set(INNODB_SOURCES
     innodb/data_validator.cpp
+    innodb/data_exporter.cpp
+    innodb/io_uring.cpp
+    innodb/page_cache.cpp
+    innodb/page_parser_v82.cpp
 )
 
 # Add repair module sources
@@ -45,6 +52,7 @@ set(ENGINE_SOURCES
     engine/field_decoder.cpp
     engine/parallel_scanner.cpp
     engine/drop_table_recovery.cpp
+    engine/blob_recovery.cpp
 )
 
 # Add utils module sources
@@ -59,6 +67,7 @@ set(UTILS_SOURCES
 set(TOOLS_SOURCES
     main_cli.cpp
     tools/heuristic_inference.cpp
+    tools/progress_cli.cpp
 )
 
 # Add page module sources

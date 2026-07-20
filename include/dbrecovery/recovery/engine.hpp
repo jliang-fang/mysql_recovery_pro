@@ -245,8 +245,10 @@ records,
     [[nodiscard]] bool is_valid() const { return file_reader_ &&
 file_reader_->is_valid(); }
 
-private:
+protected:
     std::unique_ptr<innodb::InnoDBFileReader> file_reader_;
+
+private:
     std::string current_file_path_;
 
     // ✅ P2 新增：辅助函数

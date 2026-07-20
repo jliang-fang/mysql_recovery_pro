@@ -37,14 +37,14 @@ bool RawScanner::open(const std::string& path) {
     impl_->is_open_ = true;
     impl_->handle_ = handle;
 #else
-    int fd = open(path.c_str(), O_RDONLY);
+    int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
         return false;
     }
     
     struct stat st;
     if (fstat(fd, &st) != 0) {
-        close(fd);
+        ::close(fd);
         return false;
     }
     
@@ -68,7 +68,7 @@ void RawScanner::close() {
     }
 #else
     if (impl_->fd_ >= 0) {
-        close(impl_->fd_);
+        ::close(impl_->fd_);
         impl_->fd_ = -1;
     }
 #endif

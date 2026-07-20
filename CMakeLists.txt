@@ -213,6 +213,19 @@ add_executable(mysql_recovery_pro src/main_cli.cpp)
 target_link_libraries(mysql_recovery_pro dbrecovery_innodb)
 target_include_directories(mysql_recovery_pro PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
+# Standalone tools
+add_executable(forensic_cli src/tools/forensic_cli.cpp)
+target_link_libraries(forensic_cli dbrecovery_innodb)
+target_include_directories(forensic_cli PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_executable(recovery_reporter src/tools/recovery_reporter.cpp)
+target_link_libraries(recovery_reporter dbrecovery_innodb)
+target_include_directories(recovery_reporter PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+add_executable(mock_data_gen src/tools/mock_data_gen.cpp)
+target_link_libraries(mock_data_gen dbrecovery_innodb)
+target_include_directories(mock_data_gen PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
 enable_testing()
 
 # Unit tests (C++ GTest)

@@ -14,6 +14,7 @@
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/engine/parallel_scanner.hpp"
+#include "dbrecovery/recovery/engine.hpp"
 
 namespace dbrecovery {
 namespace recovery {
