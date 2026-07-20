@@ -410,6 +410,17 @@ public:
     const AnalyzerStats& get_stats() const { return stats_; }
     void reset_stats() { stats_ = AnalyzerStats{}; }
 
+    /**
+     * @brief Scan all undo pages in ibdata1
+     * @return Vector of (page_data, page_no) for all UNDO_LOG pages
+     */
+    std::vector<std::pair<std::vector<uint8_t>, uint32_t>> scan_undo_pages();
+
+    /**
+     * @brief Extract table_id from undo record fields
+     */
+    static uint32_t extract_table_id(const std::vector<UndoFieldValue>& fields);
+
 private:
     // Configuration
     std::string ibdata_path_;
@@ -426,7 +437,13 @@ private:
     /**
      * @brief Parse DB_ROLL_PTR into (page_no, offset)
      *
-     * Format: bits [47:32] = undo_page_no, bits [31:0] = undo_offset
+     * MySQL 5.6/5.7: 6-byte DB_ROLL_PTR stored as [4B page_no, 2B offset] (LE)
+     * MySQL 8.0+: 7-byte DB_ROLL_PTR stored as [4B page_no, 2B offset, 1B flags] (LE)
+     * When loaded as uint64_t in LE: bits [31:0] = page_no, bits [47:32] = offset
+     * The 7th byte (flags in 8.0+) occupies bits [55:48] and is masked out.
+     *
+     * @param roll_ptr  The DB_ROLL_PTR value (6 or 7 bytes loaded as uint64_t)
+     * @return (page_no, offset_within_page)
      */
     static std::pair<uint32_t, uint32_t> parse_roll_ptr(uint64_t roll_ptr) {
         // MySQL 5.6/5.7: 6-byte DB_ROLL_PTR = [4B page_no, 2B offset] (LE)
@@ -449,17 +466,6 @@ private:
         if (page_no == 0 || page_no == FIL_NULL) return 0;
         return static_cast<uint64_t>(page_no) | (static_cast<uint64_t>(off) << 32);
     }
-
-    /**
-     * @brief Scan all undo pages in ibdata1
-     * @return Vector of (page_data, page_no) for all UNDO_LOG pages
-     */
-    std::vector<std::pair<std::vector<uint8_t>, uint32_t>> scan_undo_pages();
-
-    /**
-     * @brief Extract table_id from undo record fields
-     */
-    static uint32_t extract_table_id(const std::vector<UndoFieldValue>& fields);
 
     /**
      * @brief Encode primary key as hex string
