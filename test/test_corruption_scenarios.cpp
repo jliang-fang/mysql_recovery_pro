@@ -708,6 +708,7 @@ TEST(UndoLogParserTest, ParseUndoPage) {
     // Set page type to UNDO_LOG
     write_le<uint16_t>(page.data(), 0, 1);  // TRX_UNDO_PAGE_TYPE = 1
 
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
     // Write undo log page header
     write_le<uint16_t>(page.data(), 28, 40);
     write_le<uint16_t>(page.data(), 30, 40);

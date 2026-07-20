@@ -250,7 +250,7 @@ inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
     // which is at offset 38 from page start
 
     // First validate this looks like an InnoDB page: check FIL_PAGE_TYPE
-    uint16_t page_type = read_le<uint16_t>(data, 24);  // FIL_PAGE_TYPE at offset 24
+    uint16_t page_type = read_be<uint16_t>(data, 24);  // FIL_PAGE_TYPE at offset 24
     if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
         page_type != FIL_PAGE_SDI_ZIP && page_type != 0) {
         // Not a recognizable page type, skip encryption check

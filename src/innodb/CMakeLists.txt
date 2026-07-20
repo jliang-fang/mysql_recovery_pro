@@ -41,6 +41,10 @@ add_library(dbrecovery_innodb_sources STATIC
     # ✅ 新增：Undo Log 解析器
     # ✅ 修复：移除 undo_log.cpp（重复定义，已在 undo_log_parser.cpp 中实现）
     undo_log_parser.cpp
+    # ✅ 新增：深度 Undo 分析引擎 (MVCC 版本链追踪 & 闪回恢复)
+    deep_undo_analyzer.cpp
+    # ✅ 新增：闪回生成器 (Flashback SQL/CSV/JSON)
+    flashback_generator.cpp
     # ✅ 新增：Redo Log 解析器
     redo_log.cpp
     redo_log_replayer.cpp

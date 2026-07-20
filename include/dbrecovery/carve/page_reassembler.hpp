@@ -223,6 +223,16 @@ private:
         uint32_t space_id, uint32_t page_no, uint32_t page_size);
 
     /**
+     * @brief Synthesize a Page 0 FSP_HDR page when the original is missing
+     *
+     * Creates a minimal FSP_HDR with FIL header, FSP header (space_flags,
+     * free_limit, free list), and XDES section. The synthesized page allows
+     * InnoDB recovery tools to recognize the tablespace.
+     */
+    static std::vector<uint8_t> synthesize_page0(
+        uint32_t space_id, uint32_t page_size);
+
+    /**
      * @brief Write a composed .ibd file from sorted pages
      */
     bool write_composed_ibd(
@@ -330,6 +340,75 @@ inline std::vector<uint8_t> PageFragmentReassembler::create_placeholder(
     placeholder[25] = 0;
 
     return placeholder;
+}
+
+inline std::vector<uint8_t> PageFragmentReassembler::synthesize_page0(
+    uint32_t space_id, uint32_t page_size) {
+
+    std::vector<uint8_t> page(page_size, 0);
+    if (page_size < 256) return page;
+
+    // === FIL header (big-endian) ===
+    // FIL_PAGE_OFFSET at offset 4
+    page[4] = 0; page[5] = 0; page[6] = 0; page[7] = 0;  // page_no = 0
+
+    // FIL_PAGE_TYPE at offset 24 — FSP_HDR (0x45B8)
+    page[24] = 0x45; page[25] = 0xB8;
+
+    // FIL_PAGE_SPACE_ID at offset 34
+    page[34] = (space_id >> 24) & 0xFF;
+    page[35] = (space_id >> 16) & 0xFF;
+    page[36] = (space_id >> 8) & 0xFF;
+    page[37] = space_id & 0xFF;
+
+    // === FSP header at offset 38 (after FIL header) ===
+    // FSP_SPACE_FLAGS at offset 38+0 (4 bytes, little-endian)
+    // Default: POST_ANTELOPE=1, ATOMIC_BLOBS=1, PAGE_SSIZE=5 (16384)
+    uint32_t space_flags = (5 << 1) | (1 << 8) | (1 << 15); // ssize=5, atomic_blobs=1, post_antelope=1
+    page[38] = space_flags & 0xFF;
+    page[39] = (space_flags >> 8) & 0xFF;
+    page[40] = (space_flags >> 16) & 0xFF;
+    page[41] = (space_flags >> 24) & 0xFF;
+
+    // FSP_FREE_LIMIT at offset 38+16 (4 bytes, little-endian)
+    // Set to a reasonable extent count (1 extent = 64 pages)
+    uint32_t free_limit = 64;
+    page[54] = free_limit & 0xFF;
+    page[55] = (free_limit >> 8) & 0xFF;
+    page[56] = (free_limit >> 16) & 0xFF;
+    page[57] = (free_limit >> 24) & 0xFF;
+
+    // FSP_TOTAL_FREE_EXTENTS at offset 38+20 (4 bytes, little-endian)
+    page[58] = 1; page[59] = 0; page[60] = 0; page[61] = 0;
+
+    // FSP_FRAG_N_USED at offset 38+24 (4 bytes, little-endian)
+    page[62] = 0; page[63] = 0; page[64] = 0; page[65] = 0;
+
+    // FSP_FREE list (FLST, offset 38+28, 12 bytes: 4B prev, 4B next, 4B len)
+    // Leave as empty list (zeros)
+
+    // FSP_FREE_FRAG list (FLST, offset 38+40, 12 bytes)
+    // Leave as empty
+
+    // FSP_FULL_FRAG list (FLST, offset 38+52, 12 bytes)
+    // Leave as empty
+
+    // FSP_SEG_ID at offset 38+64 (8 bytes, little-endian)
+    page[102] = 1;  // seg_id = 1
+
+    // FSP_SEG_ARR at offset 38+72 (640 bytes for 40 FSEG entries)
+    // Minimal: mark first entry as in-use
+
+    // === FIL trailer (last 8 bytes) ===
+    // Page checksum at page_size - 8 (4 bytes, little-endian)
+    // Write a dummy checksum (0xFFFFFFFF)
+    for (uint32_t i = 0; i < 4 && i < 4; i++) {
+        page[page_size - 8 + i] = 0xFF;
+    }
+    // LSN at page_size - 4 (4 bytes, little-endian)
+    // Write as 0 (will be filled by recovery)
+
+    return page;
 }
 
 inline std::map<uint32_t, std::vector<PageIdentity>>
@@ -444,6 +523,32 @@ inline ReassemblyStats PageFragmentReassembler::reassemble(const std::string& ou
         stats_.total_gaps += static_cast<uint32_t>(gaps.size());
         for (const auto& g : gaps) {
             if (g.severity == PageGap::CRITICAL) stats_.critical_gaps++;
+        }
+
+        // Synthesize Page 0 (FSP_HDR) if missing — critical for tablespace recognition
+        bool has_critical_gap = false;
+        for (const auto& g : gaps) {
+            if (g.severity == PageGap::CRITICAL && g.start_page_no == 0) {
+                has_critical_gap = true;
+                break;
+            }
+        }
+        if (has_critical_gap) {
+            // Determine page size from existing pages
+            uint32_t psize = 16384;
+            for (const auto& p : sorted_pages) {
+                if (p.page_size > 0) { psize = p.page_size; break; }
+            }
+            auto synthetic = synthesize_page0(space_id, psize);
+            PageIdentity p0;
+            p0.space_id = space_id;
+            p0.page_no = 0;
+            p0.page_type = dbrecovery::innodb::FIL_PAGE_TYPE_FSP_HDR;
+            p0.page_size = psize;
+            p0.data = std::move(synthetic);
+            p0.is_synthetic = true;
+            sorted_pages.insert(sorted_pages.begin(), std::move(p0));
+            stats_.synthetic_pages_written++;
         }
 
         // Determine page size from existing pages

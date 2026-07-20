@@ -464,8 +464,8 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
 
     // 智能选择扫描步长：
     // - 页对齐扫描（4KB步长）用于正常情况
-    // - 细粒度扫描（512字节）用于非对齐页恢复
-    uint64_t scan_step = config_.use_page_aligned_scan ? config_.scan_step : 512;
+    // - 细粒度扫描（fine_scan_step）用于非对齐页恢复
+    uint64_t scan_step = config_.use_page_aligned_scan ? config_.scan_step : config_.fine_scan_step;
 
     auto last_progress_time = std::chrono::steady_clock::now();
     uint64_t pages_in_chunk = 0;

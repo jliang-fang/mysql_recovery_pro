@@ -100,14 +100,16 @@ inline MySQLVersion AutoDetector::detect_version_from_page0(const uint8_t* page0
         return MySQLVersion::UNKNOWN;
     }
     
-    // 读取页类型
-    uint16_t page_type = read_le<uint16_t>(page0, 16);
-    
-    // 读取空间ID
-    uint32_t space_id = read_le<uint32_t>(page0, 18);
-    
-    // 读取页大小信息
-    uint16_t page_size_field = read_le<uint16_t>(page0, 60);
+    // 读取页类型 (FIL header, big-endian, offset 24)
+    uint16_t page_type = read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS);
+
+    // 读取空间ID (FIL header, big-endian, offset 34)
+    uint32_t space_id = read_be<uint32_t>(page0, FIL_PAGE_SPACE_ID);
+
+    // 读取FSP空间标志 (FSP header, little-endian, offset 54)
+    uint32_t space_flags = read_le<uint32_t>(page0, 54);
+    // ZIP_SSIZE in bits 1-3 of FSP_SPACE_FLAGS
+    uint16_t zip_ssize = static_cast<uint16_t>((space_flags >> 1) & 0x7);
     
     // 判断版本
     if (page_type == SDI_PAGE_TYPE || page_type == 0x5a5a) {
@@ -118,7 +120,7 @@ inline MySQLVersion AutoDetector::detect_version_from_page0(const uint8_t* page0
         return MySQLVersion::VERSION_8_0;
     }
     
-    if (page_size_field != 0 && (page_size_field & 0x0FFF) < DEFAULT_PAGE_SIZE) {
+    if (zip_ssize > 0) {
         // 压缩页通常是 8.0+ 的特性
         return MySQLVersion::VERSION_8_0;
     }
@@ -137,8 +139,8 @@ inline MySQLVersion AutoDetector::detect_version_from_sdi(const uint8_t* sdi_pag
         return MySQLVersion::UNKNOWN;
     }
     
-    // SDI 页是 MySQL 8.0+ 的特性
-    uint16_t page_type = read_le<uint16_t>(sdi_page, 16);
+    // SDI 页是 MySQL 8.0+ 的特性 — FIL header is big-endian, page_type at offset 24
+    uint16_t page_type = read_be<uint16_t>(sdi_page, 24);
     if (page_type == SDI_PAGE_TYPE || page_type == 0x5a5a) {
         return MySQLVersion::VERSION_8_0;
     }
@@ -248,10 +250,12 @@ inline AutoDetector::DetectionResult AutoDetector::detect_from_file_header(const
         return result;
     }
     
-    // 读取 Page 0 的关键字段
-    uint16_t page_type = read_le<uint16_t>(file_data, 16);
-    uint32_t space_id = read_le<uint32_t>(file_data, 18);
-    uint16_t page_size_field = read_le<uint16_t>(file_data, 60);
+    // 读取 Page 0 的关键字段 (FIL header fields are big-endian)
+    uint16_t page_type = read_be<uint16_t>(file_data, FIL_PAGE_TYPE_ABS);
+    uint32_t space_id = read_be<uint32_t>(file_data, FIL_PAGE_SPACE_ID);
+    // FSP_SPACE_FLAGS at offset 54 (little-endian, 4 bytes)
+    uint32_t space_flags = read_le<uint32_t>(file_data, 54);
+    uint16_t page_size_field = static_cast<uint16_t>((space_flags >> 1) & 0x7);
     
     // 推断版本
     result.version = detect_version_from_page_type(page_type);
@@ -260,12 +264,14 @@ inline AutoDetector::DetectionResult AutoDetector::detect_from_file_header(const
     }
     
     // 推断页大小
-    if (page_size_field != 0) {
-        uint16_t zip_size = page_size_field & 0x0FFF;
-        if (zip_size > 0 && zip_size < DEFAULT_PAGE_SIZE) {
+    if (page_size_field > 0) {
+        // ZIP_SSIZE: 1=1024, 2=2048, 3=4096, 4=8192, 5=16384
+        static constexpr uint16_t zip_sizes[] = {0, 1024, 2048, 4096, 8192, 16384};
+        uint16_t zsize = (page_size_field < 6) ? zip_sizes[page_size_field] : 0;
+        if (zsize > 0 && zsize < DEFAULT_PAGE_SIZE) {
             result.is_compressed = true;
-            result.zip_size = zip_size;
-            result.page_size = zip_size;
+            result.zip_size = zsize;
+            result.page_size = zsize;
         }
     }
     

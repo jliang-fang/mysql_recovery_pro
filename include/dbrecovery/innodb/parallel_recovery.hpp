@@ -373,11 +373,11 @@ inline void ParallelPageScanner::process_page(size_t page_no) {
     ScannedPage page{};
     page.offset = static_cast<uint32_t>(offset);
     page.page_no = page_no;
-    page.page_type = read_le<uint16_t>(page_data.data(), 16);
-    page.prev_page = read_le<uint32_t>(page_data.data(), 0);
-    page.next_page = read_le<uint32_t>(page_data.data(), 4);
-    page.lsn = read_le<uint64_t>(page_data.data(), 8);
-    page.space_id = read_le<uint32_t>(page_data.data(), 24);
+    page.page_type = read_be<uint16_t>(page_data.data(), 24);
+    page.prev_page = read_be<uint32_t>(page_data.data(), 8);
+    page.next_page = read_be<uint32_t>(page_data.data(), 12);
+    page.lsn = read_be<uint64_t>(page_data.data(), 16);
+    page.space_id = read_be<uint32_t>(page_data.data(), 34);
     page.is_valid = PageScanner::is_innodb_page(page_data.data(), page_size_);
 
     {

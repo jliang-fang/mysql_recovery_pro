@@ -44,6 +44,7 @@ public:
         uint64_t offset_start = 0;    // 扫描起始偏移
         uint64_t offset_stop = UINT64_MAX; // 扫描结束偏移
         uint32_t scan_step = 4096;    // 扫描步长（默认4KB，优化性能）
+        uint32_t fine_scan_step = 512; // 精细扫描步长（用于非对齐扫描，默认512字节）
         bool scan_all_index = true;   // 扫描所有INDEX页
         bool recover_deleted = true;  // 恢复已删除记录
         bool verbose = false;         // 详细输出

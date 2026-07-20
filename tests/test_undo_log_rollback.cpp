@@ -15,6 +15,9 @@ TEST(UndoLogRollbackTest, ValidUndoLogParsing) {
     // Create a minimal undo log page with just the basic header
     std::vector<uint8_t> page(16384, 0);
 
+    // Write the FIL page type using InnoDB's big-endian encoding.
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
+
     // Write undo log page header
     // TRX_UNDO_PAGE_TYPE at offset 0
     write_le<uint16_t>(page.data(), 0, 1);  // TRX_UNDO_PAGE_TYPE = 1 (UNDO log)
@@ -51,6 +54,7 @@ TEST(UndoLogRollbackTest, ValidUndoLogParsing) {
 TEST(UndoLogRollbackTest, EmptyUndoLogPage) {
     std::vector<uint8_t> page(16384, 0);
     
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
     // Write undo log page header with no records
     write_le<uint16_t>(page.data(), 0, 1);   // TRX_UNDO_PAGE_TYPE
     write_le<uint16_t>(page.data(), 28, 40); // TRX_UNDO_PAGE_START

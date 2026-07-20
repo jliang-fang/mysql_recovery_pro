@@ -71,6 +71,10 @@ constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 17853; // 0x45BD — BLOB page (same a
 constexpr uint16_t FIL_PAGE_COMPRESSED  = 17845; // 0x45B5 — Compressed page
 /// @brief Compressed AND Encrypted page type (0x45B7 = 17847)
 constexpr uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 17847; // 0x45B7 — Compressed+Encrypted page
+/// @brief FSP_HDR (File Space Header) page type — Page 0 of every tablespace (0x45B8 = 17848)
+constexpr uint16_t FIL_PAGE_TYPE_FSP_HDR = 17848; // 0x45B8 — FSP header page
+/// @brief XDES (Extent Descriptor) page type (0x45B9 = 17849)
+constexpr uint16_t FIL_PAGE_TYPE_XDES    = 17849; // 0x45B9 — Extent descriptor page
 
 // Page type validation functions (using big-endian read values)
 inline bool is_valid_index_page_type(uint16_t type) {

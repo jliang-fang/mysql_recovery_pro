@@ -365,7 +365,7 @@ inline bool ChecksumVerifier::verify_header(const uint8_t* data, size_t size) {
     }
 
     // Validate page type is a known InnoDB page type
-    uint16_t page_type = read_le<uint16_t>(data, 22);  // FIL_PAGE_TYPE offset
+    uint16_t page_type = read_be<uint16_t>(data, 24);  // FIL_PAGE_TYPE at offset 24
     if (!verify_page_type(page_type)) {
         stats_.headers_invalid++;
         return false;
@@ -382,8 +382,8 @@ inline bool ChecksumVerifier::verify_header(const uint8_t* data, size_t size) {
     }
 
     // Verify LSN is non-zero (page number > 0 should have non-zero LSN)
-    uint32_t page_no = read_le<uint32_t>(data, 4);
-    uint64_t lsn = read_le<uint64_t>(data, 8);
+    uint32_t page_no = read_be<uint32_t>(data, 4);
+    uint64_t lsn = read_be<uint64_t>(data, 16);
     if (page_no > 0 && lsn == 0) {
         stats_.headers_invalid++;
         return false;
@@ -472,7 +472,7 @@ inline PageHealthInfo ChecksumVerifier::check_page_health(const uint8_t* data, s
     }
     
     // 检查页类型
-    uint16_t page_type = read_le<uint16_t>(data, 22);  // FIL_PAGE_TYPE at offset 22 (2 bytes)
+    uint16_t page_type = read_be<uint16_t>(data, 24);  // FIL_PAGE_TYPE at offset 24
     if (!verify_page_type(page_type)) {
         info.type_valid = false;
         info.status_message = "Invalid page type";

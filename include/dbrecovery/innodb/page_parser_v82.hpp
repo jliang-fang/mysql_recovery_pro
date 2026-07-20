@@ -260,15 +260,15 @@ inline uint16_t get_page_level_v82(const uint8_t* data) {
  * @brief 从页数据中提取页号
  */
 inline uint32_t get_page_offset_v82(const uint8_t* data) {
-    return read_le<uint32_t>(data, 20);
+    return read_be<uint32_t>(data, 4);
 }
 
 /**
  * @brief 从页数据中提取页链信息
  */
 inline std::pair<uint32_t, uint32_t> get_page_chain_v82(const uint8_t* data) {
-    uint32_t prev = read_le<uint32_t>(data, 24);
-    uint32_t next = read_le<uint32_t>(data, 28);
+    uint32_t prev = read_be<uint32_t>(data, 8);
+    uint32_t next = read_be<uint32_t>(data, 12);
     return {prev, next};
 }
 

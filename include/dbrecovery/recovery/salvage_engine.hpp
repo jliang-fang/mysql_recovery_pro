@@ -390,8 +390,34 @@ inline std::vector<SalvagedRow> SalvageEngine::salvage_l1(
             uint16_t null_bytes = (field_count + 7) / 8;
             data_start += null_bytes;
 
-            for (uint32_t f = 0; f < std::min(field_count, uint32_t(20)); f++) {
-                row.fields.push_back("<field_" + std::to_string(f) + ">");
+            // Re-read offset table entries to compute field boundaries
+            // offsets[0] = total record length, offsets[1..] = field end positions from end
+            std::vector<uint16_t> offsets;
+            offsets.push_back(record_len);
+            for (uint32_t oe = 0; oe + 1 < field_count; oe++) {
+                uint16_t val = (static_cast<uint16_t>(data[rec_off + (oe + 1) * 2 + 1]) << 8)
+                             | data[rec_off + (oe + 1) * 2];
+                offsets.push_back(val);
+            }
+
+            // Extract each field using offset table
+            // Field f (0-indexed): position = total_len - offsets[f], size = offsets[f] - offsets[f+1]
+            uint16_t total_len = record_len;
+            uint32_t n_fields_to_extract = std::min(field_count - 1, uint32_t(20));
+            for (uint32_t f = 0; f < n_fields_to_extract; f++) {
+                uint16_t field_sz = offsets[f] - offsets[f + 1];
+                uint16_t field_off = total_len - offsets[f]; // from data_start
+
+                if (field_sz > 0 && data_start + field_off + field_sz <= size) {
+                    std::ostringstream oss;
+                    for (uint16_t b = 0; b < field_sz; b++) {
+                        oss << std::hex << std::setw(2) << std::setfill('0')
+                            << static_cast<int>(data[data_start + field_off + b]);
+                    }
+                    row.fields.push_back(oss.str());
+                } else {
+                    row.fields.push_back("NULL");
+                }
             }
             rows.push_back(row);
         }
@@ -425,8 +451,35 @@ inline std::vector<SalvagedRow> SalvageEngine::salvage_l2(
             row.confidence = 0.5;
             row.recovery_method = "signature_scan";
 
-            for (uint32_t f = 0; f < std::min(field_count, uint32_t(20)); f++) {
-                row.fields.push_back("<record_field_" + std::to_string(f) + ">");
+            // Re-read offset table entries to compute field boundaries
+            std::vector<uint16_t> offsets;
+            offsets.push_back(record_len);
+            for (uint32_t oe = 0; oe + 1 < field_count; oe++) {
+                uint16_t val = (static_cast<uint16_t>(data[pos + (oe + 1) * 2 + 1]) << 8)
+                             | data[pos + (oe + 1) * 2];
+                offsets.push_back(val);
+            }
+
+            // Data area: after offset table, info_bits, and NULL bitmap
+            uint16_t data_start = pos + field_count * 2 + 1;
+            uint16_t null_bytes = (field_count + 7) / 8;
+            data_start += null_bytes;
+
+            uint32_t n_fields_to_extract = std::min(field_count - 1, uint32_t(20));
+            for (uint32_t f = 0; f < n_fields_to_extract; f++) {
+                uint16_t field_sz = offsets[f] - offsets[f + 1];
+                uint16_t field_off = record_len - offsets[f];
+
+                if (field_sz > 0 && data_start + field_off + field_sz <= size) {
+                    std::ostringstream oss;
+                    for (uint16_t b = 0; b < field_sz; b++) {
+                        oss << std::hex << std::setw(2) << std::setfill('0')
+                            << static_cast<int>(data[data_start + field_off + b]);
+                    }
+                    row.fields.push_back(oss.str());
+                } else {
+                    row.fields.push_back("NULL");
+                }
             }
             rows.push_back(row);
             pos += record_len; // Skip past this record

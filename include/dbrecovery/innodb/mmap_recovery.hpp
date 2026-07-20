@@ -230,7 +230,7 @@ inline std::vector<std::map<std::string, std::string>> MMapRecovery::parse_recor
         }
 
         // 读取页类型
-        uint16_t page_type = read_le<uint16_t>(page_data, 16);
+        uint16_t page_type = read_be<uint16_t>(page_data, 24);
         if (page_type != FIL_PAGE_INDEX) {
             continue;
         }
@@ -424,11 +424,11 @@ inline std::vector<ScannedPage> MMapScanner::scan() {
         ScannedPage page{};
         page.offset = static_cast<uint32_t>(page_no * page_size_);
         page.page_no = page_no;
-        page.page_type = read_le<uint16_t>(page_data, 16);
-        page.prev_page = read_le<uint32_t>(page_data, 0);
-        page.next_page = read_le<uint32_t>(page_data, 4);
-        page.lsn = read_le<uint64_t>(page_data, 8);
-        page.space_id = read_le<uint32_t>(page_data, 24);
+        page.page_type = read_be<uint16_t>(page_data, 24);
+        page.prev_page = read_be<uint32_t>(page_data, 8);
+        page.next_page = read_be<uint32_t>(page_data, 12);
+        page.lsn = read_be<uint64_t>(page_data, 16);
+        page.space_id = read_be<uint32_t>(page_data, 34);
         page.is_valid = PageScanner::is_innodb_page(page_data, page_size_);
 
         pages_.push_back(page);

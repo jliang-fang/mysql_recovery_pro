@@ -11,6 +11,9 @@ namespace {
 
 void write_page_header(std::vector<uint8_t>& page, uint16_t page_free,
                        uint16_t record_count) {
+    dbrecovery::innodb::write_be<uint16_t>(
+        page.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS,
+        dbrecovery::innodb::FIL_PAGE_UNDO_LOG);
     dbrecovery::innodb::write_le<uint16_t>(page.data(), 0, 1);
     dbrecovery::innodb::write_le<uint16_t>(page.data(), 28, 40);
     dbrecovery::innodb::write_le<uint16_t>(page.data(), 30, page_free);
@@ -85,6 +88,52 @@ TEST(UndoLogPageTest, FieldCanEndAtPageFree) {
     ASSERT_EQ(entries.size(), 1u);
     ASSERT_EQ(entries[0].fields.size(), 1u);
     EXPECT_EQ(entries[0].fields[0].size, 2);
+}
+
+TEST(UndoLogPageTest, RejectsNonUndoPage) {
+    std::vector<uint8_t> page(16384, 0);
+    write_page_header(page, 44, 1);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    page[40] = 1;
+    page[41] = 1;
+    page[42] = 1;
+    page[43] = 'x';
+
+    UndoLogParser parser;
+    EXPECT_TRUE(parser.parse_undo_log_page(page.data(), page.size(), 0).empty());
+}
+
+TEST(UndoLogPageTest, UsesUpdateRecordHeaderSize) {
+    std::vector<uint8_t> page(16384, 0);
+    page[40] = 13;
+    page[41] = 1;
+    write_le<uint16_t>(page.data(), 42, 7);
+    write_le<uint16_t>(page.data(), 44, 9);
+    page[46] = 2;
+    page[47] = 'o';
+    page[48] = 'k';
+    write_page_header(page, 49, 1);
+
+    UndoLogParser parser;
+    const auto entries = parser.parse_undo_log_page(page.data(), page.size(), 0);
+
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].page_no, 7);
+    EXPECT_EQ(entries[0].page_offset, 9);
+    ASSERT_EQ(entries[0].fields.size(), 1u);
+    EXPECT_EQ(std::string(entries[0].fields[0].data.begin(),
+                          entries[0].fields[0].data.end()), "ok");
+}
+
+TEST(UndoLogPageTest, RejectsTruncatedLengthPrefix) {
+    std::vector<uint8_t> page(16384, 0);
+    page[40] = 1;
+    page[41] = 1;
+    page[42] = 0x80;
+    write_page_header(page, 44, 1);
+
+    UndoLogParser parser;
+    EXPECT_TRUE(parser.parse_undo_log_page(page.data(), page.size(), 0).empty());
 }
 
 // Test empty undo log page
