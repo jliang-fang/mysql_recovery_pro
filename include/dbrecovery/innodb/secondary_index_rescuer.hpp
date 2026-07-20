@@ -216,120 +216,223 @@ private:
         return read_le<uint16_t>(page_data, 64);
     }
 
+    /**
+     * @brief Extract a human-readable field value from raw page data
+     */
+    static std::string extract_field_value(
+        const uint8_t* data, size_t offset, uint32_t length,
+        const catalog::ColumnInfo& col) {
+        if (length == 0) return "";
+        if (offset + length > 1048576) return "?"; // sanity
+
+        switch (col.mysql_type_id) {
+            case dbrecovery::innodb::mysql_types::TINY:
+                return std::to_string(static_cast<int>(data[offset]));
+            case dbrecovery::innodb::mysql_types::SHORT:
+                if (length >= 2) return std::to_string(read_le<uint16_t>(data, offset));
+                return "?";
+            case dbrecovery::innodb::mysql_types::LONG:
+                if (length >= 4) return std::to_string(read_le<uint32_t>(data, offset));
+                return "?";
+            case dbrecovery::innodb::mysql_types::LONGLONG:
+                if (length >= 8) return std::to_string(read_le<uint64_t>(data, offset));
+                return "?";
+            case dbrecovery::innodb::mysql_types::FLOAT: {
+                if (length >= 4) { float v; memcpy(&v, data + offset, 4); return std::to_string(v); }
+                return "?";
+            }
+            case dbrecovery::innodb::mysql_types::DOUBLE: {
+                if (length >= 8) { double v; memcpy(&v, data + offset, 8); return std::to_string(v); }
+                return "?";
+            }
+            case dbrecovery::innodb::mysql_types::VARCHAR:
+            case dbrecovery::innodb::mysql_types::VAR_STRING:
+            case dbrecovery::innodb::mysql_types::STRING:
+                return std::string(reinterpret_cast<const char*>(data + offset), length);
+            default: {
+                std::ostringstream oss;
+                for (uint32_t i = 0; i < length; i++)
+                    oss << std::hex << std::setw(2) << std::setfill('0')
+                        << static_cast<int>(data[offset + i]);
+                return oss.str();
+            }
+        }
+    }
+
+    /**
+     * @brief Parse secondary index leaf records using proper COMPACT/DYNAMIC format
+     *
+     * Algorithm:
+     *   1. Start at PAGE_INFIMUM_REC_OFFSET_ABS (54)
+     *   2. Read record header: info_bits, next_offset, heap_no, n_fields
+     *   3. Parse variable-length field list (schema-aware, only for non-fixed-length columns)
+     *   4. Parse NULL bitmap ((n_fields + 7) / 8 bytes)
+     *   5. Read field data: NULL check → var_len entry → fixed_size → type-specific decode
+     *   6. Follow next_offset chain, stop at SUPREMUM
+     */
     std::vector<SecLeafRecord> parse_secondary_leaf_records(
         const uint8_t* page_data, size_t page_size) {
 
         std::vector<SecLeafRecord> records;
-        const size_t PAGE_HEADER_OFFSET = 38;
+        if (!page_data || page_size < 56) return records;
 
-        uint16_t page_n_recs = read_le<uint16_t>(page_data, PAGE_HEADER_OFFSET + 16);
-        uint16_t heap_top = read_le<uint16_t>(page_data, PAGE_HEADER_OFFSET + 20);
+        uint16_t heap_top = read_le<uint16_t>(page_data, 40);
+        if (heap_top < 54 || heap_top > page_size) return records;
 
-        if (page_n_recs == 0 || heap_top < PAGE_HEADER_OFFSET + 56) return records;
+        // Resolve secondary index and primary key columns from schema
+        std::vector<catalog::ColumnInfo> all_cols;
+        size_t n_index_cols = 0;
+        bool found_sec = false;
 
-        // INFIMUM record is at PAGE_HEADER + 56 + 10 (after page directory)
-        uint16_t pos = PAGE_HEADER_OFFSET + 56 + 10;
+        for (const auto& idx : schema_.indexes) {
+            if (idx.is_primary) continue;
+            if (found_sec) continue;
+            found_sec = true;
+            n_index_cols = idx.columns.size();
 
-        for (uint16_t i = 0; i < page_n_recs && pos + 10 < heap_top && pos < page_size; i++) {
-            // Skip INFIMUM (first record)
-            if (i == 0) {
-                // INFIMUM: [2B next_offset] [1B info]
-                uint16_t next_off = read_le<uint16_t>(page_data, pos);
-                if (next_off == 0 || next_off <= pos) break;
-                pos = next_off;
+            // Index columns first (in index order)
+            for (const auto& col_name : idx.columns) {
+                for (const auto& [ord, col] : schema_.columns) {
+                    if (col.name == col_name) { all_cols.push_back(col); break; }
+                }
+            }
+        }
+
+        // PK columns appended after index columns
+        for (const auto& idx : schema_.indexes) {
+            if (!idx.is_primary) continue;
+            for (const auto& col_name : idx.columns) {
+                bool dup = false;
+                for (const auto& c : all_cols) { if (c.name == col_name) { dup = true; break; } }
+                if (dup) continue;
+                for (const auto& [ord, col] : schema_.columns) {
+                    if (col.name == col_name) { all_cols.push_back(col); break; }
+                }
+            }
+            break;
+        }
+
+        size_t n_total_cols = all_cols.size();
+        if (n_total_cols == 0) return records;
+
+        // Start at INFIMUM (absolute offset 54)
+        uint16_t pos = PAGE_INFIMUM_REC_OFFSET_ABS;
+        if (pos + 5 > page_size) return records;
+
+        // Read INFIMUM's next_offset → first user record
+        uint16_t next_off = read_le<uint16_t>(page_data, pos + 1) & 0x3FFF;
+        if (next_off <= pos || next_off >= heap_top) return records;
+        pos = next_off;
+
+        // Chain traversal
+        while (pos + 5 < page_size && pos < heap_top) {
+            uint8_t info_bits = page_data[pos];
+            uint8_t status = info_bits & 0x07;
+
+            if (status == REC_STATUS_SUPREMUM) break;
+
+            uint16_t next_offset = read_le<uint16_t>(page_data, pos + 1) & 0x3FFF;
+            uint16_t heap_no = read_le<uint16_t>(page_data, pos + 3) & 0x3FFF;
+
+            // Skip system records (INFIMUM=0, SUPREMUM=1 are skipped; user records start at heap_no≥2)
+            if (heap_no < 2) {
+                if (next_offset <= pos || next_offset >= heap_top) break;
+                pos = next_offset;
                 continue;
             }
 
-            // Read offset table at record start
-            uint16_t first_offset = read_le<uint16_t>(page_data, pos);
-            if (first_offset <= pos || first_offset > page_size) {
-                pos += 5;
-                continue;
+            // Parse n_fields: high 5 bits from info_bits[7:3], low 4 bits from byte 5[7:4]
+            uint16_t n_fields = (info_bits & 0xF8) >> 3;
+            if (pos + 5 < page_size) {
+                n_fields = static_cast<uint16_t>((n_fields << 4) | (page_data[pos + 5] >> 4));
+            }
+            if (n_fields == 0) break;
+
+            // Count variable-length columns for var_len list size
+            size_t n_var = 0;
+            for (size_t i = 0; i < n_total_cols && i < n_fields; i++) {
+                if (!catalog::TableSchema::is_fixed_length(all_cols[i])) n_var++;
             }
 
-            // Count offset entries
-            uint16_t prev_off = first_offset;
-            uint16_t num_offsets = 1;
-            for (uint16_t o = 2; pos + o + 2 <= page_size && num_offsets < 50; o += 2) {
-                uint16_t nxt = read_le<uint16_t>(page_data, pos + o);
-                if (nxt == 0 || nxt >= prev_off) break;
-                prev_off = nxt;
-                num_offsets++;
+            // Parse variable-length field list (at offset + 6)
+            size_t var_off = pos + 6;
+            size_t var_pos = 0;
+            std::vector<uint16_t> var_lens;
+            var_lens.reserve(n_var);
+            for (size_t i = 0; i < n_var; i++) {
+                if (var_off + var_pos >= page_size) break;
+                uint8_t first = page_data[var_off + var_pos];
+                if (first < 0x80) {
+                    var_lens.push_back(first);
+                    var_pos += 1;
+                } else {
+                    if (var_off + var_pos + 1 >= page_size) break;
+                    uint16_t len = static_cast<uint16_t>(((first & 0x7F) << 8) | page_data[var_off + var_pos + 1]);
+                    var_lens.push_back(len);
+                    var_pos += 2;
+                }
             }
 
-            // Field count = offset entries - 2 (TRX_ID + ROLL_PTR)
-            uint16_t num_fields = (num_offsets >= 3) ? num_offsets - 2 : num_offsets;
+            // Parse NULL bitmap: ((n_fields + 7) / 8) bytes after var_len list
+            size_t null_bytes = (n_fields + 7) / 8;
+            size_t null_off = var_off + var_pos;
+            const uint8_t* null_bits = (null_off + null_bytes <= page_size) ? page_data + null_off : nullptr;
 
-            // Record data starts at first_offset
-            if (first_offset + 10 > page_size) {
-                pos = first_offset;
-                continue;
-            }
-
-            // Extract field values as hex strings at record data position
+            // Parse field data after NULL bitmap
+            size_t data_off = null_off + null_bytes;
+            size_t var_idx = 0;
             SecLeafRecord rec;
-            uint16_t data_pos = first_offset;
 
-            // Determine how many index columns vs PK columns
-            // Without schema, we extract all and let caller figure it out
-            uint16_t sec_col_count = schema_.indexes.empty() ? 1 :
-                std::min(num_fields, static_cast<uint16_t>(
-                    schema_.indexes.front().columns.size()));
+            for (size_t i = 0; i < n_total_cols && i < n_fields; i++) {
+                const auto& col = all_cols[i];
+                std::string col_name = col.name;
 
-            for (uint16_t f = 0; f < num_fields && data_pos + 1 < page_size; f++) {
-                // Simple extraction: read VARCHAR-like field (length-prefixed)
-                uint8_t len_byte = page_data[data_pos];
-                data_pos++;
-
-                std::string val;
-                if (len_byte < 128) {
-                    // Single byte length
-                    if (data_pos + len_byte <= page_size) {
-                        val = std::string(reinterpret_cast<const char*>(page_data + data_pos), len_byte);
-                        data_pos += len_byte;
-                    }
-                } else {
-                    // Two-byte length
-                    if (data_pos + 1 <= page_size) {
-                        uint16_t len2 = ((len_byte & 0x7F) << 8) | page_data[data_pos];
-                        data_pos++;
-                        if (data_pos + len2 <= page_size) {
-                            val = std::string(reinterpret_cast<const char*>(page_data + data_pos), len2);
-                            data_pos += len2;
-                        }
+                // NULL bitmap check
+                if (col.is_nullable && null_bits) {
+                    size_t byte_idx = i / 8;
+                    size_t bit_idx = i % 8;
+                    if (byte_idx < null_bytes && (null_bits[byte_idx] & (1 << bit_idx))) {
+                        if (i < n_index_cols)
+                            rec.index_columns.emplace_back(col_name, "NULL");
+                        else
+                            rec.pk_columns.emplace_back(col_name, "NULL");
+                        continue;
                     }
                 }
 
-                if (val.empty()) val = "?";
-
-                // Assign to column names
-                std::string col_name;
-                if (f < sec_col_count && f < schema_.columns.size()) {
-                    // Find the column by ordinal
-                    for (const auto& [ord, col] : schema_.columns) {
-                        if (ord == f + 1) { col_name = col.name; break; }
-                    }
-                    if (col_name.empty()) col_name = "sec_col_" + std::to_string(f);
-                    rec.index_columns.push_back({col_name, val});
+                // Determine field length
+                uint32_t field_len;
+                if (!catalog::TableSchema::is_fixed_length(col)) {
+                    if (var_idx >= var_lens.size()) break;
+                    field_len = var_lens[var_idx++];
                 } else {
-                    uint16_t pk_idx = f - sec_col_count;
-                    if (pk_idx < schema_.columns.size()) {
-                        for (const auto& [ord, col] : schema_.columns) {
-                            if (ord == pk_idx + 1) { col_name = col.name; break; }
-                        }
-                    }
-                    if (col_name.empty()) col_name = "pk_col_" + std::to_string(pk_idx);
-                    rec.pk_columns.push_back({col_name, val});
+                    field_len = schema_.get_column_size(col);
                 }
+
+                if (field_len == 0 || data_off + field_len > page_size) {
+                    if (i < n_index_cols)
+                        rec.index_columns.emplace_back(col_name, "?");
+                    else
+                        rec.pk_columns.emplace_back(col_name, "?");
+                    break;
+                }
+
+                std::string value = extract_field_value(page_data, data_off, field_len, col);
+
+                if (i < n_index_cols)
+                    rec.index_columns.emplace_back(col_name, value);
+                else
+                    rec.pk_columns.emplace_back(col_name, value);
+
+                data_off += field_len;
             }
 
             if (!rec.index_columns.empty() || !rec.pk_columns.empty()) {
-                records.push_back(rec);
+                records.push_back(std::move(rec));
             }
 
-            // Advance to next record
-            uint16_t next_offset = read_le<uint16_t>(page_data, first_offset - 2);
-            if (next_offset <= first_offset || next_offset >= heap_top) break;
+            // Follow next_offset chain
+            if (next_offset <= pos || next_offset >= heap_top) break;
             pos = next_offset;
         }
 
