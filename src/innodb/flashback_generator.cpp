@@ -690,6 +690,39 @@ static std::string escape_json_string(const std::string& s) {
     return result;
 }
 
+// ==================== SQL value formatting helper ====================
+
+/**
+ * @brief Check if a MySQL type ID needs single-quote wrapping in SQL
+ */
+static bool sql_type_needs_quoting(int type_id) {
+    switch (type_id) {
+        case mysql_types::TINY:
+        case mysql_types::SHORT:
+        case mysql_types::LONG:
+        case mysql_types::LONGLONG:
+        case mysql_types::INT24:
+        case mysql_types::FLOAT:
+        case mysql_types::DOUBLE:
+        case mysql_types::YEAR:
+        case mysql_types::BIT:
+            return false;
+        default:
+            return true;
+    }
+}
+
+/**
+ * @brief Look up ColumnInfo by column name from the schema
+ */
+static const catalog::ColumnInfo* find_column_by_name(
+    const catalog::TableSchema& schema, const std::string& name) {
+    for (const auto& [ord, col] : schema.columns) {
+        if (col.name == name) return &col;
+    }
+    return nullptr;
+}
+
 // ==================== FlashbackRecord::to_sql ====================
 
 std::string FlashbackRecord::to_sql(const catalog::TableSchema& schema) const {
@@ -722,7 +755,24 @@ std::string FlashbackRecord::to_sql(const catalog::TableSchema& schema) const {
             if (f.is_null) {
                 sql << "NULL";
             } else {
-                sql << "'" << escape_sql_string(f.human_value) << "'";
+                // Look up column type from schema for type-aware formatting
+                const auto* col = find_column_by_name(schema, f.column_name);
+                if (col && !sql_type_needs_quoting(static_cast<int>(col->mysql_type_id))) {
+                    // Numeric types — unquoted
+                    sql << f.human_value;
+                } else if (col && (col->mysql_type_id == mysql_types::BLOB ||
+                                   col->mysql_type_id == mysql_types::TINY_BLOB ||
+                                   col->mysql_type_id == mysql_types::MEDIUM_BLOB ||
+                                   col->mysql_type_id == mysql_types::LONG_BLOB ||
+                                   col->mysql_type_id == mysql_types::JSON ||
+                                   col->mysql_type_id == mysql_types::GEOMETRY ||
+                                   col->mysql_type_id == mysql_types::NEWDECIMAL)) {
+                    // BLOB/JSON/GEOMETRY — use hex literal
+                    sql << "x'" << f.hex_value << "'";
+                } else {
+                    // String/temporal types — quoted with escaping
+                    sql << "'" << escape_sql_string(f.human_value) << "'";
+                }
             }
             first = false;
         }

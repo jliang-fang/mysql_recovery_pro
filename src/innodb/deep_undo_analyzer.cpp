@@ -12,6 +12,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 
 #include <cstring>
+#include <cstdio>
 #include <iostream>
 #include <algorithm>
 #include <chrono>
@@ -51,6 +52,127 @@ constexpr uint32_t MAX_CHAIN_DEPTH = 1000;
 
 // Sentinel values
 // FIL_NULL is defined in page_defs.hpp
+
+// ==================== SQL value formatting helper ====================
+
+/**
+ * @brief Format a raw value for SQL output based on column type
+ *
+ * Produces type-aware SQL literals:
+ *   - Numeric types: unquoted (e.g. 42, 3.14)
+ *   - String/temporal types: quoted with escaping (e.g. 'hello')
+ *   - BLOB/JSON types: hex literal (e.g. x'deadbeef')
+ *   - NULL: unquoted NULL
+ */
+static std::string format_sql_value(const std::vector<uint8_t>& raw_value,
+                                     const catalog::ColumnInfo& col) {
+    if (raw_value.empty()) return "NULL";
+
+    int type_id = static_cast<int>(col.mysql_type_id);
+
+    // Build hex representation for fallback
+    std::string hex;
+    for (auto b : raw_value) {
+        char buf[3];
+        std::snprintf(buf, sizeof(buf), "%02x", b);
+        hex += buf;
+    }
+
+    switch (type_id) {
+        // Numeric types — unquoted, decode from raw bytes
+        case mysql_types::TINY: {
+            int8_t v = static_cast<int8_t>(raw_value[0]);
+            return std::to_string(static_cast<int>(v));
+        }
+        case mysql_types::SHORT: {
+            if (raw_value.size() < 2) return hex;
+            int16_t v = static_cast<int16_t>(
+                raw_value[0] | (raw_value[1] << 8));
+            return std::to_string(v);
+        }
+        case mysql_types::LONG: {
+            if (raw_value.size() < 4) return hex;
+            uint32_t v = 0;
+            for (size_t i = 0; i < 4 && i < raw_value.size(); i++)
+                v |= static_cast<uint32_t>(raw_value[i]) << (i * 8);
+            return std::to_string(static_cast<int32_t>(v));
+        }
+        case mysql_types::LONGLONG: {
+            if (raw_value.size() < 8) return hex;
+            uint64_t v = 0;
+            for (size_t i = 0; i < 8 && i < raw_value.size(); i++)
+                v |= static_cast<uint64_t>(raw_value[i]) << (i * 8);
+            return std::to_string(static_cast<int64_t>(v));
+        }
+        case mysql_types::INT24: {
+            if (raw_value.size() < 3) return hex;
+            uint32_t v = raw_value[0] | (raw_value[1] << 8) | (raw_value[2] << 16);
+            if (v & 0x800000) v |= 0xFF000000;
+            return std::to_string(static_cast<int32_t>(v));
+        }
+        case mysql_types::FLOAT: {
+            if (raw_value.size() < 4) return hex;
+            float f;
+            std::memcpy(&f, raw_value.data(), 4);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.15g", static_cast<double>(f));
+            return buf;
+        }
+        case mysql_types::DOUBLE: {
+            if (raw_value.size() < 8) return hex;
+            double d;
+            std::memcpy(&d, raw_value.data(), 8);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.15g", d);
+            return buf;
+        }
+        case mysql_types::YEAR: {
+            uint32_t y = 1900 + raw_value[0];
+            return std::to_string(y);
+        }
+        case mysql_types::BIT: {
+            uint64_t val = 0;
+            for (size_t i = 0; i < raw_value.size() && i < 8; i++)
+                val = (val << 8) | raw_value[i];
+            return std::to_string(val);
+        }
+
+        // BLOB/JSON/GEOMETRY/DECIMAL — hex literal
+        case mysql_types::BLOB:
+        case mysql_types::TINY_BLOB:
+        case mysql_types::MEDIUM_BLOB:
+        case mysql_types::LONG_BLOB:
+        case mysql_types::JSON:
+        case mysql_types::GEOMETRY:
+        case mysql_types::NEWDECIMAL:
+        case mysql_types::DECIMAL:
+            return "x'" + hex + "'";
+
+        // String/temporal types — quoted with escaping
+        default: {
+            bool printable = true;
+            for (auto b : raw_value) {
+                if (b < 0x20 && b != '\t' && b != '\n') {
+                    printable = false;
+                    break;
+                }
+            }
+            if (printable) {
+                std::string s(raw_value.begin(), raw_value.end());
+                // Escape single quotes for SQL
+                size_t pos = 0;
+                while ((pos = s.find('\'', pos)) != std::string::npos) {
+                    s.insert(pos, "'");
+                    pos += 2;
+                }
+                return "'" + s + "'";
+            }
+            // Non-printable string data — fall back to hex
+            return "x'" + hex + "'";
+        }
+    }
+}
+
 } // anonymous namespace
 
 // ==================== UndoPageManager Implementation ====================
@@ -740,21 +862,15 @@ std::vector<FlashbackResult> DeepUndoAnalyzer::flashback_deletes(
                 first = false;
 
                 // Find the undo field that matches this column by field_no
-                // field_no in undo records is 1-based and corresponds to the column ordinal
-                // field_no=1 is old DB_ROLL_PTR (skip), field_no=2+ are actual column values
+                // field_no=1 is old DB_ROLL_PTR (skip), field_no=2+ maps to ord+1
+                // e.g. field_no=2 → ord=1 (first user column)
                 bool found = false;
                 for (const auto& fv : rec.old_fields) {
-                    if (fv.field_no == static_cast<uint16_t>(ord)) {
+                    if (fv.field_no == static_cast<uint16_t>(ord + 1)) {
                         if (fv.is_null) {
                             sql << "NULL";
                         } else {
-                            // Hex-encode binary data to avoid SQL injection / encoding issues
-                            sql << "x'";
-                            for (auto b : fv.old_value) {
-                                sql << std::hex << std::setw(2) << std::setfill('0')
-                                    << static_cast<int>(b);
-                            }
-                            sql << "'";
+                            sql << format_sql_value(fv.old_value, col);
                         }
                         col_count++;
                         found = true;
@@ -954,21 +1070,24 @@ std::string RowVersionHistory::to_insert_sql(const catalog::TableSchema& schema)
     if (!undo_chain.empty()) {
         const auto& newest = undo_chain.back(); // oldest-first, so back() is newest
         first = true;
-        size_t field_idx = 0;
         for (const auto& [ord, col] : schema.columns) {
             if (!first) sql << ", ";
             first = false;
 
-            if (field_idx < newest.old_fields.size()) {
-                const auto& fv = newest.old_fields[field_idx];
-                if (fv.is_null) {
-                    sql << "NULL";
-                } else {
-                    sql << "'" << std::string(
-                        fv.old_value.begin(), fv.old_value.end()) << "'";
+            // Match by field_no: field_no=1 is DB_ROLL_PTR (skip), field_no=2+ maps to ord+1
+            bool found = false;
+            for (const auto& fv : newest.old_fields) {
+                if (fv.field_no == static_cast<uint16_t>(ord + 1)) {
+                    if (fv.is_null) {
+                        sql << "NULL";
+                    } else {
+                        sql << format_sql_value(fv.old_value, col);
+                    }
+                    found = true;
+                    break;
                 }
-                field_idx++;
-            } else {
+            }
+            if (!found) {
                 sql << "DEFAULT";
             }
         }
