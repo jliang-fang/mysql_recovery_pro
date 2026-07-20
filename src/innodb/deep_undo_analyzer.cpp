@@ -265,30 +265,8 @@ UndoRecordV2Parser::read_field(
 uint64_t UndoRecordV2Parser::extract_prev_ptr_from_field(
     const std::vector<uint8_t>& field_data) {
 
-    // DB_ROLL_PTR stored in undo log fields:
-    // MySQL 5.6/5.7: 6 bytes (4B page_no + 2B offset, little-endian)
-    // MySQL 8.0+: 7 bytes (4B page_no + 2B offset + 1B flags, little-endian)
-    //
-    //   bytes[0..3] = page_no (LE)
-    //   bytes[4..5] = offset (LE)
-    //   bytes[6]    = flags (8.0+, ignored)
-    //
-    // Returns as uint64_t encoding compatible with parse_roll_ptr():
-    //   bits [31:0]  = page_no
-    //   bits [47:32] = offset
-    //   bits [55:48] = flags (8.0+, masked out by parse_roll_ptr)
-    if (field_data.size() >= 6) {
-        uint32_t page_no = read_le<uint32_t>(field_data.data(), 0);
-        uint32_t offset  = read_le<uint16_t>(field_data.data(), 4);
-
-        if (page_no != 0 && page_no != FIL_NULL) {
-            // Encode as page_no in lower 32 bits, offset in bits [47:32]
-            // This matches the encoding expected by parse_roll_ptr()
-            return page_no | (static_cast<uint64_t>(offset) << 32);
-        }
-    }
-
-    return 0;
+    // Delegate to RollPtrDecoder for unified multi-version support
+    return RollPtrDecoder::extract_prev_ptr_from_field(field_data);
 }
 
 std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
@@ -420,30 +398,13 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
         // Try MySQL 8.0+ format first (7-byte roll_ptr at offset+14)
         if (data_size - offset >= ROLL_PTR_OFFSET + ROLL_PTR_LEN_80) {
             header_size = ROLL_PTR_OFFSET + ROLL_PTR_LEN_80;
-            // Read 7 bytes big-endian (MySQL InnoDB format)
-            uint64_t ptr_val = 0;
-            for (int i = 0; i < ROLL_PTR_LEN_80; i++) {
-                ptr_val = (ptr_val << 8) | page_data[offset + ROLL_PTR_OFFSET + i];
-            }
-            // Internal encoding: page_no in lower 32 bits, offset in bits [47:32]
-            // MySQL 8.0+ 7-byte roll_ptr: page_no = ptr_val >> 20, offset = ptr_val & 0x3FFFF
-            // Convert to internal format: page_no | (offset << 32)
-            uint32_t page_no = static_cast<uint32_t>(ptr_val >> 20);
-            uint32_t off     = static_cast<uint32_t>(ptr_val & 0x3FFFF);
-            rec.prev_undo_ptr = static_cast<uint64_t>(page_no) |
-                                (static_cast<uint64_t>(off) << 32);
+            rec.prev_undo_ptr = RollPtrDecoder::decode_storage_to_internal(
+                page_data + offset + ROLL_PTR_OFFSET, ROLL_PTR_LEN_80);
         } else if (data_size - offset >= ROLL_PTR_OFFSET + ROLL_PTR_LEN_56) {
             // Fallback to MySQL 5.6/5.7 format (6-byte roll_ptr at offset+14)
             header_size = ROLL_PTR_OFFSET + ROLL_PTR_LEN_56;
-            uint64_t ptr_val = 0;
-            for (int i = 0; i < ROLL_PTR_LEN_56; i++) {
-                ptr_val = (ptr_val << 8) | page_data[offset + ROLL_PTR_OFFSET + i];
-            }
-            // MySQL 5.6/5.7 6-byte roll_ptr: page_no = ptr_val >> 20, offset = ptr_val & 0x3FFFF
-            uint32_t page_no = static_cast<uint32_t>(ptr_val >> 20);
-            uint32_t off     = static_cast<uint32_t>(ptr_val & 0x3FFFF);
-            rec.prev_undo_ptr = static_cast<uint64_t>(page_no) |
-                                (static_cast<uint64_t>(off) << 32);
+            rec.prev_undo_ptr = RollPtrDecoder::decode_storage_to_internal(
+                page_data + offset + ROLL_PTR_OFFSET, ROLL_PTR_LEN_56);
         } else {
             // Fallback: minimal header, fields start right after the basic header
             header_size = 8; // 2 + 4 + 2

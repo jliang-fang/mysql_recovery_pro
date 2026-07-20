@@ -33,6 +33,7 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/roll_ptr_decoder.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -438,34 +439,24 @@ private:
     /**
      * @brief Parse DB_ROLL_PTR into (page_no, offset)
      *
-     * MySQL 5.6/5.7: 6-byte DB_ROLL_PTR stored as [4B page_no, 2B offset] (LE)
-     * MySQL 8.0+: 7-byte DB_ROLL_PTR stored as [4B page_no, 2B offset, 1B flags] (LE)
-     * When loaded as uint64_t in LE: bits [31:0] = page_no, bits [47:32] = offset
-     * The 7th byte (flags in 8.0+) occupies bits [55:48] and is masked out.
-     *
-     * @param roll_ptr  The DB_ROLL_PTR value (6 or 7 bytes loaded as uint64_t)
-     * @return (page_no, offset_within_page)
+     * Delegates to RollPtrDecoder for unified multi-version support.
+     * @see RollPtrDecoder::decode()
      */
     static std::pair<uint32_t, uint32_t> parse_roll_ptr(uint64_t roll_ptr) {
-        // MySQL 5.6/5.7: 6-byte DB_ROLL_PTR = [4B page_no, 2B offset] (LE)
-        // MySQL 8.0+: 7-byte DB_ROLL_PTR = [4B page_no, 2B offset, 1B flags] (LE)
-        // roll_ptr is stored as: lower 32 bits = page_no, bits 32-47 = offset
-        uint32_t page_no = static_cast<uint32_t>(roll_ptr & 0xFFFFFFFF);
-        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & 0xFFFF);
-        return {page_no, offset};
+        auto decoded = RollPtrDecoder::decode(roll_ptr);
+        return {decoded.page_no, decoded.offset};
     }
 
     /**
-     * @brief Read a 6-byte prev_undo_ptr from page data at offset
+     * @brief Read a 6/7-byte prev_undo_ptr from page data at offset
      *
-     * Format: [4 bytes page_no, 2 bytes offset]
-     * Returns as uint64_t: ((uint64_t)page_no << 32) | offset
+     * Delegates to RollPtrDecoder for unified multi-version support.
+     * Attempts 7-byte (MySQL 8.0+) format first, falls back to 6-byte (5.6/5.7).
+     *
+     * @see RollPtrDecoder::decode_storage()
      */
     static uint64_t read_prev_undo_ptr(const uint8_t* page_data, size_t offset) {
-        uint32_t page_no = read_le<uint32_t>(page_data, offset);
-        uint32_t off     = read_le<uint16_t>(page_data, offset + 4);
-        if (page_no == 0 || page_no == FIL_NULL) return 0;
-        return static_cast<uint64_t>(page_no) | (static_cast<uint64_t>(off) << 32);
+        return RollPtrDecoder::decode_storage_to_internal(page_data + offset, 7);
     }
 
     /**

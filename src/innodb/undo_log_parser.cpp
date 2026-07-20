@@ -9,6 +9,7 @@
 #include "dbrecovery/innodb/undo_log_parser.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/roll_ptr_decoder.hpp"
 #include <cstring>
 #include <iostream>
 #include <fstream>
@@ -473,37 +474,30 @@ std::optional<uint64_t> parse_trx_id_from_record(
 
 /**
  * @brief Parse rollback pointer from undo log record
- * 
+ *
  * The rollback pointer (roll_ptr) is stored after the transaction ID and
  * contains information about where to find the previous version of the record.
- * 
- * Format (7 bytes):
- * - bits 0-41: page number (42 bits)
- * - bits 42-55: offset within page (14 bits)
- * - bits 56-63: reserved/flags
- * 
+ *
+ * Delegates to RollPtrDecoder for unified multi-version support.
+ *
  * @param record_data The undo log record data
  * @param offset Offset to start of rollback pointer
  * @return Rollback pointer as tuple (page_no, offset) or nullopt
  */
 std::optional<std::tuple<uint32_t, uint16_t>> parse_roll_ptr_from_record(
     const std::vector<uint8_t>& record_data, size_t offset) {
-    
-    if (offset + 7 > record_data.size()) {
+
+    if (offset + 6 > record_data.size()) {
         return std::nullopt;
     }
-    
-    // Read 6 bytes (48 bits) for page number and offset
-    uint64_t roll_ptr = 0;
-    for (int i = 0; i < 6; i++) {
-        roll_ptr |= (static_cast<uint64_t>(record_data[offset + i]) << (i * 8));
+
+    // Use RollPtrDecoder for field data format (LE: 4B page_no + 2B offset)
+    auto decoded = RollPtrDecoder::decode_field_data(record_data.data() + offset, 6);
+    if (!decoded.is_valid()) {
+        return std::nullopt;
     }
-    
-    // Extract page number (lower 42 bits) and offset (next 14 bits)
-    uint32_t page_no = static_cast<uint32_t>(roll_ptr & 0x3FFFFFFFFFFULL);  // 42 bits
-    uint16_t page_offset = static_cast<uint16_t>((roll_ptr >> 42) & 0x3FFF);  // 14 bits
-    
-    return std::make_tuple(page_no, page_offset);
+
+    return std::make_tuple(decoded.page_no, static_cast<uint16_t>(decoded.offset));
 }
 
 std::optional<std::tuple<uint64_t, uint32_t, uint32_t>> UndoLogParser::find_transaction_by_trx_id(
