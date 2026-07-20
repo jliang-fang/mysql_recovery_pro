@@ -485,6 +485,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string filesystem_type = parser_.get_option("filesystem", "ext4");
     std::transform(filesystem_type.begin(), filesystem_type.end(), filesystem_type.begin(), ::tolower);
 
+    // Determine recovery type string for reporting
+    std::string recovery_type = truncate_recovery ? "TRUNCATE" :
+                                rmrf_recovery ? "RM_RF" :
+                                drop_table_recovery ? "DROP_TABLE" :
+                                disk_carving ? (filesystem_type == "xfs" ? "XFS_DISK_CARVING" :
+                                               filesystem_type == "ext4" ? "EXT4_DISK_CARVING" : "DISK_CARVING") :
+                                scan_only ? "SCAN_ONLY" :
+                                rebuild_chain ? "CHAIN_REBUILD" :
+                                extract_sdi ? "SDI_EXTRACT" : "DEFAULT";
+
     // MySQL version hint for strategy recommendation
     std::string mysql_version = parser_.get_option("mysql-version", "");
     if (mysql_version.empty()) mysql_version = "8.0";  // default
@@ -1581,6 +1591,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
 
                 std::cout << "\n✅ XFS Recovery completed: " << output_dir << "\n";
+                generate_recovery_report(report_format, report_path, recovery_type, output_dir);
                 return 0;
             } else {
                 std::cerr << "[ERROR] XFS disk carving failed.\n";
@@ -1773,6 +1784,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
 
                 std::cout << "\n✅ ext4 Recovery completed: " << output_dir << "\n";
+                generate_recovery_report(report_format, report_path, recovery_type, output_dir);
                 return 0;
             } else {
                 std::cerr << "[ERROR] ext4 recovery failed. Falling back to raw disk carving.\n";
@@ -1945,6 +1957,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
+            generate_recovery_report(report_format, report_path, recovery_type, output_dir);
             return 0;
         } else {
             std::cerr << "[ERROR] Disk carving failed.\n";
@@ -2004,6 +2017,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
+            generate_recovery_report(report_format, report_path, recovery_type, output_dir);
             return 0;
         } else {
             std::cerr << "[ERROR] DROP TABLE recovery failed.\n";
@@ -2052,6 +2066,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         show_stats(stats_);
+        generate_recovery_report(report_format, report_path, recovery_type, output_dir);
         return 0;
     }
 
@@ -2067,6 +2082,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Found " << rebuilder.stats().orphan_pages << " orphan pages\n";
 
         show_stats(stats_);
+        generate_recovery_report(report_format, report_path, recovery_type, output_dir);
         return 0;
     }
 
@@ -2081,6 +2097,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         show_stats(stats_);
+        generate_recovery_report(report_format, report_path, recovery_type, output_dir);
         return 0;
     }
 
@@ -3471,6 +3488,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     show_stats(stats_);
     std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
+    generate_recovery_report(report_format, report_path, recovery_type, output_dir);
 
     return 0;
 }
