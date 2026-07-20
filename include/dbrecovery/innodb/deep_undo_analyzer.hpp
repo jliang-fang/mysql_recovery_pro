@@ -34,6 +34,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/roll_ptr_decoder.hpp"
+#include "dbrecovery/innodb/undo_page_index.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -413,7 +414,31 @@ public:
     void reset_stats() { stats_ = AnalyzerStats{}; }
 
     /**
+     * @brief Set the undo page index (shared across operations)
+     *
+     * When set, scan_undo_pages() uses the pre-built index for O(1) lookup
+     * instead of scanning the entire ibdata1 on every call.
+     * Ownership remains external; the index must outlive the analyzer.
+     */
+    void set_undo_page_index(UndoPageIndex* index) {
+        undo_page_index_ = index;
+    }
+
+    /**
+     * @brief Ensure the undo page index is built (lazy initialization)
+     *
+     * Builds the internal index if no external index was provided
+     * and the internal index hasn't been built yet. This ensures
+     * scan_undo_pages() is O(1) after the first call.
+     */
+    void ensure_index_built();
+
+    /**
      * @brief Scan all undo pages in ibdata1
+     *
+     * Uses the undo page index (external or lazy-built) for O(1) lookup.
+     * Falls back to full scan if no index is available.
+     *
      * @return Vector of (page_data, page_no) for all UNDO_LOG pages
      */
     std::vector<std::pair<std::vector<uint8_t>, uint32_t>> scan_undo_pages();
@@ -432,6 +457,9 @@ private:
     // Helpers
     UndoPageManager page_manager_;
     UndoRecordV2Parser record_parser_;
+    UndoPageIndex* undo_page_index_ = nullptr;  // External index (optional)
+    UndoPageIndex internal_index_;               // Lazy-built fallback index
+    bool index_built_ = false;
     AnalyzerStats stats_;
 
     // Internal helpers

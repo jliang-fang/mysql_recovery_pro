@@ -596,29 +596,42 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
 std::vector<std::pair<std::vector<uint8_t>, uint32_t>>
 DeepUndoAnalyzer::scan_undo_pages() {
 
-    std::vector<std::pair<std::vector<uint8_t>, uint32_t>> undo_pages;
+    // Ensure index is available (lazy-build or use external)
+    ensure_index_built();
+
+    // Use the index for O(1) lookup
+    const auto* idx = undo_page_index_ ? undo_page_index_ : &internal_index_;
+    if (!idx->is_built() || idx->undo_pages().empty()) {
+        return {};
+    }
 
     // Open ibdata1
     if (!page_manager_.is_open()) {
-        // Try to open
         std::vector<uint8_t> test_page = page_manager_.read_undo_page(0);
-        if (test_page.empty()) return undo_pages;
+        if (test_page.empty()) return {};
     }
 
-    // Scan all pages for UNDO_LOG type
-    const uint64_t total_pages = page_manager_.get_page_count();
-    for (uint32_t pg = 0; pg < total_pages; pg++) {
+    std::vector<std::pair<std::vector<uint8_t>, uint32_t>> undo_pages;
+
+    for (uint32_t pg : idx->undo_pages()) {
         auto page_data = page_manager_.read_undo_page(pg);
         if (page_data.empty()) continue;
-
-        uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
-        if (page_type == FIL_PAGE_UNDO_LOG) {
-            undo_pages.push_back({std::move(page_data), pg});
-            stats_.pages_scanned++;
-        }
+        undo_pages.push_back({std::move(page_data), pg});
+        stats_.pages_scanned++;
     }
 
     return undo_pages;
+}
+
+void DeepUndoAnalyzer::ensure_index_built() {
+    // If an external index is set, use it — no lazy build needed
+    if (undo_page_index_) return;
+    // If already built, skip
+    if (index_built_) return;
+
+    // Build the internal index
+    internal_index_.build(ibdata_path_, page_size_, 0);
+    index_built_ = true;
 }
 
 uint32_t DeepUndoAnalyzer::extract_table_id(
