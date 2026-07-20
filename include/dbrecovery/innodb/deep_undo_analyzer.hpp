@@ -246,7 +246,8 @@ public:
         const uint8_t* page_data,
         size_t page_size,
         size_t offset,
-        const catalog::TableSchema* table_schema = nullptr);
+        const catalog::TableSchema* table_schema = nullptr,
+        size_t* consumed_size = nullptr);
 
     /**
      * @brief Extract prev_undo_ptr from the undo record's field data
