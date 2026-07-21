@@ -10,6 +10,7 @@
 #include "dbrecovery/innodb/deep_undo_analyzer.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/trx_sys_timestamp_index.hpp"
 
 #include <cstring>
 #include <cstdio>
@@ -576,6 +577,49 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
     // 15. Order oldest-first (INSERT first, newest undo last)
     std::reverse(history.undo_chain.begin(), history.undo_chain.end());
 
+    // 15a. Populate commit_lsn and approx_timestamp for each undo record
+    //      Collect unique trx_ids from the chain
+    std::vector<uint64_t> chain_trx_ids;
+    for (const auto& rec : history.undo_chain) {
+        if (rec.trx_id > 0) {
+            chain_trx_ids.push_back(rec.trx_id);
+        }
+    }
+    if (!chain_trx_ids.empty()) {
+        // Remove duplicates
+        std::sort(chain_trx_ids.begin(), chain_trx_ids.end());
+        chain_trx_ids.erase(
+            std::unique(chain_trx_ids.begin(), chain_trx_ids.end()),
+            chain_trx_ids.end());
+
+        // Build timestamp index if not already built
+        TrxSysTimestampIndex ts_index;
+        if (!ibdata_path_.empty()) {
+            ts_index.build(ibdata_path_, page_size_);
+        }
+
+        // Lookup and populate each undo record
+        for (auto& rec : history.undo_chain) {
+            if (rec.trx_id > 0) {
+                auto entry = ts_index.lookup(rec.trx_id);
+                if (entry) {
+                    rec.commit_lsn = entry->commit_lsn;
+                    // Convert commit_lsn to an approximate timestamp
+                    // LSNs increase monotonically; we use a relative approximation
+                    // based on the LSN value. A real implementation would need
+                    // a log file to map LSN → wall clock time.
+                    if (entry->commit_lsn > 0) {
+                        // Approximate: treat LSN as a proxy for time ordering
+                        // (higher LSN = later time). Store as nanoseconds since epoch
+                        // for comparison purposes.
+                        auto duration = std::chrono::nanoseconds(entry->commit_lsn);
+                        rec.approx_timestamp = std::chrono::system_clock::time_point(duration);
+                    }
+                }
+            }
+        }
+    }
+
     // 16. Set metadata
     history.n_versions = 1 + static_cast<uint32_t>(history.undo_chain.size());
 
@@ -695,7 +739,7 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
 
             // Extract table_id from record
             uint32_t rec_table_id = extract_table_id(rec.old_fields);
-            if (rec_table_id != static_cast<uint32_t>(space_id) && space_id != 0) {
+            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
                 offset += consumed;
                 continue;
             }
@@ -800,7 +844,31 @@ std::vector<FlashbackResult> DeepUndoAnalyzer::flashback_deletes(
 
             // Filter by table_id
             uint32_t rec_table_id = extract_table_id(rec.old_fields);
-            if (rec_table_id != static_cast<uint32_t>(space_id) && space_id != 0) {
+            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by LSN range
+            if (filter.start_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn < *filter.start_lsn) {
+                offset += consumed;
+                continue;
+            }
+            if (filter.end_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn > *filter.end_lsn) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by time range
+            if (filter.start_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp < *filter.start_time) {
+                offset += consumed;
+                continue;
+            }
+            if (filter.end_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp > *filter.end_time) {
                 offset += consumed;
                 continue;
             }
@@ -913,7 +981,7 @@ std::vector<RowVersionHistory> DeepUndoAnalyzer::heuristic_reconstruct_chains(
 
             // Filter by table_id
             uint32_t rec_table_id = extract_table_id(rec.old_fields);
-            if (rec_table_id != static_cast<uint32_t>(space_id) && space_id != 0) {
+            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
                 offset += consumed;
                 continue;
             }

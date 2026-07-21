@@ -204,3 +204,48 @@ gtest_discover_tests(test_file_signature)
 add_executable(test_xfs_extent unit/test_xfs_extent.cpp)
 target_link_libraries(test_xfs_extent PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_xfs_extent)
+
+# RollPtrDecoder tests (P0 - Track 1)
+add_executable(test_roll_ptr_decoder innodb/roll_ptr_decoder_test.cpp)
+target_link_libraries(test_roll_ptr_decoder PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_roll_ptr_decoder)
+
+# UndoPageIndex tests (P0 - Track 1)
+add_executable(test_undo_page_index innodb/undo_page_index_test.cpp)
+target_link_libraries(test_undo_page_index PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_undo_page_index)
+
+# TrxSysTimestampIndex tests (P0 - Track 1)
+add_executable(test_trx_sys_timestamp_index innodb/trx_sys_timestamp_index_test.cpp)
+target_link_libraries(test_trx_sys_timestamp_index PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_trx_sys_timestamp_index)
+
+# SecondaryIndexRescuer tests (P0 - Track 1)
+add_executable(test_secondary_index_rescuer innodb/secondary_index_rescuer_test.cpp)
+target_link_libraries(test_secondary_index_rescuer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_secondary_index_rescuer)
+
+# DamagedPageHandler tests (P0 - Track 1)
+add_executable(test_damaged_page_handler innodb/damaged_page_handler_test.cpp)
+target_link_libraries(test_damaged_page_handler PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_damaged_page_handler)
+
+# PageTypeInferrer tests (P0 - Track 1)
+add_executable(test_page_type_inferrer innodb/page_type_inferrer_test.cpp)
+target_link_libraries(test_page_type_inferrer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_page_type_inferrer)
+
+# RawDiskCarver tests (P0 - Track 1)
+add_executable(test_raw_disk_carver innodb/raw_disk_carver_test.cpp)
+target_link_libraries(test_raw_disk_carver PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_raw_disk_carver)
+
+# FlashbackGenerator tests (P0 - Track 1)
+add_executable(test_flashback_generator innodb/flashback_generator_test.cpp)
+target_link_libraries(test_flashback_generator PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_flashback_generator)
+
+# DeepUndoAnalyzer tests (P0 - Track 1)
+add_executable(test_deep_undo_analyzer innodb/deep_undo_analyzer_test.cpp)
+target_link_libraries(test_deep_undo_analyzer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_deep_undo_analyzer)

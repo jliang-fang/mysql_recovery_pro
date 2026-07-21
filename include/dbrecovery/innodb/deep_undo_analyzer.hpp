@@ -34,6 +34,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/roll_ptr_decoder.hpp"
+#include "dbrecovery/innodb/trx_sys_timestamp_index.hpp"
 #include "dbrecovery/innodb/undo_page_index.hpp"
 
 namespace dbrecovery {
@@ -263,6 +264,12 @@ public:
     static uint64_t extract_prev_ptr_from_field(const std::vector<uint8_t>& field_data);
 
 private:
+    // Friend test classes for P0 white-box testing
+    friend class DeepUndoAnalyzerTest_ParserReadField_Test;
+    friend class DeepUndoAnalyzerTest_ParserReadFieldLongLength_Test;
+    friend class DeepUndoAnalyzerTest_ParserReadFieldBoundary_Test;
+    friend class DeepUndoAnalyzerTest_ParserReadFieldTruncated_Test;
+
     /**
      * @brief Read a single field from the undo record at the given position
      * @return (field_data, bytes_consumed) or empty if error
@@ -459,6 +466,7 @@ private:
     UndoRecordV2Parser record_parser_;
     UndoPageIndex* undo_page_index_ = nullptr;  // External index (optional)
     UndoPageIndex internal_index_;               // Lazy-built fallback index
+    TrxSysTimestampIndex timestamp_index_;       // TRX_SYS timestamp index
     bool index_built_ = false;
     AnalyzerStats stats_;
 

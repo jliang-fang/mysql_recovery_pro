@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <algorithm>
+#include <set>
 #include <iostream>
 #include <filesystem>
 #include <sstream>
@@ -37,6 +38,10 @@ RawDiskCarver::~RawDiskCarver() = default;
 
 void RawDiskCarver::set_config(const Config& config) {
     config_ = config;
+    // Forward PageTypeInferrer configuration
+    if (config_.use_page_type_inferrer) {
+        page_type_inferrer_.set_config(config_.page_inferrer_config);
+    }
 }
 
 void RawDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
@@ -669,6 +674,78 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // PageTypeInferrer enhanced scanning: find pages at non-standard offsets
+        // Runs once per chunk, after the main alignment loop, to catch misaligned pages
+        // that the page-aligned scan_step loop would miss.
+        if (config_.use_page_type_inferrer && bytes_read > config_.page_size) {
+            // Run Level 1 fuzzy boundary scan (512-byte step) to find pages
+            // at non-aligned offsets within this chunk
+            auto inferrer_candidates = page_type_inferrer_.scan_level(
+                buffer.data(), bytes_read, innodb::ScanLevel::LEVEL_1_FUZZY_BOUNDARY);
+
+            // Filter by confidence threshold
+            auto accepted = page_type_inferrer_.filter_by_confidence(
+                inferrer_candidates, config_.page_inferrer_config.accept_threshold);
+
+            for (const auto& candidate : accepted) {
+                // Skip if this offset was already covered by the main page-aligned loop
+                if (candidate.file_offset % scan_step == 0) {
+                    continue;
+                }
+
+                // Only collect INDEX and SDI pages
+                if (candidate.page_type != FIL_PAGE_INDEX &&
+                    candidate.page_type != FIL_PAGE_SDI &&
+                    candidate.page_type != FIL_PAGE_SDI_ZIP) {
+                    continue;
+                }
+
+                size_t detected_size = candidate.detected_size > 0
+                    ? candidate.detected_size : config_.page_size;
+                if (candidate.file_offset + detected_size > bytes_read) {
+                    continue;
+                }
+
+                if (candidate.page_type == FIL_PAGE_INDEX) {
+                    // index_id filter logic (same as main loop)
+                    bool should_collect = true;
+                    if (!config_.target_index_ids.empty()) {
+                        should_collect = std::find(config_.target_index_ids.begin(),
+                                                  config_.target_index_ids.end(),
+                                                  candidate.index_id) != config_.target_index_ids.end();
+                    }
+                    if (should_collect && !config_.exclude_index_ids.empty()) {
+                        should_collect = std::find(config_.exclude_index_ids.begin(),
+                                                  config_.exclude_index_ids.end(),
+                                                  candidate.index_id) == config_.exclude_index_ids.end();
+                    }
+                    if (!should_collect) continue;
+
+                    std::vector<uint8_t> page_copy(detected_size);
+                    std::memcpy(page_copy.data(), buffer.data() + candidate.file_offset, detected_size);
+
+                    {
+                        std::lock_guard<std::mutex> lock(pages_mutex_);
+                        collected_pages_[candidate.index_id].push_back(std::move(page_copy));
+                    }
+                    pages_found_.fetch_add(1);
+
+                } else if (candidate.page_type == FIL_PAGE_SDI ||
+                           candidate.page_type == FIL_PAGE_SDI_ZIP) {
+                    // Collect SDI pages for schema extraction
+                    std::vector<uint8_t> sdi_copy(detected_size);
+                    std::memcpy(sdi_copy.data(), buffer.data() + candidate.file_offset, detected_size);
+
+                    {
+                        std::lock_guard<std::mutex> lock(pages_mutex_);
+                        last_scan_result_.sdi_pages[candidate.space_id] = std::move(sdi_copy);
+                        last_scan_result_.sdi_pages_found++;
+                    }
+                    pages_found_.fetch_add(1);
                 }
             }
         }

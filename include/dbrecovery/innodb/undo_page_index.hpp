@@ -115,9 +115,7 @@ public:
 
             // Skip to next page
             if (pg + 1 < total_pages_) {
-                file.seekg(static_cast<std::streamoff>(HEADER_SIZE),
-                           std::ios::cur);
-                // Skip the rest of the page
+                // Skip the rest of the page after the header we already read
                 if (page_size > HEADER_SIZE) {
                     file.seekg(static_cast<std::streamoff>(page_size - HEADER_SIZE),
                                std::ios::cur);

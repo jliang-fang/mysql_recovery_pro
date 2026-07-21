@@ -479,6 +479,30 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_deletes(
                 continue;
             }
 
+            // Filter by LSN range
+            if (config_.start_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn < *config_.start_lsn) {
+                offset += consumed;
+                continue;
+            }
+            if (config_.end_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn > *config_.end_lsn) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by time range
+            if (config_.start_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp < *config_.start_time) {
+                offset += consumed;
+                continue;
+            }
+            if (config_.end_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp > *config_.end_time) {
+                offset += consumed;
+                continue;
+            }
+
             auto fr = decode_single_record(rec, schema);
 
             if (config_.include_incomplete || fr.is_complete) {
@@ -549,6 +573,30 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_updates(
                 continue;
             }
 
+            // Filter by LSN range
+            if (config_.start_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn < *config_.start_lsn) {
+                offset += consumed;
+                continue;
+            }
+            if (config_.end_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn > *config_.end_lsn) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by time range
+            if (config_.start_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp < *config_.start_time) {
+                offset += consumed;
+                continue;
+            }
+            if (config_.end_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp > *config_.end_time) {
+                offset += consumed;
+                continue;
+            }
+
             auto fr = decode_single_record(rec, schema);
             if (config_.include_incomplete || fr.is_complete) {
                 records.push_back(std::move(fr));
@@ -581,11 +629,71 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_transaction(
     uint64_t trx_id,
     const catalog::TableSchema& schema) {
 
-    auto saved_config = config_;
-    config_.trx_id = trx_id;
-    auto results = flashback_deletes(schema);
-    config_ = saved_config;
-    return results;
+    auto start = std::chrono::high_resolution_clock::now();
+    std::vector<FlashbackRecord> records;
+
+    // Scan all undo pages for ALL record types matching the target trx_id
+    auto undo_pages = analyzer_->scan_undo_pages();
+    UndoRecordV2Parser parser;
+
+    for (const auto& [page_data, page_no] : undo_pages) {
+        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
+        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
+
+        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
+        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
+            size_t consumed = 0;
+            auto rec_opt = parser.parse(page_data.data(), page_data.size(), offset, &schema, &consumed);
+            if (!rec_opt) break;
+
+            auto& rec = *rec_opt;
+            rec.undo_page_no = page_no;
+
+            // Filter by transaction ID
+            if (rec.trx_id != trx_id) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by table_id
+            uint32_t rec_table_id = DeepUndoAnalyzer::extract_table_id(rec.old_fields);
+            uint32_t expected_table_id = static_cast<uint32_t>(schema.table_id);
+            if (expected_table_id != 0 && rec_table_id != expected_table_id) {
+                offset += consumed;
+                continue;
+            }
+
+            auto fr = decode_single_record(rec, schema);
+
+            if (config_.include_incomplete || fr.is_complete) {
+                records.push_back(std::move(fr));
+            }
+
+            if (records.size() >= config_.max_records) break;
+            offset += consumed;
+        }
+        if (records.size() >= config_.max_records) break;
+    }
+
+    // Sort by undo_no for chronological order within the transaction
+    std::sort(records.begin(), records.end(),
+        [](const FlashbackRecord& a, const FlashbackRecord& b) {
+            return a.undo_no < b.undo_no;
+        });
+
+    auto end = std::chrono::high_resolution_clock::now();
+    stats_.execution_time_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    stats_.total_records = records.size();
+    for (const auto& r : records) {
+        if (r.is_complete) stats_.complete_records++;
+        else stats_.partial_records++;
+        stats_.avg_completeness += r.completeness;
+    }
+    if (!records.empty()) {
+        stats_.avg_completeness /= static_cast<double>(records.size());
+    }
+
+    return records;
 }
 
 // ==================== Flashback point-in-time ====================

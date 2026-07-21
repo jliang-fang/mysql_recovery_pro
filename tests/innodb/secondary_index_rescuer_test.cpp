@@ -1,0 +1,431 @@
+#include <gtest/gtest.h>
+#include "dbrecovery/innodb/secondary_index_rescuer.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
+#include <fstream>
+#include <vector>
+#include <cstdio>
+#include <cstring>
+
+namespace dbrecovery {
+namespace innodb {
+
+// Helper: build a complete secondary index leaf page with user records
+// Returns a 16KB page buffer
+static std::vector<uint8_t> create_secondary_leaf_page(
+    const std::vector<std::pair<uint32_t, uint32_t>>& records,
+    uint32_t& out_first_rec_offset) {
+
+    const size_t page_size = 16384;
+    std::vector<uint8_t> page(page_size, 0);
+
+    // --- FIL header (38 bytes) ---
+    // Offset 24: page type
+    // NOTE: The rescuer reads page type with read_le, so we store 0x45BF in LE
+    write_le<uint16_t>(page.data(), 24, FIL_PAGE_INDEX);  // 17855 = 0x45BF
+
+    // --- Page header (at offset 38) ---
+    // Each record layout: [5 bytes header] + [1 byte n_fields nibble] + [var-len list] + [NULL bitmap] + [field data]
+    // We'll carefully place records after INFIMUM+SUPREMUM
+
+    // INFIMUM at offset 54 (13 bytes), SUPREMUM at offset 67 (13 bytes)
+    // First user record: start at offset 80
+    uint32_t cur_off = 80;
+
+    // INFIMUM record header: set next_offset (absolute offset) to first user record
+    // INFIMUM occupies offset 54-66 (13 bytes)
+    // INFIMUM's next_offset is at offset 55, 2 bytes LE
+    write_le<uint16_t>(page.data(), 55, cur_off);  // next_off = first user record offset
+
+    // SUPREMUM record: set status bits to 0x03
+    page[67] = 0x03;  // REC_STATUS_SUPREMUM in low 3 bits
+
+    // Build user records
+    for (size_t i = 0; i < records.size(); i++) {
+        uint32_t pos = cur_off;
+        const auto& [col1_val, pk_val] = records[i];
+
+        // n_fields = 2 (1 sec col + 1 pk col)
+        // info_bits: high 5 bits = 0 (n_fields high bits), low 3 bits = 0 (ordinary)
+        page[pos] = 0x00;
+
+        // next_offset (bytes 1-2, LE): absolute offset of next record
+        uint32_t next_off = (i + 1 < records.size()) ? cur_off + 15 : 0;
+        write_le<uint16_t>(page.data(), pos + 1, next_off);
+
+        // heap_no (bytes 3-4, LE): 2 + i (user records start at heap_no 2)
+        write_le<uint16_t>(page.data(), pos + 3, static_cast<uint16_t>(2 + i));
+
+        // byte 5: high nibble = n_fields low 4 bits = 2
+        page[pos + 5] = 0x20;
+
+        // No var-len fields (all fixed-length INT)
+        // NULL bitmap: 1 byte, (2+7)/8 = 1, all 0 = not null
+        page[pos + 6] = 0x00;
+
+        // Field data starts at pos + 7
+        // Field 1: col1 (INT, 4 bytes LE)
+        write_le<uint32_t>(page.data(), pos + 7, col1_val);
+        // Field 2: pk_col (INT, 4 bytes LE)
+        write_le<uint32_t>(page.data(), pos + 11, pk_val);
+
+        cur_off += 15;  // 5 + 1 + 0 + 1 + 8 = 15 bytes per record
+    }
+
+    // Set heap_top at offset 40 (LE read)
+    write_le<uint16_t>(page.data(), 40, cur_off + 10);
+
+    // Set page_level = 0 (leaf) at offset 64 (LE read)
+    write_le<uint16_t>(page.data(), 64, 0);
+
+    out_first_rec_offset = 80;
+    return page;
+}
+
+// Helper: create a temp .ibd file with a single secondary index page
+static std::string create_temp_sec_ibd(
+    const std::vector<std::pair<uint32_t, uint32_t>>& records,
+    uint32_t page_no = 3,
+    const std::string& suffix = "") {
+
+    std::string path = "/tmp/test_sec_index" + suffix + ".bin";
+    const size_t page_size = 16384;
+
+    // Allocate file with enough pages
+    std::vector<uint8_t> file(page_size * (page_no + 1), 0);
+
+    // Create the secondary index leaf page
+    uint32_t first_rec_off;
+    auto page_data = create_secondary_leaf_page(records, first_rec_off);
+
+    // Copy page data into the file at the specified page_no
+    std::memcpy(file.data() + page_no * page_size, page_data.data(), page_size);
+
+    // Write non-leaf page at page 2 (to test filtering)
+    // Level 1 page
+    write_le<uint16_t>(file.data(), 2 * page_size + 24, FIL_PAGE_INDEX);
+    write_le<uint16_t>(file.data(), 2 * page_size + 64, 1);  // level 1, not leaf
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(file.data()), file.size());
+    out.close();
+    return path;
+}
+
+// Helper: build a basic schema with 1 secondary index + 1 PK column
+static catalog::TableSchema make_test_schema() {
+    catalog::TableSchema schema;
+    schema.table_name = "test_table";
+    schema.row_format = 2;  // DYNAMIC
+
+    // Column 1: sec_col (INT, type=4, fixed 4 bytes)
+    catalog::ColumnInfo col1;
+    col1.name = "sec_col";
+    col1.mysql_type_id = 4;  // LONG/INT
+    col1.is_nullable = true;
+    col1.column_length = 4;
+    col1.physical_pos = 0;
+    col1.ordinal = 1;
+
+    // Column 2: pk_col (INT, type=4, fixed 4 bytes)
+    catalog::ColumnInfo col2;
+    col2.name = "pk_col";
+    col2.mysql_type_id = 4;  // LONG/INT
+    col2.is_nullable = true;
+    col2.column_length = 4;
+    col2.physical_pos = 1;
+    col2.ordinal = 2;
+
+    schema.columns[1] = col1;
+    schema.columns[2] = col2;
+
+    // Secondary index
+    catalog::IndexInfo sec_idx;
+    sec_idx.name = "idx_sec";
+    sec_idx.is_primary = false;
+    sec_idx.is_unique = false;
+    sec_idx.columns.push_back("sec_col");
+
+    // Primary key
+    catalog::IndexInfo pk_idx;
+    pk_idx.name = "PRIMARY";
+    pk_idx.is_primary = true;
+    pk_idx.is_unique = true;
+    pk_idx.columns.push_back("pk_col");
+
+    schema.indexes.push_back(sec_idx);
+    schema.indexes.push_back(pk_idx);
+
+    return schema;
+}
+
+// ==================== extract_from_secondary_index Tests ====================
+
+TEST(SecondaryIndexRescuerTest, ExtractFromSecIndex) {
+    auto schema = make_test_schema();
+    std::string path = create_temp_sec_ibd({{42, 999}, {100, 888}});
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto result = rescuer.extract_from_secondary_index(path);
+
+    // Should have 2 PK entries
+    EXPECT_EQ(result.size(), 2u);
+
+    // Check PK 999: sec_col = 42
+    auto it = result.find("999");
+    ASSERT_NE(it, result.end());
+    EXPECT_EQ(it->second["sec_col"], "42");
+    EXPECT_EQ(it->second["pk_col"], "999");
+
+    // Check PK 888: sec_col = 100
+    it = result.find("888");
+    ASSERT_NE(it, result.end());
+    EXPECT_EQ(it->second["sec_col"], "100");
+    EXPECT_EQ(it->second["pk_col"], "888");
+
+    std::remove(path.c_str());
+}
+
+TEST(SecondaryIndexRescuerTest, ExtractFromSecIndexNoSecIndexInSchema) {
+    // Schema with only PK, no secondary index
+    catalog::TableSchema schema;
+    schema.table_name = "test_table";
+    catalog::ColumnInfo col;
+    col.name = "pk_col";
+    col.mysql_type_id = 4;
+    schema.columns[1] = col;
+    catalog::IndexInfo pk;
+    pk.name = "PRIMARY";
+    pk.is_primary = true;
+    pk.columns.push_back("pk_col");
+    schema.indexes.push_back(pk);
+
+    std::string path = create_temp_sec_ibd({{42, 999}});
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto result = rescuer.extract_from_secondary_index(path);
+
+    EXPECT_TRUE(result.empty());
+
+    std::remove(path.c_str());
+}
+
+TEST(SecondaryIndexRescuerTest, ExtractFromSecIndexNonExistentFile) {
+    auto schema = make_test_schema();
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto result = rescuer.extract_from_secondary_index("/nonexistent/path.ibd");
+
+    EXPECT_TRUE(result.empty());
+}
+
+TEST(SecondaryIndexRescuerTest, ExtractFromSecIndexNoLeafPages) {
+    // Non-leaf pages should be filtered out
+    std::string path = "/tmp/test_sec_nonleaf.bin";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> file(page_size * 5, 0);
+
+    // Page 3: INDEX but level 1 (non-leaf), should be skipped
+    write_le<uint16_t>(file.data(), 3 * page_size + 24, FIL_PAGE_INDEX);
+    write_le<uint16_t>(file.data(), 3 * page_size + 64, 1);  // level 1
+
+    // Page 4: UNDO_LOG page, should be skipped
+    write_le<uint16_t>(file.data(), 4 * page_size + 24, FIL_PAGE_UNDO_LOG);
+
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(file.data()), file.size());
+    }
+
+    auto schema = make_test_schema();
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto result = rescuer.extract_from_secondary_index(path);
+
+    EXPECT_TRUE(result.empty());
+
+    std::remove(path.c_str());
+}
+
+// ==================== merge_indexes Tests ====================
+
+TEST(SecondaryIndexRescuerTest, MergeIndexes) {
+    auto schema = make_test_schema();
+
+    // Two index data sources: first has sec_col for PK 999, second has nothing extra
+    std::map<std::string, std::map<std::string, std::string>> idx1;
+    idx1["999"]["sec_col"] = "42";
+    idx1["999"]["pk_col"] = "999";
+
+    std::map<std::string, std::map<std::string, std::string>> idx2;
+    idx2["888"]["sec_col"] = "100";
+    idx2["888"]["pk_col"] = "888";
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto rows = rescuer.merge_indexes({idx1, idx2});
+
+    EXPECT_EQ(rows.size(), 2u);
+}
+
+TEST(SecondaryIndexRescuerTest, MergeIndexesEmpty) {
+    auto schema = make_test_schema();
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto rows = rescuer.merge_indexes({});
+
+    EXPECT_TRUE(rows.empty());
+}
+
+TEST(SecondaryIndexRescuerTest, MergeIndexesNoOverlap) {
+    auto schema = make_test_schema();
+
+    std::map<std::string, std::map<std::string, std::string>> idx1;
+    idx1["111"]["sec_col"] = "10";
+    idx1["111"]["pk_col"] = "111";
+
+    std::map<std::string, std::map<std::string, std::string>> idx2;
+    idx2["222"]["sec_col"] = "20";
+    idx2["222"]["pk_col"] = "222";
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto rows = rescuer.merge_indexes({idx1, idx2});
+
+    EXPECT_EQ(rows.size(), 2u);
+}
+
+// ==================== rescue_from_indexes Tests ====================
+
+TEST(SecondaryIndexRescuerTest, RescueFromIndexes) {
+    auto schema = make_test_schema();
+    std::string path = create_temp_sec_ibd({{42, 999}});
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto rows = rescuer.rescue_from_indexes({path});
+
+    EXPECT_EQ(rows.size(), 1u);
+    EXPECT_EQ(rows[0].fields["sec_col"], "42");
+    EXPECT_EQ(rows[0].fields["pk_col"], "999");
+    EXPECT_EQ(rows[0].source, "secondary_index_rescue");
+    EXPECT_GT(rows[0].completeness, 0.0);
+
+    // Verify stats
+    const auto& stats = rescuer.get_stats();
+    EXPECT_GT(stats.secondary_pages_scanned, 0u);
+    EXPECT_GT(stats.secondary_leaf_pages, 0u);
+    EXPECT_GT(stats.secondary_records, 0u);
+    EXPECT_GT(stats.rescued_rows, 0u);
+    EXPECT_GT(stats.rescue_time_ms, 0.0);
+
+    std::remove(path.c_str());
+}
+
+TEST(SecondaryIndexRescuerTest, RescueFromIndexesEmptyPaths) {
+    auto schema = make_test_schema();
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto rows = rescuer.rescue_from_indexes({});
+
+    EXPECT_TRUE(rows.empty());
+}
+
+TEST(SecondaryIndexRescuerTest, RescueFromIndexesMultipleFiles) {
+    auto schema = make_test_schema();
+    std::string path1 = create_temp_sec_ibd({{42, 999}}, 3, "a");
+    std::string path2 = create_temp_sec_ibd({{100, 888}}, 4, "b");
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto rows = rescuer.rescue_from_indexes({path1, path2});
+
+    EXPECT_EQ(rows.size(), 2u);
+
+    std::remove(path1.c_str());
+    std::remove(path2.c_str());
+}
+
+// ==================== Stats Tests ====================
+
+TEST(SecondaryIndexRescuerTest, StatsInitial) {
+    SecondaryIndexRescuer rescuer;
+    const auto& stats = rescuer.get_stats();
+    EXPECT_EQ(stats.secondary_pages_scanned, 0u);
+    EXPECT_EQ(stats.secondary_leaf_pages, 0u);
+    EXPECT_EQ(stats.secondary_records, 0u);
+    EXPECT_EQ(stats.rescued_rows, 0u);
+    EXPECT_EQ(stats.merged_rows, 0u);
+    EXPECT_EQ(stats.rescue_time_ms, 0.0);
+}
+
+TEST(SecondaryIndexRescuerTest, ExtractUpdatesStats) {
+    auto schema = make_test_schema();
+    std::string path = create_temp_sec_ibd({{42, 999}});
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    rescuer.extract_from_secondary_index(path);
+
+    const auto& stats = rescuer.get_stats();
+    EXPECT_GT(stats.secondary_pages_scanned, 0u);
+    EXPECT_GT(stats.secondary_leaf_pages, 0u);
+    EXPECT_GT(stats.secondary_records, 0u);
+
+    std::remove(path.c_str());
+}
+
+// ==================== Edge Cases ====================
+
+TEST(SecondaryIndexRescuerTest, SchemaWithoutSecondaryIndex) {
+    catalog::TableSchema schema;
+    schema.table_name = "test";
+    catalog::ColumnInfo col;
+    col.name = "pk_col";
+    col.mysql_type_id = 4;
+    schema.columns[1] = col;
+    catalog::IndexInfo pk;
+    pk.name = "PRIMARY";
+    pk.is_primary = true;
+    pk.columns.push_back("pk_col");
+    schema.indexes.push_back(pk);
+
+    std::string path = create_temp_sec_ibd({{42, 999}});
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto result = rescuer.extract_from_secondary_index(path);
+
+    // No secondary index defined, should return empty
+    EXPECT_TRUE(result.empty());
+
+    std::remove(path.c_str());
+}
+
+TEST(SecondaryIndexRescuerTest, EmptySchema) {
+    catalog::TableSchema schema;
+    schema.table_name = "empty";
+
+    std::string path = create_temp_sec_ibd({{42, 999}});
+
+    SecondaryIndexRescuer rescuer;
+    rescuer.set_schema(schema);
+    auto result = rescuer.extract_from_secondary_index(path);
+
+    EXPECT_TRUE(result.empty());
+
+    std::remove(path.c_str());
+}
+
+} // namespace innodb
+} // namespace dbrecovery
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

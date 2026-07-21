@@ -14,6 +14,7 @@
 
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/page_type_inferrer.hpp"
 #include "dbrecovery/carve/page_reassembler.hpp"
 
 namespace dbrecovery {
@@ -59,6 +60,10 @@ public:
         std::vector<uint64_t> exclude_index_ids; // 排除已知的系统表index_id
         // 数据模式匹配（用于删除文件恢复）
         std::vector<std::string> data_patterns;  // 要搜索的数据模式
+
+        // PageTypeInferrer — enhanced page detection
+        bool use_page_type_inferrer = false;
+        innodb::PageInferrerConfig page_inferrer_config;
     };
 
     // 页类型枚举
@@ -181,6 +186,11 @@ private:
     std::mutex pages_mutex_;
     std::map<uint64_t, std::vector<std::vector<uint8_t>>> collected_pages_;
 
+    // PageTypeInferrer — enhanced page detection engine
+    mutable innodb::PageTypeInferrer page_type_inferrer_{innodb::PageInferrerConfig{}};
+
+    // Static utility methods — made public for testing
+public:
     /**
      * @brief 检测是否是有效的InnoDB页 (LSN验证)
      */

@@ -314,6 +314,7 @@ private:
 
         size_t n_total_cols = all_cols.size();
         if (n_total_cols == 0) return records;
+        if (!found_sec) return records;  // No secondary index in schema
 
         // Start at INFIMUM (absolute offset 54)
         uint16_t pos = PAGE_INFIMUM_REC_OFFSET_ABS;

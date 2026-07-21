@@ -43,6 +43,8 @@ add_library(dbrecovery_innodb_sources STATIC
     undo_log_parser.cpp
     # ✅ 新增：深度 Undo 分析引擎 (MVCC 版本链追踪 & 闪回恢复)
     deep_undo_analyzer.cpp
+    # ✅ 新增：TRX_SYS 时间戳索引 (trx_id → commit_lsn)
+    trx_sys_timestamp_index.cpp
     # ✅ 新增：闪回生成器 (Flashback SQL/CSV/JSON)
     flashback_generator.cpp
     # ✅ 新增：Redo Log 解析器

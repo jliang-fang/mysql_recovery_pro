@@ -217,7 +217,9 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--data-dir=<path>\033[0m           MySQL data directory for DROP TABLE recovery\n";
     std::cout << "  \033[1m--header-repair\033[0m            Repair corrupted page headers\n";
     std::cout << "  \033[1m--blob-recovery\033[0m            Enable BLOB recovery\n";
-    std::cout << "  \033[1m--default-recovery\033[0m         Default recovery mode\n\n";
+    std::cout << "  \033[1m--default-recovery\033[0m         Default recovery mode\n";
+	    std::cout << "  \033[1m--page-type-inferrer\033[0m       Enable 4-level progressive page detection\n";
+	    std::cout << "                                 (finds pages at non-aligned offsets, default: off)\n\n";
     std::cout << "\033[1mScan & Discovery Options:\033[0m\n";
     std::cout << "  \033[1m--scan\033[0m                     Scan and display page information\n";
     std::cout << "  \033[1m--scan-dir=<dir>\033[0m           Scan entire data directory\n";
@@ -485,6 +487,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::string filesystem_type = parser_.get_option("filesystem", "ext4");
     std::transform(filesystem_type.begin(), filesystem_type.end(), filesystem_type.begin(), ::tolower);
 
+    // PageTypeInferrer: 4-level progressive page detection
+    bool use_page_type_inferrer = parser_.get_bool_option("page-type-inferrer", false);
+
     // Determine recovery type string for reporting
     std::string recovery_type = truncate_recovery ? "TRUNCATE" :
                                 rmrf_recovery ? "RM_RF" :
@@ -570,6 +575,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.page_size = page_size;
         config.num_workers = num_workers;
         config.verbose = verbose;
+        config.use_page_type_inferrer = use_page_type_inferrer;
         if (!target_index_ids_str.empty()) {
             std::istringstream iss(target_index_ids_str);
             std::string id_str;
@@ -1804,6 +1810,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.num_workers = num_workers;
         config.verbose = verbose;
         config.recover_deleted = true;
+        config.use_page_type_inferrer = use_page_type_inferrer;
         carver.set_config(config);
 
         // Load external schema if provided
