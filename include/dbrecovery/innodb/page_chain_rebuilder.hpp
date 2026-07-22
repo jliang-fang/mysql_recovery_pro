@@ -7,6 +7,8 @@
 #include <memory>
 #include <sstream>
 #include "dbrecovery/innodb/page_scanner.hpp"
+#include "dbrecovery/innodb/sec_index_btree_repair.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -83,6 +85,11 @@ public:
     std::unordered_map<uint32_t, size_t> build_page_index_map() const;
 
     /**
+     * @brief 设置表结构
+     */
+    void set_schema(const catalog::TableSchema& s) { schema_ = s; }
+
+    /**
      * @brief 设置页大小
      */
     void set_page_size(uint32_t page_size) { page_size_ = page_size; }
@@ -92,11 +99,19 @@ public:
      */
     uint32_t get_page_size() const { return page_size_; }
 
+    /**
+     * @brief 基于内容排序重连页链
+     * @param page_data 页号到原始页数据的映射
+     * @return true 如果至少重连了一个页
+     */
+    bool fix_chain_breaks_content_based(const std::map<uint32_t, std::vector<uint8_t>>& page_data);
+
 private:
     std::vector<ScannedPage> rebuilt_pages_;
     ChainRebuildStats rebuild_stats_;
     std::unordered_map<uint32_t, size_t> page_index_map_;
     uint32_t page_size_ = 16384;  // 页大小
+    catalog::TableSchema schema_;  // 表结构
 
     // 检测循环引用
     bool detect_circular_reference() const;
@@ -281,6 +296,44 @@ inline void PageChainRebuilder::sort_by_page_number() {
     for (size_t i = 0; i < rebuilt_pages_.size(); ++i) {
         page_index_map_[rebuilt_pages_[i].page_no] = i;
     }
+}
+
+inline bool PageChainRebuilder::fix_chain_breaks_content_based(
+    const std::map<uint32_t, std::vector<uint8_t>>& page_data) {
+
+    if (rebuilt_pages_.empty()) return false;
+
+    // Extract page numbers from rebuilt_pages_
+    std::vector<uint32_t> page_nos;
+    for (const auto& p : rebuilt_pages_) {
+        page_nos.push_back(p.page_no);
+    }
+
+    // Use SecondaryIndexBTreeRepairer for content-based ordering
+    innodb::SecondaryIndexBTreeRepairer repairer(page_size_);
+    repairer.set_schema(schema_);
+    repairer.set_page_list(page_nos, page_data);
+
+    // Run content-based repair
+    if (!repairer.repair_chain_by_content(page_nos)) {
+        return false;
+    }
+
+    // Map the relinked pages back to ScannedPage format
+    // The repairer's page_data_map_ was modified in-place with new FIL_PAGE_PREV/NEXT
+    for (auto& page : rebuilt_pages_) {
+        auto it = page_data.find(page.page_no);
+        if (it == page_data.end()) continue;
+
+        // Read updated prev/next from the page data
+        if (it->second.size() >= page_size_) {
+            page.prev_page = read_be<uint32_t>(it->second.data(), FIL_PAGE_PREV_ABS);
+            page.next_page = read_be<uint32_t>(it->second.data(), FIL_PAGE_NEXT_ABS);
+        }
+    }
+
+    rebuild_stats_.fixed_chains += repairer.get_stats().chain_breaks_fixed;
+    return repairer.get_stats().pages_relinked > 0;
 }
 
 inline std::unordered_map<uint32_t, size_t> PageChainRebuilder::build_page_index_map() const {

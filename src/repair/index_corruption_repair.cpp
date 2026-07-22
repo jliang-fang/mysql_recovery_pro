@@ -357,6 +357,82 @@ bool IndexCorruptionRepairer::rebuild_page_chain(uint8_t* file_data, size_t file
     return true;
 }
 
+bool IndexCorruptionRepairer::rebuild_page_chain_by_content(
+    uint8_t* file_data, size_t file_size, uint64_t index_id) {
+
+    if (!file_data || file_size < page_size_) {
+        return false;
+    }
+
+    // Build page data map for pages belonging to this index_id
+    auto all_pages = get_all_page_info(file_data, file_size);
+    std::map<uint32_t, std::vector<uint8_t>> page_data;
+    std::vector<uint32_t> page_nos;
+
+    for (const auto& [page_no, info] : all_pages) {
+        if (info.is_valid && info.index_id == index_id) {
+            page_nos.push_back(page_no);
+            const uint8_t* page = file_data + page_no * page_size_;
+            page_data[page_no] = std::vector<uint8_t>(page, page + page_size_);
+        }
+    }
+
+    if (page_nos.size() <= 1) return false;
+
+    // Use SecondaryIndexBTreeRepairer for content-based repair
+    dbrecovery::innodb::SecondaryIndexBTreeRepairer repairer(page_size_);
+    repairer.set_page_list(page_nos, page_data);
+
+    if (!repairer.repair_chain_by_content(page_nos)) {
+        return false;
+    }
+
+    // Write updated prev/next back to file_data
+    for (const auto& [page_no, data] : page_data) {
+        if (data.size() < dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 4) continue;
+        uint8_t* page = file_data + page_no * page_size_;
+        page[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 0] = data[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 0];
+        page[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 1] = data[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 1];
+        page[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 2] = data[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 2];
+        page[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 3] = data[dbrecovery::innodb::FIL_PAGE_PREV_ABS + 3];
+        page[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 0] = data[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 0];
+        page[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 1] = data[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 1];
+        page[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 2] = data[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 2];
+        page[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 3] = data[dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 3];
+    }
+
+    return true;
+}
+
+std::vector<dbrecovery::innodb::PageKeyRange> IndexCorruptionRepairer::extract_key_ranges(
+    uint8_t* file_data, size_t file_size, uint64_t index_id) {
+
+    std::vector<dbrecovery::innodb::PageKeyRange> key_ranges;
+
+    if (!file_data || file_size < page_size_) {
+        return key_ranges;
+    }
+
+    auto all_pages = get_all_page_info(file_data, file_size);
+    std::map<uint32_t, std::vector<uint8_t>> page_data;
+    std::vector<uint32_t> page_nos;
+
+    for (const auto& [page_no, info] : all_pages) {
+        if (info.is_valid && info.index_id == index_id) {
+            page_nos.push_back(page_no);
+            const uint8_t* page = file_data + page_no * page_size_;
+            page_data[page_no] = std::vector<uint8_t>(page, page + page_size_);
+        }
+    }
+
+    if (page_nos.empty()) return key_ranges;
+
+    dbrecovery::innodb::SecondaryIndexBTreeRepairer repairer(page_size_);
+    repairer.set_page_list(page_nos, page_data);
+
+    return repairer.extract_key_ranges();
+}
+
 std::vector<uint32_t> IndexCorruptionRepairer::detect_orphan_pages(const uint8_t* file_data, size_t file_size) {
     std::vector<uint32_t> orphans;
 

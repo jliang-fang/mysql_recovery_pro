@@ -13,6 +13,7 @@
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/btree_node_parser.hpp"
 #include "dbrecovery/innodb/page_scanner.hpp"
+#include "dbrecovery/innodb/sec_index_btree_repair.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -128,6 +129,13 @@ public:
     void set_pages(const std::vector<ScannedPage>& pages);
 
     /**
+     * @brief 设置页数据映射（用于内容排序）
+     */
+    void set_page_data_map(const std::map<uint32_t, std::vector<uint8_t>>& m) {
+        page_data_map_ = m;
+    }
+
+    /**
      * @brief 设置表结构
      */
     void set_schema(const catalog::TableSchema& schema);
@@ -227,6 +235,18 @@ public:
     void sort_pages_by_chain();
 
     /**
+     * @brief 基于内容排序重连页链
+     * @param page_data 页号到原始页数据的映射
+     * @return true 如果至少重连了一个页
+     */
+    bool fix_chain_breaks_content_based(const std::map<uint32_t, std::vector<uint8_t>>& page_data);
+
+    /**
+     * @brief 按 key range 排序页（基于内容排序）
+     */
+    void sort_by_key_range();
+
+    /**
      * @brief 获取页链的叶子页范围
      * @return (first_leaf, last_leaf) 页号
      */
@@ -240,6 +260,7 @@ public:
 private:
     std::vector<ScannedPage> pages_;
     std::map<uint32_t, size_t> page_index_map_;
+    std::map<uint32_t, std::vector<uint8_t>> page_data_map_;
     catalog::TableSchema schema_;
     size_t page_size_;
 
@@ -441,13 +462,11 @@ inline BTreeTraversalStatus BPlusTreeTraversal::parse_page_records(uint32_t page
 }
 
 inline std::optional<std::vector<uint8_t>> BPlusTreeTraversal::get_page_data(uint32_t page_no) const {
-    // 这是一个简化实现
-    // 实际应该从原始文件或缓冲区读取页数据
-    // 这里返回空，表示需要外部提供页数据
-
-    // 为了测试，返回一个空的页数据
-    std::vector<uint8_t> page_data(page_size_, 0);
-    return page_data;
+    auto it = page_data_map_.find(page_no);
+    if (it != page_data_map_.end()) {
+        return it->second;
+    }
+    return std::nullopt;
 }
 
 inline bool BPlusTreeTraversal::is_index_page(uint16_t type) const {
@@ -588,6 +607,114 @@ inline void BPlusTreeTraversal::fix_chain_breaks() {
         } else {
             page.next_page = 0xFFFFFFFF; // 最后一页
         }
+    }
+
+    pages_ = sorted_pages;
+    build_page_index_map_internal();
+}
+
+inline bool BPlusTreeTraversal::fix_chain_breaks_content_based(
+    const std::map<uint32_t, std::vector<uint8_t>>& page_data) {
+
+    if (pages_.empty()) return false;
+
+    // Extract page numbers
+    std::vector<uint32_t> page_nos;
+    for (const auto& p : pages_) {
+        page_nos.push_back(p.page_no);
+    }
+
+    // Use SecondaryIndexBTreeRepairer for content-based ordering
+    innodb::SecondaryIndexBTreeRepairer repairer(page_size_);
+    repairer.set_schema(schema_);
+    repairer.set_page_list(page_nos, page_data);
+
+    // Run content-based repair
+    if (!repairer.repair_chain_by_content(page_nos)) {
+        return false;
+    }
+
+    // Map the relinked pages back to ScannedPage format
+    for (auto& page : pages_) {
+        auto it = page_data.find(page.page_no);
+        if (it == page_data.end()) continue;
+
+        // Read updated prev/next from the page data
+        if (it->second.size() >= static_cast<size_t>(FIL_PAGE_NEXT_ABS) + 4) {
+            page.prev_page = read_be<uint32_t>(it->second.data(), FIL_PAGE_PREV_ABS);
+            page.next_page = read_be<uint32_t>(it->second.data(), FIL_PAGE_NEXT_ABS);
+        }
+    }
+
+    return true;
+}
+
+inline void BPlusTreeTraversal::sort_by_key_range() {
+    if (pages_.empty() || page_data_map_.empty()) return;
+
+    // Extract page numbers
+    std::vector<uint32_t> page_nos;
+    for (const auto& p : pages_) {
+        page_nos.push_back(p.page_no);
+    }
+
+    // Use SecondaryIndexBTreeRepairer for content-based ordering
+    innodb::SecondaryIndexBTreeRepairer repairer(page_size_);
+    repairer.set_schema(schema_);
+    repairer.set_page_list(page_nos, page_data_map_);
+
+    // Extract key ranges
+    auto key_ranges = repairer.extract_key_ranges();
+    if (key_ranges.empty()) return;
+
+    // Separate leaf and internal pages
+    std::vector<PageKeyRange> leaf_ranges;
+    std::vector<PageKeyRange> internal_ranges;
+    for (auto& kr : key_ranges) {
+        if (kr.is_leaf) leaf_ranges.push_back(std::move(kr));
+        else internal_ranges.push_back(std::move(kr));
+    }
+
+    // Sort leaf pages by min_key
+    std::sort(leaf_ranges.begin(), leaf_ranges.end(),
+        [](const PageKeyRange& a, const PageKeyRange& b) {
+            return a.min_key < b.min_key;
+        });
+
+    // Sort internal pages by level (descending = root first), then min_key
+    std::sort(internal_ranges.begin(), internal_ranges.end(),
+        [](const PageKeyRange& a, const PageKeyRange& b) {
+            if (a.level != b.level) return a.level > b.level;
+            return a.min_key < b.min_key;
+        });
+
+    // Build sorted ScannedPage list
+    std::vector<ScannedPage> sorted_pages;
+    std::map<uint32_t, ScannedPage> page_map;
+    for (const auto& p : pages_) {
+        page_map[p.page_no] = p;
+    }
+
+    for (const auto& kr : leaf_ranges) {
+        auto it = page_map.find(kr.page_no);
+        if (it != page_map.end()) {
+            sorted_pages.push_back(it->second);
+        }
+    }
+    for (const auto& kr : internal_ranges) {
+        auto it = page_map.find(kr.page_no);
+        if (it != page_map.end()) {
+            sorted_pages.push_back(it->second);
+        }
+    }
+
+    // Add any remaining pages not in key ranges
+    for (const auto& p : pages_) {
+        bool found = false;
+        for (const auto& kr : key_ranges) {
+            if (kr.page_no == p.page_no) { found = true; break; }
+        }
+        if (!found) sorted_pages.push_back(p);
     }
 
     pages_ = sorted_pages;

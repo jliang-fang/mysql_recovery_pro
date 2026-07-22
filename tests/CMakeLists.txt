@@ -249,3 +249,13 @@ gtest_discover_tests(test_flashback_generator)
 add_executable(test_deep_undo_analyzer innodb/deep_undo_analyzer_test.cpp)
 target_link_libraries(test_deep_undo_analyzer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_deep_undo_analyzer)
+
+# InteractiveSchemaBuilder tests (P1)
+add_executable(test_interactive_schema unit/test_interactive_schema.cpp)
+target_link_libraries(test_interactive_schema PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_interactive_schema)
+
+# SecondaryIndexBTreeRepairer tests (P3)
+add_executable(test_sec_btree_repair unit/test_sec_btree_repair.cpp)
+target_link_libraries(test_sec_btree_repair PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_sec_btree_repair)

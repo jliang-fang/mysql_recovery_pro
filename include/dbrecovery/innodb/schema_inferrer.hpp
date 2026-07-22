@@ -631,8 +631,16 @@ public:
         const std::vector<std::pair<const uint8_t*, size_t>>& pages);
     
     /**
-     * @brief Get inferred schema
+     * @brief v2.0: Convert v1 inference result to v2 SchemaInferenceResult
+     *
+     * Maps InferredColumn → InferredColumnV2 by creating a single TypeCandidate
+     * from each v1 column's type_name/type_id and building the v2 result structure.
+     * Enables integration with InteractiveSchemaBuilder and other v2 tools.
+     *
+     * @param v1_result The v1 inference result from infer_from_raw_pages()
+     * @return v2 SchemaInferenceResult compatible with InteractiveSchemaBuilder
      */
+    static inference::SchemaInferenceResult convert_to_v2_result(const Result& v1_result);
     const InferredSchema& get_schema() const { return schema_; }
     
     /**
@@ -653,6 +661,43 @@ private:
 };
 
 // ==================== Inline Implementations ====================
+
+inline inference::SchemaInferenceResult SchemaInferrer::convert_to_v2_result(const Result& v1_result) {
+    inference::SchemaInferenceResult v2_result;
+
+    const auto& v1_schema = v1_result.schema;
+    v2_result.proposed_table_name = v1_schema.table_name;
+    v2_result.detected_column_count = static_cast<uint32_t>(v1_schema.columns.size());
+    v2_result.detected_pk_count = static_cast<uint32_t>(v1_schema.primary_key_columns.size());
+    v2_result.overall_confidence = v1_schema.confidence;
+    v2_result.inference_method = v1_schema.inference_method;
+    v2_result.warnings = v1_result.warnings;
+    v2_result.tentative_ddl = v1_schema.to_ddl();
+
+    for (const auto& v1_col : v1_schema.columns) {
+        inference::InferredColumnV2 v2_col;
+        v2_col.ordinal_position = v1_col.ordinal_position;
+        v2_col.suggested_name = v1_col.name;
+        v2_col.is_nullable = v1_col.is_nullable;
+        v2_col.is_primary_key_candidate = v1_col.is_primary_key;
+        v2_col.is_auto_increment_candidate = v1_col.is_auto_increment;
+        v2_col.overall_confidence = v1_schema.confidence;
+
+        // Create a single TypeCandidate from the v1 column
+        inference::TypeCandidate candidate;
+        candidate.type_name = v1_col.type_name;
+        candidate.innodb_type_id = v1_col.type_id;
+        candidate.confidence = v1_schema.confidence;
+        candidate.reasoning = "Converted from v1 inference result (method: " +
+                             v1_schema.inference_method + ")";
+
+        v2_col.candidates.push_back(candidate);
+        v2_col.best_guess = candidate;
+        v2_result.columns.push_back(v2_col);
+    }
+
+    return v2_result;
+}
 
 } // namespace innodb
 } // namespace dbrecovery

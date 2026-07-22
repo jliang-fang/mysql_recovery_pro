@@ -10,6 +10,9 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <chrono>
+
+#include "dbrecovery/innodb/sec_index_btree_repair.hpp"
 
 namespace dbrecovery {
 namespace repair {
@@ -134,6 +137,26 @@ public:
      * 修复断裂的 prev/next 指针
      */
     bool rebuild_page_chain(uint8_t* file_data, size_t file_size);
+
+    /**
+     * @brief 基于内容重建页链（适用于二级索引碎片化）
+     *
+     * 提取叶页的 min/max key，按 key range 排序后重连 prev/next 指针
+     * @param file_data 文件数据
+     * @param file_size 文件大小
+     * @param index_id 目标索引 ID
+     * @return true 如果至少重连了一个页
+     */
+    bool rebuild_page_chain_by_content(uint8_t* file_data, size_t file_size, uint64_t index_id);
+
+    /**
+     * @brief 提取指定索引的 key ranges
+     * @param file_data 文件数据
+     * @param file_size 文件大小
+     * @param index_id 目标索引 ID
+     * @return key ranges 列表
+     */
+    std::vector<innodb::PageKeyRange> extract_key_ranges(uint8_t* file_data, size_t file_size, uint64_t index_id);
 
     /**
      * @brief 检测孤儿页

@@ -37,6 +37,7 @@
 #include "dbrecovery/recovery/ext4_recovery.hpp"
 #include "dbrecovery/innodb/undo_log_parser.hpp"
 #include "dbrecovery/innodb/schema_inferrer.hpp"
+#include "dbrecovery/tools/interactive_schema_builder.hpp"
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
 #include "dbrecovery/innodb/partition_table_recovery.hpp"
@@ -520,6 +521,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // v2.0 advanced feature flags
     bool reassemble_mode = parser_.get_bool_option("reassemble", false);
     bool infer_schema_mode = parser_.get_bool_option("infer-schema", false);
+    bool interactive_schema_mode = parser_.get_bool_option("interactive-schema", false);
     bool undo_history_mode = parser_.get_bool_option("undo-history", false);
     bool undo_reassemble = parser_.get_bool_option("undo-reassemble", false);
     bool salvage_mode = parser_.get_bool_option("salvage-mode", false);
@@ -667,6 +669,22 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return 1;
         }
         return 0;
+    }
+
+    // Interactive schema mode (after inference, before recovery)
+    if (interactive_schema_mode && infer_schema_mode && result.success) {
+        auto v2_result = dbrecovery::innodb::SchemaInferrer::convert_to_v2_result(result);
+        dbrecovery::tools::InteractiveSchemaBuilder builder;
+        builder.set_schema_result(v2_result);
+        if (builder.run_interactive()) {
+            auto accepted = builder.get_accepted_schema();
+            std::string report_path = output_dir + "/accepted_schema_report.txt";
+            fs::create_directories(output_dir);
+            std::ofstream report_file(report_path);
+            report_file << accepted.to_report();
+            std::cout << "[INFO] Accepted schema report written to: " << report_path << "\n";
+            std::cout << builder.generate_ddl() << "\n";
+        }
     }
 
     // v2.0: Undo history mode
