@@ -259,3 +259,8 @@ gtest_discover_tests(test_interactive_schema)
 add_executable(test_sec_btree_repair unit/test_sec_btree_repair.cpp)
 target_link_libraries(test_sec_btree_repair PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_sec_btree_repair)
+
+# HeuristicSchemaEngine tests (P5 - Schema inference v2.0)
+add_executable(test_heuristic_schema_engine ../test/test_heuristic_schema_engine.cpp)
+target_link_libraries(test_heuristic_schema_engine PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_heuristic_schema_engine)

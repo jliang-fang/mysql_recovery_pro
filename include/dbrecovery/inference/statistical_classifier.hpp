@@ -22,6 +22,8 @@
 #include <sstream>
 #include <iomanip>
 
+#include "dbrecovery/innodb/page_defs.hpp"
+
 namespace dbrecovery {
 namespace inference {
 
@@ -777,21 +779,20 @@ PhysicalLayoutAnalyzer::analyze_page(const uint8_t* page_data, size_t page_size)
 
     // Check FIL header page type (offset 24, big-endian, 2 bytes)
     uint16_t page_type = (static_cast<uint16_t>(page_data[24]) << 8) | page_data[25];
-    // FIL_PAGE_INDEX = 0x45BF = 17855
-    if (page_type != 17855) return std::nullopt;
+    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX) return std::nullopt;
 
     // Read PAGE_N_RECS from page header (FIL_HEADER_SIZE + 16 = 38 + 16 = 54)
     uint16_t n_recs = (static_cast<uint16_t>(page_data[55]) << 8) | page_data[54];
     if (n_recs == 0 || n_recs > 1000) return std::nullopt;
 
-    // Read PAGE_HEAP_TOP
-    uint16_t heap_top = (static_cast<uint16_t>(page_data[59]) << 8) | page_data[58];
+    // Read PAGE_HEAP_TOP from page header (FIL_HEADER_SIZE + 2 = 38 + 2 = 40)
+    uint16_t heap_top = (static_cast<uint16_t>(page_data[41]) << 8) | page_data[40];
     if (heap_top < 120 || heap_top > page_size - 8) return std::nullopt;
 
     // Read INFIMUM offset (FIL_HEADER + 38 bytes page header + 6 = 38 + 44 = 82)
     // Actually: PAGE_HEADER_SIZE=56, PAGE_NEW_INFIMUM at PAGE_HEADER + 36
-    // For COMPACT format: INFIMUM record starts at PAGE_NEW_INFIMUM
-    uint16_t infimum_offset = (static_cast<uint16_t>(page_data[101]) << 8) | page_data[100];
+    // Read first user record offset from INFIMUM's next_offset (offset 100-101, LE)
+    uint16_t first_rec_offset = (static_cast<uint16_t>(page_data[101]) << 8) | page_data[100];
 
     // Read SUPREMUM offset
     uint16_t supremum_offset = (static_cast<uint16_t>(page_data[103]) << 8) | page_data[102];
@@ -803,9 +804,7 @@ PhysicalLayoutAnalyzer::analyze_page(const uint8_t* page_data, size_t page_size)
 
     // INFIMUM has no offset table (it's a pseudo-record)
     // First real record starts after INFIMUM (5 bytes for COMPACT)
-    // INFIMUM's next_offset points to the first real record
-    uint16_t first_rec_offset = (static_cast<uint16_t>(page_data[infimum_offset + 2]) << 8)
-                              | page_data[infimum_offset + 1];
+    // INFIMUM's next_offset points to the first real record, already read above
 
     if (first_rec_offset < 120 || first_rec_offset >= heap_top) return std::nullopt;
 
@@ -891,15 +890,12 @@ PhysicalLayoutAnalyzer::extract_column_values(
         if (size < 120) continue;
 
         uint16_t page_type = (static_cast<uint16_t>(data[24]) << 8) | data[25];
-        if (page_type != 17855) continue;
+        if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX) continue;
 
-        uint16_t infimum_offset = (static_cast<uint16_t>(data[101]) << 8) | data[100];
-        uint16_t heap_top = (static_cast<uint16_t>(data[59]) << 8) | data[58];
+        // Read first user record offset from INFIMUM's next_offset (offset 100-101, LE)
+        uint16_t rec_off = (static_cast<uint16_t>(data[101]) << 8) | data[100];
+        uint16_t heap_top = (static_cast<uint16_t>(data[41]) << 8) | data[40];
         uint16_t n_recs = (static_cast<uint16_t>(data[55]) << 8) | data[54];
-
-        // Traverse records using next_offset chain
-        uint16_t rec_off = (static_cast<uint16_t>(data[infimum_offset + 2]) << 8)
-                         | data[infimum_offset + 1];
 
         for (uint16_t rec_idx = 0; rec_idx < n_recs && sampled < max_samples; rec_idx++) {
             if (rec_off < 120 || rec_off >= heap_top) break;

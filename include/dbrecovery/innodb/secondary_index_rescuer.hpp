@@ -208,6 +208,9 @@ public:
     };
 
 private:
+    size_t page_size_;
+    catalog::TableSchema schema_;
+    SecondaryIndexRescueStats stats_;
 
     uint16_t read_page_level(const uint8_t* page_data) {
         // PAGE_LEVEL is at PAGE_HEADER + 26 = 38 + 26 = 64

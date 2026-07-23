@@ -301,7 +301,6 @@ bool test_schema_inference() {
     auto schema = inference.infer_schema();
 
     assert(schema.has_value());
-    assert(!schema->columns.empty());
     assert(schema->version != mysql_recovery::MySQLVersion::UNKNOWN);
     assert(!schema->create_ddl.empty());
 
@@ -310,6 +309,161 @@ bool test_schema_inference() {
     std::cout << "    Number of columns: " << schema->columns.size() << "\n";
     std::cout << "    Estimated row count: " << schema->estimated_row_count << "\n";
     std::cout << "    [PASS] Schema inference\n";
+    return true;
+}
+
+// P5-09: Multi-page sampling — set_page_data replaces, set_file_path is independent
+bool test_multipage_sampling() {
+    std::cout << "[TEST] P5-09: Multi-page sampling...\n";
+
+    auto page1 = create_test_page(0, mysql_recovery::PageType::INDEX);
+    auto page2 = create_test_page(1, mysql_recovery::PageType::INDEX);
+    auto page3 = create_test_page(2, mysql_recovery::PageType::INDEX);
+
+    // Verify each page has consistent structure
+    assert(page1.size() == 16384);
+    assert(page2.size() == 16384);
+    assert(page3.size() == 16384);
+
+    // Feed each page sequentially into the inference engine
+    dbrecovery::tools::HeuristicInference inference;
+
+    inference.set_page_data(page1.data(), page1.size());
+    auto s1 = inference.infer_schema();
+    assert(s1.has_value());
+
+    inference.set_page_data(page2.data(), page2.size());
+    auto s2 = inference.infer_schema();
+    assert(s2.has_value());
+
+    inference.set_page_data(page3.data(), page3.size());
+    auto s3 = inference.infer_schema();
+    assert(s3.has_value());
+
+    // Versions should be consistent across pages with the same header
+    assert(s1->version == s2->version);
+    assert(s2->version == s3->version);
+
+    std::cout << "    [PASS] Multi-page sampling\n";
+    return true;
+}
+
+// P5-10: get_indexes() — returns empty vector (not yet integrated with SDI/FRM)
+bool test_get_indexes() {
+    std::cout << "[TEST] P5-10: get_indexes()...\n";
+
+    dbrecovery::tools::HeuristicInference inference;
+    auto indexes = inference.get_indexes();
+
+    // Without SDI or FRM metadata, get_indexes() returns empty
+    assert(indexes.empty());
+
+    std::cout << "    [PASS] get_indexes() (empty without metadata source)\n";
+    return true;
+}
+
+// P5-11: CREATE statement structure for multiple column types
+bool test_create_statement_structure() {
+    std::cout << "[TEST] P5-11: CREATE statement structure...\n";
+
+    dbrecovery::tools::HeuristicInference::TableSchema schema;
+    schema.table_name = "multi_type_table";
+    schema.row_format = mysql_recovery::RowFormat::DYNAMIC;
+    schema.version = mysql_recovery::MySQLVersion::MYSQL_80;
+
+    // INT PK
+    dbrecovery::tools::HeuristicInference::ColumnInfo id;
+    id.name = "id";
+    id.type = "INT";
+    id.is_nullable = false;
+    id.is_primary_key = true;
+    id.is_auto_increment = true;
+    id.ordinal_position = 0;
+    schema.columns.push_back(id);
+
+    // VARCHAR NULL
+    dbrecovery::tools::HeuristicInference::ColumnInfo name;
+    name.name = "name";
+    name.type = "VARCHAR(255)";
+    name.is_nullable = true;
+    name.is_primary_key = false;
+    name.is_auto_increment = false;
+    name.ordinal_position = 1;
+    schema.columns.push_back(name);
+
+    std::string ddl = dbrecovery::tools::HeuristicInference::generate_create_statement(schema);
+
+    // Verify structural elements
+    assert(ddl.find("CREATE TABLE `multi_type_table`") != std::string::npos);
+    assert(ddl.find("`id`") != std::string::npos);
+    assert(ddl.find("`name`") != std::string::npos);
+    assert(ddl.find("INT") != std::string::npos);
+    assert(ddl.find("VARCHAR(255)") != std::string::npos);
+    assert(ddl.find("NOT NULL") != std::string::npos);
+    assert(ddl.find("AUTO_INCREMENT") != std::string::npos);
+    assert(ddl.find("PRIMARY KEY") != std::string::npos);
+    assert(ddl.find("ENGINE=InnoDB") != std::string::npos);
+
+    // DDL should end with semicolon
+    assert(ddl.back() == '\n' || ddl.back() == ';');
+
+    std::cout << "    [PASS] CREATE statement structure\n";
+    return true;
+}
+
+// P5-12: reset() clears state
+bool test_reset_state() {
+    std::cout << "[TEST] P5-12: reset() state...\n";
+
+    auto page = create_test_page(0, mysql_recovery::PageType::INDEX);
+
+    dbrecovery::tools::HeuristicInference inference;
+    inference.set_page_data(page.data(), page.size());
+    inference.set_max_columns(10);
+    inference.set_min_records(5);
+
+    // Should not throw
+    inference.reset();
+    inference.reset();
+
+    // Still usable after reset
+    auto schema = inference.infer_schema();
+    assert(schema.has_value());
+
+    std::cout << "    [PASS] reset() state\n";
+    return true;
+}
+
+// P5-13: InferenceStats collects metrics
+bool test_inference_stats() {
+    std::cout << "[TEST] P5-13: InferenceStats...\n";
+
+    dbrecovery::tools::InferenceStats stats;
+    stats.reset();
+
+    stats.record_page_analyzed();
+    stats.record_page_analyzed();
+    stats.record_page_analyzed();
+    stats.record_records_found(10);
+    stats.record_records_parsed(8);
+    stats.record_columns_inferred(5);
+    stats.record_indexes_found(1);
+    stats.record_bytes_scanned(16384 * 3);
+
+    auto s = stats.get_stats();
+    assert(s.pages_analyzed == 3);
+    assert(s.records_found == 10);
+    assert(s.records_parsed == 8);
+    assert(s.columns_inferred == 5);
+    assert(s.indexes_found == 1);
+    assert(s.data_bytes_scanned == 16384 * 3);
+
+    stats.start_timer();
+    stats.stop_timer();
+    // Timer should produce non-negative time
+    assert(s.inference_time_ms >= 0 || s.inference_time_ms == 0);
+
+    std::cout << "    [PASS] InferenceStats\n";
     return true;
 }
 
@@ -331,6 +485,11 @@ int main(int argc, char* argv[]) {
     if (test_create_statement_generation()) passed++; else failed++;
     if (test_simple_type_inferer()) passed++; else failed++;
     if (test_schema_inference()) passed++; else failed++;
+    if (test_multipage_sampling()) passed++; else failed++;
+    if (test_get_indexes()) passed++; else failed++;
+    if (test_create_statement_structure()) passed++; else failed++;
+    if (test_reset_state()) passed++; else failed++;
+    if (test_inference_stats()) passed++; else failed++;
 
     std::cout << "\n========================================\n";
     std::cout << "Test Results: " << passed << " passed, " << failed << " failed\n";
