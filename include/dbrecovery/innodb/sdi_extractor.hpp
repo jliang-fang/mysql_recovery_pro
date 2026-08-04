@@ -96,7 +96,7 @@ public:
      */
     std::vector<ExtractedSDI> extract_from_page(const uint8_t* page_data, size_t page_size);
 
-private:
+public:
     size_t page_size_;
     SDIExtractStats extract_stats_;
 

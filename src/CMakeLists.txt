@@ -25,11 +25,11 @@ set(RECOVERY_SOURCES
 
 # Add innodb module sources
 set(INNODB_SOURCES
+    innodb/compressed_table_recovery.cpp
     innodb/data_validator.cpp
-    innodb/data_exporter.cpp
-    innodb/io_uring.cpp
-    innodb/page_cache.cpp
-    innodb/page_parser_v82.cpp
+    innodb/encrypted_table_recovery.cpp
+    innodb/offline_keyring_parser.cpp
+    innodb/shared_tablespace_recovery.cpp
 )
 
 # Add repair module sources
@@ -69,7 +69,31 @@ set(UTILS_SOURCES
 set(TOOLS_SOURCES
     main_cli.cpp
     tools/heuristic_inference.cpp
+    tools/interactive_schema_builder.cpp
     tools/progress_cli.cpp
+    tools/recovery_cli.cpp
+)
+
+# Add salvage module sources (Phase 2: Row-level salvage for damaged pages)
+set(SALVAGE_SOURCES
+    salvage/damaged_page_handler.cpp
+    salvage/row_salvage_scanner.cpp
+    salvage/salvage_engine.cpp
+)
+
+# Add carve module sources (Phase 2: Disk carving page reassembly)
+set(CARVE_SOURCES
+    carve/page_reassembler.cpp
+)
+
+# Add enterprise module sources (Phase 2: Partition + shared tablespace recovery)
+set(ENTERPRISE_SOURCES
+    enterprise/partition_recovery.cpp
+)
+
+# Add report module sources (Phase 2: Recovery report generation)
+set(REPORT_SOURCES
+    report/recovery_report.cpp
 )
 
 # Add page module sources
@@ -91,6 +115,7 @@ set(DISK_SOURCES
 # Add inference module sources
 set(INFERENCE_SOURCES
     inference/physical_layout_analyzer.cpp
+    inference/statistical_classifier.cpp
 )
 
 # Add safety module sources (Phase 2: Bare Device Safety Gate)
@@ -105,14 +130,20 @@ set(SAFETY_SOURCES
 target_sources(dbrecovery_innodb PRIVATE
     ${COMMON_SOURCES}
     ${RECOVERY_SOURCES}
+    ${INNODB_SOURCES}
     ${REPAIR_SOURCES}
     ${EXPORT_SOURCES}
     ${ENGINE_SOURCES}
     ${UTILS_SOURCES}
+    ${TOOLS_SOURCES}
     ${PAGE_SOURCES}
     ${DISK_SOURCES}
     ${INFERENCE_SOURCES}
     ${SAFETY_SOURCES}
+    ${SALVAGE_SOURCES}
+    ${CARVE_SOURCES}
+    ${ENTERPRISE_SOURCES}
+    ${REPORT_SOURCES}
     tools/heuristic_inference.cpp
 )
 

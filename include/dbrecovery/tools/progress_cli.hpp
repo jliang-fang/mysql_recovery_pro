@@ -20,6 +20,7 @@
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/innodb/page_chain_rebuilder.hpp"
 #include "dbrecovery/innodb/sdi_extractor.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/btree_node_parser.hpp"
 #include "dbrecovery/innodb/record_chain_rebuilder.hpp"
 #include "dbrecovery/innodb/blob_chain_rebuilder.hpp"

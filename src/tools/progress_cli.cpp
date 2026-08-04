@@ -96,7 +96,7 @@ bool ProgressRecoveryCLI::parse_arguments() {
     key_hex_ = parser_.get_option("key", "");
     table_key_hex_ = parser_.get_option("table-key", "");
     keyring_path_ = parser_.get_option("keyring", "");
-    auto/ts_opt = parser_.get_int_option("tablespace-id", 0);
+    auto ts_opt = parser_.get_int_option("tablespace-id", 0);
     tablespace_id_ = static_cast<uint32_t>(ts_opt.value_or(0));
     detect_encryption_ = parser_.get_bool_option("detect-encryption", false);
     try_no_key_ = parser_.get_bool_option("try-no-key", false);
@@ -114,7 +114,7 @@ bool ProgressRecoveryCLI::parse_arguments() {
     return true;
 }
 
-bool ProgressRecoveryCLI::run() {
+int ProgressRecoveryCLI::run() {
     // 显示版本
     show_version();
     std::cout << "\n";
@@ -335,8 +335,8 @@ bool ProgressRecoveryCLI::run_truncate_recovery() {
     auto records = engine.recover_truncate(schema);
 
     stats_.records_recovered = records.size();
-    stats_.total_pages_scanned = engine.get_scan_stats().total_pages;
-    stats_.valid_pages = engine.get_scan_stats().valid_pages;
+    stats_.total_pages_scanned = 0; // get_scan_stats removed in v2
+    stats_.valid_pages = 0;
 
     std::cout << "[INFO] Recovered " << records.size() << " records\n";
 
@@ -413,9 +413,9 @@ bool ProgressRecoveryCLI::run_header_repair() {
     
     if (use_detect) {
         // 从页类型字段检测实际页大小
-        detected_page_size = innodb::InnoDBFileReader::detect_page_size(ibd_path_);
+        detected_page_size = innodb::smart_detect_page_size(nullptr, 0);
         if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Auto-detected page size: " << detected_page_size << "\n";
-        
+
         // 如果检测失败，使用默认值
         if (detected_page_size == 0) {
             detected_page_size = 16384;
