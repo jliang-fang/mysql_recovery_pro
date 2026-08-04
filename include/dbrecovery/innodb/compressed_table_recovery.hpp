@@ -223,8 +223,11 @@ inline bool CompressedTableRecovery::is_page_compressed(const uint8_t* page_data
     if (version != 1) return false;
 
     uint16_t zip_size = read_le<uint16_t>(page_data, 0);
-    // Valid compressed page sizes: 8=4KB, 16=8KB, 32=16KB
+    // zip_size is in 512-byte units: 8=4KB, 16=8KB, 32=16KB
     if (zip_size != 8 && zip_size != 16 && zip_size != 32) return false;
+
+    // zip_size must not exceed the page itself (can't be larger than the page)
+    if (static_cast<uint32_t>(zip_size) * 512 > page_size) return false;
 
     uint32_t orig_size = read_le<uint32_t>(page_data, 14);
     // orig_size must be a valid InnoDB page size
@@ -452,16 +455,17 @@ inline std::optional<size_t> CompressedTableRecoveryManager::parse_compression_i
     std::vector<uint8_t> page_data(16384);
     file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-    // 检查页 0 的 flags
-    if (page_data.size() >= 80) {
-        uint16_t flags = read_le<uint16_t>(page_data.data(), 80);
-        // 检查是否设置了压缩标志
-        if (flags & 0x0080) {
-            // 压缩页大小在 flags 的高 16 位
-            uint32_t zip_size = (flags >> 16) & 0x0FFF;
-            if (zip_size > 0) {
-                return static_cast<size_t>(zip_size);
-            }
+    // 检查页 0 的 FSP_FLAGS (offset 80, 4 bytes, little-endian)
+    if (page_data.size() >= 84) {  // need 4 bytes at offset 80
+        uint32_t fsp_flags = read_le<uint32_t>(page_data.data(), 80);
+        // FSP_FLAGS zip_ssize is at bits 5-7
+        // zip_ssize = (fsp_flags >> 5) & 0x07
+        // Actual compressed page size = UNIV_PAGE_SIZE / (2 ^ zip_ssize)
+        // UNIV_PAGE_SIZE is typically 16384 (16KB)
+        // zip_ssize=0 -> 16KB (no compression), zip_ssize=1 -> 8KB, zip_ssize=2 -> 4KB
+        uint32_t zip_ssize = (fsp_flags >> 5) & 0x07;
+        if (zip_ssize > 0) {
+            return static_cast<size_t>(16384 / (1 << zip_ssize));
         }
     }
 

@@ -86,6 +86,11 @@ set(DISK_SOURCES
     disk/ibd_file_carver.cpp
 )
 
+# Add inference module sources
+set(INFERENCE_SOURCES
+    inference/physical_layout_analyzer.cpp
+)
+
 # Add all sources to dbrecovery_innodb library
 target_sources(dbrecovery_innodb PRIVATE
     ${COMMON_SOURCES}
@@ -96,6 +101,7 @@ target_sources(dbrecovery_innodb PRIVATE
     ${UTILS_SOURCES}
     ${PAGE_SOURCES}
     ${DISK_SOURCES}
+    ${INFERENCE_SOURCES}
     tools/heuristic_inference.cpp
 )
 
@@ -259,7 +265,7 @@ endif()
 
 # ==================== Link innodb module sources ====================
 add_subdirectory(innodb)
-target_link_libraries(dbrecovery_innodb PRIVATE dbrecovery_core dbrecovery_innodb_sources)
+target_link_libraries(dbrecovery_innodb PUBLIC dbrecovery_core dbrecovery_innodb_sources)
 
 # ==================== GUI Support ====================
 if(GUI_ENABLED)

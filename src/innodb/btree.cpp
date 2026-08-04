@@ -1580,12 +1580,11 @@ void BPlusTreeReconstructor::add_page(uint32_t page_no, std::vector<uint8_t> pag
     pages_[page_no] = std::move(page_data);
 }
 
-bool BPlusTreeReconstructor::reconstruct() noexcept {
+bool BPlusTreeReconstructor::reconstruct(const catalog::TableSchema& schema) noexcept {
     if (pages_.empty()) {
         return false;
     }
 
-    // 从根页开始遍历
     auto it = pages_.find(root_page_no_);
     if (it == pages_.end()) {
         return false;
@@ -1596,12 +1595,85 @@ bool BPlusTreeReconstructor::reconstruct() noexcept {
         return false;
     }
 
-    // ✅ P1-1 实现：调用 parse_records 方法解析记录
-    // 这里需要表结构信息来正确解析字段类型和长度
-    // 暂时返回空记录列表
     records_.clear();
+    std::set<uint32_t> visited;
+    return traverse_tree(root_page_no_, schema, visited);
+}
+
+bool BPlusTreeReconstructor::traverse_tree(
+    uint32_t page_no,
+    const catalog::TableSchema& schema,
+    std::set<uint32_t>& visited) noexcept {
+
+    if (visited.size() >= 10000) {
+        return false;
+    }
+    if (!visited.insert(page_no).second) {
+        return true;
+    }
+
+    auto it = pages_.find(page_no);
+    if (it == pages_.end()) {
+        return false;
+    }
+
+    BPlusTreeParser parser(it->second);
+    if (!parser.parse()) {
+        return false;
+    }
+
+    if (parser.node_type() == BTreeNodeType::LEAF) {
+        auto recs = parser.parse_records(schema);
+        for (auto& r : recs) {
+            records_.push_back(std::move(r));
+        }
+        return true;
+    }
+
+    if (parser.node_type() == BTreeNodeType::INTERNAL) {
+        bool ok = true;
+        for (uint32_t child : extract_child_pages(parser, it->second)) {
+            if (!traverse_tree(child, schema, visited)) {
+                ok = false;
+            }
+        }
+        return ok;
+    }
 
     return true;
+}
+
+std::vector<uint32_t>
+BPlusTreeReconstructor::extract_child_pages(
+    const BPlusTreeParser& parser,
+    const std::vector<uint8_t>& page_data) const {
+
+    std::vector<uint32_t> children;
+    const auto& offsets = parser.record_offsets();
+    if (page_data.size() < dbrecovery::innodb::FIL_HEADER_SIZE + 10) {
+        return children;
+    }
+
+    for (uint16_t rec_off : offsets) {
+        if (rec_off < dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS) continue;
+        if (static_cast<size_t>(rec_off) + 4 > page_data.size()) continue;
+        uint32_t child = dbrecovery::innodb::read_le<uint32_t>(
+            page_data.data(), rec_off);
+        if (child != 0 && child != 0xFFFFFFFF) {
+            children.push_back(child);
+        }
+    }
+
+    if (page_data.size() >= dbrecovery::innodb::FIL_PAGE_NEXT_ABS + 4) {
+        uint32_t next_page = dbrecovery::innodb::read_le<uint32_t>(
+            page_data.data(),
+            dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
+        if (next_page != 0 && next_page != 0xFFFFFFFF) {
+            children.push_back(next_page);
+        }
+    }
+
+    return children;
 }
 
 // ==================== BPlusTreeParser 实现 ====================

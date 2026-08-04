@@ -5,6 +5,7 @@
 
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/common/endian_compat.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -157,44 +158,48 @@ bool MySQLVersionDetector::matches_version(const uint8_t* page_data,
 // ==================== 版本特征检查方法 ====================
 
 int MySQLVersionDetector::check_lsn_extension(const uint8_t* page_data, size_t page_size) {
-    // 检查FIL_PAGE_FILE_FLUSH_LSN字段（偏移24-31）
-    // MySQL 8.0+有8字节LSN扩展
-    if (page_size < 32) return 0;
+    // Check FIL header: page_type at offset 24 (2 bytes big-endian)
+    // FLUSH_LSN (MySQL 8.0+) at offset 26 (8 bytes big-endian)
+    // MySQL 8.0+ has 8-byte LSN extension in the FIL header
+    if (page_size < 34) return 0;
 
-    // 读取FIL_PAGE_FILE_FLUSH_LSN
-    uint64_t flush_lsn = endian::read_le64(page_data, 24);
-    
-    // 如果FIL_PAGE_FILE_FLUSH_LSN非零，可能是MySQL 8.0+
+    // Read page_type at offset 24 (FIL_PAGE_TYPE_ABS), big-endian
+    uint16_t page_type = endian::read_be16(page_data, innodb::FIL_PAGE_TYPE_ABS);
+
+    // If page type is 0 (freshly allocated), this is not a valid page
+    if (page_type == 0) return 0;
+
+    // Read FLUSH_LSN at offset 26 (FIL_PAGE_TYPE_ABS + 2), big-endian
+    uint64_t flush_lsn = endian::read_be64(page_data, innodb::FIL_PAGE_TYPE_ABS + 2);
+
+    // If FLUSH_LSN is non-zero, this is MySQL 8.0+
     if (flush_lsn > 0) {
-        return 10;  // 支持LSN扩展
+        return 10;  // Supports LSN extension
     }
-    
-    return -5;  // 不支持LSN扩展
+
+    return -5;  // No LSN extension
 }
 
 int MySQLVersionDetector::check_sdi_signature(const uint8_t* page_data, size_t page_size) {
-    // 检查SDI签名（偏移64-71）
-    // MySQL 8.0+的SDI页有特定签名: 0x08 'S' 'D' 'I' '0' '0' '0' '0'
+    // Check for SDI signature at offset 64-71
+    // MySQL 8.0+ SDI pages have signature: 0x08 'S' 'D' 'I' '0' '0' '0' '0'
     if (page_size < 72) return 0;
 
     constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
-    
-    // 检查页类型是否为SDI页
-    uint16_t page_type = endian::read_le16(page_data, 16);
-    if (page_type == 0x26F3) {  // SDI页类型
-        // 检查SDI签名
+
+    // Read page type at offset 24 (FIL_PAGE_TYPE_ABS), big-endian
+    uint16_t page_type = endian::read_be16(page_data, innodb::FIL_PAGE_TYPE_ABS);
+
+    // Check if this is an SDI page (uncompressed 0x45BE or compressed 0x45BD)
+    if (page_type == innodb::FIL_PAGE_SDI || page_type == innodb::FIL_PAGE_SDI_ZIP) {
+        // Check SDI signature
         if (std::memcmp(page_data + 64, SDI_SIG, 8) == 0) {
-            return 15;  // 匹配SDI签名
+            return 15;  // Matches SDI signature
         }
-        return 5;  // SDI页但无签名（可能是旧版本）
+        return 5;  // SDI page but no signature (possibly older version)
     }
 
-    // 检查是否有SDI页类型值
-    if (page_type == 0x26F3) {
-        return 10;  // SDI页类型
-    }
-
-    return -10;  // 非SDI页类型
+    return -10;  // Not an SDI page type
 }
 
 int MySQLVersionDetector::check_page_version_field(const uint8_t* page_data, size_t page_size) {
@@ -214,20 +219,22 @@ int MySQLVersionDetector::check_page_version_field(const uint8_t* page_data, siz
 }
 
 int MySQLVersionDetector::check_checksum_type(const uint8_t* page_data, size_t page_size) {
-    // 检查校验和类型
-    // MySQL 5.6+使用CRC32
-    // MySQL 5.5及更早版本使用OLD或INNODB校验和
-    
+    // Check checksum type in FIL header
+    // Checksum is stored at offset 0 in the FIL header, in big-endian format
+    // MySQL 5.6+ uses CRC32 checksum (typically a large value)
+    // MySQL 5.5 and earlier use OLD or INNODB checksum
+
     if (page_size < 4) return 0;
 
-    uint32_t checksum = endian::read_le32(page_data, 0);
-    
-    // CRC32校验和通常较大
+    // Read checksum at offset 0, big-endian (InnoDB FIL header stores all fields big-endian)
+    uint32_t checksum = endian::read_be32(page_data, 0);
+
+    // CRC32 checksum values are typically large (> 16 million)
     if (checksum > 0x1000000) {
-        return 8;  // 可能是CRC32
+        return 8;  // Likely CRC32
     }
-    
-    return 5;  // 未知校验和类型
+
+    return 5;  // Unknown checksum type
 }
 
 int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_size) {
@@ -240,37 +247,40 @@ int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_
 }
 
 int MySQLVersionDetector::check_undo_log_format(const uint8_t* page_data, size_t page_size) {
-    // 检查UNDO LOG页格式
-    // MySQL 8.0+使用新的UNDO LOG格式
+    // Check UNDO LOG page format
+    // MySQL 8.0+ uses new UNDO LOG format
     if (page_size < 50) return 0;
 
-    uint16_t page_type = endian::read_le16(page_data, 16);
-    
-    if (page_type == 0x26F2) {  // UNDO_LOG页类型
-        // 检查UNDO LOG头
-        uint8_t undo_type = page_data[100];  // UNDO_LOG_HEADER_OFFSET + 0
+    // Read page type at offset 24 (FIL_PAGE_TYPE_ABS), big-endian
+    uint16_t page_type = endian::read_be16(page_data, innodb::FIL_PAGE_TYPE_ABS);
+
+    if (page_type == innodb::FIL_PAGE_UNDO_LOG) {  // 0x45B2 = 17842
+        // Check UNDO LOG header
+        uint8_t undo_type = page_data[100];  // UNDO_LOG_HEADER_OFFSET
         if (undo_type == 0 || undo_type == 1) {
-            return 8;  // 新格式
+            return 8;  // New format
         }
     }
 
-    return 5;  // 无法确定
+    return 5;  // Cannot determine
 }
 
 int MySQLVersionDetector::check_page_type_range(const uint8_t* page_data, size_t page_size) {
-    // 检查页类型是否在有效范围内
+    // Check if page type is within valid range
+    // Page type is at offset 24 (FIL_PAGE_TYPE_ABS), read as big-endian
     if (page_size < 38) return 0;
 
-    uint16_t page_type = endian::read_le16(page_data, 16);
-    
-    // 有效的InnoDB页类型范围
-    if (page_type == 0 || page_type == 0x26F1 || page_type == 0x26F2 ||
-        page_type == 0x26F3 || page_type == 0x26F4 || page_type == 0x45BF ||
-        page_type == 0x45BE || page_type == 0x26F6) {
+    uint16_t page_type = endian::read_be16(page_data, innodb::FIL_PAGE_TYPE_ABS);
+
+    // Valid InnoDB page type values (big-endian read values)
+    if (page_type == innodb::FIL_PAGE_TYPE_ALLOCATED || page_type == innodb::FIL_PAGE_INDEX ||
+        page_type == innodb::FIL_PAGE_UNDO_LOG || page_type == innodb::FIL_PAGE_SDI ||
+        page_type == innodb::FIL_PAGE_SDI_ZIP || page_type == innodb::FIL_PAGE_TYPE_FSP_HDR ||
+        page_type == innodb::FIL_PAGE_TYPE_XDES) {
         return 10;
     }
 
-    return -5;  // 无效页类型
+    return -5;  // Invalid page type
 }
 
 MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
@@ -296,8 +306,8 @@ MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
         return MySQLVersion::MYSQL_56;  // Fallback to 5.6 for older versions
     }
 
-    // 默认返回5.6
-    return MySQLVersion::MYSQL_56;
+    // 默认返回未知
+    return MySQLVersion::UNKNOWN;
 }
 
 // ==================== DetailedVersionDetector实现 ====================
@@ -442,7 +452,7 @@ MySQLVersion DetailedVersionDetector::match_version(const std::vector<FeatureChe
         return MySQLVersion::MYSQL_56;  // Fallback to 5.6 for older versions
     }
 
-    return MySQLVersion::MYSQL_56;
+    return MySQLVersion::UNKNOWN;
 }
 
 // ==================== VersionDetectionFactory实现 ====================

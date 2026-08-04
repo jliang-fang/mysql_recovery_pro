@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 #include "dbrecovery/innodb/mach_read.hpp"
@@ -428,8 +429,9 @@ public:
 
     /**
      * @brief 重建索引结构
+     * @param schema 表结构定义（用于字段类型解析）
      */
-    bool reconstruct() noexcept;
+    bool reconstruct(const catalog::TableSchema& schema) noexcept;
 
     /**
      * @brief 获取所有记录
@@ -443,7 +445,12 @@ private:
     std::map<uint32_t, std::vector<uint8_t>> pages_;
     std::vector<std::map<std::string, std::string>> records_;
 
-    bool traverse_tree(uint32_t page_no, const catalog::TableSchema& schema) noexcept;
+    bool traverse_tree(uint32_t page_no, const catalog::TableSchema& schema,
+                       std::set<uint32_t>& visited) noexcept;
+
+    std::vector<uint32_t> extract_child_pages(
+        const BPlusTreeParser& parser,
+        const std::vector<uint8_t>& page_data) const;
 };
 
 } // namespace innodb

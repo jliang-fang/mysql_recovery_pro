@@ -71,7 +71,7 @@ public:
      */
     static DecodedRollPtr decode(uint64_t roll_ptr) {
         uint32_t page_no = static_cast<uint32_t>(roll_ptr & 0xFFFFFFFF);
-        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & 0xFFFF);
+        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & 0x3FFFF);
         uint8_t  flags   = static_cast<uint8_t>((roll_ptr >> 48) & 0xFF);
         return {page_no, offset, flags};
     }
@@ -81,7 +81,7 @@ public:
      */
     static uint64_t encode(uint32_t page_no, uint32_t offset, uint8_t flags = 0) {
         return static_cast<uint64_t>(page_no) |
-               (static_cast<uint64_t>(offset & 0xFFFF) << 32) |
+               (static_cast<uint64_t>(offset & 0x3FFFF) << 32) |
                (static_cast<uint64_t>(flags) << 48);
     }
 

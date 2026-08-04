@@ -31,6 +31,7 @@
 #include <iomanip>
 
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/roll_ptr_decoder.hpp"
@@ -487,12 +488,20 @@ private:
      * @brief Read a 6/7-byte prev_undo_ptr from page data at offset
      *
      * Delegates to RollPtrDecoder for unified multi-version support.
-     * Attempts 7-byte (MySQL 8.0+) format first, falls back to 6-byte (5.6/5.7).
+     * Uses 7-byte (MySQL 8.0+) or 6-byte (5.6/5.7) format based on the
+     * provided mysql_version parameter. Defaults to 7-byte (MySQL 8.0+).
+     *
+     * @param page_data     Raw page buffer
+     * @param offset        Byte offset of the roll pointer within the page
+     * @param mysql_version MySQL version for roll pointer size determination
+     * @return Decoded prev_undo_ptr (0 = no previous version)
      *
      * @see RollPtrDecoder::decode_storage()
      */
-    static uint64_t read_prev_undo_ptr(const uint8_t* page_data, size_t offset) {
-        return RollPtrDecoder::decode_storage_to_internal(page_data + offset, 7);
+    static uint64_t read_prev_undo_ptr(const uint8_t* page_data, size_t offset,
+                                       MySQLVersion mysql_version = MySQLVersion::MYSQL_80) {
+        size_t roll_ptr_size = (mysql_version >= MySQLVersion::MYSQL_80) ? 7 : 6;
+        return RollPtrDecoder::decode_storage_to_internal(page_data + offset, roll_ptr_size);
     }
 
     /**

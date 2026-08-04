@@ -79,10 +79,17 @@ struct DamageReport {
 
 // ==================== Salvaged Row ====================
 
+enum class SalvageLevel : uint8_t {
+    STRUCTURED = 0,   // L1/L2 — full record structure
+    FRAGMENT = 1,     // L3 — pattern-matched evidence
+    STRING_ONLY = 2  // L4 — raw string extraction
+};
+
 struct SalvagedRow {
     uint64_t page_offset = 0;
     uint16_t record_offset = 0;
     uint16_t field_count = 0;
+    SalvageLevel salvage_level = SalvageLevel::STRUCTURED;
     std::vector<std::string> fields;
     double confidence = 0.0;  // 0.0-1.0
     std::string recovery_method; // "header_repair", "signature_scan", "pattern_match", "string_extract"
@@ -134,7 +141,7 @@ public:
     struct Config {
         uint32_t page_size = 16384;
         uint32_t min_string_len = 4;       // Min ASCII string length to extract
-        uint32_t min_record_fields = 2;    // Min fields for valid record
+        uint32_t min_record_fields = 2;    // Min fields for STRUCTURED recovery only (L1/L2)
         double min_confidence = 0.3;       // Min confidence to include row
         bool enable_signature_scan = true; // L2: scan for record signatures
         bool enable_pattern_match = true;  // L3: scan for data patterns
@@ -509,6 +516,7 @@ inline std::vector<SalvagedRow> SalvageEngine::salvage_l3(
             SalvagedRow row;
             row.page_offset = it->position();
             row.field_count = 1;
+            row.salvage_level = SalvageLevel::FRAGMENT;
             row.fields.push_back(it->str());
             row.confidence = 0.4;
             row.recovery_method = method;
@@ -543,6 +551,7 @@ inline std::vector<SalvagedRow> SalvageEngine::salvage_l4(
                 SalvagedRow row;
                 row.page_offset = start_pos;
                 row.field_count = 1;
+                row.salvage_level = SalvageLevel::STRING_ONLY;
                 row.fields.push_back(current);
                 row.confidence = 0.2;
                 row.recovery_method = "string_extract";
@@ -557,6 +566,7 @@ inline std::vector<SalvagedRow> SalvageEngine::salvage_l4(
         SalvagedRow row;
         row.page_offset = start_pos;
         row.field_count = 1;
+        row.salvage_level = SalvageLevel::STRING_ONLY;
         row.fields.push_back(current);
         row.confidence = 0.2;
         row.recovery_method = "string_extract";
@@ -611,11 +621,14 @@ inline std::vector<SalvagedRow> SalvageEngine::salvage_page(
         }
     }
 
-    // Filter by confidence
+    // For L1/L2 structured recovery, enforce min_field_count
+    // For L3/L4 fragments, only filter by confidence (fragments are single-field by nature)
     rows.erase(std::remove_if(rows.begin(), rows.end(),
         [this](const SalvagedRow& r) {
-            return r.confidence < config_.min_confidence ||
-                   r.field_count < config_.min_record_fields;
+            if (r.confidence < config_.min_confidence) return true;
+            if (r.salvage_level == SalvageLevel::STRUCTURED &&
+                r.field_count < config_.min_record_fields) return true;
+            return false;
         }), rows.end());
 
     return rows;

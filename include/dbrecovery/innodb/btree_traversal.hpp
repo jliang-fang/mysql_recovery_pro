@@ -394,6 +394,12 @@ inline BTreeTraversalStatus BPlusTreeTraversal::traverse_from_page(uint32_t page
         return BTreeTraversalStatus::INVALID_PAGE_NUMBER;
     }
 
+    // 安全检查：防止过深递归导致栈溢出（最大 B+Tree 深度通常不超过 20）
+    if (depth > 1000) {
+        stats_.pages_with_errors++;
+        return BTreeTraversalStatus::UNKNOWN_ERROR;
+    }
+
     // 检查是否已访问（循环引用检测）
     if (is_visited(page_no)) {
         circular_refs_.push_back(page_no);
@@ -424,40 +430,90 @@ inline BTreeTraversalStatus BPlusTreeTraversal::traverse_from_page(uint32_t page
     visited_pages_.insert(page_no);
     stats_.total_pages_visited++;
 
-    // 解析页类型
     if (page.type == FIL_PAGE_INDEX) {
         stats_.index_pages_visited++;
     }
 
-    // 解析页记录
-    auto parse_status = parse_page_records(page_no);
-    if (parse_status != BTreeTraversalStatus::SUCCESS) {
-        stats_.pages_with_errors++;
+    // 使用 ScannedPage.level 判断页类型（0 = 叶子页，> 0 = 内部节点）
+    if (page.level == 0) {
+        // 叶子页：解析记录
+        stats_.leaf_pages_visited++;
+        auto parse_status = parse_page_records(page_no);
+        if (parse_status != BTreeTraversalStatus::SUCCESS) {
+            stats_.pages_with_errors++;
+        }
+        return BTreeTraversalStatus::SUCCESS;
     }
 
-    // 获取页级别（深度）
-    // 页级别在页头的偏移 42 处（BTR_PAGE_LEVEL）
-    // 这里简化处理：通过遍历深度推断
+    // 内部节点：从记录中提取子节点页号并递归遍历
+    stats_.internal_pages_visited++;
 
-    // 如果是内部节点，递归遍历子节点
-    // 注意：需要从记录中提取子节点页号
-    // 这里简化处理：假设所有页都是叶子页（对于恢复场景）
+    auto data_it = page_data_map_.find(page_no);
+    if (data_it == page_data_map_.end()) {
+        stats_.pages_with_errors++;
+        return BTreeTraversalStatus::PAGE_NOT_FOUND;
+    }
 
-    // 统计叶子页
-    if (depth == 0 || pages_.size() <= 100) {
-        stats_.leaf_pages_visited++;
-    } else {
-        stats_.internal_pages_visited++;
+    BPlusTreeParser parser(data_it->second);
+    if (!parser.parse()) {
+        stats_.pages_with_errors++;
+        return BTreeTraversalStatus::UNKNOWN_ERROR;
+    }
+
+    // 内部节点记录的第一个 4 字节是子节点页号（小端序）
+    const auto& offsets = parser.record_offsets();
+    const auto& page_data = data_it->second;
+    uint32_t child_count = 0;
+
+    for (uint16_t rec_off : offsets) {
+        if (rec_off < dbrecovery::innodb::PAGE_INFIMUM_REC_OFFSET_ABS) continue;
+        if (static_cast<size_t>(rec_off) + 4 > page_data.size()) continue;
+        uint32_t child = dbrecovery::innodb::read_le<uint32_t>(page_data.data(), rec_off);
+        if (child != 0 && child != 0xFFFFFFFF) {
+            child_count++;
+            auto child_status = traverse_from_page(child, depth + 1);
+            if (child_status != BTreeTraversalStatus::SUCCESS &&
+                child_status != BTreeTraversalStatus::CIRCULAR_REFERENCE) {
+                // 继续遍历其他子节点，不因单个子节点失败而终止
+                stats_.pages_with_errors++;
+            }
+        }
+    }
+
+    // 没有找到子节点可能表示页数据不完整
+    if (child_count == 0) {
+        stats_.pages_with_errors++;
     }
 
     return BTreeTraversalStatus::SUCCESS;
 }
 
 inline BTreeTraversalStatus BPlusTreeTraversal::parse_page_records(uint32_t page_no) {
-    // Skip actual record parsing for now - just count the page
-    // In a real implementation, we would read page data and parse records
-    stats_.records_found++;
-    stats_.records_recovered++;
+    // Get page data from page_data_map_
+    auto data_it = page_data_map_.find(page_no);
+    if (data_it == page_data_map_.end()) {
+        // No raw data available, just count the page
+        stats_.records_found++;
+        return BTreeTraversalStatus::SUCCESS;
+    }
+
+    // Use BPlusTreeParser to parse record structure
+    BPlusTreeParser parser(data_it->second);
+    if (!parser.parse()) {
+        stats_.pages_with_errors++;
+        return BTreeTraversalStatus::UNKNOWN_ERROR;
+    }
+
+    // Parse records using the schema
+    auto parsed_records = parser.parse_records(schema_);
+    stats_.records_found += parsed_records.size();
+    stats_.records_recovered += parsed_records.size();
+
+    // Add to records_ collection
+    for (auto& rec : parsed_records) {
+        records_.push_back(std::move(rec));
+    }
+
     return BTreeTraversalStatus::SUCCESS;
 }
 
@@ -476,9 +532,11 @@ inline bool BPlusTreeTraversal::is_index_page(uint16_t type) const {
 }
 
 inline bool BPlusTreeTraversal::is_leaf_page(uint32_t page_no) const {
-    // 简化实现：所有页都视为叶子页
-    // 实际应该检查页级别（level == 0 表示叶子页）
-    return true;
+    auto it = page_index_map_.find(page_no);
+    if (it == page_index_map_.end()) {
+        return true; // default to leaf if not found
+    }
+    return pages_[it->second].level == 0;
 }
 
 inline void BPlusTreeTraversal::add_to_path(uint32_t page_no) {

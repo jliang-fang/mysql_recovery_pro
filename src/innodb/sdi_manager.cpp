@@ -32,62 +32,18 @@ catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t
         return schema;
     }
 
-    // Read header (type and id are reserved for future use)
-    // uint32_t type = dbrecovery::innodb::read_le<uint32_t>(payload);
-    // uint64_t id   = dbrecovery::innodb::read_le<uint64_t>(payload + 4);
-    uint32_t uncompressed_len = dbrecovery::innodb::read_le<uint32_t>(payload + 12);
-    uint32_t compressed_len   = dbrecovery::innodb::read_le<uint32_t>(payload + 16);
-
-    if (g_verbose) 
-    std::cerr << "[DEBUG] uncompressed_len=" << uncompressed_len << ", compressed_len=" << compressed_len << "\n";
-
-    if (compressed_len == 0 || compressed_len > payload_len - 20) {
-        if (g_verbose)         std::cerr << "[DEBUG] compressed_len validation failed\n";
+    // Reuse the safe extraction path from the header
+    auto sdi_json = extract_sdi_json(payload, payload_len);
+    if (!sdi_json) {
+        if (g_verbose)         std::cerr << "[DEBUG] extract_sdi_json returned nullopt\n";
         return schema;
     }
 
-    const uint8_t* raw_data = payload + 20;
-
-    // Decompress using zlib directly (avoid dependency on dbrecovery::utils)
-    z_stream strm = {};
-    strm.next_in = const_cast<Bytef*>(raw_data);
-    strm.avail_in = static_cast<uInt>(compressed_len);
-
-    std::vector<uint8_t> decompressed(uncompressed_len);
-    strm.next_out = decompressed.data();
-    strm.avail_out = static_cast<uInt>(decompressed.size());
-
-    int ret = inflateInit2(&strm, -15); // raw deflate
-    if (ret != Z_OK) {
-        if (g_verbose)         std::cerr << "[DEBUG] inflateInit2 failed with ret=" << ret << "\n";
-        return schema;
-    }
-
-    do {
-        ret = inflate(&strm, Z_NO_FLUSH);
-        if (ret == Z_BUF_ERROR) {
-            decompressed.resize(decompressed.size() * 2);
-            strm.next_out = decompressed.data() + strm.total_out;
-            strm.avail_out = static_cast<uInt>(decompressed.size() - strm.total_out);
-        } else if (ret != Z_OK && ret != Z_STREAM_END) {
-            if (g_verbose)             std::cerr << "[DEBUG] inflate failed with ret=" << ret << "\n";
-            inflateEnd(&strm);
-            return schema;
-        }
-    } while (ret != Z_STREAM_END);
-
-    decompressed.resize(strm.total_out);
-    inflateEnd(&strm);
-
-    if (g_verbose) 
-    std::cerr << "[DEBUG] Decompressed size=" << decompressed.size() << "\n";
-    // ✅ 调试：输出完整的 JSON 内容以检查字段名
-    std::string json_str(decompressed.begin(), decompressed.end());
-    if (g_verbose)     std::cerr << "[DEBUG SDI JSON] " << json_str.substr(0, std::min(json_str.length(), (size_t)5000)) << "\n";
+    if (g_verbose)     std::cerr << "[DEBUG SDI JSON] " << sdi_json->substr(0, std::min(sdi_json->length(), (size_t)5000)) << "\n";
 
     // Parse JSON
     try {
-        auto json_obj = nlohmann::json::parse(decompressed.begin(), decompressed.end());
+        auto json_obj = nlohmann::json::parse(*sdi_json);
 
         // MySQL 8.0+ SDI uses "dictionary" as root object
         if (json_obj.contains("dictionary")) {

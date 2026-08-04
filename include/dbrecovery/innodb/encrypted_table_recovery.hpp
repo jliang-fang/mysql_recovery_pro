@@ -142,7 +142,8 @@ private:
 
     // 解密页数据
     std::vector<uint8_t> decrypt_page_data(const uint8_t* encrypted_data,
-                                           size_t size, uint32_t page_no);
+                                           size_t size, uint32_t page_no,
+                                           uint32_t space_id);
 
     // 解析页中的记录
     std::vector<std::map<std::string, std::string>> parse_page_records(
@@ -271,11 +272,12 @@ inline bool EncryptedTableRecovery::is_page_encrypted(const uint8_t* page_data, 
 }
 
 inline std::vector<uint8_t> EncryptedTableRecovery::decrypt_page_data(const uint8_t* encrypted_data,
-                                                                      size_t size, uint32_t page_no) {
+                                                                      size_t size, uint32_t page_no,
+                                                                      uint32_t space_id) {
     auto start = std::chrono::high_resolution_clock::now();
 
     // 尝试解密
-    auto decrypted = decryptor_.decrypt_page(encrypted_data, size, 0, page_no);
+    auto decrypted = decryptor_.decrypt_page(encrypted_data, size, space_id, page_no);
 
     auto end = std::chrono::high_resolution_clock::now();
     stats_.decrypt_time_ms += std::chrono::duration<double, std::milli>(end - start).count();
@@ -318,7 +320,7 @@ inline std::vector<std::map<std::string, std::string>> EncryptedTableRecovery::p
         // 如果页加密，尝试解密
         std::vector<uint8_t> working_data = page_data;
         if (page.is_encrypted) {
-            working_data = decrypt_page_data(page_data.data(), page_data.size(), page.page_no);
+            working_data = decrypt_page_data(page_data.data(), page_data.size(), page.page_no, page.space_id);
             if (working_data.empty()) {
                 if (!try_recovery_without_key_) {
                     continue;

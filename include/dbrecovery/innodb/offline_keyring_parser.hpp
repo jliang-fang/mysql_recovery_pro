@@ -15,6 +15,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include <nlohmann/json.hpp>
+#include <openssl/aes.h>
 
 namespace dbrecovery {
 namespace innodb {
@@ -138,15 +139,9 @@ public:
             auto j = nlohmann::json::parse(json_str);
             return parse_keyring_json(j);
         } catch (const std::exception& e) {
-            // If XOR decrypt fails, try raw JSON (maybe not encrypted after all)
-            try {
-                std::string raw(reinterpret_cast<const char*>(encrypted_data.data()), encrypted_data.size());
-                auto j = nlohmann::json::parse(raw);
-                return parse_keyring_json(j);
-            } catch (...) {
-                last_error_ = std::string("Failed to decrypt/parse: ") + e.what();
-                return false;
-            }
+            // If XOR decrypt fails, log and reject
+            last_error_ = "XOR placeholder decryption failed -- real AES keyring decryption not implemented for this format";
+            return false;
         }
     }
 
@@ -217,29 +212,53 @@ public:
         uint32_t space_id,
         uint32_t page_no = 0,
         uint64_t lsn = 0) {
+        (void)page_no; (void)lsn;  // page_no used for per-page IV, lsn for redo
 
-        // Build derivation input: space_id || page_no || LSN
-        std::vector<uint8_t> input;
-        input.push_back(static_cast<uint8_t>(space_id & 0xFF));
-        input.push_back(static_cast<uint8_t>((space_id >> 8) & 0xFF));
-        input.push_back(static_cast<uint8_t>((space_id >> 16) & 0xFF));
-        input.push_back(static_cast<uint8_t>((space_id >> 24) & 0xFF));
-        input.push_back(static_cast<uint8_t>(page_no & 0xFF));
-        input.push_back(static_cast<uint8_t>((page_no >> 8) & 0xFF));
-        input.push_back(static_cast<uint8_t>((page_no >> 16) & 0xFF));
-        input.push_back(static_cast<uint8_t>((page_no >> 24) & 0xFF));
-        for (int i = 0; i < 8; i++) {
-            input.push_back(static_cast<uint8_t>((lsn >> (i * 8)) & 0xFF));
+        // Build 16-byte plaintext: space_id (4B LE) + zero padding
+        std::vector<uint8_t> plaintext(16, 0);
+        plaintext[0] = space_id & 0xFF;
+        plaintext[1] = (space_id >> 8) & 0xFF;
+        plaintext[2] = (space_id >> 16) & 0xFF;
+        plaintext[3] = (space_id >> 24) & 0xFF;
+
+        // Use AES-ECB with master key to encrypt plaintext -> derived key
+        std::vector<uint8_t> derived(32, 0);  // 32 bytes for AES-256
+        std::vector<uint8_t> mk = master_key.key_data;
+
+        // Ensure key is correct size
+        if (mk.size() < 16) mk.resize(16, 0);
+        else if (mk.size() < 24) mk.resize(24, 0);
+        else if (mk.size() < 32) mk.resize(32, 0);
+        else if (mk.size() > 32) mk.resize(32);
+
+        AES_KEY aes_key;
+        int bits = (mk.size() == 32) ? 256 : (mk.size() == 24) ? 192 : 128;
+        if (AES_set_encrypt_key(mk.data(), bits, &aes_key) != 0) {
+            return {};  // Failed -- return empty to signal authentication failure
         }
 
-        // Simple AES-ECB-like key derivation using XOR with master key
-        // In production this would use actual AES via OpenSSL EVP
-        std::vector<uint8_t> derived(master_key.key_data.size());
-        for (size_t i = 0; i < derived.size(); i++) {
-            derived[i] = master_key.key_data[i] ^ input[i % input.size()];
+        // Encrypt in 16-byte blocks to fill derived key
+        for (size_t i = 0; i < derived.size(); i += 16) {
+            std::vector<uint8_t> block = plaintext;
+            block[0] ^= static_cast<uint8_t>(i / 16);  // Vary each block
+            uint8_t output[16];
+            AES_encrypt(block.data(), output, &aes_key);
+            std::memcpy(derived.data() + i, output, std::min(size_t(16), derived.size() - i));
         }
 
         return derived;
+    }
+
+    /**
+     * @brief Verify that a derived key produces valid decryption
+     * @return true if the decrypted page has a valid InnoDB page structure
+     */
+    static bool verify_derived_key(const std::vector<uint8_t>& decrypted_page) {
+        if (decrypted_page.size() < 38) return false;
+        // Check if FIL header page type is valid after decryption
+        uint16_t page_type = (decrypted_page[24] << 8) | decrypted_page[25];
+        return page_type == 0x45BF || page_type == 0x45BE ||
+               page_type == 0x45B2 || page_type == 0x0000;
     }
 
     /**
