@@ -456,22 +456,7 @@ public:
      */
     static uint32_t extract_table_id(const std::vector<UndoFieldValue>& fields);
 
-private:
-    // Configuration
-    std::string ibdata_path_;
-    size_t page_size_ = 16384;
-    uint32_t max_chain_depth_ = 1000;
-
-    // Helpers
-    UndoPageManager page_manager_;
-    UndoRecordV2Parser record_parser_;
-    UndoPageIndex* undo_page_index_ = nullptr;  // External index (optional)
-    UndoPageIndex internal_index_;               // Lazy-built fallback index
-    TrxSysTimestampIndex timestamp_index_;       // TRX_SYS timestamp index
-    bool index_built_ = false;
-    AnalyzerStats stats_;
-
-    // Internal helpers
+    // ==================== Static Utilities (public for testing) ====================
 
     /**
      * @brief Parse DB_ROLL_PTR into (page_no, offset)
@@ -508,8 +493,23 @@ private:
      * @brief Encode primary key as hex string
      */
     static std::string pk_to_hex(const std::vector<uint8_t>& pk_raw);
-};
 
+private:
+    // Configuration
+    std::string ibdata_path_;
+    size_t page_size_ = 16384;
+    uint32_t max_chain_depth_ = 1000;
+
+    // Helpers
+    UndoPageManager page_manager_;
+    UndoRecordV2Parser record_parser_;
+    UndoPageIndex* undo_page_index_ = nullptr;  // External index (optional)
+    UndoPageIndex internal_index_;               // Lazy-built fallback index
+    TrxSysTimestampIndex timestamp_index_;       // TRX_SYS timestamp index
+    bool index_built_ = false;
+    AnalyzerStats stats_;
+
+};
 } // namespace innodb
 } // namespace dbrecovery
 

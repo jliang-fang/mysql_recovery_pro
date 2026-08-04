@@ -1,6 +1,8 @@
 # src/CMakeLists.txt - MySQL 8.x Recovery Engine Source Files
 # Enhanced for multi-version and multi-environment compatibility
 
+include(CheckIncludeFileCXX)
+
 # ==================== Common Sources ====================
 set(COMMON_SOURCES
     common/version_compat.cpp
@@ -91,6 +93,14 @@ set(INFERENCE_SOURCES
     inference/physical_layout_analyzer.cpp
 )
 
+# Add safety module sources (Phase 2: Bare Device Safety Gate)
+set(SAFETY_SOURCES
+    safety/device_identity.cpp
+    safety/loopback_safety.cpp
+    safety/write_protect.cpp
+    safety/safety_gate.cpp
+)
+
 # Add all sources to dbrecovery_innodb library
 target_sources(dbrecovery_innodb PRIVATE
     ${COMMON_SOURCES}
@@ -102,6 +112,7 @@ target_sources(dbrecovery_innodb PRIVATE
     ${PAGE_SOURCES}
     ${DISK_SOURCES}
     ${INFERENCE_SOURCES}
+    ${SAFETY_SOURCES}
     tools/heuristic_inference.cpp
 )
 
@@ -147,6 +158,16 @@ else()
     target_compile_definitions(dbrecovery_innodb PRIVATE
         ENV_PLATFORM_LINUX
     )
+    # Check for linux/nvme_ioctl.h availability
+    check_include_file_cxx("linux/nvme_ioctl.h" HAVE_LINUX_NVME_IOCTL_H)
+    if(HAVE_LINUX_NVME_IOCTL_H)
+        target_compile_definitions(dbrecovery_innodb PRIVATE
+            HAVE_LINUX_NVME_IOCTL_H=1
+        )
+        message(STATUS "Found linux/nvme_ioctl.h - NVMe identity ioctl enabled")
+    else()
+        message(STATUS "linux/nvme_ioctl.h not found - NVMe identity will use sysfs fallback")
+    endif()
     target_link_libraries(dbrecovery_innodb PRIVATE
         pthread
         rt

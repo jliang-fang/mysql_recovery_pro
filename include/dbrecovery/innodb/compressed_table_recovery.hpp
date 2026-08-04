@@ -174,7 +174,8 @@ inline std::vector<ScannedPage> CompressedTableRecovery::scan_pages() {
             ScannedPage page{};
             page.offset = static_cast<uint32_t>(offset + page_offset);
             page.page_no = static_cast<uint32_t>(page_offset / page_size_);
-            page.page_type = read_le<uint16_t>(page_data, 16);
+            page.type = read_le<uint16_t>(page_data, 16);
+            page.page_type = page.type;
             page.prev_page = read_le<uint32_t>(page_data, 0);
             page.next_page = read_le<uint32_t>(page_data, 4);
             page.lsn = read_le<uint64_t>(page_data, 8);

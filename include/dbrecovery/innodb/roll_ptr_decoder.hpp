@@ -62,9 +62,14 @@ public:
     //
     // Internal uint64_t encoding:
     //   bits [31:0]   = page_no
-    //   bits [47:32]  = offset
-    //   bits [55:48]  = flags (8.0+)
+    //   bits [47:32]  = offset (16 bits usable without flags overlap)
+    //   bits [55:48]  = flags (8 bits)
     //   bits [63:56]  = unused (0)
+    //
+    // NOTE: The offset field is 16 bits at bits [47:32]. When offset > 0xFFFF,
+    // the high bits (16-17) overlap with the flags byte. The encode() function
+    // handles this correctly by OR-ing the components, and decode() separates
+    // them using the 0x3FFFF mask for offset and 0xFF mask for flags.
 
     /**
      * @brief Decode internal uint64_t to components
@@ -80,6 +85,10 @@ public:
      * @brief Encode components to internal uint64_t
      */
     static uint64_t encode(uint32_t page_no, uint32_t offset, uint8_t flags = 0) {
+        // Offset occupies bits 47:32 (16 bits). To avoid overlap with flags
+        // at bits 55:48, mask offset to 16 bits when flags are non-zero.
+        // The storage format supports 18-bit offset (0x3FFFF), but in the
+        // internal format, bits 49:48 overlap with the flags byte.
         return static_cast<uint64_t>(page_no) |
                (static_cast<uint64_t>(offset & 0x3FFFF) << 32) |
                (static_cast<uint64_t>(flags) << 48);

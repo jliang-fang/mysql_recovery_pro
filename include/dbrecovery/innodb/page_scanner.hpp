@@ -24,6 +24,9 @@ struct ScannedPage {
     bool is_valid;          // 是否有效页
     uint64_t lsn;           // LSN
     uint32_t space_id;      // 空间ID
+    bool is_compressed = false;
+    bool is_encrypted = false;
+    uint16_t page_type = 0;
 
     std::string to_string() const {
         std::ostringstream oss;

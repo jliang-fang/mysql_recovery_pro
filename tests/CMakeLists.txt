@@ -264,3 +264,26 @@ gtest_discover_tests(test_sec_btree_repair)
 add_executable(test_heuristic_schema_engine ../test/test_heuristic_schema_engine.cpp)
 target_link_libraries(test_heuristic_schema_engine PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_heuristic_schema_engine)
+
+# ==================== P0 Regression Tests (ASan/UBSan) ====================
+# P0 regression tests for all 7 recently applied fixes
+add_executable(test_p0_regression p0_regression_test.cpp)
+target_link_libraries(test_p0_regression PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_p0_regression)
+
+# ==================== P1 Format Correctness Fuzz Tests ====================
+
+# P1 Salvage Engine Fuzz Test
+add_executable(test_p1_salvage_fuzz p1_salvage_fuzz_test.cpp)
+target_link_libraries(test_p1_salvage_fuzz PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_p1_salvage_fuzz)
+
+# P1 Physical Layout Analyzer Fuzz Test
+add_executable(test_p1_layout_fuzz p1_layout_fuzz_test.cpp)
+target_link_libraries(test_p1_layout_fuzz PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_p1_layout_fuzz)
+
+# P1 Statistical Type Classifier Fuzz Test
+add_executable(test_p1_type_classifier_fuzz p1_type_classifier_fuzz_test.cpp)
+target_link_libraries(test_p1_type_classifier_fuzz PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_p1_type_classifier_fuzz)
