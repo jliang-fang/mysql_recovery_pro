@@ -197,26 +197,88 @@ bool UndoPageManager::ensure_open() {
 }
 
 std::vector<uint8_t> UndoPageManager::read_undo_page(uint32_t page_no) {
-    if (!ensure_open()) return {};
-    if (static_cast<uint64_t>(page_no) >= page_count_) return {};
+    // First try the main data file (ibdata1)
+    if (ensure_open()) {
+        if (static_cast<uint64_t>(page_no) < page_count_) {
+            const uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
+            if (offset <= static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+                file_.clear();
+                file_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
 
-    const uint64_t offset = static_cast<uint64_t>(page_no) * page_size_;
-    if (offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
-        return {};
+                std::vector<uint8_t> page_data(page_size_);
+                file_.read(reinterpret_cast<char*>(page_data.data()),
+                           static_cast<std::streamsize>(page_size_));
+
+                if (file_.gcount() == static_cast<std::streamsize>(page_size_)) {
+                    return page_data;
+                }
+            }
+        }
     }
 
-    file_.clear();
-    file_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    // If not found in main file, try independent undo tablespaces
+    return read_from_undo_tablespace(page_no);
+}
 
-    std::vector<uint8_t> page_data(page_size_);
-    file_.read(reinterpret_cast<char*>(page_data.data()),
-               static_cast<std::streamsize>(page_size_));
+bool UndoPageManager::ensure_undo_tablespaces_open() {
+    if (undo_tablespaces_opened_) return true;
+    if (undo_tablespace_paths_.empty()) return false;
 
-    if (file_.gcount() != static_cast<std::streamsize>(page_size_)) {
-        return {};
+    for (size_t i = 0; i < undo_tablespace_paths_.size(); i++) {
+        std::ifstream ts_file(undo_tablespace_paths_[i], std::ios::binary | std::ios::ate);
+        if (!ts_file) continue;
+
+        const auto end_pos = ts_file.tellg();
+        if (end_pos < 0) continue;
+
+        uint64_t ts_pages = static_cast<uint64_t>(end_pos) / page_size_;
+        if (ts_pages == 0) continue;
+
+        // Auto-detect page range if not specified
+        if (undo_tablespace_ends_[i] == 0) {
+            undo_tablespace_ends_[i] = undo_tablespace_starts_[i] + static_cast<uint32_t>(ts_pages);
+        }
+
+        undo_tablespace_files_.push_back(std::move(ts_file));
+        undo_tablespace_pages_.push_back(ts_pages);
     }
 
-    return page_data;
+    undo_tablespaces_opened_ = !undo_tablespace_files_.empty();
+    return undo_tablespaces_opened_;
+}
+
+std::vector<uint8_t> UndoPageManager::read_from_undo_tablespace(uint32_t page_no) {
+    if (!ensure_undo_tablespaces_open()) return {};
+
+    // Find which undo tablespace contains this page number
+    for (size_t i = 0; i < undo_tablespace_files_.size(); i++) {
+        uint32_t start = undo_tablespace_starts_[i];
+        uint32_t end = undo_tablespace_ends_[i];
+
+        if (page_no >= start && page_no < end) {
+            uint32_t local_page = page_no - start;
+            if (local_page >= undo_tablespace_pages_[i]) return {};
+
+            const uint64_t offset = static_cast<uint64_t>(local_page) * page_size_;
+            if (offset > static_cast<uint64_t>(std::numeric_limits<std::streamoff>::max())) {
+                return {};
+            }
+
+            undo_tablespace_files_[i].clear();
+            undo_tablespace_files_[i].seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+
+            std::vector<uint8_t> page_data(page_size_);
+            undo_tablespace_files_[i].read(reinterpret_cast<char*>(page_data.data()),
+                                            static_cast<std::streamsize>(page_size_));
+
+            if (undo_tablespace_files_[i].gcount() == static_cast<std::streamsize>(page_size_)) {
+                return page_data;
+            }
+            break;
+        }
+    }
+
+    return {};
 }
 
 bool UndoPageManager::is_open() const {

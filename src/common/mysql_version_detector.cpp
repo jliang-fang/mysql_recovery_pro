@@ -303,7 +303,7 @@ MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
         if (checksum_score >= 8) {
             return MySQLVersion::MYSQL_56;  // 5.6+
         }
-        return MySQLVersion::MYSQL_56;  // Fallback to 5.6 for older versions
+        return MySQLVersion::UNKNOWN;  // No clear version signal
     }
 
     // 默认返回未知
@@ -449,7 +449,7 @@ MySQLVersion DetailedVersionDetector::match_version(const std::vector<FeatureChe
         if (checksum_matches > 0) {
             return MySQLVersion::MYSQL_56;  // 5.6+
         }
-        return MySQLVersion::MYSQL_56;  // Fallback to 5.6 for older versions
+        return MySQLVersion::UNKNOWN;  // No clear version signal
     }
 
     return MySQLVersion::UNKNOWN;

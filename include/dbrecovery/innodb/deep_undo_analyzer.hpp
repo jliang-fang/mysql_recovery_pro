@@ -204,9 +204,25 @@ public:
     }
 
     /**
-     * @brief Read a single page from the data file
+     * @brief Add an independent undo tablespace file (MySQL 8.0+)
+     * @param path Path to undo tablespace file (e.g., undo_001, undo_002)
+     * @param start_page Starting page number offset for this tablespace
+     * @param end_page Ending page number offset (exclusive), 0 = auto-detect
+     */
+    void add_undo_tablespace(const std::string& path,
+                             uint32_t start_page = 0,
+                             uint32_t end_page = 0) {
+        undo_tablespace_paths_.push_back(path);
+        undo_tablespace_starts_.push_back(start_page);
+        undo_tablespace_ends_.push_back(end_page);
+    }
+
+    /**
+     * @brief Read a single page from the data file or undo tablespace
      * @param page_no Page number to read
      * @return Page buffer, or empty on error
+     *
+     * Searches ibdata1 first, then independent undo tablespaces.
      */
     std::vector<uint8_t> read_undo_page(uint32_t page_no);
 
@@ -222,6 +238,11 @@ public:
 
     size_t page_size() const { return page_size_; }
 
+    /**
+     * @brief Get number of registered undo tablespace files
+     */
+    size_t undo_tablespace_count() const { return undo_tablespace_paths_.size(); }
+
 private:
     std::string data_file_path_;
     size_t page_size_;
@@ -229,7 +250,21 @@ private:
     bool opened_ = false;
     uint64_t page_count_ = 0;
 
+    // Independent undo tablespace files (MySQL 8.0+)
+    std::vector<std::string> undo_tablespace_paths_;
+    std::vector<uint32_t> undo_tablespace_starts_;
+    std::vector<uint32_t> undo_tablespace_ends_;
+    std::vector<std::ifstream> undo_tablespace_files_;
+    std::vector<uint64_t> undo_tablespace_pages_;
+    bool undo_tablespaces_opened_ = false;
+
     bool ensure_open();
+    bool ensure_undo_tablespaces_open();
+
+    /**
+     * @brief Try to read a page from an independent undo tablespace
+     */
+    std::vector<uint8_t> read_from_undo_tablespace(uint32_t page_no);
 };
 
 /**
@@ -308,6 +343,15 @@ public:
     void set_ibdata_path(const std::string& path) {
         ibdata_path_ = path;
         page_manager_.set_data_file(path);
+    }
+
+    /**
+     * @brief Add an independent undo tablespace file (MySQL 8.0+)
+     * @param path Path to undo tablespace (e.g., undo_001, undo_002)
+     * @param start_page Starting page number for this tablespace
+     */
+    void add_undo_tablespace(const std::string& path, uint32_t start_page = 0) {
+        page_manager_.add_undo_tablespace(path, start_page);
     }
 
     /**

@@ -102,7 +102,7 @@ std::vector<ScannedPage> EncryptedTableRecovery::scan_pages() {
             page.prev_page = read_le<uint32_t>(page_data, 0);
             page.next_page = read_le<uint32_t>(page_data, 4);
             page.lsn = read_le<uint64_t>(page_data, 8);
-            page.space_id = read_le<uint32_t>(page_data, 24);
+            page.space_id = read_le<uint32_t>(page_data, 34);
             page.is_valid = PageScanner::is_innodb_page(page_data, page_size_);
 
             if (is_page_encrypted(page_data, page_size_)) {
