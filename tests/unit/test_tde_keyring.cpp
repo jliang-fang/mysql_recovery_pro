@@ -240,11 +240,16 @@ TEST_F(TDEKeyringTest, TDEPageHeaderParsing) {
 }
 
 TEST_F(TDEKeyringTest, IsEncryptedDetection) {
-    // Non-encrypted page (algorithm byte = 0)
+    // The TDE header starts at offset 38 (right after the FIL header).
+    // FIL header at offset 24 has page_type (big-endian), and TDE algorithm byte is at data[38].
+    // Non-encrypted page (algorithm byte = 0 at TDE header offset)
     std::vector<uint8_t> normal_page(100, 0);
+    // Set a valid page type so is_encrypted proceeds to check the TDE byte
+    normal_page[24] = 0x45;  // FIL_PAGE_INDEX (big-endian)
+    normal_page[25] = 0xBF;
     EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
 
-    // Encrypted page (algorithm byte = 1-9)
-    normal_page[0] = 6;  // AES-256-CBC
+    // Encrypted page (algorithm byte = 1-9 at TDE header offset 38)
+    normal_page[38] = 6;  // AES-256-CBC
     EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
 }

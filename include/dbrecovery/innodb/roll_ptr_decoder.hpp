@@ -73,24 +73,32 @@ public:
 
     /**
      * @brief Decode internal uint64_t to components
+     *
+     * When flags are non-zero, offset is masked to 16 bits (0xFFFF) to avoid
+     * overlap with the flags byte at bits 55:48. The offset_mask is kept
+     * consistent with encode() for a clean round-trip.
      */
     static DecodedRollPtr decode(uint64_t roll_ptr) {
         uint32_t page_no = static_cast<uint32_t>(roll_ptr & 0xFFFFFFFF);
-        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & 0x3FFFF);
         uint8_t  flags   = static_cast<uint8_t>((roll_ptr >> 48) & 0xFF);
+        uint32_t offset_mask = (flags != 0) ? 0xFFFF : 0x3FFFF;
+        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & offset_mask);
         return {page_no, offset, flags};
     }
 
     /**
      * @brief Encode components to internal uint64_t
+     *
+     * When flags are non-zero, offset is masked to 16 bits (0xFFFF) to avoid
+     * overlap with the flags byte at bits 55:48. When flags are zero, the
+     * full 18-bit offset (0x3FFFF) is preserved.
+     *
+     * Symmetric with decode(): encode(a, b, c) → decode() → {a, b, c}
      */
     static uint64_t encode(uint32_t page_no, uint32_t offset, uint8_t flags = 0) {
-        // Offset occupies bits 47:32 (16 bits). To avoid overlap with flags
-        // at bits 55:48, mask offset to 16 bits when flags are non-zero.
-        // The storage format supports 18-bit offset (0x3FFFF), but in the
-        // internal format, bits 49:48 overlap with the flags byte.
+        uint32_t offset_mask = (flags != 0) ? 0xFFFF : 0x3FFFF;
         return static_cast<uint64_t>(page_no) |
-               (static_cast<uint64_t>(offset & 0x3FFFF) << 32) |
+               (static_cast<uint64_t>(offset & offset_mask) << 32) |
                (static_cast<uint64_t>(flags) << 48);
     }
 

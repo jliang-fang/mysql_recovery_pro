@@ -2370,7 +2370,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
             if (dbrecovery::innodb::is_sdi_page_type(page_type)) {
-                // For compressed SDI (0x45BD), extract slot offset
+                // For compressed SDI (0x45BD), construct synthetic SDI header + call extract_sdi_json()
                 if (page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP && page_size >= 100) {
                     // offset = struct.unpack('>h',data[97:99])[0] + 99
                     int16_t slot_offset = static_cast<int16_t>(
@@ -2387,51 +2387,36 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                         if (compressed_len > 0 && compressed_len < page_size &&
                             record_offset + 33 + compressed_len <= page_size) {
+                            // Build synthetic SDI header: 20 bytes LE
+                            std::vector<uint8_t> synthetic_header(20, 0);
+                            dbrecovery::innodb::write_le<uint32_t>(synthetic_header.data(), 0, 7);  // type = SDI
+                            dbrecovery::innodb::write_le<uint64_t>(synthetic_header.data(), 4, 0);  // id = 0
+                            dbrecovery::innodb::write_le<uint32_t>(synthetic_header.data(), 12, uncompressed_len);
+                            dbrecovery::innodb::write_le<uint32_t>(synthetic_header.data(), 16, compressed_len);
+
+                            // Concatenate synthetic header + compressed payload
                             const uint8_t* compressed_data = page_data.data() + record_offset + 33;
+                            std::vector<uint8_t> sdi_blob;
+                            sdi_blob.reserve(synthetic_header.size() + compressed_len);
+                            sdi_blob.insert(sdi_blob.end(), synthetic_header.begin(), synthetic_header.end());
+                            sdi_blob.insert(sdi_blob.end(), compressed_data, compressed_data + compressed_len);
 
-                            z_stream strm = {};
-                            strm.next_in = const_cast<Bytef*>(compressed_data);
-                            strm.avail_in = compressed_len;
+                            auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
+                                sdi_blob.data(), sdi_blob.size());
 
-                            std::vector<uint8_t> decompressed(uncompressed_len > 0 ? uncompressed_len : compressed_len * 4);
-                            strm.next_out = decompressed.data();
-                            strm.avail_out = decompressed.size();
-
-                            // Use standard zlib decompression (not raw deflate)
-                            int ret = inflateInit(&strm);
-                            if (ret == Z_OK) {
-                                do {
-                                    ret = inflate(&strm, Z_NO_FLUSH);
-                                    if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
-                                        decompressed.resize(decompressed.size() * 2);
-                                        strm.next_out = decompressed.data() + strm.total_out;
-                                        strm.avail_out = decompressed.size() - strm.total_out;
+                            if (json_opt.has_value()) {
+                                try {
+                                    auto json = nlohmann::json::parse(json_opt.value());
+                                    dbrecovery::catalog::TableSchema schema;
+                                    if (json.contains("dd_object")) {
+                                        schema.from_json(json["dd_object"]);
+                                    } else {
+                                        schema.from_json(json);
                                     }
-                                } while (ret == Z_OK);
-
-                                if (ret == Z_STREAM_END) {
-                                    decompressed.resize(strm.total_out);
-                                    std::string json_str(reinterpret_cast<const char*>(decompressed.data()),
-                                                          decompressed.size());
-                                    try {
-                                        auto json = nlohmann::json::parse(json_str);
-                                        dbrecovery::catalog::TableSchema schema;
-                                        // MySQL 8.0 SDI format: { "dd_object": { "name": ..., "columns": [...] } }
-                                        nlohmann::json schema_json;
-                                        if (json.contains("dd_object")) {
-                                            schema_json = json["dd_object"];
-                                        } else {
-                                            schema_json = json;
-                                        }
-                                        if (schema.from_json(schema_json)) {
-                                            std::cout << "[INFO] Successfully parsed schema from compressed SDI: "
-                                                      << schema.table_name << " (" << schema.columns.size() << " columns)\n";
-                                            inflateEnd(&strm);
-                                            return schema;
-                                        }
-                                    } catch (const nlohmann::json::parse_error&) {}
-                                }
-                                inflateEnd(&strm);
+                                    std::cout << "[INFO] Successfully parsed schema from compressed SDI: "
+                                              << schema.table_name << " (" << schema.columns.size() << " columns)\n";
+                                    return schema;
+                                } catch (const nlohmann::json::parse_error&) {}
                             }
                         }
                     }

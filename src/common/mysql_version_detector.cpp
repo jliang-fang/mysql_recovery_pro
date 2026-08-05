@@ -207,7 +207,7 @@ int MySQLVersionDetector::check_page_version_field(const uint8_t* page_data, siz
     // MySQL 8.0+引入此字段
     if (page_size < 38) return 0;
 
-    uint16_t page_version = endian::read_le16(page_data, 36);
+    uint16_t page_version = endian::read_be16(page_data, 36);
     
     if (page_version > 0) {
         if (page_version == 1) return 8;   // MySQL 8.0

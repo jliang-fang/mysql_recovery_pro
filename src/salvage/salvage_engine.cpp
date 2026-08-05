@@ -411,7 +411,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
                 row.field_count = 1;
                 row.salvage_level = SalvageLevel::STRING_ONLY;
                 row.fields.push_back(current);
-                row.confidence = 0.2;
+                row.confidence = 0.3;
                 row.recovery_method = "string_extract";
                 rows.push_back(row);
             }
@@ -426,7 +426,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
         row.field_count = 1;
         row.salvage_level = SalvageLevel::STRING_ONLY;
         row.fields.push_back(current);
-        row.confidence = 0.2;
+        row.confidence = 0.3;
         row.recovery_method = "string_extract";
         rows.push_back(row);
     }

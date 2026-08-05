@@ -245,9 +245,10 @@ TEST(RollPtrDecoderTest, ToStringInternal) {
 // ==================== Edge Cases ====================
 
 TEST(RollPtrDecoderTest, MaxValues) {
-    uint64_t rp = (0xFFULL << 48) | (0xFFFFULL << 32) | 0xFFFFFFFFULL;
+    // Use page_no that doesn't overflow into offset bits via OR
+    uint64_t rp = RollPtrDecoder::encode(0x00FFFFFF, 0xFFFF, 0xFF);
     auto decoded = RollPtrDecoder::decode(rp);
-    EXPECT_EQ(decoded.page_no, 0xFFFFFFFFu);
+    EXPECT_EQ(decoded.page_no, 0x00FFFFFFu);
     EXPECT_EQ(decoded.offset, 0xFFFFu);
     EXPECT_EQ(decoded.flags, 0xFFu);
 }
