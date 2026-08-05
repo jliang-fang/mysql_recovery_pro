@@ -287,3 +287,8 @@ gtest_discover_tests(test_p1_layout_fuzz)
 add_executable(test_p1_type_classifier_fuzz p1_type_classifier_fuzz_test.cpp)
 target_link_libraries(test_p1_type_classifier_fuzz PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_p1_type_classifier_fuzz)
+
+# Compressed table fixture tests (requires generated .ibd files)
+add_executable(test_compressed_table_fixture compressed_table_fixture_test.cpp)
+target_link_libraries(test_compressed_table_fixture PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+add_test(NAME test_compressed_table_fixture COMMAND test_compressed_table_fixture)

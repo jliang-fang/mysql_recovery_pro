@@ -67,7 +67,6 @@ set(UTILS_SOURCES
 
 # Add tools module sources
 set(TOOLS_SOURCES
-    main_cli.cpp
     tools/heuristic_inference.cpp
     tools/interactive_schema_builder.cpp
     tools/progress_cli.cpp
