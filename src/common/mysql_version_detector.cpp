@@ -447,6 +447,14 @@ MySQLVersion DetailedVersionDetector::match_version(const std::vector<FeatureChe
         return MySQLVersion::MYSQL_80;  // 8.0-8.3
     } else if (lsn_matches <= 0 && sdi_matches <= 0) {
         if (checksum_matches > 0) {
+            bool has_valid_page_type = false;
+            for (const auto& r : results) {
+                if (r.feature_name == "Valid Page Type" && r.matches) {
+                    has_valid_page_type = true;
+                    break;
+                }
+            }
+            if (!has_valid_page_type) return MySQLVersion::UNKNOWN;
             return MySQLVersion::MYSQL_56;  // 5.6+
         }
         return MySQLVersion::UNKNOWN;  // No clear version signal

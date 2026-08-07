@@ -75,7 +75,7 @@ private:
     std::filesystem::path file_path_;
     catalog::TableSchema schema_;
     TDEDecryptor decryptor_;
-    bool try_recovery_without_key_ = true;
+    bool try_recovery_without_key_ = false;
 
     std::vector<uint32_t> encrypted_pages_;
     std::vector<uint32_t> failed_pages_;

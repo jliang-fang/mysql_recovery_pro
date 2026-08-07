@@ -32,8 +32,15 @@ public:
 
         // ✅ 防御性长度校验
         constexpr size_t MAX_SDI_SIZE = 16 * 1024 * 1024; // 16 MB
+        constexpr size_t MAX_COMPRESSION_RATIO = 20;
         if (hdr.uncompressed_len == 0 || hdr.compressed_len > hdr.uncompressed_len ||
             hdr.uncompressed_len > MAX_SDI_SIZE) {
+            return std::nullopt;
+        }
+
+        // ✅ 预解压压缩比检查（防 DoS）
+        if (hdr.compressed_len > 0 &&
+            hdr.uncompressed_len / hdr.compressed_len > MAX_COMPRESSION_RATIO) {
             return std::nullopt;
         }
 
@@ -79,7 +86,7 @@ public:
         inflateEnd(&strm);
 
         // ✅ 压缩比校验（防 DoS）
-        if (data_len > 0 && decompressed.size() / data_len > 20) {
+        if (data_len > 0 && decompressed.size() / data_len > MAX_COMPRESSION_RATIO) {
             return std::nullopt;
         }
 

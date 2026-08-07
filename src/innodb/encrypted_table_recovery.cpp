@@ -17,7 +17,7 @@ namespace innodb {
 // ==================== EncryptedTableRecovery ====================
 
 EncryptedTableRecovery::EncryptedTableRecovery(size_t page_size)
-    : page_size_(page_size), try_recovery_without_key_(true) {
+    : page_size_(page_size), try_recovery_without_key_(false) {
     std::memset(&stats_, 0, sizeof(stats_));
 }
 
@@ -183,6 +183,8 @@ std::vector<std::map<std::string, std::string>> EncryptedTableRecovery::parse_pa
                 if (!try_recovery_without_key_) {
                     continue;
                 }
+                std::cerr << "[WARN] Page " << page.page_no
+                          << " could not be decrypted (no key); falling back to raw bytes\n";
                 working_data = page_data;
             }
         }

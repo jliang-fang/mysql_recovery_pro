@@ -964,12 +964,36 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 cfg.page_size = page_size;
                 cfg.verbose = false;
                 cfg.min_string_len = 4;
-                cfg.min_record_fields = 1;
-                cfg.min_confidence = 0.15;
+                cfg.min_record_fields = 2;
+                cfg.min_confidence = 0.3;
 
                 dbrecovery::recovery::SalvageEngine engine(cfg);
                 auto result = engine.salvage_pages(raw_pages);
                 std::cout << "[AUTO-SALVAGE] SalvageEngine found " << result.rows.size() << " rows\n";
+
+                // Convert SalvagedRow → RowFragment for correlation
+                for (const auto& sr : result.rows) {
+                    dbrecovery::salvage::RowFragment frag;
+                    frag.fragment_id = all_fragments.size();
+                    frag.overall_confidence = sr.confidence;
+                    frag.recovery_method = "salvage:" + sr.recovery_method;
+                    for (size_t fi = 0; fi < sr.fields.size(); fi++) {
+                        dbrecovery::salvage::FieldFragment f;
+                        f.field_index = static_cast<uint32_t>(fi);
+                        f.data.assign(sr.fields[fi].begin(), sr.fields[fi].end());
+                        f.confidence = sr.confidence;
+                        f.is_complete = (sr.salvage_level ==
+                            dbrecovery::recovery::SalvageLevel::STRUCTURED);
+                        f.source = "salvage_engine";
+                        frag.fields.push_back(std::move(f));
+                    }
+                    if (!frag.fields.empty()) {
+                        all_fragments.push_back(std::move(frag));
+                    }
+                }
+                if (!all_fragments.empty()) {
+                    correlator.add_fragments(all_fragments, "salvage_engine");
+                }
             }
         }
 
