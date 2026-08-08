@@ -209,8 +209,8 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
         auto buf = create_page_buffer();
         set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
         set_be64(buf, FIL_PAGE_TYPE_ABS + 2, 0x1000);     // Non-zero FLUSH_LSN
-        // Version field at offset 36 (BE in FIL header)
-        set_be16(buf, 36, 1);
+        // Version field at offset 38 (FIL_HEADER_SIZE, BE in FIL header)
+        set_be16(buf, FIL_HEADER_SIZE, 1);
         // SDI signature at offset 64
         constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
         std::memcpy(buf.data() + 64, SDI_SIG, 8);
@@ -225,8 +225,8 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
         auto buf = create_page_buffer();
         set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
         set_be64(buf, FIL_PAGE_TYPE_ABS + 2, 0x2000);     // Non-zero FLUSH_LSN
-        // Version field = 2 for MySQL 8.4+ (BE in FIL header)
-        set_be16(buf, 36, 2);
+        // Version field = 2 for MySQL 8.4+ (BE at offset FIL_HEADER_SIZE=38)
+        set_be16(buf, FIL_HEADER_SIZE, 2);
         // SDI signature at offset 64
         constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
         std::memcpy(buf.data() + 64, SDI_SIG, 8);
@@ -281,31 +281,29 @@ TEST_F(FILHeaderEndiannessTest, FILHeaderSizeConsistency) {
 
 class RollPtrDecoderTest : public ::testing::Test {
 protected:
-    // Internal format: bits [31:0]=page_no, [47:32]=offset, [55:48]=flags
+    // Internal format: bits [31:0]=page_no, [49:32]=offset (18 bits), [55:50]=flags
     uint64_t make_internal(uint32_t page_no, uint32_t offset, uint8_t flags) {
         return RollPtrDecoder::encode(page_no, offset, flags);
     }
 };
 
 TEST_F(RollPtrDecoderTest, DecodeWith18BitOffset) {
-    // Verify that decode() correctly extracts a 18-bit offset with 0x3FFFF mask
-    // Maximum 18-bit offset = 0x3FFFF. Note: offsets > 0xFFFF (16 bits)
-    // spill into the flags byte (bits 55:48) because offset occupies bits 47:32.
-    // Use offset = 0xFFFF which fits in 16 bits and doesn't touch the flags byte.
-    uint64_t rp = make_internal(100, 0xFFFF, 0);
+    // Verify that decode() correctly extracts a full 18-bit offset with 0x3FFFF mask.
+    // The internal format reserves bits [49:32] for offset and bits [55:50] for
+    // flags, so a max 18-bit offset (0x3FFFF) round-trips cleanly even with flags.
+    uint64_t rp = make_internal(100, 0x3FFFF, 0x3F);
     auto decoded = RollPtrDecoder::decode(rp);
 
     EXPECT_EQ(decoded.page_no, 100u);
-    EXPECT_EQ(decoded.offset, 0xFFFFu) << "16-bit offset must be preserved with 0x3FFFF mask";
-    EXPECT_EQ(decoded.flags, 0u) << "Flags must be 0 when using 16-bit offset";
+    EXPECT_EQ(decoded.offset, 0x3FFFFu) << "18-bit offset must be preserved";
+    EXPECT_EQ(decoded.flags, 0x3Fu) << "Flags must be preserved alongside 18-bit offset";
 }
 
 TEST_F(RollPtrDecoderTest, DecodeOffsetMaskMax) {
     // Test the maximum offset value that fits without overflowing into flags
-    // offset = 0xFFFF (16 bits) is the max that doesn't touch flags byte
-    uint64_t rp = make_internal(100, 0xFFFF, 0);
+    uint64_t rp = make_internal(100, 0x3FFFF, 0);
     auto decoded = RollPtrDecoder::decode(rp);
-    EXPECT_EQ(decoded.offset, 0xFFFFu);
+    EXPECT_EQ(decoded.offset, 0x3FFFFu);
     EXPECT_EQ(decoded.flags, 0u);
 }
 
@@ -320,24 +318,19 @@ TEST_F(RollPtrDecoderTest, DecodeOffsetZero) {
 }
 
 TEST_F(RollPtrDecoderTest, EncodeMaxPageNo) {
-    // Encode with maximum page_no and offset
-    // Note: when flags=0xFF, offset is masked to 16 bits (0xFFFF) to avoid
-    // overlap with the flags byte at bits 55:48
-    uint64_t rp = RollPtrDecoder::encode(0xFFFFFFFF, 0xFFFF, 0xFF);
+    // Encode with maximum page_no, offset, and flags
+    uint64_t rp = RollPtrDecoder::encode(0xFFFFFFFF, 0x3FFFF, 0x3F);
     auto decoded = RollPtrDecoder::decode(rp);
 
     EXPECT_EQ(decoded.page_no, 0xFFFFFFFFu);
-    EXPECT_EQ(decoded.offset, 0xFFFFu);
-    EXPECT_EQ(decoded.flags, 0xFFu);
+    EXPECT_EQ(decoded.offset, 0x3FFFFu);
+    EXPECT_EQ(decoded.flags, 0x3Fu);
 }
 
 TEST_F(RollPtrDecoderTest, DecodeOffsetMaskBoundary) {
-    // Test 18-bit offset round-trip through the storage format path.
-    // The internal encode() format supports 18-bit offsets only when flags=0
-    // AND the top 2 bits of offset (bits 49:48) are 0, since those bits are
-    // indistinguishable from the flags field in OR-based encoding.
-    // For full 18-bit support, use the storage format round-trip:
-    // encode_storage() → decode_storage() → decode_storage_to_internal()
+    // Test 18-bit offset round-trip through both the storage and internal paths.
+    // The internal format reserves bits [49:32] for offset and bits [55:50] for
+    // flags with no overlap, so all 18-bit offsets round-trip losslessly.
     struct { uint32_t page_no; uint32_t offset; uint8_t flags; } cases[] = {
         {0x1000, 0x3FFFF, 0x0},
         {0x1000, 0x3FFFE, 0x0},
@@ -368,39 +361,26 @@ TEST_F(RollPtrDecoderTest, DecodeOffsetMaskBoundary) {
         // Test storage-to-internal round-trip
         uint64_t internal = RollPtrDecoder::decode_storage_to_internal(buf, 7);
         auto decoded_internal = RollPtrDecoder::decode(internal);
-        // The internal format supports 18-bit offsets only when the top 2 bits
-        // (bits 49:48) are 0, since those bits are indistinguishable from the
-        // flags field in OR-based encoding. Offsets > 0xFFFF (16 bits) with
-        // bits 49:48 set will be truncated to 16 bits in the internal format.
-        uint32_t expected_offset = c.offset;
-        if (c.flags != 0 && c.offset > 0xFFFF) {
-            expected_offset = c.offset & 0xFFFF;
-        } else if (c.flags == 0 && c.offset > 0xFFFF) {
-            bool bits_49_48_set = (c.offset & 0x30000) != 0;
-            if (bits_49_48_set) {
-                expected_offset = c.offset & 0xFFFF;
-            }
-        }
-        EXPECT_EQ(decoded_internal.offset, expected_offset)
-            << "Internal offset round-trip: expected 0x" << std::hex << expected_offset
+        // The internal format now supports full 18-bit offsets with no overlap,
+        // so the offset is preserved losslessly regardless of flags.
+        EXPECT_EQ(decoded_internal.offset, c.offset)
+            << "Internal offset round-trip: expected 0x" << std::hex << c.offset
             << " got 0x" << decoded_internal.offset << std::dec
-            << " (flags=0x" << (int)c.flags << " bits_49_48=" << ((c.offset & 0x30000) != 0) << ")";
+            << " (flags=0x" << (int)c.flags << ")";
     }
 }
 
 TEST_F(RollPtrDecoderTest, EncodeDecodeAllFields) {
     // Test encode() packs page_no and offset correctly.
-    // Note: offset occupies bits 47:32 (16 bits), and flags occupy bits 55:48.
-    // When flags are non-zero, offset must be small enough (<= 0x3FFF = 14 bits)
-    // to not overlap with the flags byte during decode.
-    // Use offset=0x3FF (10 bits) which cleanly fits in bits 47:32 without
-    // any overlap with the flags byte at bits 55:48.
-    uint64_t rp = RollPtrDecoder::encode(0xFEDCBA98, 0x3FF, 0x0);
+    // The internal format reserves bits [49:32] for offset (18 bits) and
+    // bits [55:50] for flags (6 bits), so full 18-bit offset is preserved
+    // regardless of flags.
+    uint64_t rp = RollPtrDecoder::encode(0xFEDCBA98, 0x3FFFF, 0x3F);
     auto decoded = RollPtrDecoder::decode(rp);
 
     EXPECT_EQ(decoded.page_no, 0xFEDCBA98u);
-    EXPECT_EQ(decoded.offset, 0x3FFu);
-    EXPECT_EQ(decoded.flags, 0x0u);
+    EXPECT_EQ(decoded.offset, 0x3FFFFu);
+    EXPECT_EQ(decoded.flags, 0x3Fu);
 
     // Also test encode/decode with flags via the storage format round-trip,
     // which properly handles the bit layout without overlap:

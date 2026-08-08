@@ -264,12 +264,13 @@ int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_
         return 0;  // 非FSP页，无法读取空间标志
     }
 
-    uint32_t flags = endian::read_be32(page_data, innodb::FIL_HEADER_SIZE);  // offset 38
+    // FSP Header (Page 0, offset 38): FSP_SPACE_ID at +0, FSP_SPACE_FLAGS at +4
+    uint32_t flags = endian::read_be32(page_data, innodb::FIL_HEADER_SIZE + 4);  // offset 42
 
     // POST_ANTELOPE位（bit 0）：MySQL 5.7+ 设置，5.6及更早版本清除
     constexpr uint32_t FSP_FLAGS_POST_ANTELOPE = 0x1;
-    // ATOMIC_BLOBS位（bit 6）：MySQL 5.7+ 设置
-    constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS  = 0x40;
+    // ATOMIC_BLOBS位（bit 5）：MySQL 5.7+ 设置
+    constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS  = 0x20;
 
     int score = 0;
     if (flags & FSP_FLAGS_POST_ANTELOPE) {

@@ -9,13 +9,13 @@ namespace innodb {
 // ==================== Internal Format Tests ====================
 
 TEST(RollPtrDecoderTest, DecodeInternalFormat) {
-    // Internal: bits [31:0]=page_no, [47:32]=offset, [55:48]=flags
-    uint64_t rp = (0xABULL << 48) | (0x1234ULL << 32) | 0x000FEDCBULL;
+    // Internal: bits [31:0]=page_no, [49:32]=offset (18 bits), [55:50]=flags (6 bits)
+    uint64_t rp = (0x2BULL << 50) | (0x1234ULL << 32) | 0x000FEDCBULL;
     auto decoded = RollPtrDecoder::decode(rp);
 
     EXPECT_EQ(decoded.page_no, 0x000FEDCBu);
     EXPECT_EQ(decoded.offset, 0x1234u);
-    EXPECT_EQ(decoded.flags, 0xABu);
+    EXPECT_EQ(decoded.flags, 0x2Bu);
     EXPECT_TRUE(decoded.is_valid());
     EXPECT_FALSE(decoded.is_null());
 }
@@ -30,7 +30,7 @@ TEST(RollPtrDecoderTest, DecodeInternalFormatZero) {
 }
 
 TEST(RollPtrDecoderTest, DecodeInternalFormatFIL_NULL) {
-    uint64_t rp = (0x00ULL << 48) | (0x0000ULL << 32) | FIL_NULL;
+    uint64_t rp = (0x00ULL << 50) | (0x0000ULL << 32) | FIL_NULL;
     auto decoded = RollPtrDecoder::decode(rp);
     EXPECT_EQ(decoded.page_no, FIL_NULL);
     EXPECT_FALSE(decoded.is_valid());
@@ -38,8 +38,8 @@ TEST(RollPtrDecoderTest, DecodeInternalFormatFIL_NULL) {
 }
 
 TEST(RollPtrDecoderTest, EncodeInternalFormat) {
-    uint64_t rp = RollPtrDecoder::encode(0x000FEDCB, 0x1234, 0xAB);
-    EXPECT_EQ(rp, (0xABULL << 48) | (0x1234ULL << 32) | 0x000FEDCBULL);
+    uint64_t rp = RollPtrDecoder::encode(0x000FEDCB, 0x1234, 0x2B);
+    EXPECT_EQ(rp, (0x2BULL << 50) | (0x1234ULL << 32) | 0x000FEDCBULL);
 }
 
 TEST(RollPtrDecoderTest, EncodeDecodeRoundTrip) {
@@ -246,11 +246,11 @@ TEST(RollPtrDecoderTest, ToStringInternal) {
 
 TEST(RollPtrDecoderTest, MaxValues) {
     // Use page_no that doesn't overflow into offset bits via OR
-    uint64_t rp = RollPtrDecoder::encode(0x00FFFFFF, 0xFFFF, 0xFF);
+    uint64_t rp = RollPtrDecoder::encode(0x00FFFFFF, 0x3FFFF, 0x3F);
     auto decoded = RollPtrDecoder::decode(rp);
     EXPECT_EQ(decoded.page_no, 0x00FFFFFFu);
-    EXPECT_EQ(decoded.offset, 0xFFFFu);
-    EXPECT_EQ(decoded.flags, 0xFFu);
+    EXPECT_EQ(decoded.offset, 0x3FFFFu);
+    EXPECT_EQ(decoded.flags, 0x3Fu);
 }
 
 TEST(RollPtrDecoderTest, StorageMaxValues) {
@@ -269,11 +269,11 @@ TEST(RollPtrDecoderTest, StorageMaxValues) {
 }
 
 TEST(RollPtrDecoderTest, EncodeMaxValues) {
-    uint64_t rp = RollPtrDecoder::encode(0xFFFFFFFF, 0xFFFF, 0xFF);
+    uint64_t rp = RollPtrDecoder::encode(0xFFFFFFFF, 0x3FFFF, 0x3F);
     auto decoded = RollPtrDecoder::decode(rp);
     EXPECT_EQ(decoded.page_no, 0xFFFFFFFFu);
-    EXPECT_EQ(decoded.offset, 0xFFFFu);
-    EXPECT_EQ(decoded.flags, 0xFFu);
+    EXPECT_EQ(decoded.offset, 0x3FFFFu);
+    EXPECT_EQ(decoded.flags, 0x3Fu);
 }
 
 } // namespace innodb

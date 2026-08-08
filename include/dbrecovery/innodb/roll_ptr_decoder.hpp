@@ -62,44 +62,40 @@ public:
     //
     // Internal uint64_t encoding:
     //   bits [31:0]   = page_no
-    //   bits [47:32]  = offset (16 bits usable without flags overlap)
-    //   bits [55:48]  = flags (8 bits)
+    //   bits [49:32]  = offset (18 bits, max 0x3FFFF)
+    //   bits [55:50]  = flags (6 bits, max 0x3F)
     //   bits [63:56]  = unused (0)
     //
-    // NOTE: The offset field is 16 bits at bits [47:32]. When offset > 0xFFFF,
-    // the high bits (16-17) overlap with the flags byte. The encode() function
-    // handles this correctly by OR-ing the components, and decode() separates
-    // them using the 0x3FFFF mask for offset and 0xFF mask for flags.
+    // NOTE: Flags sit at bits 55:50 so offset (18 bits at bits 49:32) never
+    // overlaps. This guarantees clean round-trip for all valid MySQL 8.0+
+    // roll_ptr values (18-bit offset + 4-bit flags).
 
     /**
      * @brief Decode internal uint64_t to components
      *
-     * When flags are non-zero, offset is masked to 16 bits (0xFFFF) to avoid
-     * overlap with the flags byte at bits 55:48. The offset_mask is kept
-     * consistent with encode() for a clean round-trip.
+     * Bit layout: bits [31:0]=page_no, [49:32]=offset (18 bits),
+     * [55:50]=flags (6 bits). No overlap between offset and flags.
      */
     static DecodedRollPtr decode(uint64_t roll_ptr) {
         uint32_t page_no = static_cast<uint32_t>(roll_ptr & 0xFFFFFFFF);
-        uint8_t  flags   = static_cast<uint8_t>((roll_ptr >> 48) & 0xFF);
-        uint32_t offset_mask = (flags != 0) ? 0xFFFF : 0x3FFFF;
-        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & offset_mask);
+        uint32_t offset  = static_cast<uint32_t>((roll_ptr >> 32) & 0x3FFFF);
+        uint8_t  flags   = static_cast<uint8_t>((roll_ptr >> 50) & 0x3F);
         return {page_no, offset, flags};
     }
 
     /**
      * @brief Encode components to internal uint64_t
      *
-     * When flags are non-zero, offset is masked to 16 bits (0xFFFF) to avoid
-     * overlap with the flags byte at bits 55:48. When flags are zero, the
-     * full 18-bit offset (0x3FFFF) is preserved.
+     * Bit layout: bits [31:0]=page_no, [49:32]=offset (18 bits),
+     * [55:50]=flags (6 bits). No overlap between offset and flags,
+     * so full 18-bit offset is always preserved regardless of flags.
      *
      * Symmetric with decode(): encode(a, b, c) → decode() → {a, b, c}
      */
     static uint64_t encode(uint32_t page_no, uint32_t offset, uint8_t flags = 0) {
-        uint32_t offset_mask = (flags != 0) ? 0xFFFF : 0x3FFFF;
         return static_cast<uint64_t>(page_no) |
-               (static_cast<uint64_t>(offset & offset_mask) << 32) |
-               (static_cast<uint64_t>(flags) << 48);
+               (static_cast<uint64_t>(offset & 0x3FFFF) << 32) |
+               (static_cast<uint64_t>(flags & 0x3F) << 50);
     }
 
     // ==================== Storage Format (BE in undo page header) ====================

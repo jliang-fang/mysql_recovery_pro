@@ -252,6 +252,10 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--flashback-format=<fmt>\033[0m   Output format: sql, csv, json (default: sql)\n";
     std::cout << "  \033[1m--salvage-mode\033[0m             Emergency salvage mode for severely corrupted pages\n";
     std::cout << "                                 Brute-force scans for any parseable row fragments\n";
+    std::cout << "                                 0=L1 header_repair, 1=L2 signature_scan,\n";
+    std::cout << "                                 2=L3 pattern_match, 3=L4 string_extract\n";
+    std::cout << "  \033[1m--include-fragments\033[0m         In salvage mode, also export L3 FRAGMENT and L4\n";
+    std::cout << "                                 STRING_ONLY rows (default: STRUCTURED rows only)\n";
     std::cout << "  \033[1m--auto-salvage\033[0m              Auto salvage — try all strategies, correlate results\n";
     std::cout << "                                 Uses SalvageEngine + DataCorrelationEngine\n";
     std::cout << "  \033[1m--deep-carve\033[0m                Deep carve mode — sector-level PageIdentityEngine scanning\n";
@@ -534,6 +538,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool undo_history_mode = parser_.get_bool_option("undo-history", false);
     bool undo_reassemble = parser_.get_bool_option("undo-reassemble", false);
     bool salvage_mode = parser_.get_bool_option("salvage-mode", false);
+    bool include_fragments = parser_.get_bool_option("include-fragments", false);
     bool flashback_delete = parser_.get_bool_option("flashback-delete", false);
     bool flashback_update = parser_.get_bool_option("flashback-update", false);
     std::string flashback_format = parser_.get_option("flashback-format", "sql");
@@ -1072,10 +1077,29 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         if (!result.rows.empty()) {
             fs::create_directories(output_dir);
             std::string csv_path = output_dir + "/salvaged_data.csv";
-            if (dbrecovery::recovery::SalvageEngine::export_csv(csv_path, result.rows)) {
-                std::cout << "[INFO] Salvaged data written to: " << csv_path << "\n";
+
+            // By default export only STRUCTURED rows (L1/L2); L3/L4 fragments are
+            // low-confidence and only included when --include-fragments is set.
+            std::vector<dbrecovery::recovery::SalvagedRow> export_rows;
+            for (const auto& row : result.rows) {
+                if (include_fragments ||
+                    row.salvage_level == dbrecovery::recovery::SalvageLevel::STRUCTURED) {
+                    export_rows.push_back(row);
+                }
             }
-            std::cout << "[INFO] Total rows salvaged: " << result.rows.size() << "\n";
+
+            if (export_rows.empty()) {
+                std::cout << "[WARN] No structured rows to export "
+                          << "(use --include-fragments to export L3/L4 fragments)\n";
+            } else if (dbrecovery::recovery::SalvageEngine::export_csv(csv_path, export_rows)) {
+                std::cout << "[INFO] Salvaged data written to: " << csv_path << "\n";
+                std::cout << "[INFO] Total rows salvaged: " << export_rows.size() << "\n";
+                if (export_rows.size() < result.rows.size()) {
+                    std::cout << "[INFO] Skipped " << (result.rows.size() - export_rows.size())
+                              << " low-confidence fragment rows "
+                              << "(use --include-fragments to export them)\n";
+                }
+            }
         } else {
             std::cout << "[WARN] No data could be salvaged\n";
         }

@@ -55,6 +55,18 @@ public:
     void set_schema(const catalog::TableSchema& schema);
     void set_compressed_page_size(size_t compressed_size);
 
+    /**
+     * @brief Auto-detect compressed page size from IBD file page 0
+     *
+     * Reads FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4)
+     * in big-endian format, extracts ZIP_SSIZE at bits 1-4, and calculates
+     * compressed_page_size = 16384 / (1 << zip_ssize).
+     *
+     * @param file_path  Path to the .ibd file
+     * @return true if compression detected and page size set, false otherwise
+     */
+    bool auto_detect_compression(const std::string& file_path);
+
     std::vector<std::map<std::string, std::string>> recover();
     const CompressedTableRecoveryStats& get_stats() const { return stats_; }
     const std::vector<uint32_t>& get_compressed_pages() const { return compressed_pages_; }

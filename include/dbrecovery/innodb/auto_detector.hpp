@@ -106,10 +106,10 @@ inline MySQLVersion AutoDetector::detect_version_from_page0(const uint8_t* page0
     // 读取空间ID (FIL header, big-endian, offset 34)
     uint32_t space_id = read_be<uint32_t>(page0, FIL_PAGE_SPACE_ID);
 
-    // 读取FSP空间标志 (FSP header, little-endian, offset 54)
-    uint32_t space_flags = read_le<uint32_t>(page0, 54);
-    // ZIP_SSIZE in bits 1-3 of FSP_SPACE_FLAGS
-    uint16_t zip_ssize = static_cast<uint16_t>((space_flags >> 1) & 0x7);
+    // FSP header starts at offset 38 (FIL_HEADER_SIZE); FSP_SPACE_FLAGS is at +4
+    // (absolute offset 42), big-endian. ZIP_SSIZE in bits 1-4.
+    uint32_t space_flags = read_be<uint32_t>(page0, 38 + 4);
+    uint16_t zip_ssize = static_cast<uint16_t>((space_flags >> 1) & 0x0F);
     
     // 判断版本
     if (page_type == SDI_PAGE_TYPE || page_type == 0x5a5a) {
@@ -246,16 +246,17 @@ inline AutoDetector::DetectionResult AutoDetector::detect_from_file_header(const
     result.is_compressed = false;
     result.zip_size = 0;
     
-    if (!file_data || size < 38) {
+    if (!file_data || size < 42) {
         return result;
     }
     
     // 读取 Page 0 的关键字段 (FIL header fields are big-endian)
     uint16_t page_type = read_be<uint16_t>(file_data, FIL_PAGE_TYPE_ABS);
     uint32_t space_id = read_be<uint32_t>(file_data, FIL_PAGE_SPACE_ID);
-    // FSP_SPACE_FLAGS at offset 54 (little-endian, 4 bytes)
-    uint32_t space_flags = read_le<uint32_t>(file_data, 54);
-    uint16_t page_size_field = static_cast<uint16_t>((space_flags >> 1) & 0x7);
+    // FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4), big-endian.
+    // ZIP_SSIZE in bits 1-4.
+    uint32_t space_flags = read_be<uint32_t>(file_data, 38 + 4);
+    uint16_t page_size_field = static_cast<uint16_t>((space_flags >> 1) & 0x0F);
     
     // 推断版本
     result.version = detect_version_from_page_type(page_type);

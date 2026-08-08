@@ -22,6 +22,7 @@
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 
 namespace dbrecovery {
 namespace carve {
@@ -177,8 +178,8 @@ inline PageId PageIdentityEngine::read_page_header(
 }
 
 inline bool PageIdentityEngine::verify_checksum(
-    const uint8_t* /*page_data*/, size_t /*page_size*/, uint32_t stored_checksum) {
-    return (stored_checksum != 0 && stored_checksum != 0xFFFFFFFF);
+    const uint8_t* page_data, size_t page_size, uint32_t /*stored_checksum*/) {
+    return innodb::is_page_checksum_valid(page_data, page_size);
 }
 
 inline uint32_t PageIdentityEngine::detect_page_size(const uint8_t* data, size_t size) {

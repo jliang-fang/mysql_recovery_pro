@@ -256,6 +256,26 @@ std::vector<std::map<std::string, std::string>> CompressedTableRecovery::recover
 
 CompressedTableRecoveryManager::CompressedTableRecoveryManager() {}
 
+bool CompressedTableRecovery::auto_detect_compression(const std::string& file_path) {
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file) return false;
+
+    std::vector<uint8_t> page0(16384, 0);
+    file.read(reinterpret_cast<char*>(page0.data()), page0.size());
+    if (file.gcount() < 46) return false;
+
+    // FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4), big-endian
+    uint32_t fsp_flags = read_be<uint32_t>(page0.data(), 42);
+    // ZIP_SSIZE at bits 1-4 (4 bits): compressed_page_size = 16384 / (1 << zip_ssize)
+    uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
+
+    if (zip_ssize > 0) {
+        compressed_page_size_ = 16384 / (1 << zip_ssize);
+        return true;
+    }
+    return false;
+}
+
 void CompressedTableRecoveryManager::add_compressed_table(const std::string& table_name,
                                                           uint32_t compressed_page_size) {
     tables_[table_name] = compressed_page_size;
@@ -278,23 +298,22 @@ std::optional<size_t> CompressedTableRecoveryManager::get_compressed_page_size(
 std::optional<size_t> CompressedTableRecoveryManager::parse_compression_info(
     const std::string& ibd_path) {
     std::ifstream file(ibd_path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return std::nullopt;
-    }
+    if (!file) return std::nullopt;
 
     size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    if (file_size < 16384) {
-        return std::nullopt;
-    }
+    if (file_size < 16384) return std::nullopt;
 
     std::vector<uint8_t> page_data(16384);
     file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-    if (page_data.size() >= 84) {
-        uint32_t fsp_flags = read_le<uint32_t>(page_data.data(), 80);
-        uint32_t zip_ssize = (fsp_flags >> 5) & 0x07;
+    // FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4), big-endian
+    // Bit layout: POST_ANTELOPE=bit0, ZIP_SSIZE=bits1-4, ATOMIC_BLOBS=bit5
+    // Compressed page size = 16384 / (1 << zip_ssize) for zip_ssize > 0
+    if (page_data.size() >= 46) {
+        uint32_t fsp_flags = read_be<uint32_t>(page_data.data(), 42);
+        uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
         if (zip_ssize > 0) {
             return static_cast<size_t>(16384 / (1 << zip_ssize));
         }

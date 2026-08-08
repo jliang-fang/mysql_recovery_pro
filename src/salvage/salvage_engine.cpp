@@ -542,7 +542,7 @@ bool SalvageEngine::export_csv(
     }
 
     // Header
-    file << "offset,method,confidence";
+    file << "offset,level,method,confidence";
     for (uint16_t i = 0; i < max_fields; i++) {
         file << ",field_" << i;
     }
@@ -550,7 +550,8 @@ bool SalvageEngine::export_csv(
 
     // Data
     for (const auto& row : rows) {
-        file << row.page_offset << "," << row.recovery_method << ","
+        file << row.page_offset << "," << static_cast<int>(row.salvage_level) << ","
+             << row.recovery_method << ","
              << std::fixed << std::setprecision(2) << row.confidence;
         for (uint16_t i = 0; i < max_fields; i++) {
             file << ",";

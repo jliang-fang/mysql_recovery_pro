@@ -89,11 +89,12 @@ std::vector<uint8_t> PageFragmentReassembler::synthesize_page0(
     page[36] = (space_id >> 8) & 0xFF;
     page[37] = space_id & 0xFF;
 
+    // FSP header at offset 38: space_id (4B), then space_flags (4B at abs 42)
     uint32_t space_flags = (5 << 1) | (1 << 8) | (1 << 15);
-    page[38] = space_flags & 0xFF;
-    page[39] = (space_flags >> 8) & 0xFF;
-    page[40] = (space_flags >> 16) & 0xFF;
-    page[41] = (space_flags >> 24) & 0xFF;
+    page[42] = space_flags & 0xFF;
+    page[43] = (space_flags >> 8) & 0xFF;
+    page[44] = (space_flags >> 16) & 0xFF;
+    page[45] = (space_flags >> 24) & 0xFF;
 
     uint32_t free_limit = 64;
     page[54] = free_limit & 0xFF;

@@ -3753,8 +3753,8 @@ void InnoDBIndexParser::deduplicate_records(std::vector<IndexRecord>& records) {
 uint32_t detect_page_size_from_fsp(const uint8_t* page_data) {
     if (!page_data) return UNIV_PAGE_SIZE;
 
-    // FSP header flags at offset 54 in page 0
-    uint32_t flags = read_be<uint32_t>(page_data, 54);
+    // FSP header flags at offset 42 in page 0 (FSP_SPACE_FLAGS = FIL_HEADER_SIZE+4)
+    uint32_t flags = read_be<uint32_t>(page_data, 42);
 
     // Validate: Check if offset 0-3 (FIL header checksum) looks reasonable
     // A valid FIL header should have reasonable checksum values
@@ -3847,7 +3847,7 @@ uint32_t smart_detect_page_size(const uint8_t* page_data, size_t file_size) {
 uint8_t detect_row_format_from_fsp(const uint8_t* page_data) {
     if (!page_data) return 2;  // Default DYNAMIC
 
-    uint32_t flags = read_be<uint32_t>(page_data, 54);
+    uint32_t flags = read_be<uint32_t>(page_data, 42);
 
     // POST_ANTELOPE: bit 0 - 1=DYNAMIC/COMPRESSED, 0=REDUNDANT/COMPACT
     // ZIP_SSIZE: bits 1-4 - if != 0, table is compressed
@@ -3881,7 +3881,7 @@ bool is_antelope_format(const uint8_t* page_data) {
 
 uint32_t read_fsp_space_flags(const uint8_t* page_data) {
     if (!page_data) return 0;
-    return read_be<uint32_t>(page_data, 54);
+    return read_be<uint32_t>(page_data, 42);
 }
 
 uint32_t get_root_page_from_inode(const uint8_t* ibd_data, size_t ibd_size, uint32_t page_size) {
