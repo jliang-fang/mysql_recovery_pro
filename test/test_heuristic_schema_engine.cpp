@@ -67,7 +67,7 @@ static std::vector<uint8_t> build_index_page(
 
     // === PAGE_HEADER (offset 38-93) ===
     // PAGE_N_DIR_SLOTS (38-39)
-    uint16_t n_slots = 2;
+    uint16_t n_slots = n_recs + 2;
     page[38] = n_slots & 0xFF; page[39] = (n_slots >> 8) & 0xFF;
 
     // Compute data layout
@@ -153,8 +153,10 @@ static std::vector<uint8_t> build_index_page(
     // === User Records ===
     uint32_t current_rec_offset = first_rec_offset;
     uint32_t data_offset = data_start_offset;
+    std::vector<uint32_t> user_rec_offsets;
 
     for (uint32_t r = 0; r < n_recs; r++) {
+        user_rec_offsets.push_back(current_rec_offset);
         // Compute offset table entries (relative to rec offset, decreasing order)
         // Stored in reverse field order: last field end first
         // field_offsets[0] = end of last field (largest)
@@ -210,6 +212,24 @@ static std::vector<uint8_t> build_index_page(
     // Slot 1: SUPREMUM
     page[page_dir_start + 2] = SUPREMUM_OFF & 0xFF;
     page[page_dir_start + 3] = (SUPREMUM_OFF >> 8) & 0xFF;
+
+    // === Page Directory at end of page (for PhysicalLayoutAnalyzer) ===
+    // PhysicalLayoutAnalyzer::analyze_page() reads n_slots from page_size-2 (LE),
+    // then for i in [1, n_slots-1) reads slot at dir_end - (n_slots - i)*2 where
+    // dir_end = page_size - 2. Each slot is a LE uint16 record offset.
+    // Slot 0 = INFIMUM (skipped by analyzer, i starts at 1).
+    // Slots 1..n_slots-2 = user records.
+    // Slot n_slots-1 = SUPREMUM (skipped by analyzer, i+1 < n_slots stops before).
+    page[ps - 2] = n_slots & 0xFF;
+    page[ps - 1] = (n_slots >> 8) & 0xFF;
+    uint16_t dir_end = ps - 2;
+    for (uint16_t i = 1; i + 1 < n_slots; i++) {
+        uint16_t slot_pos = dir_end - (n_slots - i) * 2;
+        uint32_t rec = (i - 1 < n_recs) ? user_rec_offsets[i - 1] : 0;
+        uint16_t rec_off = static_cast<uint16_t>(rec);
+        page[slot_pos] = rec_off & 0xFF;
+        page[slot_pos + 1] = (rec_off >> 8) & 0xFF;
+    }
 
     return page;
 }

@@ -239,7 +239,7 @@ TEST_F(ComprehensiveRecoveryTest, TDEDecryptorBasic) {
     std::vector<uint8_t> normal_page(100, 0);
     EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
 
-    normal_page[0] = 6;  // AES-256-CBC algorithm indicator
+    normal_page[38] = 6;  // AES-256-CBC algorithm indicator at TDE header offset
     EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
 }
 

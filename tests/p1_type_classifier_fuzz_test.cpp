@@ -392,6 +392,7 @@ TEST(P1TypeClassifierFuzzTest, TypeSpecificLikelihoods) {
         f.is_fixed_length = true; f.fixed_size = 19;
         f.ascii_ratio = 1.0; f.digit_ratio = 0.5;
         f.entropy = 4.5;
+        f.has_dash_ratio = 1.0; f.has_colon_ratio = 1.0;
         f.null_ratio = 0.0; f.zero_ratio = 0.0; f.empty_ratio = 0.0;
 
         auto candidates = classifier.classify(f);

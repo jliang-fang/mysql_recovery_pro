@@ -783,8 +783,8 @@ TEST(RedoLogFilterTest, FilterBySpaceId) {
 
 TEST(TDEDecryptorTest, IsEncrypted) {
     std::vector<uint8_t> page(16384, 0);
-    page[0] = 0x01;  // TDE algorithm marker
-    
+    page[38] = 0x01;  // TDE algorithm marker at offset 38 (after FIL header)
+
     bool encrypted = TDEDecryptor::is_encrypted(page.data(), page.size());
     EXPECT_TRUE(encrypted);
 }

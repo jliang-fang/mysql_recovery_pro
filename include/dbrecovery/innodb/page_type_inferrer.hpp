@@ -1443,7 +1443,7 @@ inline bool PageTypeInferrer::validate_offset_table(
 inline uint64_t PageTypeInferrer::extract_index_id(
     const uint8_t* page_data, size_t page_size) {
 
-    if (!page_data || page_size < 50) return 0;
+    if (!page_data || page_size < 52) return 0;
 
     // Index ID is at BTR_IND_PAGE_OFFSET_ABS = FIL_HEADER_SIZE + 6 = 44
     uint64_t index_id = read_be<uint64_t>(page_data, 44);

@@ -63,7 +63,7 @@ struct ColumnFeatures {
     double signed_ratio = 0.0;
 
     double entropy = 0.0;
-    std::vector<uint8_t> byte_histogram;
+    std::vector<uint32_t> byte_histogram;
     double repeated_pattern_score = 0.0;
 
     bool is_fixed_length = false;
@@ -80,7 +80,7 @@ public:
     static ColumnFeatures extract(const std::vector<std::vector<uint8_t>>& raw_values);
 
 private:
-    static double compute_entropy(const std::vector<uint8_t>& histogram, uint32_t total);
+    static double compute_entropy(const std::vector<uint32_t>& histogram, uint32_t sample_count, uint64_t total_bytes);
     static double compute_repeated_pattern_score(const std::vector<std::vector<uint8_t>>& values);
     static bool is_ascii_printable(uint8_t byte);
     static bool is_digit(uint8_t byte);

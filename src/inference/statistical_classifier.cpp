@@ -46,7 +46,7 @@ ColumnFeatures FeatureExtractor::extract(
     if (f.sample_count == 0) return f;
 
     std::vector<double> lengths;
-    std::vector<uint8_t> byte_hist(256, 0);
+    std::vector<uint32_t> byte_hist(256, 0);
     uint32_t null_count = 0, zero_count = 0, empty_count = 0;
     uint32_t ascii_count = 0, digit_count = 0, alpha_count = 0, alphanum_count = 0;
     uint32_t signed_cnt = 0, dot_cnt = 0, colon_cnt = 0, dash_cnt = 0;
@@ -175,7 +175,10 @@ ColumnFeatures FeatureExtractor::extract(
         f.numeric_max = (num_max > 0) ? std::optional<uint64_t>(num_max) : std::nullopt;
     }
 
-    f.entropy = compute_entropy(byte_hist, n);
+    uint64_t total_bytes = 0;
+    for (auto c : byte_hist) total_bytes += c;
+
+    f.entropy = compute_entropy(byte_hist, n, total_bytes);
     f.byte_histogram = byte_hist;
     f.repeated_pattern_score = compute_repeated_pattern_score(raw_values);
     f.distinct_count = static_cast<uint32_t>(distinct_values.size());
@@ -189,12 +192,12 @@ ColumnFeatures FeatureExtractor::extract(
 }
 
 double FeatureExtractor::compute_entropy(
-    const std::vector<uint8_t>& histogram, uint32_t total) {
-    if (total == 0) return 0.0;
+    const std::vector<uint32_t>& histogram, uint32_t sample_count, uint64_t total_bytes) {
+    if (total_bytes == 0) return 0.0;
     double entropy = 0.0;
     for (size_t i = 0; i < histogram.size(); i++) {
         if (histogram[i] > 0) {
-            double p = static_cast<double>(histogram[i]) / total;
+            double p = static_cast<double>(histogram[i]) / total_bytes;
             entropy -= p * std::log2(p);
         }
     }
