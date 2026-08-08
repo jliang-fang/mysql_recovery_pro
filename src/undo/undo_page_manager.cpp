@@ -1,10 +1,6 @@
 /**
  * @file undo_page_manager.cpp
- * @brief Stub - UndoPageManager implementation
- *
- * TODO: Implement per architecture_v2_blueprint.md
- * See: /app/mysql_recovery_pro/src/innodb/undo_log_parser.cpp for existing implementation
- * See: /app/mysql_recovery_pro/src/innodb/undo_log_replayer.cpp for existing implementation
+ * @brief UndoPageManager implementation — unified facade over innodb undo modules
  */
 
 #include "dbrecovery/undo/undo_page_manager.hpp"
@@ -18,7 +14,8 @@
 namespace dbrecovery {
 namespace undo {
 
-// Stub - full implementation deferred
+// UndoPageManager is an inline facade — all methods are in the header.
+// This file exists for ABI stability and future extension points.
 
 } // namespace undo
 } // namespace dbrecovery

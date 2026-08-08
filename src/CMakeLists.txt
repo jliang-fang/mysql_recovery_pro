@@ -78,16 +78,23 @@ set(SALVAGE_SOURCES
     salvage/damaged_page_handler.cpp
     salvage/row_salvage_scanner.cpp
     salvage/salvage_engine.cpp
+    salvage/secondary_index_rescuer.cpp
+    salvage/data_correlation.cpp
 )
 
 # Add carve module sources (Phase 2: Disk carving page reassembly)
 set(CARVE_SOURCES
     carve/page_reassembler.cpp
+    carve/fragment_reassembler.cpp
+    carve/page_identity_engine.cpp
+    carve/tablespace_composer.cpp
 )
 
 # Add enterprise module sources (Phase 2: Partition + shared tablespace recovery)
 set(ENTERPRISE_SOURCES
     enterprise/partition_recovery.cpp
+    enterprise/offline_keyring.cpp
+    enterprise/shared_tablespace.cpp
 )
 
 # Add report module sources (Phase 2: Recovery report generation)
@@ -115,6 +122,9 @@ set(DISK_SOURCES
 set(INFERENCE_SOURCES
     inference/physical_layout_analyzer.cpp
     inference/statistical_classifier.cpp
+    inference/feature_extractor.cpp
+    inference/interactive_builder.cpp
+    inference/layout_analyzer.cpp
 )
 
 # Add safety module sources (Phase 2: Bare Device Safety Gate)
@@ -123,6 +133,12 @@ set(SAFETY_SOURCES
     safety/loopback_safety.cpp
     safety/write_protect.cpp
     safety/safety_gate.cpp
+)
+
+# Add undo module sources (Phase 2: Undo log analysis & flashback)
+set(UNDO_SOURCES
+    undo/flashback_engine.cpp
+    undo/undo_page_manager.cpp
 )
 
 # Add all sources to dbrecovery_innodb library
@@ -139,6 +155,7 @@ target_sources(dbrecovery_innodb PRIVATE
     ${DISK_SOURCES}
     ${INFERENCE_SOURCES}
     ${SAFETY_SOURCES}
+    ${UNDO_SOURCES}
     ${SALVAGE_SOURCES}
     ${CARVE_SOURCES}
     ${ENTERPRISE_SOURCES}

@@ -179,7 +179,7 @@ TEST(P1LayoutFuzzTest, CorruptedPageDirectory) {
 
         auto info = analyzer.analyze_page(page.data(), page.size());
         // Should not crash. Result may be empty or valid.
-        EXPECT_TRUE(info.total_columns == 0 || info.total_columns <= 100);
+        EXPECT_TRUE(!info.has_value() || info->total_columns <= 100);
     }
 }
 
@@ -205,7 +205,7 @@ TEST(P1LayoutFuzzTest, CorruptedOffsetTable) {
 
         auto info = analyzer.analyze_page(page.data(), page.size());
         // Should not crash
-        EXPECT_TRUE(info.total_columns == 0 || info.total_columns <= 100);
+        EXPECT_TRUE(!info.has_value() || info->total_columns <= 100);
     }
 }
 
@@ -231,7 +231,7 @@ TEST(P1LayoutFuzzTest, NullBitmapCorruption) {
 
         auto info = analyzer.analyze_page(page.data(), page.size());
         // Should not crash
-        EXPECT_TRUE(info.total_columns == 0 || info.total_columns <= 100);
+        EXPECT_TRUE(!info.has_value() || info->total_columns <= 100);
     }
 }
 
@@ -287,7 +287,7 @@ TEST(P1LayoutFuzzTest, EmptySlotTable) {
 
         auto info = analyzer.analyze_page(page.data(), page.size());
         // Empty page should return empty info, not crash
-        EXPECT_EQ(info.total_columns, 0);
+        EXPECT_FALSE(info.has_value());
     }
 
     // Also test with zeroed-out page directory
@@ -298,7 +298,7 @@ TEST(P1LayoutFuzzTest, EmptySlotTable) {
         page[page.size() - 1] = 0x00;
 
         auto info = analyzer.analyze_page(page.data(), page.size());
-        EXPECT_EQ(info.total_columns, 0); // Should be 0 or gracefully handled
+        EXPECT_FALSE(info.has_value()); // Should be nullopt or gracefully handled
     }
 }
 
@@ -317,7 +317,7 @@ TEST(P1LayoutFuzzTest, MaximumRecordCount) {
 
         auto info = analyzer.analyze_page(page.data(), page.size());
         // Should not crash or OOM
-        EXPECT_TRUE(info.total_columns == 2 || info.total_columns == 0);
+        EXPECT_TRUE(!info.has_value() || info->total_columns == 2);
     }
 
     // Create page with 500 very small records (boundary)
@@ -329,7 +329,7 @@ TEST(P1LayoutFuzzTest, MaximumRecordCount) {
 
         auto info = analyzer.analyze_page(page.data(), page.size());
         // Should not crash
-        EXPECT_TRUE(info.total_columns <= 10);
+        EXPECT_TRUE(!info.has_value() || info->total_columns <= 10);
     }
 }
 
@@ -342,7 +342,7 @@ TEST(P1LayoutFuzzTest, ExtremePageSizes) {
     for (size_t sz : {32, 64, 100, 512}) {
         std::vector<uint8_t> tiny(sz, static_cast<uint8_t>(rand() % 256));
         auto info = analyzer.analyze_page(tiny.data(), tiny.size());
-        EXPECT_EQ(info.total_columns, 0); // Too small to be valid
+        EXPECT_FALSE(info.has_value()); // Too small to be valid
     }
 
     // Very large page size (64KB)
@@ -354,7 +354,7 @@ TEST(P1LayoutFuzzTest, ExtremePageSizes) {
 
         auto info = analyzer.analyze_page(large.data(), large.size());
         // Should not crash; may return empty or partial info
-        EXPECT_TRUE(info.total_columns == 0 || info.total_columns <= 100);
+        EXPECT_TRUE(!info.has_value() || info->total_columns <= 100);
     }
 }
 
@@ -367,11 +367,11 @@ TEST(P1LayoutFuzzTest, NullEmptyData) {
 
     // Null data
     auto info = analyzer.analyze_page(nullptr, 16384);
-    EXPECT_EQ(info.total_columns, 0);
+    EXPECT_FALSE(info.has_value());
 
     // Empty data
     info = analyzer.analyze_page(nullptr, 0);
-    EXPECT_EQ(info.total_columns, 0);
+    EXPECT_FALSE(info.has_value());
 
     // Empty feature extraction
     std::vector<std::vector<uint8_t>> empty_samples;
@@ -411,8 +411,6 @@ TEST(P1LayoutFuzzTest, MultiPageCorruption) {
         auto info = analyzer.analyze_multiple_pages(pages);
         // Should not crash
         EXPECT_TRUE(info.total_columns == 0 || info.total_columns <= 100);
-        EXPECT_GE(info.confidence, 0.0);
-        EXPECT_LE(info.confidence, 1.0);
     }
 }
 

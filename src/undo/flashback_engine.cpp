@@ -1,10 +1,10 @@
 /**
  * @file flashback_engine.cpp
- * @brief Stub - FlashbackEngine implementation
+ * @brief FlashbackEngine implementation — delegation wrapper around innodb::FlashbackGenerator
  *
- * TODO: Implement per architecture_v2_blueprint.md
- * See: /app/mysql_recovery_pro/src/innodb/flashback_generator.cpp for existing implementation
- * See: /app/mysql_recovery_pro/src/innodb/deep_undo_analyzer.cpp for existing implementation
+ * All core logic lives in innodb::FlashbackGenerator. This file provides
+ * the undo::FlashbackEngine thin wrapper, plus any undo-namespace-specific
+ * orchestration that may be added in the future.
  */
 
 #include "dbrecovery/undo/flashback_engine.hpp"
@@ -19,7 +19,8 @@
 namespace dbrecovery {
 namespace undo {
 
-// Stub - full implementation deferred
+// FlashbackEngine is a thin wrapper — all methods are inlined in the header.
+// This file exists for ABI stability and future extension points.
 
 } // namespace undo
 } // namespace dbrecovery

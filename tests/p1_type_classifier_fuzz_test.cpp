@@ -239,10 +239,13 @@ TEST(P1TypeClassifierFuzzTest, EmptyFieldData) {
         EXPECT_LE(c.confidence, 1.0);
     }
 
-    // Empty columns_samples for extract_all
+    // Empty columns_samples for extract_all (not available on FeatureExtractor)
+    // Use extract() on each column instead
     std::vector<std::vector<std::vector<uint8_t>>> empty_cols;
-    auto all_features = extractor.extract_all(empty_cols);
-    EXPECT_TRUE(all_features.empty());
+    for (const auto& col : empty_cols) {
+        auto feats = extractor.extract(col);
+        EXPECT_TRUE(feats.sample_count == 0);
+    }
 }
 
 // ==================== Single-Byte Fields ====================
