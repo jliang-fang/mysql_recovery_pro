@@ -6,6 +6,7 @@
  */
 
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
+#include "dbrecovery/innodb/offline_keyring_parser.hpp"
 
 #include <cstring>
 #include <chrono>
@@ -39,18 +40,19 @@ void EncryptedTableRecovery::add_table_key(uint32_t key_id, const std::vector<ui
 }
 
 bool EncryptedTableRecovery::load_keyring(const std::string& keyring_path) {
-    KeyringFile keyring;
-    if (!keyring.load(keyring_path)) {
+    OfflineKeyringParser parser;
+    if (!parser.parse_keyring_file(keyring_path)) {
+        last_error_ = parser.get_last_error();
         return false;
     }
 
-    for (const auto& entry : keyring.entries) {
+    for (const auto& mk : parser.get_master_keys()) {
         uint32_t key_id = static_cast<uint32_t>(
-            std::hash<std::string>{}(entry.key_name));
-        decryptor_.add_table_key(key_id, entry.key_data, entry.algorithm);
+            std::hash<std::string>{}(mk.key_name));
+        decryptor_.add_table_key(key_id, mk.key_data, mk.algorithm);
     }
 
-    return !keyring.entries.empty();
+    return !parser.get_master_keys().empty();
 }
 
 void EncryptedTableRecovery::set_try_recovery_without_key(bool try_recovery) {
@@ -128,7 +130,8 @@ bool EncryptedTableRecovery::is_page_encrypted(const uint8_t* page_data, size_t 
     if (page_size < 44) {
         return false;
     }
-    uint8_t algo = page_data[0];
+    // TDE algorithm byte is at FIL header offset 38, not at offset 0 (which is FIL checksum)
+    uint8_t algo = page_data[38];
     return algo >= 0x01 && algo <= 0x09;
 }
 

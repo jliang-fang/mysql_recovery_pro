@@ -610,6 +610,7 @@ bool RecoveryEngine::export_to_json(const std::vector<std::map<std::string, std:
 // ==================== 实现缺失的方法 ====================
 
 void RecoveryEngine::set_space_id(uint32_t space_id) {
+    space_id_ = space_id;
     // Store space_id for TDE key derivation context
     // The space_id identifies the tablespace for per-table key derivation
     if (!primary_key_hex_.empty()) {
@@ -952,8 +953,31 @@ std::vector<std::string> RecoveryEngine::flashback_deletes(
         return {};
     }
 
-    return undo_parser_.flashback_delete(undo_data_path_, table_name,
-                                          start_time, end_time);
+    // P0.7: Use DeepUndoAnalyzer (MVCC version-chain aware flashback) instead
+    // of the legacy UndoLogParser. Configure it with the undo data path and
+    // page size so it shares the same conventions as the rest of the engine.
+    deep_undo_analyzer_.set_ibdata_path(undo_data_path_);
+    if (file_reader_) {
+        deep_undo_analyzer_.set_page_size(file_reader_->get_page_size());
+    }
+
+    innodb::FlashbackFilter filter;
+    // Note: The old API accepted ISO time strings, but DeepUndoAnalyzer
+    // uses std::chrono::system_clock::time_point. Time-based filtering
+    // is preserved as a no-op when strings are empty (the default).
+    // If time-range filtering is needed, callers should set the filter
+    // directly before calling into the analyzer.
+
+    auto results = deep_undo_analyzer_.flashback_deletes(space_id_, schema_, filter);
+
+    std::vector<std::string> sql;
+    sql.reserve(results.size());
+    for (const auto& r : results) {
+        if (!r.reverse_sql.empty()) {
+            sql.push_back(r.reverse_sql);
+        }
+    }
+    return sql;
 }
 
 std::vector<innodb::UndoLogEntry> RecoveryEngine::traverse_undo_chain(

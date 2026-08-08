@@ -1119,6 +1119,200 @@ TEST(DeepUndoAnalyzerTest, DeepUndoAnalyzerResetStats) {
     EXPECT_EQ(analyzer.get_stats().broken_chains, 0u);
 }
 
+// ==================== trace_version_chain Integration Helpers ====================
+
+// Build a 6-byte field-data roll pointer (4B page_no LE + 2B offset LE).
+// All-zero bytes encode "no previous version" (null).
+static std::vector<uint8_t> make_roll_ptr_field(uint32_t page_no, uint16_t offset) {
+    std::vector<uint8_t> f(6, 0);
+    write_le<uint32_t>(f.data(), 0, page_no);
+    write_le<uint16_t>(f.data(), 4, offset);
+    return f;
+}
+
+// Layout a chain of UPDATE undo records on a single undo page, oldest-first.
+// Each record's first field is the old DB_ROLL_PTR pointing to the previous
+// (older) record; the oldest record's first field is null (all zeros).
+// Returns {page, first_record_offset_of_newest}.
+struct ChainLayout {
+    uint32_t page_no = 0;
+    uint16_t newest_offset = 0;
+    uint16_t free = 0;
+};
+
+static ChainLayout build_version_chain_page(
+    std::vector<uint8_t>& out_page,
+    size_t page_size = 16384) {
+    std::vector<uint8_t> page(page_size, 0);
+    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+
+    uint16_t free_off = TRX_UNDO_PAGE_HDR_SIZE;
+    // (next_ptr_page, next_ptr_off) for each record's old DB_ROLL_PTR field.
+    // We build oldest-first, so each record points to the record placed before it.
+    std::vector<std::pair<uint32_t, uint16_t>> chain_ptrs = {
+        {0, 0},        // oldest: no previous
+        {0, 0},        // placeholder, patched below
+        {0, 0},        // placeholder, patched below
+    };
+    // Record offsets as they will land in the page (patched after layout).
+    uint16_t offsets[3] = {0, 0, 0};
+
+    for (int i = 0; i < 3; i++) {
+        offsets[i] = free_off;
+        // Old value column field (an INT, 4 bytes) — value differs per record.
+        std::vector<uint8_t> val_field = {static_cast<uint8_t>(10 * (i + 1)), 0, 0, 0};
+        // First field: old DB_ROLL_PTR. Patched for records 1,2 after layout.
+        std::vector<uint8_t> ptr_field = make_roll_ptr_field(chain_ptrs[i].first,
+                                                             chain_ptrs[i].second);
+        auto rec = make_update_rec( /*page_no*/100, /*page_offset*/200,
+            /*trx_id*/100 + static_cast<uint64_t>(i),
+            /*prev_roll_ptr*/0, {ptr_field, val_field});
+        if (free_off + rec.size() > page_size) break;
+        std::memcpy(page.data() + free_off, rec.data(), rec.size());
+        free_off += static_cast<uint16_t>(rec.size());
+    }
+    // Patch the middle (newer) records' first field to point to the previous record.
+    // Record 2 (newest) -> record 1, record 1 -> record 0.
+    auto patch_ptr = [&](int idx, uint32_t page_no, uint16_t target_off) {
+        auto ptr_field = make_roll_ptr_field(page_no, target_off);
+        // Header is 21 bytes (2 + 4 + 2 + 1 + 5 + 7), then 1-byte length prefix for first field.
+        size_t field_off = static_cast<size_t>(offsets[idx]) + 22;
+        std::memcpy(page.data() + field_off, ptr_field.data(), ptr_field.size());
+    };
+    patch_ptr(2, 5, offsets[1]);
+    patch_ptr(1, 5, offsets[0]);
+
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_START, TRX_UNDO_PAGE_HDR_SIZE);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS, 3);
+    out_page = std::move(page);
+    ChainLayout layout;
+    layout.page_no = 5;
+    layout.newest_offset = offsets[2];
+    layout.free = free_off;
+    return layout;
+}
+
+// ==================== trace_version_chain Integration Tests ====================
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainThreeVersionWalk) {
+    // Build a single undo page with a 3-record chain (oldest -> newest).
+    std::vector<uint8_t> page;
+    auto layout = build_version_chain_page(page);
+
+    // ibdata1 with page 5 = the undo page.
+    uint32_t max_page = 5;
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_chain_walk");
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_page_size(16384);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+    schema.table_id = 1;
+
+    // Current clustered-index record; roll_ptr points to the NEWEST undo record.
+    std::vector<uint8_t> current = {0xAA, 0xBB};
+    uint64_t roll_ptr = RollPtrDecoder::encode(layout.page_no, layout.newest_offset, 0);
+
+    auto history = analyzer.trace_version_chain(current, roll_ptr, schema, 42);
+
+    EXPECT_EQ(history.index_id, 42u);
+    ASSERT_EQ(history.current_data.size(), 2u);
+    EXPECT_EQ(history.current_data[0], 0xAA);
+    // undo_chain is ordered oldest-first.
+    ASSERT_EQ(history.undo_chain.size(), 3u);
+    EXPECT_EQ(history.n_versions, 4u);
+    EXPECT_FALSE(history.truncated);
+
+    // Oldest record first: trx_id = 100 (oldest), then 101, then 102 (newest).
+    EXPECT_EQ(history.undo_chain[0].trx_id, 100u);
+    EXPECT_EQ(history.undo_chain[1].trx_id, 101u);
+    EXPECT_EQ(history.undo_chain[2].trx_id, 102u);
+
+    // Each record carries 2 fields: old roll ptr + old value.
+    ASSERT_EQ(history.undo_chain[0].old_fields.size(), 2u);
+    EXPECT_EQ(history.undo_chain[0].old_fields[1].old_value[0], 10u);
+    EXPECT_EQ(history.undo_chain[1].old_fields[1].old_value[0], 20u);
+    EXPECT_EQ(history.undo_chain[2].old_fields[1].old_value[0], 30u);
+
+    // Oldest record's old roll ptr is null (no previous version).
+    EXPECT_EQ(history.undo_chain[0].old_fields[0].old_value.size(), 6u);
+    EXPECT_EQ(history.undo_chain[0].old_fields[0].old_value[0], 0u);
+
+    const auto& stats = analyzer.get_stats();
+    EXPECT_EQ(stats.chains_traced, 1u);
+    EXPECT_EQ(stats.broken_chains, 0u);
+    EXPECT_EQ(stats.total_undo_records, 3u);
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainRollPtrPointsToCorruptPage) {
+    // ibdata only has page 0 (zero-filled, not an undo page). A roll_ptr to
+    // a non-undo page must break the chain and count a broken chain.
+    std::vector<uint8_t> file(16384 * 1, 0);
+    std::string path = create_temp_file(file, "_chain_badpage");
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_page_size(16384);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    // encode(page_no=0 ...) would be null; use page 0 offset 40 which is a
+    // valid pointer but the page type is 0 (not UNDO_LOG) -> chain break.
+    uint64_t roll_ptr = RollPtrDecoder::encode(0, 40, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 7);
+
+    EXPECT_EQ(history.undo_chain.size(), 0u);
+    EXPECT_EQ(history.n_versions, 1u);
+    EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainCycleDetected) {
+    // A roll_ptr that points back to itself must terminate via the visited set
+    // rather than looping forever. We build a page whose single record's old
+    // roll-ptr field points back to its own offset.
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+    uint16_t rec_off = TRX_UNDO_PAGE_HDR_SIZE;
+    auto rec = make_update_rec(100, 200, 55, 0,
+        {make_roll_ptr_field(5, rec_off), {0x01, 0x00, 0x00, 0x00}});
+    std::memcpy(page.data() + rec_off, rec.data(), rec.size());
+    uint16_t free_off = rec_off + static_cast<uint16_t>(rec.size());
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS, 1);
+
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_chain_cycle");
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_page_size(16384);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    uint64_t roll_ptr = RollPtrDecoder::encode(5, rec_off, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 9);
+
+    // The self-referential record is visited once; the loop must terminate.
+    // undo_chain has either 1 record (if the self-pointer is extracted) or is
+    // terminated by the visited set. Either way it must NOT hang or exceed 1.
+    ASSERT_LE(history.undo_chain.size(), 1u);
+    EXPECT_LE(history.n_versions, 2u);
+
+    std::remove(path.c_str());
+}
+
 // ==================== FlashbackGenerator-style Output Tests ====================
 
 TEST(DeepUndoAnalyzerTest, FlashbackResultConfidence) {

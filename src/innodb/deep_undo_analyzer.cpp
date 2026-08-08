@@ -754,6 +754,92 @@ uint32_t DeepUndoAnalyzer::extract_table_id(
     return 0;
 }
 
+std::vector<UndoRecordV2> DeepUndoAnalyzer::scan_records(
+    const catalog::TableSchema& schema,
+    const FlashbackFilter& filter,
+    std::initializer_list<UndoRecordV2::Type> types) {
+
+    std::vector<UndoRecordV2> records;
+    auto undo_pages = scan_undo_pages();
+    if (undo_pages.empty()) return records;
+
+    for (const auto& [page_data, page_no] : undo_pages) {
+        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
+        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
+
+        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
+        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
+            size_t consumed = 0;
+            auto rec_opt = record_parser_.parse(
+                page_data.data(), page_data.size(), offset, &schema, &consumed);
+            if (!rec_opt) break;
+
+            auto& rec = *rec_opt;
+            rec.undo_page_no = page_no;
+
+            // Filter by type (empty = keep all)
+            if (types.size() > 0) {
+                bool type_match = false;
+                for (auto t : types) {
+                    if (rec.type == t) { type_match = true; break; }
+                }
+                if (!type_match) {
+                    offset += consumed;
+                    continue;
+                }
+            }
+
+            // Filter by table_id
+            uint32_t rec_table_id = extract_table_id(rec.old_fields);
+            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by trx_id
+            if (filter.trx_id.has_value() && rec.trx_id != *filter.trx_id) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by LSN range
+            if (filter.start_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn < *filter.start_lsn) {
+                offset += consumed;
+                continue;
+            }
+            if (filter.end_lsn.has_value() && rec.commit_lsn.has_value() &&
+                *rec.commit_lsn > *filter.end_lsn) {
+                offset += consumed;
+                continue;
+            }
+
+            // Filter by time range
+            if (filter.start_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp < *filter.start_time) {
+                offset += consumed;
+                continue;
+            }
+            if (filter.end_time.has_value() && rec.approx_timestamp.has_value() &&
+                *rec.approx_timestamp > *filter.end_time) {
+                offset += consumed;
+                continue;
+            }
+
+            records.push_back(std::move(rec));
+
+            if (filter.max_records > 0 && records.size() >= filter.max_records) {
+                return records;
+            }
+
+            offset += consumed;
+        }
+        if (filter.max_records > 0 && records.size() >= filter.max_records) break;
+    }
+
+    return records;
+}
+
 std::string DeepUndoAnalyzer::pk_to_hex(const std::vector<uint8_t>& pk_raw) {
     if (pk_raw.empty()) return "";
     std::ostringstream oss;
@@ -873,136 +959,59 @@ std::vector<FlashbackResult> DeepUndoAnalyzer::flashback_deletes(
     std::vector<FlashbackResult> results;
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Step 1: Scan all undo pages for DELETE records
-    auto undo_pages = scan_undo_pages();
-    if (undo_pages.empty()) return results;
+    // Use shared scan_records() to find DELETE_MARK records
+    auto delete_records = scan_records(schema, filter,
+        {UndoRecordV2::DELETE_MARK});
 
-    // Step 2: Find all TRX_UNDO_DEL_REC records
-    for (const auto& [page_data, page_no] : undo_pages) {
-        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
-        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
+    // Convert each delete record to a flashback result
+    for (auto& rec : delete_records) {
+        FlashbackResult fr;
+        fr.trx_id = rec.trx_id;
+        fr.undo_no = rec.undo_no;
 
-        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
-        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
-            size_t consumed = 0;
-            auto rec_opt = record_parser_.parse(
-                page_data.data(), page_data.size(), offset, &schema, &consumed);
-            if (!rec_opt) break;
-
-            auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-
-            // Filter by transaction ID
-            if (filter.trx_id.has_value() && rec.trx_id != *filter.trx_id) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter: only DELETE_MARK records
-            if (rec.type != UndoRecordV2::DELETE_MARK) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by table_id
-            uint32_t rec_table_id = extract_table_id(rec.old_fields);
-            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by LSN range
-            if (filter.start_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn < *filter.start_lsn) {
-                offset += consumed;
-                continue;
-            }
-            if (filter.end_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn > *filter.end_lsn) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by time range
-            if (filter.start_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp < *filter.start_time) {
-                offset += consumed;
-                continue;
-            }
-            if (filter.end_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp > *filter.end_time) {
-                offset += consumed;
-                continue;
-            }
-
-            // Build flashback result
-            FlashbackResult fr;
-            fr.trx_id = rec.trx_id;
-            fr.undo_no = rec.undo_no;
-
-            // Generate INSERT INTO statement
-            // Use field_no from undo records to map old values to correct columns
-            std::ostringstream sql;
-            sql << "INSERT INTO " << schema.table_name << " (";
-
-            // Column names
-            bool first = true;
-            for (const auto& [ord, col] : schema.columns) {
-                if (!first) sql << ", ";
-                sql << "`" << col.name << "`";
-                first = false;
-            }
-            sql << ") VALUES (";
-
-            // Column values from undo record fields
-            // Use field_no to map undo fields to schema columns
-            // In UPDATE/DELETE undo records, the first field (field_no=1) is old DB_ROLL_PTR
-            // Subsequent fields contain old values, with field_no identifying the column
-            // Skip field 0 (old DB_ROLL_PTR) and map remaining fields by field_no
-            size_t col_count = 0;
-            first = true;
-            for (const auto& [ord, col] : schema.columns) {
-                if (!first) sql << ", ";
-                first = false;
-
-                // Find the undo field that matches this column by field_no
-                // field_no=1 is old DB_ROLL_PTR (skip), field_no=2+ maps to ord+1
-                // e.g. field_no=2 → ord=1 (first user column)
-                bool found = false;
-                for (const auto& fv : rec.old_fields) {
-                    if (fv.field_no == static_cast<uint16_t>(ord + 1)) {
-                        if (fv.is_null) {
-                            sql << "NULL";
-                        } else {
-                            sql << format_sql_value(fv.old_value, col);
-                        }
-                        col_count++;
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    sql << "DEFAULT";
-                }
-            }
-
-            sql << ");";
-            fr.reverse_sql = sql.str();
-            fr.confidence = static_cast<double>(col_count) /
-                std::max(size_t(1), schema.columns.size());
-            fr.is_complete = (col_count == schema.columns.size());
-
-            // Check max_records limit
-            if (results.size() >= filter.max_records) {
-                break;
-            }
-
-            results.push_back(std::move(fr));
-            stats_.flashback_statements++;
-
-            // Advance to next record
-            offset += consumed;
+        // Generate INSERT INTO statement
+        std::ostringstream sql;
+        sql << "INSERT INTO " << schema.table_name << " (";
+        bool first = true;
+        for (const auto& [ord, col] : schema.columns) {
+            if (!first) sql << ", ";
+            sql << "`" << col.name << "`";
+            first = false;
         }
+        sql << ") VALUES (";
+
+        size_t col_count = 0;
+        first = true;
+        for (const auto& [ord, col] : schema.columns) {
+            if (!first) sql << ", ";
+            first = false;
+
+            bool found = false;
+            for (const auto& fv : rec.old_fields) {
+                if (fv.field_no == static_cast<uint16_t>(ord + 1)) {
+                    if (fv.is_null) {
+                        sql << "NULL";
+                    } else {
+                        sql << format_sql_value(fv.old_value, col);
+                    }
+                    col_count++;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                sql << "DEFAULT";
+            }
+        }
+
+        sql << ");";
+        fr.reverse_sql = sql.str();
+        fr.confidence = static_cast<double>(col_count) /
+            std::max(size_t(1), schema.columns.size());
+        fr.is_complete = (col_count == schema.columns.size());
+
+        results.push_back(std::move(fr));
+        stats_.flashback_statements++;
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

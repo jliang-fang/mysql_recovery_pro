@@ -500,6 +500,25 @@ public:
      */
     static uint32_t extract_table_id(const std::vector<UndoFieldValue>& fields);
 
+    /**
+     * @brief Scan all undo pages and parse every undo record, applying a filter
+     *
+     * Shared primitive used by flashback_deletes(), heuristic_reconstruct_chains(),
+     * and FlashbackGenerator. Encapsulates the undo-page iteration loop
+     * (read TRX_UNDO_PAGE_* headers -> parse each record -> advance) so the
+     * same logic is not reimplemented in every caller.
+     *
+     * @param schema    Table schema (used for field decoding and table_id filter)
+     * @param filter    Optional filter (trx_id / LSN / time / max_records)
+     * @param types     Record types to keep; empty = keep all. Any of
+     *                  UndoRecordV2::INSERT / UPDATE / DELETE_MARK.
+     * @return Parsed undo records in scan order
+     */
+    std::vector<UndoRecordV2> scan_records(
+        const catalog::TableSchema& schema,
+        const FlashbackFilter& filter = {},
+        std::initializer_list<UndoRecordV2::Type> types = {});
+
     // ==================== Static Utilities (public for testing) ====================
 
     /**

@@ -36,6 +36,8 @@
 #include "dbrecovery/disk/xfs_disk_carver.hpp"
 #include "dbrecovery/recovery/ext4_recovery.hpp"
 #include "dbrecovery/innodb/undo_log_parser.hpp"
+#include "dbrecovery/innodb/redo_log.hpp"
+#include "dbrecovery/innodb/redo_log_replayer.hpp"
 #include "dbrecovery/innodb/schema_inferrer.hpp"
 #include "dbrecovery/tools/interactive_schema_builder.hpp"
 #include "dbrecovery/recovery/salvage_engine.hpp"
@@ -275,6 +277,10 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--secondary-rescue\033[0m         Recover data from secondary indexes when clustered index is damaged\n";
     std::cout << "                                 Requires --secondary-index=<paths> and --schema-file\n";
     std::cout << "  \033[1m--secondary-index=<paths>\033[0m  Comma-separated paths to secondary index .ibd files\n";
+    std::cout << "  \033[1m--redo-replay\033[0m               Replay redo log records against pages for recovery\n";
+    std::cout << "                                 Requires --redo-log=<path> and --schema-file\n";
+    std::cout << "  \033[1m--redo-log=<path>\033[0m           Path to InnoDB redo log file (ib_logfile0)\n";
+    std::cout << "  \033[1m--redo-space-id=<id>\033[0m        Filter redo records by tablespace ID (default: auto)\n";
     std::cout << "  \033[1m--keyring-file=<path>\033[0m      Path to keyring file for TDE decryption\n";
     std::cout << "                                 Supports keyring_file (JSON), encrypted keyring, Vault export\n";
     std::cout << "  \033[1m--tde-password=<pwd>\033[0m       Password for encrypted keyring file\n";
@@ -560,6 +566,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // Secondary index rescue
     bool secondary_rescue = parser_.get_bool_option("secondary-rescue", false);
     std::string secondary_index_paths = parser_.get_option("secondary-index", "");
+
+    // Redo log replay
+    bool redo_replay_mode = parser_.get_bool_option("redo-replay", false);
+    std::string redo_log_path = parser_.get_option("redo-log", "");
+    std::string redo_space_id_str = parser_.get_option("redo-space-id", "");
 
     // Enhanced keyring support
     std::string keyring_file = parser_.get_option("keyring-file", "");
@@ -1306,6 +1317,130 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cout << "  2. Use --infer-schema on older version pages for historical schema\n";
         } else if (!analysis.versions.empty()) {
             std::cout << "Column count: " << analysis.versions[0].column_count << "\n";
+        }
+
+        return 0;
+    }
+
+    // v2.0: Redo log replay mode
+    if (redo_replay_mode) {
+        std::cout << "[INFO] v2.0 Redo Log Replay Mode\n";
+
+        if (redo_log_path.empty()) {
+            std::cerr << "[ERROR] --redo-replay requires --redo-log=<path>\n";
+            return 1;
+        }
+
+        // Load schema
+        auto replay_schema = load_schema_from_file(schema_file_path);
+        if (!replay_schema.has_value()) {
+            std::cout << "[WARN] No schema file provided; records will be raw bytes.\n";
+        }
+
+        // Parse redo log
+        dbrecovery::innodb::RedoLogParser redo_parser;
+        auto redo_records = redo_parser.parse_file(redo_log_path);
+        std::cout << "[INFO] Parsed " << redo_records.size() << " redo log records from: "
+                  << redo_log_path << "\n";
+
+        if (redo_records.empty()) {
+            std::cerr << "[ERROR] No redo log records found\n";
+            return 1;
+        }
+
+        // Filter by space ID if specified
+        uint32_t space_id_filter = 0;
+        bool has_space_filter = false;
+        if (!redo_space_id_str.empty()) {
+            space_id_filter = static_cast<uint32_t>(std::stoul(redo_space_id_str));
+            has_space_filter = true;
+        }
+
+        // Populate replayer with records
+        dbrecovery::innodb::RedoLogReplayer replayer;
+        replayer.set_page_size(page_size);
+
+        // If we have an IBD, pre-load pages from it
+        if (!ibd_path.empty()) {
+            std::ifstream ibd_file(ibd_path, std::ios::binary);
+            if (ibd_file) {
+                ibd_file.seekg(0, std::ios::end);
+                size_t ibd_size = ibd_file.tellg();
+                ibd_file.seekg(0, std::ios::beg);
+                uint32_t num_pages = static_cast<uint32_t>(ibd_size / page_size);
+                std::vector<uint8_t> pg_buf(page_size);
+                for (uint32_t pg = 0; pg < num_pages; pg++) {
+                    ibd_file.read(reinterpret_cast<char*>(pg_buf.data()), page_size);
+                    if (ibd_file.gcount() == static_cast<std::streamsize>(page_size)) {
+                        replayer.add_page(pg, pg_buf);
+                    }
+                }
+                std::cout << "[INFO] Pre-loaded " << num_pages << " pages from: " << ibd_path << "\n";
+            }
+        }
+
+        // Add filtered redo records
+        size_t added = 0;
+        for (const auto& record : redo_records) {
+            if (has_space_filter && record.r_space_id != space_id_filter) continue;
+            replayer.add_redo_records({record});
+            added++;
+        }
+        std::cout << "[INFO] Added " << added << " redo records to replay queue\n";
+
+        if (added == 0) {
+            std::cerr << "[ERROR] No redo records match the filter criteria\n";
+            return 1;
+        }
+
+        // Replay
+        catalog::TableSchema replay_schema_val = replay_schema.value_or(catalog::TableSchema{});
+        auto replay_result = replayer.replay(replay_schema_val);
+
+        // Report results
+        std::cout << "\n[RESULT] Redo Log Replay Complete\n";
+        std::cout << "  Success: " << (replay_result.success ? "yes" : "no") << "\n";
+        std::cout << "  Records processed: " << replay_result.records_processed << "\n";
+        std::cout << "  Records applied: " << replay_result.records_applied << "\n";
+        std::cout << "  Records failed: " << replay_result.records_failed << "\n";
+
+        if (!replay_result.message.empty()) {
+            std::cout << "  Message: " << replay_result.message << "\n";
+        }
+
+        if (!replay_result.errors.empty()) {
+            std::cout << "  Errors (" << replay_result.errors.size() << "):\n";
+            for (size_t i = 0; i < std::min(replay_result.errors.size(), size_t(10)); i++) {
+                std::cout << "    - " << replay_result.errors[i] << "\n";
+            }
+        }
+
+        auto replay_stats = replayer.get_stats();
+        std::cout << "  Pages modified: " << replay_stats.pages_modified << "\n";
+
+        // Export updated pages if output directory is specified
+        if (!output_dir.empty()) {
+            fs::create_directories(output_dir);
+            const auto& updated_pages = replayer.get_updated_pages();
+            std::cout << "  Exporting " << updated_pages.size() << " updated pages to: "
+                      << output_dir << "\n";
+
+            for (const auto& [pg_no, pg_data] : updated_pages) {
+                std::string pg_path = output_dir + "/page_" + std::to_string(pg_no) + ".bin";
+                std::ofstream pg_file(pg_path, std::ios::binary);
+                pg_file.write(reinterpret_cast<const char*>(pg_data.data()), pg_data.size());
+            }
+
+            std::string summary_path = output_dir + "/redo_replay_result.txt";
+            std::ofstream summary_file(summary_path);
+            summary_file << "Redo Log Replay Result\n";
+            summary_file << "======================\n";
+            summary_file << "Success: " << (replay_result.success ? "yes" : "no") << "\n";
+            summary_file << "Records processed: " << replay_result.records_processed << "\n";
+            summary_file << "Records applied: " << replay_result.records_applied << "\n";
+            summary_file << "Records failed: " << replay_result.records_failed << "\n";
+            summary_file << "Pages modified: " << replay_stats.pages_modified << "\n";
+            std::cout << "[INFO] Summary written to: " << summary_path << "\n";
         }
 
         return 0;

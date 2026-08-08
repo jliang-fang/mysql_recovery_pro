@@ -188,11 +188,6 @@ private:
 
     std::unique_ptr<DeepUndoAnalyzer> analyzer_;
 
-    // Internal: convert raw undo results to decoded flashback records
-    std::vector<FlashbackRecord> convert_to_flashback_records(
-        const std::vector<FlashbackResult>& undo_results,
-        const catalog::TableSchema& schema);
-
     FlashbackRecord decode_single_record(
         const UndoRecordV2& rec,
         const catalog::TableSchema& schema);

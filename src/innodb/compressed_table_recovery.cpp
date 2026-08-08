@@ -78,7 +78,8 @@ std::vector<ScannedPage> CompressedTableRecovery::scan_pages() {
             page.prev_page = read_le<uint32_t>(page_data, 0);
             page.next_page = read_le<uint32_t>(page_data, 4);
             page.lsn = read_le<uint64_t>(page_data, 8);
-            page.space_id = read_le<uint32_t>(page_data, 24);
+            // space_id at offset 34 (FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID)
+        page.space_id = read_le<uint32_t>(page_data, 34);
             page.is_valid = PageScanner::is_innodb_page(page_data, page_size_);
 
             if (is_page_compressed(page_data, page_size_)) {
@@ -143,6 +144,11 @@ std::vector<uint8_t> CompressedTableRecovery::decompress_page_data(
 
     const uint8_t* payload = compressed_data + ZSD_HEADER_SIZE;
     size_t payload_size = std::min(static_cast<size_t>(zlen), compressed_size - ZSD_HEADER_SIZE);
+
+    // Compression ratio safety check: reject if zlen > 512 * expected_size
+    if (zlen > static_cast<uint16_t>(expected_size * 512)) {
+        return {};
+    }
 
     std::vector<uint8_t> decompressed(expected_size, 0);
 
@@ -268,6 +274,11 @@ bool CompressedTableRecovery::auto_detect_compression(const std::string& file_pa
     uint32_t fsp_flags = read_be<uint32_t>(page0.data(), 42);
     // ZIP_SSIZE at bits 1-4 (4 bits): compressed_page_size = 16384 / (1 << zip_ssize)
     uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
+
+    // Validate zip_ssize: values >= 5 produce invalid page sizes (< 1024 bytes)
+    if (zip_ssize >= 5) {
+        return false;
+    }
 
     if (zip_ssize > 0) {
         compressed_page_size_ = 16384 / (1 << zip_ssize);

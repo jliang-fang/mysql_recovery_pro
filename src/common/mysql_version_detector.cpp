@@ -8,6 +8,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace dbrecovery {
 
@@ -55,9 +56,9 @@ MySQLVersion MySQLVersionDetector::detect_from_multiple_pages(
         return MySQLVersion::UNKNOWN;
     }
 
-    // 统计每个版本的票数
-    std::unordered_map<MySQLVersion, int> votes;
-    
+    // 统计每个版本的票数（使用有序map保证确定性）
+    std::map<MySQLVersion, int> votes;
+
     for (auto page : pages) {
         if (page) {
             MySQLVersion v = detect(page, page_size);
@@ -67,11 +68,11 @@ MySQLVersion MySQLVersionDetector::detect_from_multiple_pages(
         }
     }
 
-    // 找到票数最多的版本
+    // 找到票数最多的版本（并列时选择版本号较小的，保证确定性）
     MySQLVersion result = MySQLVersion::UNKNOWN;
     int max_votes = 0;
     for (const auto& [version, count] : votes) {
-        if (count > max_votes) {
+        if (count > max_votes || (count == max_votes && version < result)) {
             max_votes = count;
             result = version;
         }
@@ -223,7 +224,8 @@ int MySQLVersionDetector::check_page_version_field(const uint8_t* page_data, siz
 
     if (page_version > 0) {
         if (page_version == 1) return 8;   // MySQL 8.0
-        if (page_version == 2) return 10;  // MySQL 8.4+
+        if (page_version == 2) return 10;  // MySQL 8.4
+        if (page_version >= 3) return 15;  // MySQL 9.0+
         return 5;  // 未知版本
     }
 
@@ -330,18 +332,26 @@ MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
     // 根据分数决定版本
     if (lsn_score > 0 && sdi_score > 0 && page_version_score > 0) {
         // MySQL 8.0+
-        if (page_version_score >= 10) {
-            return MySQLVersion::MYSQL_84;  // 8.4+
+        if (page_version_score >= 15) {
+            return MySQLVersion::MYSQL_90;  // 9.0 (page_version >= 3)
         }
-        return MySQLVersion::MYSQL_80;  // 8.0-8.3
+        if (page_version_score >= 10) {
+            return MySQLVersion::MYSQL_84;  // 8.4 (page_version == 2)
+        }
+        return MySQLVersion::MYSQL_80;  // 8.0-8.3 (page_version == 1)
     } else if (lsn_score <= 0 && sdi_score <= 0) {
         // MySQL 5.x
         if (checksum_score >= 8) {
-            // 区分5.7和5.6：FSP POST_ANTELOPE标志
+            // 区分5.7和5.6：优先使用FSP POST_ANTELOPE标志（仅page 0有效）
             if (fsp_score > 0) {
                 return MySQLVersion::MYSQL_57;  // 5.7+ (POST_ANTELOPE)
             }
-            return MySQLVersion::MYSQL_56;  // 5.6 (无POST_ANTELOPE)
+            // 非FSP页面的5.7检测：使用undo_log格式作为辅助信号
+            // 5.7引入了ATOMIC_BLOBS，undo page格式有细微变化
+            if (undo_score >= 8) {
+                return MySQLVersion::MYSQL_57;  // 5.7 (undo格式辅助判断)
+            }
+            return MySQLVersion::MYSQL_56;  // 5.6 (无POST_ANTELOPE，无undo信号)
         }
         return MySQLVersion::UNKNOWN;  // No clear version signal
     }

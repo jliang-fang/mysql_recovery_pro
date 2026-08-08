@@ -62,6 +62,7 @@ public:
                        TDEAlgorithm algorithm);
     bool load_keyring(const std::string& keyring_path);
     void set_try_recovery_without_key(bool try_recovery);
+    const std::string& get_last_error() const { return last_error_; }
 
     std::vector<std::map<std::string, std::string>> recover();
     const EncryptedTableRecoveryStats& get_stats() const { return stats_; }
@@ -81,6 +82,7 @@ private:
     std::vector<uint32_t> failed_pages_;
     std::vector<std::map<std::string, std::string>> records_;
     EncryptedTableRecoveryStats stats_;
+    std::string last_error_;
 
     std::vector<ScannedPage> scan_pages();
     bool is_page_encrypted(const uint8_t* page_data, size_t page_size);

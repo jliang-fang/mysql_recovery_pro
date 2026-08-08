@@ -12,6 +12,7 @@
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/innodb/undo_log_parser.hpp"
+#include "dbrecovery/innodb/deep_undo_analyzer.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -307,9 +308,19 @@ private:
     mutable innodb::UndoLogParser undo_parser_;
 
     /**
+     * @brief Deep undo analyzer for MVCC version chain & flashback recovery
+     */
+    mutable innodb::DeepUndoAnalyzer deep_undo_analyzer_;
+
+    /**
      * @brief Path to ibdata1 or undo tablespace for undo log scanning
      */
     std::string undo_data_path_;
+
+    /**
+     * @brief Tablespace ID of the currently targeted table (for undo scanning)
+     */
+    uint32_t space_id_ = 0;
 
     /**
      * @brief 是否自动检测加密
@@ -330,6 +341,23 @@ private:
      * @brief 获取页大小提示
      */
     uint32_t get_page_size_hint() const { return page_size_hint_; }
+
+    /**
+     * @brief 表结构定义（用于 Undo flashback 等需要 schema 的路径）
+     */
+    catalog::TableSchema schema_;
+
+    /**
+     * @brief 设置表结构（用于 Undo flashback 等需要 schema 的路径）
+     *
+     * @param schema 表结构定义
+     */
+    void set_table_schema(const catalog::TableSchema& schema) { schema_ = schema; }
+
+    /**
+     * @brief 获取当前表结构
+     */
+    const catalog::TableSchema& get_table_schema() const { return schema_; }
 
     /**
      * @brief 主密钥（用于密钥派生）

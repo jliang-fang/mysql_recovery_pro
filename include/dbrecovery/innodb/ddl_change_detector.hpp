@@ -186,8 +186,23 @@ public:
                     entry_count++;
                 }
 
-                // Column count = offset entries - 2 (minus TRX_ID + ROLL_PTR)
-                uint32_t col_cnt = (entry_count >= 3) ? entry_count - 2 : entry_count;
+                // Detect ROW_ID presence from system column field sizes.
+                // No ROW_ID (table has PK): field_0=TRX_ID(6B), field_1=ROLL_PTR(7B)
+                // Has ROW_ID (no PK):       field_0=ROW_ID(6B), field_1=TRX_ID(6B)
+                bool has_row_id = false;
+                if (entry_count >= 3) {
+                    uint16_t last_entry = read_le<uint16_t>(
+                        page_data, pos + 2 * (entry_count - 1));
+                    uint16_t second_last = read_le<uint16_t>(
+                        page_data, pos + 2 * (entry_count - 2));
+                    // field_1 size = 7 → ROLL_PTR (no ROW_ID)
+                    // field_1 size = 6 → TRX_ID (has ROW_ID)
+                    has_row_id = (second_last - last_entry == 6);
+                }
+
+                // Column count = offset entries - system columns (TRX_ID + ROLL_PTR + ROW_ID?)
+                uint32_t sys_cols = 2 + (has_row_id ? 1 : 0);
+                uint32_t col_cnt = (entry_count >= sys_cols) ? entry_count - sys_cols : entry_count;
                 if (col_cnt >= 1 && col_cnt <= 200) {
                     col_count_votes[col_cnt]++;
                 }

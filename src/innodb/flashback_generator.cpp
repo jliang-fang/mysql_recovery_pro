@@ -21,12 +21,6 @@
 namespace dbrecovery {
 namespace innodb {
 
-// Undo page header offsets (shared with deep_undo_analyzer.cpp)
-constexpr uint16_t TRX_UNDO_PAGE_START   = 28;
-constexpr uint16_t TRX_UNDO_PAGE_FREE    = 30;
-constexpr uint16_t TRX_UNDO_PAGE_N_RECS  = 34;
-constexpr uint16_t TRX_UNDO_PAGE_HDR_SIZE = 40;
-
 // ==================== Construction ====================
 
 FlashbackGenerator::FlashbackGenerator()
@@ -412,29 +406,6 @@ FlashbackRecord FlashbackGenerator::decode_single_record(
     return fr;
 }
 
-// ==================== Convert raw results ====================
-
-std::vector<FlashbackRecord> FlashbackGenerator::convert_to_flashback_records(
-    const std::vector<FlashbackResult>& undo_results,
-    const catalog::TableSchema& schema) {
-
-    std::vector<FlashbackRecord> records;
-    records.reserve(undo_results.size());
-
-    for (const auto& ur : undo_results) {
-        FlashbackRecord fr;
-        fr.operation = FlashbackRecord::DELETE_OP;
-        fr.trx_id = ur.trx_id;
-        fr.undo_no = ur.undo_no;
-        fr.timestamp = ur.timestamp;
-        fr.completeness = ur.confidence;
-        fr.is_complete = ur.is_complete;
-        records.push_back(std::move(fr));
-    }
-
-    return records;
-}
-
 // ==================== Flashback DELETE ====================
 
 std::vector<FlashbackRecord> FlashbackGenerator::flashback_deletes(
@@ -443,79 +414,24 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_deletes(
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<FlashbackRecord> records;
 
-    // Scan undo pages for DELETE_MARK records and decode each one
-    auto undo_pages = analyzer_->scan_undo_pages();
-    UndoRecordV2Parser parser;
+    // Delegate the undo scan to DeepUndoAnalyzer's shared primitive
+    innodb::FlashbackFilter filter;
+    filter.trx_id = config_.trx_id;
+    filter.start_lsn = config_.start_lsn;
+    filter.end_lsn = config_.end_lsn;
+    filter.start_time = config_.start_time;
+    filter.end_time = config_.end_time;
+    filter.max_records = config_.max_records;
+    filter.include_incomplete = config_.include_incomplete;
 
-    for (const auto& [page_data, page_no] : undo_pages) {
-        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
-        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
+    auto undo_records = analyzer_->scan_records(schema, filter,
+        {UndoRecordV2::DELETE_MARK});
 
-        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
-        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
-            size_t consumed = 0;
-            auto rec_opt = parser.parse(page_data.data(), page_data.size(), offset, &schema, &consumed);
-            if (!rec_opt) break;
-
-            auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-
-            if (rec.type != UndoRecordV2::DELETE_MARK) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by table_id using DeepUndoAnalyzer's extract_table_id
-            uint32_t rec_table_id = DeepUndoAnalyzer::extract_table_id(rec.old_fields);
-            uint32_t expected_table_id = static_cast<uint32_t>(schema.table_id);
-            if (expected_table_id != 0 && rec_table_id != expected_table_id) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by transaction ID
-            if (config_.trx_id.has_value() && rec.trx_id != *config_.trx_id) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by LSN range
-            if (config_.start_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn < *config_.start_lsn) {
-                offset += consumed;
-                continue;
-            }
-            if (config_.end_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn > *config_.end_lsn) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by time range
-            if (config_.start_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp < *config_.start_time) {
-                offset += consumed;
-                continue;
-            }
-            if (config_.end_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp > *config_.end_time) {
-                offset += consumed;
-                continue;
-            }
-
-            auto fr = decode_single_record(rec, schema);
-
-            if (config_.include_incomplete || fr.is_complete) {
-                records.push_back(std::move(fr));
-            }
-
-            // Max records check
-            if (records.size() >= config_.max_records) break;
-
-            // Advance offset
-            offset += consumed;
+    for (auto& rec : undo_records) {
+        auto fr = decode_single_record(rec, schema);
+        if (config_.include_incomplete || fr.is_complete) {
+            records.push_back(std::move(fr));
         }
-        if (records.size() >= config_.max_records) break;
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -542,70 +458,22 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_updates(
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<FlashbackRecord> records;
 
-    // Scan undo pages for UPDATE records and decode old values
-    auto undo_pages = analyzer_->scan_undo_pages();
-    UndoRecordV2Parser parser;
+    innodb::FlashbackFilter filter;
+    filter.start_lsn = config_.start_lsn;
+    filter.end_lsn = config_.end_lsn;
+    filter.start_time = config_.start_time;
+    filter.end_time = config_.end_time;
+    filter.max_records = config_.max_records;
+    filter.include_incomplete = config_.include_incomplete;
 
-    for (const auto& [page_data, page_no] : undo_pages) {
-        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
-        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
+    auto undo_records = analyzer_->scan_records(schema, filter,
+        {UndoRecordV2::UPDATE});
 
-        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
-        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
-            size_t consumed = 0;
-            auto rec_opt = parser.parse(page_data.data(), page_data.size(), offset, &schema, &consumed);
-            if (!rec_opt) break;
-
-            auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-
-            // Only UPDATE records (not INSERT, not DELETE_MARK)
-            if (rec.type != UndoRecordV2::UPDATE) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by table_id
-            uint32_t rec_table_id = DeepUndoAnalyzer::extract_table_id(rec.old_fields);
-            uint32_t expected_table_id = static_cast<uint32_t>(schema.table_id);
-            if (expected_table_id != 0 && rec_table_id != expected_table_id) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by LSN range
-            if (config_.start_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn < *config_.start_lsn) {
-                offset += consumed;
-                continue;
-            }
-            if (config_.end_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn > *config_.end_lsn) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by time range
-            if (config_.start_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp < *config_.start_time) {
-                offset += consumed;
-                continue;
-            }
-            if (config_.end_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp > *config_.end_time) {
-                offset += consumed;
-                continue;
-            }
-
-            auto fr = decode_single_record(rec, schema);
-            if (config_.include_incomplete || fr.is_complete) {
-                records.push_back(std::move(fr));
-            }
-            if (records.size() >= config_.max_records) break;
-
-            offset += consumed;
+    for (auto& rec : undo_records) {
+        auto fr = decode_single_record(rec, schema);
+        if (config_.include_incomplete || fr.is_complete) {
+            records.push_back(std::move(fr));
         }
-        if (records.size() >= config_.max_records) break;
     }
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -632,47 +500,19 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_transaction(
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<FlashbackRecord> records;
 
-    // Scan all undo pages for ALL record types matching the target trx_id
-    auto undo_pages = analyzer_->scan_undo_pages();
-    UndoRecordV2Parser parser;
+    innodb::FlashbackFilter filter;
+    filter.trx_id = trx_id;
+    filter.max_records = config_.max_records;
+    filter.include_incomplete = config_.include_incomplete;
 
-    for (const auto& [page_data, page_no] : undo_pages) {
-        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
-        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
+    // Scan all record types for this transaction
+    auto undo_records = analyzer_->scan_records(schema, filter);
 
-        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
-        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
-            size_t consumed = 0;
-            auto rec_opt = parser.parse(page_data.data(), page_data.size(), offset, &schema, &consumed);
-            if (!rec_opt) break;
-
-            auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-
-            // Filter by transaction ID
-            if (rec.trx_id != trx_id) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by table_id
-            uint32_t rec_table_id = DeepUndoAnalyzer::extract_table_id(rec.old_fields);
-            uint32_t expected_table_id = static_cast<uint32_t>(schema.table_id);
-            if (expected_table_id != 0 && rec_table_id != expected_table_id) {
-                offset += consumed;
-                continue;
-            }
-
-            auto fr = decode_single_record(rec, schema);
-
-            if (config_.include_incomplete || fr.is_complete) {
-                records.push_back(std::move(fr));
-            }
-
-            if (records.size() >= config_.max_records) break;
-            offset += consumed;
+    for (auto& rec : undo_records) {
+        auto fr = decode_single_record(rec, schema);
+        if (config_.include_incomplete || fr.is_complete) {
+            records.push_back(std::move(fr));
         }
-        if (records.size() >= config_.max_records) break;
     }
 
     // Sort by undo_no for chronological order within the transaction

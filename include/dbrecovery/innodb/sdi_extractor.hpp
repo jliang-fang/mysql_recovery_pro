@@ -8,6 +8,9 @@
 #include <fstream>
 #include <filesystem>
 #include <sstream>
+#include <limits>
+#include <cstring>
+#include <zlib.h>
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
@@ -16,6 +19,10 @@
 
 namespace dbrecovery {
 namespace innodb {
+
+// SDI decompression safety limits
+constexpr size_t SDI_MAX_UNCOMPRESSED_SIZE = 16 * 1024 * 1024;  // 16MB
+constexpr size_t SDI_MAX_COMPRESSION_RATIO = 256;  // max 256:1 compression ratio
 
 // SDI 提取的结构体定义（在类之前声明）
 struct ExtractedSDI {
@@ -158,7 +165,18 @@ inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(con
 
             if (compressed_len > 0 && compressed_len < page_size &&
                 record_offset + 33 + compressed_len <= page_size) {
-                // Decompress using standard zlib
+
+                // Safety: reject oversized uncompressed length
+                if (uncompressed_len > SDI_MAX_UNCOMPRESSED_SIZE) {
+                    return std::nullopt;
+                }
+
+                // Safety: reject extreme compression ratios
+                if (compressed_len > 0 && uncompressed_len / compressed_len > SDI_MAX_COMPRESSION_RATIO) {
+                    return std::nullopt;
+                }
+
+                // Decompress using raw deflate
                 const uint8_t* compressed_data = page_data + record_offset + 33;
 
                 z_stream strm = {};
@@ -169,7 +187,7 @@ inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(con
                 strm.next_out = decompressed.data();
                 strm.avail_out = decompressed.size();
 
-                int ret = inflateInit(&strm);  // Standard zlib
+                int ret = inflateInit2(&strm, -15);  // Raw deflate (no zlib header)
                 if (ret == Z_OK) {
                     do {
                         ret = inflate(&strm, Z_NO_FLUSH);
@@ -348,7 +366,7 @@ inline std::vector<ExtractedSDI> SDIExtractor::extract_from_page(const uint8_t* 
                 strm.next_out = decompressed.data();
                 strm.avail_out = decompressed.size();
 
-                int ret = inflateInit(&strm);
+                int ret = inflateInit2(&strm, -15);  // Raw deflate (no zlib header)
                 if (ret == Z_OK) {
                     do {
                         ret = inflate(&strm, Z_NO_FLUSH);
