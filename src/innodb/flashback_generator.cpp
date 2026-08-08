@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <set>
 #include <stdexcept>
 
 namespace dbrecovery {
@@ -725,8 +726,73 @@ std::string FlashbackRecord::to_sql(const catalog::TableSchema& schema) const {
             first = false;
         }
         sql << ");";
-    } else {
-        sql << "/* operation not fully implemented */";
+        return sql.str();
+    }
+
+    // Helper to format a single decoded field as a SQL literal (type-aware).
+    auto format_value = [&](const DecodedField& f) -> std::string {
+        if (f.is_null) return "NULL";
+        const auto* col = find_column_by_name(schema, f.column_name);
+        if (col && !sql_type_needs_quoting(static_cast<int>(col->mysql_type_id))) {
+            return f.human_value;  // numeric family — unquoted
+        }
+        if (col && (col->mysql_type_id == mysql_types::BLOB ||
+                    col->mysql_type_id == mysql_types::TINY_BLOB ||
+                    col->mysql_type_id == mysql_types::MEDIUM_BLOB ||
+                    col->mysql_type_id == mysql_types::LONG_BLOB ||
+                    col->mysql_type_id == mysql_types::JSON ||
+                    col->mysql_type_id == mysql_types::GEOMETRY ||
+                    col->mysql_type_id == mysql_types::NEWDECIMAL)) {
+            return "x'" + f.hex_value + "'";  // binary — hex literal
+        }
+        return "'" + escape_sql_string(f.human_value) + "'";  // string/temporal
+    };
+
+    // Build a set of primary key column names from the index definitions.
+    std::set<std::string> pk_columns;
+    for (const auto& idx : schema.indexes) {
+        if (idx.is_primary) {
+            for (const auto& cname : idx.columns) {
+                pk_columns.insert(cname);
+            }
+            break;
+        }
+    }
+
+    // Build a WHERE clause from the primary-key columns present in this record.
+    // PK values are unchanged by the originating operation, so they uniquely
+    // identify the row regardless of operation type.
+    std::string where_clause;
+    bool first_term = true;
+    for (const auto& [ord, col] : schema.columns) {
+        if (pk_columns.find(col.name) == pk_columns.end()) continue;
+        auto it = std::find_if(fields.begin(), fields.end(),
+            [&](const DecodedField& f) { return f.column_name == col.name; });
+        if (it != fields.end()) {
+            if (!first_term) where_clause += " AND ";
+            where_clause += "`" + col.name + "` = " + format_value(*it);
+            first_term = false;
+        }
+    }
+    if (first_term) {
+        where_clause = "/* no PK columns decoded — manual review required */";
+    }
+
+    if (operation == UPDATE) {
+        // Undo UPDATE stores the BEFORE image. Reverse by restoring every
+        // decoded column to its pre-update value. The switch already emitted
+        // "UPDATE table SET ", so append the SET assignments.
+        bool first_set = true;
+        for (const auto& f : fields) {
+            if (!first_set) sql << ", ";
+            sql << "`" << f.column_name << "` = " << format_value(f);
+            first_set = false;
+        }
+        sql << " WHERE " << where_clause << ";";
+    } else if (operation == INSERT) {
+        // Undo INSERT carries only the PK (the row that was inserted). Reverse
+        // by deleting that single row. The switch already emitted the WHERE.
+        sql << where_clause << ";";
     }
 
     return sql.str();

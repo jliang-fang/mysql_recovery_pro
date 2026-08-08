@@ -1714,7 +1714,10 @@ int main(int argc, char** argv) {
             try { ver = std::stoul(mysql_version); } catch (...) {}
             if (ver > 0) index_parser.set_mysql_version(ver);
         } else {
-            index_parser.set_mysql_version(50600);  // Default: MySQL 5.6
+            // No explicit version and no detection: use a neutral modern default.
+            // Prefer 8.0 (DYNAMIC row format, FIL_DATADIR PAGE_TYPE) over 5.6;
+            // unknown versions must not be silently assumed to be MySQL 5.6.
+            index_parser.set_mysql_version(80000);  // Neutral default: MySQL 8.0
         }
 
         // Parse schema from --schema option if provided
@@ -2183,11 +2186,11 @@ int main(int argc, char** argv) {
                     case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
                     case dbrecovery::MySQLVersion::MYSQL_84: index_parser.set_mysql_version(80400); break;
                     case dbrecovery::MySQLVersion::MYSQL_90: index_parser.set_mysql_version(90000); break;
-                    default: index_parser.set_mysql_version(50600); break;
+                    default: index_parser.set_mysql_version(80000); break;  // Neutral default: 8.0
                 }
                 std::cout << "[INFO] Auto-detected MySQL version from file header\n";
             } else {
-                index_parser.set_mysql_version(50600);
+                index_parser.set_mysql_version(80000);  // Neutral default: 8.0
             }
         }
 

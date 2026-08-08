@@ -1,10 +1,9 @@
 /**
  * @file shared_tablespace.cpp
- * @brief Stub - SharedTablespace implementation
+ * @brief SharedTablespaceRecoveryEngine — out-of-line definitions
  *
- * TODO: Implement per architecture_v2_blueprint.md
- * See: /app/mysql_recovery_pro/src/innodb/shared_tablespace_recovery.cpp for existing implementation
- * See: /app/mysql_recovery_pro/src/enterprise/partition_recovery.cpp for existing implementation
+ * The SharedTablespaceRecoveryEngine facade is fully inline in the header.
+ * This file provides out-of-line definitions for any non-inline methods.
  */
 
 #include "dbrecovery/enterprise/shared_tablespace.hpp"
@@ -21,7 +20,8 @@
 namespace dbrecovery {
 namespace enterprise {
 
-// Stub - full implementation deferred
+// SharedTablespaceRecoveryEngine methods are inline in shared_tablespace.hpp.
+// This file exists to ensure the translation unit is registered in CMake.
 
 } // namespace enterprise
 } // namespace dbrecovery
