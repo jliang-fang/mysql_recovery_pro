@@ -395,9 +395,11 @@ TEST(P1LayoutFuzzTest, MultiPageCorruption) {
 
     for (int iter = 0; iter < 50; iter++) {
         std::vector<std::pair<const uint8_t*, size_t>> pages;
+        std::vector<std::vector<uint8_t>> buffers;
 
         for (int p = 0; p < 5; p++) {
-            auto page = make_simple_index_page(3);
+            buffers.push_back(make_simple_index_page(3));
+            auto& page = buffers.back();
 
             // Corrupt random parts of some pages
             if (rand() % 2 == 0) {

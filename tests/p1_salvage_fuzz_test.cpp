@@ -253,18 +253,19 @@ TEST(P1SalvageFuzzTest, MixedDamageLevels) {
 
     for (int iter = 0; iter < 5; iter++) {
         std::vector<std::pair<const uint8_t*, size_t>> pages;
+        std::vector<std::vector<uint8_t>> buffers;
 
-        auto p1 = make_valid_index_page();
-        pages.emplace_back(p1.data(), p1.size());
+        buffers.push_back(make_valid_index_page());
+        pages.emplace_back(buffers.back().data(), buffers.back().size());
 
-        auto p2 = std::vector<uint8_t>(16384, static_cast<uint8_t>(rand() % 256));
+        buffers.push_back(std::vector<uint8_t>(16384, static_cast<uint8_t>(rand() % 256)));
         const std::string email = "admin@test.org";
-        if (100 + email.size() <= p2.size())
-            std::memcpy(p2.data() + 100, email.data(), email.size());
-        pages.emplace_back(p2.data(), p2.size());
+        if (100 + email.size() <= buffers.back().size())
+            std::memcpy(buffers.back().data() + 100, email.data(), email.size());
+        pages.emplace_back(buffers.back().data(), buffers.back().size());
 
-        auto p3 = std::vector<uint8_t>(16384, static_cast<uint8_t>(rand() % 256));
-        pages.emplace_back(p3.data(), p3.size());
+        buffers.push_back(std::vector<uint8_t>(16384, static_cast<uint8_t>(rand() % 256)));
+        pages.emplace_back(buffers.back().data(), buffers.back().size());
 
         auto result = engine.salvage_pages(pages);
 
