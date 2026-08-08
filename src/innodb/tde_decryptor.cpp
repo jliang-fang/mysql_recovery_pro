@@ -24,9 +24,15 @@ std::vector<uint8_t> TDEDecryptor::decrypt_page(const uint8_t* encrypted_data, s
         return std::vector<uint8_t>(encrypted_data, encrypted_data + size);
     }
 
-    // Parse TDE header
+    // Parse TDE header (starts at FIL_PAGE_DATA = offset 38 after FIL header)
+    // TDE header: 1 (algo) + 4 (key_id) + 12 (iv) + 28 (encrypted_header) = 45 bytes
+    if (size < 38 + 45) {
+        stats_.pages_failed++;
+        return {};
+    }
+    const uint8_t* tde_header = encrypted_data + 38;
     TDEPageHeader header;
-    if (!header.parse(encrypted_data, size)) {
+    if (!header.parse(tde_header, size - 38)) {
         stats_.pages_failed++;
         return {};
     }
@@ -62,8 +68,9 @@ std::vector<uint8_t> TDEDecryptor::decrypt_page(const uint8_t* encrypted_data, s
 
     const TDEKey& key = it->second;
 
-    // Extract ciphertext (skip TDE header)
-    std::vector<uint8_t> ciphertext(encrypted_data + 44, encrypted_data + size);
+    // Extract ciphertext (skip TDE header: 45 bytes from tde_header start)
+    // Total from page start: 38 (FIL header) + 45 (TDE header) = 83
+    std::vector<uint8_t> ciphertext(tde_header + 45, encrypted_data + size);
 
     // Extract IV from header
     std::vector<uint8_t> iv(header.iv, header.iv + 12);
@@ -81,12 +88,13 @@ std::vector<uint8_t> TDEDecryptor::decrypt_page(const uint8_t* encrypted_data, s
 }
 
 std::optional<TDEPageHeader> TDEDecryptor::decrypt_page_header(const uint8_t* data, size_t size) {
-    if (!data || size < 44) {
+    if (!data || size < 38 + 45) {
         return std::nullopt;
     }
 
+    // TDE header starts at FIL_PAGE_DATA (offset 38)
     TDEPageHeader header;
-    if (!header.parse(data, size)) {
+    if (!header.parse(data + 38, size - 38)) {
         return std::nullopt;
     }
 

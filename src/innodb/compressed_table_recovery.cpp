@@ -135,6 +135,8 @@ std::vector<uint8_t> CompressedTableRecovery::decompress_page_data(
     auto start = std::chrono::high_resolution_clock::now();
 
     constexpr size_t ZSD_HEADER_SIZE = 32;
+    constexpr size_t MAX_COMPRESSION_RATIO = 256;  // max 256:1 compression ratio
+
     if (compressed_size < ZSD_HEADER_SIZE) {
         return {};
     }
@@ -147,6 +149,11 @@ std::vector<uint8_t> CompressedTableRecovery::decompress_page_data(
 
     // Compression ratio safety check: reject if zlen > 512 * expected_size
     if (zlen > static_cast<uint16_t>(expected_size * 512)) {
+        return {};
+    }
+
+    // Safety: reject extreme compression ratios (e.g., 16KB → 64 bytes)
+    if (payload_size > 0 && expected_size / payload_size > MAX_COMPRESSION_RATIO) {
         return {};
     }
 

@@ -1919,6 +1919,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     }
                 }
 
+                // Populate report stats from XFS carver result
+                stats_.total_pages_scanned = xfs_result.pages_recovered;
+                stats_.valid_pages = xfs_result.pages_recovered;
+                stats_.index_pages = xfs_result.pages_recovered;
+                stats_.records_recovered = xfs_result.total_records;
+                stats_.elapsed_seconds = xfs_result.elapsed_seconds;
+
                 std::cout << "\n✅ XFS Recovery completed: " << output_dir << "\n";
                 generate_recovery_report(report_format, report_path, recovery_type, output_dir);
                 return 0;
@@ -1944,6 +1951,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             ext4_config.verbose = verbose;
             ext4_config.scan_freed_blocks = true;
             ext4_config.scan_deleted_inodes = true;
+            ext4_config.exclude_system_tables = exclude_system_tables;
 
             // Parse target index IDs
             if (!target_index_ids_str.empty()) {
@@ -2112,6 +2120,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     }
                 }
 
+                // Populate report stats from ext4 carver result
+                stats_.total_pages_scanned = ext4_result.pages_recovered;
+                stats_.valid_pages = ext4_result.pages_recovered;
+                stats_.index_pages = ext4_result.pages_recovered;
+                stats_.records_recovered = ext4_result.total_records;
+                stats_.elapsed_seconds = ext4_result.elapsed_seconds;
+
                 std::cout << "\n✅ ext4 Recovery completed: " << output_dir << "\n";
                 generate_recovery_report(report_format, report_path, recovery_type, output_dir);
                 return 0;
@@ -2133,7 +2148,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.num_workers = num_workers;
         config.verbose = verbose;
         config.recover_deleted = true;
+        config.exclude_system_tables = exclude_system_tables;
         config.use_page_type_inferrer = use_page_type_inferrer;
+        if (!target_index_ids_str.empty()) {
+            std::istringstream iss(target_index_ids_str);
+            std::string id_str;
+            while (std::getline(iss, id_str, ',')) {
+                try { config.target_index_ids.push_back(std::stoull(id_str)); } catch (...) {}
+            }
+        }
         carver.set_config(config);
 
         // v2.0: Deep carve mode — use PageIdentityEngine for sector-level scanning
@@ -2335,6 +2358,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     std::cout << "    - " << err << "\n";
                 }
             }
+
+            // Populate report stats from RawDiskCarver recovery result
+            stats_.records_recovered = result.total_records;
+            const auto& scan_stats = carver.get_last_scan_result();
+            stats_.total_pages_scanned = scan_stats.total_pages_scanned;
+            stats_.valid_pages = scan_stats.valid_pages_found;
+            stats_.index_pages = scan_stats.index_pages_found;
+            stats_.sdi_pages = scan_stats.sdi_pages_found;
+            stats_.blob_pages = scan_stats.blob_pages_found;
+            stats_.elapsed_seconds = scan_stats.elapsed_seconds;
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
             generate_recovery_report(report_format, report_path, recovery_type, output_dir);

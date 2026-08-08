@@ -945,6 +945,20 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
                     }
 
                     if (index_id > 0 && index_id < 1000000000000) {
+                        // Filter system tables if configured
+                        if (config_.exclude_system_tables) {
+                            if ((index_id > 0 && index_id <= 100) ||
+                                index_id >= 0xFFFF0000ULL) {
+                                continue;
+                            }
+                        }
+                        // Filter to only target index IDs if specified
+                        if (!config_.target_index_ids.empty() &&
+                            std::find(config_.target_index_ids.begin(),
+                                      config_.target_index_ids.end(),
+                                      index_id) == config_.target_index_ids.end()) {
+                            continue;
+                        }
                         Ext4BlockInfo block_info;
                         block_info.block_number = disk_offset / block_size;
                         block_info.disk_offset = disk_offset;
@@ -1101,6 +1115,20 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
                                 }
 
                                 if (index_id > 0 && index_id < 1000000000000) {
+                                    // Filter system tables if configured
+                                    if (config_.exclude_system_tables) {
+                                        if ((index_id > 0 && index_id <= 100) ||
+                                            index_id >= 0xFFFF0000ULL) {
+                                            continue;
+                                        }
+                                    }
+                                    // Filter to only target index IDs if specified
+                                    if (!config_.target_index_ids.empty() &&
+                                        std::find(config_.target_index_ids.begin(),
+                                                  config_.target_index_ids.end(),
+                                                  index_id) == config_.target_index_ids.end()) {
+                                        continue;
+                                    }
                                     Ext4BlockInfo block_info;
                                     block_info.block_number = block_num;
                                     block_info.disk_offset = disk_offset;

@@ -68,14 +68,17 @@ MySQLVersion MySQLVersionDetector::detect_from_multiple_pages(
         }
     }
 
-    // 找到票数最多的版本（并列时选择版本号较小的，保证确定性）
+    // 找到票数最多的版本（std::map按key有序迭代，保证确定性）
+    // 并列时选择版本号较小的（保守策略），例如5.6和8.0都获得相同票数时选5.6
     MySQLVersion result = MySQLVersion::UNKNOWN;
     int max_votes = 0;
     for (const auto& [version, count] : votes) {
-        if (count > max_votes || (count == max_votes && version < result)) {
+        // map有序迭代，version从小到大
+        if (count > max_votes) {
             max_votes = count;
             result = version;
         }
+        // count == max_votes时不更新——保持已有result（较小版本号）
     }
 
     return result;

@@ -198,7 +198,7 @@ inline size_t TDEKey::iv_size() const {
 // ==================== TDEPageHeader ====================
 
 inline bool TDEPageHeader::parse(const uint8_t* data, size_t size) {
-    if (size < 44) {  // 1 + 4 + 12 + 28
+    if (size < 45) {  // 1 + 4 + 12 + 28 = 45
         return false;
     }
 

@@ -597,6 +597,14 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                                               index_id) == config_.exclude_index_ids.end();
                 }
 
+                // 排除系统表 (0-100 或 >= 0xFFFF0000)
+                if (should_collect && config_.exclude_system_tables) {
+                    if ((index_id > 0 && index_id <= 100) ||
+                        index_id >= 0xFFFF0000ULL) {
+                        should_collect = false;
+                    }
+                }
+
                 if (should_collect) {
                     // 提取页数据
                     std::vector<uint8_t> page_copy(config_.page_size);
@@ -722,6 +730,12 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                         should_collect = std::find(config_.exclude_index_ids.begin(),
                                                   config_.exclude_index_ids.end(),
                                                   candidate.index_id) == config_.exclude_index_ids.end();
+                    }
+                    if (should_collect && config_.exclude_system_tables) {
+                        if ((candidate.index_id > 0 && candidate.index_id <= 100) ||
+                            candidate.index_id >= 0xFFFF0000ULL) {
+                            should_collect = false;
+                        }
                     }
                     if (!should_collect) continue;
 

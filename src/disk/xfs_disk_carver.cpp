@@ -2133,7 +2133,11 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
         // SYS_TABLES, SYS_COLUMNS, SYS_INDEXES, SYS_FIELDS
         // Typically have low index IDs (1-100) or specific ranges
         if (index_id > 0 && index_id <= 100) return true;  // System tables
-        // Additional known system table ranges can be added
+        // InnoDB reserves the high 32-bit range (>= 0xFFFF0000) for the
+        // data dictionary / internal system tables. Schemaless recovery
+        // frequently mis-identifies these via garbage pages, so treat them
+        // as system tables when exclusion is requested.
+        if (index_id >= 0xFFFF0000ULL) return true;
         return false;
     };
 

@@ -285,10 +285,12 @@ EncryptedTableRecoveryManager::parse_encryption_info(const std::string& ibd_path
     std::vector<uint8_t> page_data(16384);
     file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-    if (page_data.size() >= 44 && page_data[0] >= 0x01 && page_data[0] <= 0x09) {
+    // TDE algorithm byte is at FIL header offset 38, not at offset 0 (which is FIL checksum)
+    // TDE header at offset 38: 1 byte algorithm, 4 bytes key_id, 12 bytes IV, 28 bytes encrypted header
+    if (page_data.size() >= 83 && page_data[38] >= 0x01 && page_data[38] <= 0x09) {
         EncryptedTableInfo info;
-        info.key_id = read_le<uint32_t>(page_data.data(), 1);
-        info.algorithm = static_cast<TDEAlgorithm>(page_data[0]);
+        info.key_id = read_le<uint32_t>(page_data.data(), 39);
+        info.algorithm = static_cast<TDEAlgorithm>(page_data[38]);
         info.has_key = false;
         return info;
     }

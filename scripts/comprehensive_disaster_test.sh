@@ -349,6 +349,22 @@ EOPYTHON
     mysql -u root -S "${socket}" -D "${TES_DB}" --skip-column-names -e \
         "SELECT COUNT(*) FROM comp_table" > "${RESULTS_DIR}/${fs_type}_count_comp_table.txt"
 
+    # Capture the real index_id of all_types PRIMARY index from the data dictionary.
+    # This lets us count ONLY the target table's recovered CSV file instead of
+    # summing every index_N.csv (which inflates the rate with garbage pages).
+    local all_types_index_id=""
+    all_types_index_id=$(mysql -u root -S "${socket}" -D "${TES_DB}" --skip-column-names -e \
+        "SELECT i.INDEX_ID FROM INFORMATION_SCHEMA.INNODB_INDEXES i \
+         JOIN INFORMATION_SCHEMA.INNODB_TABLES t ON i.TABLE_ID=t.TABLE_ID \
+         WHERE t.NAME='${TES_DB}/all_types' AND i.NAME='PRIMARY' LIMIT 1" 2>/dev/null | tr -d ' \n')
+    if [ -z "$all_types_index_id" ]; then
+        log_warn "[${fs_type^^}] Could not determine all_types index_id from data dictionary; will count all non-system CSVs"
+        all_types_index_id=""
+    else
+        log_info "[${fs_type^^}] all_types PRIMARY index_id = ${all_types_index_id}"
+    fi
+    echo "${all_types_index_id}" > "${RESULTS_DIR}/${fs_type}_all_types_index_id.txt"
+
     local golden_count=$(wc -l < "${RESULTS_DIR}/${fs_type}_golen_all_types.csv")
     log_info "[${fs_type^^}] Golden data: ${golden_count} rows (all_types)"
 
@@ -483,6 +499,15 @@ run_disaster_scenario() {
 
     log_info "[${fs_type^^}] Running disk carving recovery on ${device}..."
 
+    # Read the target index_id for targeted recovery (avoids counting garbage pages)
+    local target_idx=""
+    if [ -f "${RESULTS_DIR}/${fs_type}_all_types_index_id.txt" ]; then
+        target_idx=$(cat "${RESULTS_DIR}/${fs_type}_all_types_index_id.txt" | tr -d ' \n')
+        if [ -z "$target_idx" ] || [ "${#target_idx}" -gt 15 ]; then
+            target_idx=""
+        fi
+    fi
+
     if [ -f "${BINARY}" ] && [ -b "${device}" ]; then
         ${recovery_cmd} --disk-carving \
             --device-path="${device}" \
@@ -491,6 +516,8 @@ run_disaster_scenario() {
             --page-size=16384 \
             --format=csv \
             --num-workers=4 \
+            --exclude-system-tables \
+            ${target_idx:+--target-index-ids=$target_idx} \
             --verbose 2>&1 | tee "${output_dir}/recovery.log" || log_warn "[${fs_type^^}] Recovery exited with code $?"
     else
         log_error "[${fs_type^^}] Binary not found or device not accessible"
@@ -508,6 +535,8 @@ run_disaster_scenario() {
                     --page-size=16384 \
                     --format=csv \
                     --num-workers=4 \
+                    --exclude-system-tables \
+                    ${target_idx:+--target-index-ids=$target_idx} \
                     --verbose 2>&1 | tee "${output_dir}/recovery.log" || log_warn "[${fs_type^^}] Recovery exited with code $?"
             fi
         fi
@@ -516,25 +545,54 @@ run_disaster_scenario() {
     local end_time=$(date +%s)
     local elapsed=$((end_time - start_time))
 
-    # Analyze results — count all records across ALL CSV files
-    # Schema-aware recovery produces named CSV files (all_types.csv, etc.)
-    # Schema-less recovery produces index_N.csv files with raw parsed data
+    # Analyze results — count only the target table's recovered records.
+    # Schema-aware recovery produces all_types.csv. Schema-less recovery
+    # produces index_<N>.csv / xfs_index_<N>.csv per index_id. We know the
+    # real all_types PRIMARY index_id from setup, so we count ONLY that file
+    # instead of summing every CSV (which inflates rates with garbage pages).
     local recovered_count=0
     local csv_file="${output_dir}/all_types.csv"
     if [ -f "$csv_file" ]; then
         recovered_count=$(wc -l < "$csv_file" 2>/dev/null || echo 0)
         recovered_count=$((recovered_count - 1 > 0 ? recovered_count - 1 : 0))
     else
-        # Schema-less mode: count records across all CSV files
-        recovered_count=0
-        for f in "${output_dir}"/*.csv; do
-            if [ -f "$f" ]; then
+        local target_idx=""
+        if [ -f "${RESULTS_DIR}/${fs_type}_all_types_index_id.txt" ]; then
+            target_idx=$(cat "${RESULTS_DIR}/${fs_type}_all_types_index_id.txt" | tr -d ' \n')
+            # Sanity: must be a plausible index id (not empty, not overflow)
+            if [ -z "$target_idx" ] || [ "${#target_idx}" -gt 15 ]; then
+                target_idx=""
+            fi
+        fi
+
+        if [ -n "$target_idx" ]; then
+            # Count only the target table's CSV file
+            local target_csv=""
+            for cand in "${output_dir}/xfs_index_${target_idx}.csv" \
+                        "${output_dir}/index_${target_idx}.csv"; do
+                if [ -f "$cand" ]; then target_csv="$cand"; break; fi
+            done
+            if [ -n "$target_csv" ]; then
+                recovered_count=$(wc -l < "$target_csv" 2>/dev/null || echo 0)
+                recovered_count=$((recovered_count - 1 > 0 ? recovered_count - 1 : 0))
+            fi
+        else
+            # Fallback: count all non-system CSVs (crude, may over-count)
+            local system_id_threshold=4294963200  # 0xFFFF0000
+            local recovered_count=0
+            for f in "${output_dir}"/*.csv; do
+                if [ ! -f "$f" ]; then continue; fi
+                local base=$(basename "$f")
+                local idx=$(echo "$base" | grep -oE '[0-9]+' | head -1)
+                if [ -z "$idx" ]; then continue; fi
+                if [ "${#idx}" -gt 15 ]; then continue; fi
+                if [ "$idx" -ge "$system_id_threshold" ]; then continue; fi
                 local csv_lines
                 csv_lines=$(wc -l < "$f" 2>/dev/null || echo 0)
-                recovered_count=$((recovered_count + csv_lines - 1))  # Subtract header per file
-            fi
-        done
-        recovered_count=$((recovered_count > 0 ? recovered_count : 0))
+                recovered_count=$((recovered_count + csv_lines - 1))
+            done
+            recovered_count=$((recovered_count > 0 ? recovered_count : 0))
+        fi
     fi
 
     local golden_count=$(cat "${RESULTS_DIR}/${fs_type}_count_all_types.txt" 2>/dev/null || echo 0)

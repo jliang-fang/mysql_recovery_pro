@@ -58,6 +58,7 @@ public:
         // TRUNCATE恢复支持: 指定要恢复的index_id列表
         std::vector<uint64_t> target_index_ids;  // 只恢复指定的index_id
         std::vector<uint64_t> exclude_index_ids; // 排除已知的系统表index_id
+        bool exclude_system_tables = false;      // 排除系统表index_id (0-100 and >= 0xFFFF0000)
         // 数据模式匹配（用于删除文件恢复）
         std::vector<std::string> data_patterns;  // 要搜索的数据模式
 

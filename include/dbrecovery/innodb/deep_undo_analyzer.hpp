@@ -533,26 +533,6 @@ public:
     }
 
     /**
-     * @brief Read a 6/7-byte prev_undo_ptr from page data at offset
-     *
-     * Delegates to RollPtrDecoder for unified multi-version support.
-     * Uses 7-byte (MySQL 8.0+) or 6-byte (5.6/5.7) format based on the
-     * provided mysql_version parameter. Defaults to 7-byte (MySQL 8.0+).
-     *
-     * @param page_data     Raw page buffer
-     * @param offset        Byte offset of the roll pointer within the page
-     * @param mysql_version MySQL version for roll pointer size determination
-     * @return Decoded prev_undo_ptr (0 = no previous version)
-     *
-     * @see RollPtrDecoder::decode_storage()
-     */
-    static uint64_t read_prev_undo_ptr(const uint8_t* page_data, size_t offset,
-                                       MySQLVersion mysql_version = MySQLVersion::MYSQL_80) {
-        size_t roll_ptr_size = (mysql_version >= MySQLVersion::MYSQL_80) ? 7 : 6;
-        return RollPtrDecoder::decode_storage_to_internal(page_data + offset, roll_ptr_size);
-    }
-
-    /**
      * @brief Encode primary key as hex string
      */
     static std::string pk_to_hex(const std::vector<uint8_t>& pk_raw);
