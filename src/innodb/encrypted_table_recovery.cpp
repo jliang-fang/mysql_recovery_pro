@@ -87,35 +87,36 @@ std::vector<ScannedPage> EncryptedTableRecovery::scan_pages() {
         return pages;
     }
 
-    std::vector<uint8_t> buffer(std::min(file_size, size_t(1024 * 1024)));
-
-    size_t offset = 0;
-    while (file.readsome(reinterpret_cast<char*>(buffer.data()), buffer.size())) {
-        size_t read_size = file.gcount();
-
-        for (size_t page_offset = 0; page_offset + page_size_ <= read_size; page_offset += page_size_) {
-            const uint8_t* page_data = buffer.data() + page_offset;
-
-            ScannedPage page{};
-            page.offset = static_cast<uint32_t>(offset + page_offset);
-            page.page_no = static_cast<uint32_t>(page_offset / page_size_);
-            page.type = read_le<uint16_t>(page_data, 16);
-            page.page_type = page.type;
-            page.prev_page = read_le<uint32_t>(page_data, 0);
-            page.next_page = read_le<uint32_t>(page_data, 4);
-            page.lsn = read_le<uint64_t>(page_data, 8);
-            page.space_id = read_le<uint32_t>(page_data, 34);
-            page.is_valid = PageScanner::is_innodb_page(page_data, page_size_);
-
-            if (is_page_encrypted(page_data, page_size_)) {
-                page.is_encrypted = true;
-                encrypted_pages_.push_back(page.page_no);
-            }
-
-            pages.push_back(page);
+    // Deterministic fixed-size reads; FIL fields parsed with canonical
+    // big-endian offsets from page_defs.hpp.
+    std::vector<uint8_t> page_buf(page_size_);
+    for (size_t page_no = 0; page_no < total_pages; ++page_no) {
+        file.seekg(static_cast<std::streamoff>(page_no * page_size_), std::ios::beg);
+        file.read(reinterpret_cast<char*>(page_buf.data()),
+                  static_cast<std::streamsize>(page_size_));
+        if (file.gcount() < static_cast<std::streamsize>(page_size_)) {
+            break;
         }
 
-        offset += read_size;
+        const uint8_t* p = page_buf.data();
+        ScannedPage page{};
+        page.offset = static_cast<uint32_t>(page_no * page_size_);
+        page.page_no = static_cast<uint32_t>(page_no);
+        page.space_id = read_be<uint32_t>(p, FIL_PAGE_SPACE_ID);
+        page.page_no = read_be<uint32_t>(p, FIL_PAGE_OFFSET);
+        page.prev_page = read_be<uint32_t>(p, FIL_PAGE_PREV_ABS);
+        page.next_page = read_be<uint32_t>(p, FIL_PAGE_NEXT_ABS);
+        page.lsn = read_be<uint64_t>(p, FIL_PAGE_LSN_ABS);
+        page.type = read_be<uint16_t>(p, FIL_PAGE_TYPE_ABS);
+        page.page_type = page.type;
+        page.is_valid = PageScanner::is_innodb_page(p, page_size_);
+
+        if (is_page_encrypted(p, page_size_)) {
+            page.is_encrypted = true;
+            encrypted_pages_.push_back(page.page_no);
+        }
+
+        pages.push_back(page);
     }
 
     stats_.encrypted_pages = encrypted_pages_.size();
