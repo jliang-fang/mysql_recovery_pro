@@ -12,7 +12,7 @@
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/innodb/undo_log_parser.hpp"
-#include "dbrecovery/innodb/deep_undo_analyzer.hpp"
+#include "dbrecovery/innodb/flashback_generator.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -310,7 +310,7 @@ private:
     /**
      * @brief Deep undo analyzer for MVCC version chain & flashback recovery
      */
-    mutable innodb::DeepUndoAnalyzer deep_undo_analyzer_;
+    mutable innodb::FlashbackGenerator flashback_generator_;
 
     /**
      * @brief Path to ibdata1 or undo tablespace for undo log scanning

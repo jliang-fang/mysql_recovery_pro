@@ -72,6 +72,7 @@ std::vector<RedoLogRecord> RedoLogParser::parse_file(const std::string& path) {
     // 格式：type(1) + space_id(4) + page_no(4) + data(...)
     // 每条记录至少9字节（头），数据部分长度可变
     size_t pos = 0;
+    uint64_t current_lsn = 0;
     while (pos + 9 <= buffer.size()) {
         // 读取记录头（type + space_id + page_no）
         uint8_t type = buffer[pos];
@@ -85,12 +86,14 @@ std::vector<RedoLogRecord> RedoLogParser::parse_file(const std::string& path) {
         record.r_type = type;
         record.r_space_id = space_id;
         record.r_page_no = page_no;
+        record.r_lsn = current_lsn;
         record.r_data.assign(buffer.data() + pos + 9, buffer.data() + pos + 9 + data_len);
 
         records.push_back(std::move(record));
 
         // 移动到下一条记录（跳过当前记录的全部数据）
         pos += 9 + data_len;
+        current_lsn += 9 + data_len;
     }
 
     return records;

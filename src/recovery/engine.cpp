@@ -953,28 +953,27 @@ std::vector<std::string> RecoveryEngine::flashback_deletes(
         return {};
     }
 
-    // P0.7: Use DeepUndoAnalyzer (MVCC version-chain aware flashback) instead
-    // of the legacy UndoLogParser. Configure it with the undo data path and
-    // page size so it shares the same conventions as the rest of the engine.
-    deep_undo_analyzer_.set_ibdata_path(undo_data_path_);
+    // P0.7: Use FlashbackGenerator (schema-aware, human-readable flashback SQL)
+    // instead of the raw DeepUndoAnalyzer inline SQL. FlashbackGenerator wraps
+    // DeepUndoAnalyzer with proper field_no mapping, value decoding, and SQL formatting.
+    flashback_generator_.set_ibdata_path(undo_data_path_);
     if (file_reader_) {
-        deep_undo_analyzer_.set_page_size(file_reader_->get_page_size());
+        flashback_generator_.set_page_size(file_reader_->get_page_size());
     }
 
-    innodb::FlashbackFilter filter;
-    // Note: The old API accepted ISO time strings, but DeepUndoAnalyzer
-    // uses std::chrono::system_clock::time_point. Time-based filtering
-    // is preserved as a no-op when strings are empty (the default).
-    // If time-range filtering is needed, callers should set the filter
-    // directly before calling into the analyzer.
+    innodb::FlashbackConfig fg_config;
+    fg_config.mode = innodb::FlashbackMode::DELETE;
+    fg_config.output_format = innodb::FlashbackOutputFormat::SQL;
+    flashback_generator_.set_config(fg_config);
 
-    auto results = deep_undo_analyzer_.flashback_deletes(space_id_, schema_, filter);
+    auto results = flashback_generator_.flashback_deletes(schema_);
 
     std::vector<std::string> sql;
     sql.reserve(results.size());
     for (const auto& r : results) {
-        if (!r.reverse_sql.empty()) {
-            sql.push_back(r.reverse_sql);
+        std::string stmt = r.to_sql(schema_);
+        if (!stmt.empty()) {
+            sql.push_back(stmt);
         }
     }
     return sql;

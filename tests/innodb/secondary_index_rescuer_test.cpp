@@ -26,6 +26,9 @@ static std::vector<uint8_t> create_secondary_leaf_page(
     write_le<uint16_t>(page.data(), 24, FIL_PAGE_INDEX);  // 17855 = 0x45BF
 
     // --- Page header (at offset 38) ---
+    // Set n_heap format bit (bit 15) to indicate COMPACT/DYNAMIC format
+    page[42] |= 0x80;
+
     // Each record layout: [5 bytes header] + [1 byte n_fields nibble] + [var-len list] + [NULL bitmap] + [field data]
     // We'll carefully place records after INFIMUM+SUPREMUM
 

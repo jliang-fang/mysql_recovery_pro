@@ -274,48 +274,23 @@ private:
     std::vector<SecLeafRecord> parse_secondary_leaf_records(
         const uint8_t* page_data, size_t page_size) {
 
+        if (!page_data || page_size < 56) return {};
+
+        // Detect format: COMPACT/DYNAMIC vs REDUNDANT
+        if (!is_compact_format(page_data)) {
+            return parse_secondary_leaf_records_redundant(page_data, page_size);
+        }
+
         std::vector<SecLeafRecord> records;
-        if (!page_data || page_size < 56) return records;
 
         uint16_t heap_top = read_le<uint16_t>(page_data, 40);
         if (heap_top < 54 || heap_top > page_size) return records;
 
         // Resolve secondary index and primary key columns from schema
-        std::vector<catalog::ColumnInfo> all_cols;
-        size_t n_index_cols = 0;
-        bool found_sec = false;
-
-        for (const auto& idx : schema_.indexes) {
-            if (idx.is_primary) continue;
-            if (found_sec) continue;
-            found_sec = true;
-            n_index_cols = idx.columns.size();
-
-            // Index columns first (in index order)
-            for (const auto& col_name : idx.columns) {
-                for (const auto& [ord, col] : schema_.columns) {
-                    if (col.name == col_name) { all_cols.push_back(col); break; }
-                }
-            }
-        }
-
-        // PK columns appended after index columns
-        for (const auto& idx : schema_.indexes) {
-            if (!idx.is_primary) continue;
-            for (const auto& col_name : idx.columns) {
-                bool dup = false;
-                for (const auto& c : all_cols) { if (c.name == col_name) { dup = true; break; } }
-                if (dup) continue;
-                for (const auto& [ord, col] : schema_.columns) {
-                    if (col.name == col_name) { all_cols.push_back(col); break; }
-                }
-            }
-            break;
-        }
-
+        auto all_cols = resolve_secondary_index_columns();
         size_t n_total_cols = all_cols.size();
-        if (n_total_cols == 0) return records;
-        if (!found_sec) return records;  // No secondary index in schema
+        size_t n_index_cols = count_index_columns();
+        if (n_total_cols == 0 || n_index_cols == 0) return records;
 
         // Start at INFIMUM (absolute offset 54)
         uint16_t pos = PAGE_INFIMUM_REC_OFFSET_ABS;
@@ -439,6 +414,187 @@ private:
         }
 
         return records;
+    }
+
+    /**
+     * @brief Parse secondary index leaf records using REDUNDANT row format
+     *
+     * REDUNDANT format differences from COMPACT:
+     *   - 6-byte record header (RedundantHeader) instead of 5-byte COMPACT header
+     *   - Offset array (1 or 2 bytes per field) instead of var-len field list + NULL bitmap
+     *   - NULL detection via adjacent offset equality
+     *   - INFIMUM at offset 100 (vs 54 for COMPACT)
+     *   - No variable-length field list prefix, no NULL bitmap
+     */
+    std::vector<SecLeafRecord> parse_secondary_leaf_records_redundant(
+        const uint8_t* page_data, size_t page_size) {
+
+        std::vector<SecLeafRecord> records;
+        if (!page_data || page_size < 110) return records;
+
+        uint16_t heap_top = read_le<uint16_t>(page_data, 40);
+        if (heap_top < 100 || heap_top > page_size) return records;
+
+        // Resolve secondary index and primary key columns from schema
+        auto all_cols = resolve_secondary_index_columns();
+        size_t n_total_cols = all_cols.size();
+        size_t n_index_cols = count_index_columns();
+        if (n_total_cols == 0 || n_index_cols == 0) return records;
+
+        // REDUNDANT: INFIMUM at absolute offset 100
+        static constexpr uint16_t REDUNDANT_INFIMUM_OFF = 100;
+        uint16_t pos = REDUNDANT_INFIMUM_OFF;
+        if (pos + 6 > page_size) return records;
+
+        // Read INFIMUM's RedundantHeader -> first user record
+        auto inf_header_opt = RedundantHeader::parse(page_data + pos, 6);
+        if (!inf_header_opt) return records;
+        uint16_t next_off = inf_header_opt->get_next_record_offset();
+        if (next_off <= pos || next_off >= heap_top) return records;
+        pos = next_off;
+
+        // Chain traversal
+        while (pos + 6 < page_size && pos < heap_top) {
+            auto header_opt = RedundantHeader::parse(page_data + pos, 6);
+            if (!header_opt) break;
+
+            const auto& rh = header_opt.value();
+            uint16_t next_offset = rh.get_next_record_offset();
+            uint16_t heap_no = rh.get_heap_no();
+
+            // SUPREMUM has heap_no == 1
+            if (heap_no == 1) break;
+
+            // Skip INFIMUM (heap_no == 0) — should not happen after first hop
+            if (heap_no < 2) {
+                if (next_offset <= pos || next_offset >= heap_top) break;
+                pos = next_offset;
+                continue;
+            }
+
+            uint16_t n_fields = rh.get_n_fields();
+            if (n_fields == 0) break;
+            bool is_1byte = rh.is_1byte_offset_format();
+            uint16_t extra_bytes = rh.get_extra_bytes_size();  // 6 + n_fields * (1 or 2)
+
+            if (pos + extra_bytes > page_size) break;
+
+            // Read offset array (n_fields entries, 1 or 2 bytes each)
+            const uint8_t* offsets_ptr = page_data + pos + 6;
+            std::vector<uint16_t> field_offsets;
+            field_offsets.reserve(n_fields);
+            for (uint16_t i = 0; i < n_fields; i++) {
+                uint16_t off;
+                if (is_1byte) {
+                    off = offsets_ptr[i];
+                } else {
+                    off = (static_cast<uint16_t>(offsets_ptr[i * 2]) << 8) |
+                          static_cast<uint16_t>(offsets_ptr[i * 2 + 1]);
+                }
+                field_offsets.push_back(off);
+            }
+
+            // Parse field data using offset array
+            SecLeafRecord rec;
+            uint16_t data_start = extra_bytes;
+
+            for (size_t i = 0; i < n_total_cols && i < n_fields; i++) {
+                const auto& col = all_cols[i];
+                std::string col_name = col.name;
+
+                // REDUNDANT NULL detection: adjacent offsets equal -> field is NULL
+                uint32_t start_off = field_offsets[i];
+                bool is_null = (i + 1 < n_fields) ? (start_off == field_offsets[i + 1]) : false;
+
+                if (is_null) {
+                    if (i < n_index_cols)
+                        rec.index_columns.emplace_back(col_name, "NULL");
+                    else
+                        rec.pk_columns.emplace_back(col_name, "NULL");
+                    continue;
+                }
+
+                uint32_t end_off;
+                if (i + 1 < n_fields) {
+                    end_off = field_offsets[i + 1];
+                } else {
+                    end_off = next_offset;
+                }
+
+                if (end_off <= start_off || start_off < data_start ||
+                    pos + end_off > page_size) {
+                    if (i < n_index_cols)
+                        rec.index_columns.emplace_back(col_name, "?");
+                    else
+                        rec.pk_columns.emplace_back(col_name, "?");
+                    break;
+                }
+
+                uint32_t field_len = end_off - start_off;
+                std::string value = extract_field_value(page_data, pos + start_off, field_len, col);
+
+                if (i < n_index_cols)
+                    rec.index_columns.emplace_back(col_name, value);
+                else
+                    rec.pk_columns.emplace_back(col_name, value);
+            }
+
+            if (!rec.index_columns.empty() || !rec.pk_columns.empty()) {
+                records.push_back(std::move(rec));
+            }
+
+            // Follow next_offset chain (absolute, unsigned for REDUNDANT)
+            if (next_offset <= pos || next_offset >= heap_top) break;
+            pos = next_offset;
+        }
+
+        return records;
+    }
+
+    /**
+     * @brief Resolve secondary index and PK columns into ordered column list
+     */
+    std::vector<catalog::ColumnInfo> resolve_secondary_index_columns() const {
+        std::vector<catalog::ColumnInfo> all_cols;
+        bool found_sec = false;
+
+        for (const auto& idx : schema_.indexes) {
+            if (idx.is_primary) continue;
+            if (found_sec) continue;
+            found_sec = true;
+
+            for (const auto& col_name : idx.columns) {
+                for (const auto& [ord, col] : schema_.columns) {
+                    if (col.name == col_name) { all_cols.push_back(col); break; }
+                }
+            }
+        }
+
+        for (const auto& idx : schema_.indexes) {
+            if (!idx.is_primary) continue;
+            for (const auto& col_name : idx.columns) {
+                bool dup = false;
+                for (const auto& c : all_cols) { if (c.name == col_name) { dup = true; break; } }
+                if (dup) continue;
+                for (const auto& [ord, col] : schema_.columns) {
+                    if (col.name == col_name) { all_cols.push_back(col); break; }
+                }
+            }
+            break;
+        }
+
+        return all_cols;
+    }
+
+    /**
+     * @brief Count number of secondary index columns
+     */
+    size_t count_index_columns() const {
+        for (const auto& idx : schema_.indexes) {
+            if (idx.is_primary) continue;
+            return idx.columns.size();
+        }
+        return 0;
     }
 };
 

@@ -237,11 +237,11 @@ void RedoLogChainBuilder::add_record(const RedoLogRecord& record) {
     records_.push_back(record);
     stats_.total_records++;
 
-    // Track LSN range (simplified - would use LSN from record in production)
+    // Track LSN range
     if (stats_.start_lsn == 0) {
-        stats_.start_lsn = record.r_page_no;  // Using page_no as placeholder
+        stats_.start_lsn = record.r_lsn;
     }
-    stats_.end_lsn = record.r_page_no + 1;
+    stats_.end_lsn = record.r_lsn;
 }
 
 bool RedoLogChainBuilder::build_chains() {
@@ -263,8 +263,7 @@ std::vector<RedoLogRecord> RedoLogChainBuilder::get_records(uint64_t start_lsn, 
     std::vector<RedoLogRecord> result;
 
     for (const auto& record : records_) {
-        uint64_t record_lsn = static_cast<uint64_t>(record.r_space_id) << 32 | record.r_page_no;
-        if (record_lsn >= start_lsn && record_lsn <= end_lsn) {
+        if (record.r_lsn >= start_lsn && record.r_lsn <= end_lsn) {
             result.push_back(record);
         }
     }
@@ -334,13 +333,12 @@ bool RedoLogFilter::passes_filter(const RedoLogRecord& record) {
         return false;
     }
 
-    // LSN filter (simplified)
+    // LSN filter
     if (start_lsn_.has_value() || end_lsn_.has_value()) {
-        uint64_t record_lsn = static_cast<uint64_t>(record.r_space_id) << 32 | record.r_page_no;
-        if (start_lsn_.has_value() && record_lsn < start_lsn_.value()) {
+        if (start_lsn_.has_value() && record.r_lsn < start_lsn_.value()) {
             return false;
         }
-        if (end_lsn_.has_value() && record_lsn > end_lsn_.value()) {
+        if (end_lsn_.has_value() && record.r_lsn > end_lsn_.value()) {
             return false;
         }
     }
