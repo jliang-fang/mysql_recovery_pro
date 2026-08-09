@@ -53,7 +53,7 @@ MySQLVersion PageParserFactory::detect_mysql_version(const uint8_t* data, size_t
     // 1. 验证输入参数
     if (!data || size < 38) {
         std::cerr << "[WARN] Data too small for version detection: " << size << " bytes" << std::endl;
-        return MySQLVersion::MYSQL_57; // 默认返回 MySQL 5.7
+        return MySQLVersion::UNKNOWN;
     }
 
     // 2. 首先尝试从 SDI 页识别版本
@@ -112,8 +112,8 @@ MySQLVersion PageParserFactory::detect_version_from_header(const uint8_t* data, 
         }
     }
 
-    // 默认返回 MySQL 5.7（兼容性考虑）
-    return MySQLVersion::MYSQL_57;
+    // 默认返回 UNKNOWN（没有足够证据）
+    return MySQLVersion::UNKNOWN;
 }
 
 MySQLVersion PageParserFactory::detect_version_from_sdi(const uint8_t* data, size_t size) {
@@ -205,19 +205,15 @@ bool GenericPageParser::parse_header(const uint8_t* data, size_t size) {
 }
 
 bool GenericPageParser::parse_fil_header(const uint8_t* data, size_t size) {
-    if (size < 38) {
+    if (size < dbrecovery::innodb::FIL_HEADER_SIZE) {
         return false;
     }
 
-    // 读取页类型
-    page_type_ = read_le<uint16_t>(data, 16);
-
-    // 读取页号
-    page_offset_ = read_le<uint32_t>(data, 20);
-
-    // 读取页链信息
-    prev_page_ = read_le<uint32_t>(data, 24);
-    next_page_ = read_le<uint32_t>(data, 28);
+    // FIL header fields are big-endian (canonical InnoDB format).
+    page_type_ = read_be<uint16_t>(data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);   // offset 24
+    page_offset_ = read_be<uint32_t>(data, dbrecovery::innodb::FIL_PAGE_OFFSET);   // offset 4
+    prev_page_ = read_be<uint32_t>(data, dbrecovery::innodb::FIL_PAGE_PREV_ABS);   // offset 8
+    next_page_ = read_be<uint32_t>(data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS);   // offset 12
 
     return true;
 }

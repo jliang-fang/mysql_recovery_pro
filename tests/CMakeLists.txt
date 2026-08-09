@@ -140,6 +140,11 @@ target_link_libraries(test_version_detection PRIVATE dbrecovery_innodb GTest::GT
 target_compile_definitions(test_version_detection PRIVATE TEST_DATA_DIR_MACRO="${CMAKE_SOURCE_DIR}/test/test_data")
 gtest_discover_tests(test_version_detection)
 
+# Version-aware recovery engine tests (Phase 2 - version evidence safety)
+add_executable(test_version_aware_recovery test_version_aware_recovery.cpp)
+target_link_libraries(test_version_aware_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_version_aware_recovery)
+
 # B+Tree traversal tests (Phase 2 Week 3 - B+Tree Traversal + Chain Break Detection)
 add_executable(test_btree_traversal unit/btree_traversal_test.cpp)
 target_link_libraries(test_btree_traversal PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)

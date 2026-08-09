@@ -4,6 +4,7 @@
  */
 
 #include "dbrecovery/recovery/version_aware_recovery.hpp"
+#include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include <fstream>
@@ -58,37 +59,10 @@ MySQLVersion VersionAwareRecoveryEngine::detect_version(const uint8_t* data, siz
 }
 
 MySQLVersion VersionAwareRecoveryEngine::detect_version_internal(const uint8_t* data, size_t size) {
-    // 1. 首先检查 SDI 页（MySQL 8.0+）
-    MySQLVersion version = detect_version_from_sdi(data, size);
-    if (version != MySQLVersion::UNKNOWN) {
-        stats_.version_detection_method = "SDI page detection";
-        return version;
-    }
-
-    // 2. 检查 LSN 值范围
-    version = detect_version_from_lsn(data, size);
-    if (version != MySQLVersion::UNKNOWN) {
-        stats_.version_detection_method = "LSN range detection";
-        return version;
-    }
-
-    // 3. 检查页头特征
-    version = detect_version_from_page_header(data, size);
-    if (version != MySQLVersion::UNKNOWN) {
-        stats_.version_detection_method = "Page header analysis";
-        return version;
-    }
-
-    // 4. 检查校验和类型
-    version = detect_version_from_checksum(data, size);
-    if (version != MySQLVersion::UNKNOWN) {
-        stats_.version_detection_method = "Checksum analysis";
-        return version;
-    }
-
-    // 默认假设 MySQL 5.6
-    stats_.version_detection_method = "Default assumption";
-    return MySQLVersion::MYSQL_56;
+    MySQLVersion version = MySQLVersionDetector::detect(data, size);
+    stats_.version_detection_method =
+        version == MySQLVersion::UNKNOWN ? "Insufficient evidence" : "Canonical FIL metadata";
+    return version;
 }
 
 MySQLVersion VersionAwareRecoveryEngine::detect_version_from_sdi(const uint8_t* data, size_t size) {
@@ -116,8 +90,8 @@ MySQLVersion VersionAwareRecoveryEngine::detect_version_from_sdi(const uint8_t* 
 MySQLVersion VersionAwareRecoveryEngine::detect_version_from_lsn(const uint8_t* data, size_t size) {
     if (size < 24) return MySQLVersion::UNKNOWN;
 
-    // 读取 LSN (offset 16-23)
-    uint64_t lsn = innodb::read_le<uint64_t>(data + 16);
+    // FIL_PAGE_LSN is big-endian at offset 16 (FIL_PAGE_LSN_ABS).
+    uint64_t lsn = innodb::read_be<uint64_t>(data + innodb::FIL_PAGE_LSN_ABS);
 
     // LSN 范围估算：
     // MySQL 5.6: 通常 < 1B
@@ -135,25 +109,30 @@ MySQLVersion VersionAwareRecoveryEngine::detect_version_from_lsn(const uint8_t* 
         return MySQLVersion::MYSQL_57;
     }
 
-    return MySQLVersion::MYSQL_56;
+    // LSN magnitude alone is not reliable below ~1B (5.6/5.7 both fit).
+    return MySQLVersion::UNKNOWN;
 }
 
 MySQLVersion VersionAwareRecoveryEngine::detect_version_from_page_header(const uint8_t* data, size_t size) {
     if (size < 100) return MySQLVersion::UNKNOWN;
 
-    // 检查 BTR 页头 (offset 38+)
-    // MySQL 8.0+ 有额外的页版本字段
+    // Only INDEX pages carry BTR_HEADER fields at offset FIL_HEADER_SIZE.
+    uint16_t page_type = innodb::read_be<uint16_t>(data + innodb::FIL_PAGE_TYPE_ABS);
+    if (page_type != innodb::FIL_PAGE_INDEX) {
+        return MySQLVersion::UNKNOWN;
+    }
 
-    // 检查 INDEX ID 格式
-    uint64_t index_id = innodb::read_le<uint64_t>(data + 52);
+    // BTR_HEADER fields are big-endian, relative to FIL_HEADER_SIZE (38).
+    // INDEX ID is at absolute offset 44 (BTR_IND_PAGE_OFFSET_ABS).
+    uint64_t index_id = innodb::read_be<uint64_t>(data + innodb::BTR_IND_PAGE_OFFSET_ABS);
 
     // MySQL 8.0+ 使用不同的 INDEX ID 范围
     if (index_id > 0xFFFFFFFF00000000ULL) {
         return MySQLVersion::MYSQL_80;
     }
 
-    // 检查页目录槽数量
-    uint16_t n_dir_slots = innodb::read_le<uint16_t>(data + 38);
+    // 检查页目录槽数量 (PAGE_N_DIR_SLOTS, big-endian at offset 38)
+    uint16_t n_dir_slots = innodb::read_be<uint16_t>(data + innodb::FIL_PAGE_OFFSET_N_DIR_SLOTS);
     if (n_dir_slots > 100) {
         // MySQL 8.4+ 支持更大的页目录
         return MySQLVersion::MYSQL_84;
@@ -163,23 +142,9 @@ MySQLVersion VersionAwareRecoveryEngine::detect_version_from_page_header(const u
 }
 
 MySQLVersion VersionAwareRecoveryEngine::detect_version_from_checksum(const uint8_t* data, size_t size) {
-    if (size < 24) return MySQLVersion::UNKNOWN;
-
-    // 读取存储的校验和
-    uint32_t checksum1 = innodb::read_le<uint32_t>(data);
-    uint32_t checksum2 = innodb::read_le<uint32_t>(data + 4);
-
-    // MySQL 8.0+ 使用新的校验和算法
-    // CRC32C vs CRC32
-    if (checksum1 != 0 && checksum2 != 0) {
-        // 尝试计算两种校验和
-        // 这里简化处理，实际需要完整计算
-        if ((checksum1 ^ checksum2) == 0xFFFFFFFF) {
-            // 可能是 MySQL 8.0+ 的新校验和
-            return MySQLVersion::MYSQL_80;
-        }
-    }
-
+    // Checksum bytes alone are not reliable version evidence across the
+    // 5.6-9.x range. Fail closed rather than infer an 8.x layout from a weak
+    // heuristic that cannot distinguish algorithms safely.
     return MySQLVersion::UNKNOWN;
 }
 
@@ -231,6 +196,19 @@ std::vector<std::map<std::string, std::string>> VersionAwareRecoveryEngine::reco
     // 根据版本选择解析器
     auto recovery_start = std::chrono::high_resolution_clock::now();
 
+    // Fail closed: unresolved automatic detection must not produce structured
+    // records or route through heuristic structured-row recovery.
+    if (detected_version_ == MySQLVersion::UNKNOWN) {
+        std::cerr << "[ERROR] Cannot recover: MySQL version could not be detected. "
+                  << "Use --mysql-version to explicitly specify the version. "
+                  << "No structured records will be produced from unresolved physical format."
+                  << std::endl;
+        auto recovery_end = std::chrono::high_resolution_clock::now();
+        stats_.recovery_time_ms = std::chrono::duration<double, std::milli>(recovery_end - recovery_start).count();
+        stats_.recovered_records = 0;
+        return records_;
+    }
+
     for (uint32_t page_no = 0; page_no < stats_.total_pages; ++page_no) {
         const uint8_t* page_data = data.data() + page_no * page_size_;
 
@@ -251,10 +229,6 @@ std::vector<std::map<std::string, std::string>> VersionAwareRecoveryEngine::reco
                 break;
             case MySQLVersion::MYSQL_90:
                 page_records = parse_mysql90(page_data, page_size_);
-                break;
-            default:
-                // 使用启发式解析
-                page_records = heuristic_parse(page_data, page_size_, detected_version_);
                 break;
         }
 
@@ -697,7 +671,7 @@ RowFormat VersionDetector::get_default_row_format(MySQLVersion version) {
         case MySQLVersion::MYSQL_90:
             return RowFormat::DYNAMIC;
         default:
-            return RowFormat::COMPACT;
+            return RowFormat::REDUNDANT;  // most conservative for UNKNOWN
     }
 }
 

@@ -180,7 +180,9 @@ TEST_F(FILHeaderEndiannessTest, ChecksumTypeDetection) {
 
 TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
     // Test 6 bug scenarios from the version detector
-    // Scenario 1: MySQL 5.6 page — no LSN extension, no SDI, CRC32 checksum
+    // Scenario 1: MySQL 5.6 page — no LSN extension, no SDI, CRC32 checksum.
+    // Hardened behavior: an INDEX page without 8.0 markers cannot be
+    // distinguished from other 5.x versions, so it must be UNKNOWN, not MYSQL_56.
     {
         auto buf = create_page_buffer();
         set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
@@ -188,48 +190,42 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
         // FLUSH_LSN stays 0 (MySQL 5.6/5.7)
 
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
-        EXPECT_EQ(version, MySQLVersion::MYSQL_56)
-            << "Scenario 1: MySQL 5.6 page must be detected as MYSQL_56";
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN)
+            << "Scenario 1: INDEX page without 8.0 markers must be UNKNOWN";
     }
 
-    // Scenario 2: MySQL 5.7 page — same as 5.6 but with different page type patterns
+    // Scenario 2: MySQL 5.7 page — same as 5.6 but with different page type
+    // patterns. Without FSP flags or UNDO format evidence, 5.6 vs 5.7 is
+    // ambiguous and must remain UNKNOWN.
     {
         auto buf = create_page_buffer();
         set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
         set_be32(buf, 0, 0x1A2B3C4D);  // CRC32 checksum
 
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
-        // 5.6 and 5.7 share the same detection pattern (no LSN extension, no SDI)
-        EXPECT_TRUE(version == MySQLVersion::MYSQL_56 || version == MySQLVersion::MYSQL_57)
-            << "Scenario 2: MySQL 5.7 page must be detected as MYSQL_56 or MYSQL_57";
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN)
+            << "Scenario 2: 5.6/5.7 ambiguity must be UNKNOWN, not guessed";
     }
 
-    // Scenario 3: MySQL 8.0 page — has LSN extension, page version field, and SDI
+    // Scenario 3: MySQL 8.0 INDEX page — has LSN extension and page version
+    // field (page_version appears at offset 38 only on INDEX pages).
     {
         auto buf = create_page_buffer();
-        set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+        set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
         set_be64(buf, FIL_PAGE_TYPE_ABS + 2, 0x1000);     // Non-zero FLUSH_LSN
-        // Version field at offset 38 (FIL_HEADER_SIZE, BE in FIL header)
-        set_be16(buf, FIL_HEADER_SIZE, 1);
-        // SDI signature at offset 64
-        constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
-        std::memcpy(buf.data() + 64, SDI_SIG, 8);
+        set_be16(buf, FIL_HEADER_SIZE, 1);                 // page_version = 1
 
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
         EXPECT_EQ(version, MySQLVersion::MYSQL_80)
             << "Scenario 3: MySQL 8.0 page must be detected as MYSQL_80";
     }
 
-    // Scenario 4: MySQL 8.4 page — has LSN extension, page version = 2, and SDI
+    // Scenario 4: MySQL 8.4 INDEX page — has LSN extension, page version = 2.
     {
         auto buf = create_page_buffer();
-        set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+        set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
         set_be64(buf, FIL_PAGE_TYPE_ABS + 2, 0x2000);     // Non-zero FLUSH_LSN
-        // Version field = 2 for MySQL 8.4+ (BE at offset FIL_HEADER_SIZE=38)
-        set_be16(buf, FIL_HEADER_SIZE, 2);
-        // SDI signature at offset 64
-        constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
-        std::memcpy(buf.data() + 64, SDI_SIG, 8);
+        set_be16(buf, FIL_HEADER_SIZE, 2);                 // page_version = 2
 
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
         EXPECT_EQ(version, MySQLVersion::MYSQL_84)
@@ -256,8 +252,7 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
 
         // Should not crash and return UNKNOWN
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
-        // Allocated pages may fall through to UNKNOWN or MYSQL_56
-        EXPECT_TRUE(version == MySQLVersion::UNKNOWN || version == MySQLVersion::MYSQL_56)
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN)
             << "Scenario 6: Allocated page must not crash version detection";
     }
 }

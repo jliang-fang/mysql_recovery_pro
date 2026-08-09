@@ -98,6 +98,14 @@ struct VersionDetectionResult {
     int confidence;
     std::vector<std::string> matching_features;
     std::vector<std::string> non_matching_features;
+
+    /// @brief True when the detector reached a definite version (not UNKNOWN).
+    bool is_known() const { return version != MySQLVersion::UNKNOWN; }
+
+    /// @brief True when a version was selected but the evidence was not fully
+    /// consistent (confidence < 100). Ambiguous layouts should not drive
+    /// format-sensitive operations without an explicit operator override.
+    bool is_ambiguous() const { return is_known() && confidence < 100; }
 };
 
 /**

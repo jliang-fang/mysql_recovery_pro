@@ -305,15 +305,12 @@ TEST(PageParserV3Test, ParseCompletePage) {
     data[8] = 0x00; data[9] = 0x00; data[10] = 0x00; data[11] = 0x00; // FIL_PAGE_LSN
     data[12] = 0x00; data[13] = 0x00; data[14] = 0x00; data[15] = 0x00; // FIL_PAGE_LSN
     
-    // Page Type
-    data[16] = 0x67; data[17] = 0x45;
+    // Page Type (canonical FIL header: big-endian at offset 24)
+    data[24] = 0x45; data[25] = 0x67;
     
     // Checksum
     data[18] = 0x00; data[19] = 0x00; data[20] = 0x00; data[21] = 0x00;
-    
-    // Page Number
-    data[22] = 0x00; data[23] = 0x00; data[24] = 0x00; data[25] = 0x00;
-    
+
     // Page Level
     data[42] = 0x00; data[43] = 0x00;
     

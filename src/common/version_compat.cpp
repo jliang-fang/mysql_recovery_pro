@@ -7,6 +7,8 @@
 
 #include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/common/endian_compat.hpp"
+#include "dbrecovery/common/mysql_version_detector.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include "page/page_parser.h"
 #include "page/page_parser_factory.h"
 #include <cstring>
@@ -469,58 +471,9 @@ MySQLVersion detectVersion(const uint8_t* page_data, size_t page_size) {
         return MySQLVersion::UNKNOWN;
     }
 
-    // Simple version detection based on page header
-    // For a complete implementation, use mysql_recovery::PageFactory
-    uint16_t page_type = dbrecovery::endian::read_le16(page_data, 16);
-    
-    // Check for SDI page (MySQL 8.0+)
-    if (page_type == 9971) {
-        return MySQLVersion::MYSQL_80;
-    }
-    
-    // Check for header_version field (MySQL 8.0+)
-    if (page_size >= 42) {
-        uint16_t header_version = dbrecovery::endian::read_le16(page_data, 40);
-        if (header_version >= 2) {
-            return MySQLVersion::MYSQL_84;
-        }
-        if (header_version > 0) {
-            return MySQLVersion::MYSQL_80;
-        }
-    }
-    
-    // Check for FIL_PAGE_FILE_FLUSH_LSN (8 bytes in 8.0+)
-    if (page_size >= 32) {
-        uint64_t flush_lsn = dbrecovery::endian::read_le64(page_data, 24);
-        if (flush_lsn > 0xFFFFFFFF) {
-            return MySQLVersion::MYSQL_80;
-        }
-    }
-    
-    // Check for PAGE_MAX_TRX_ID (5.6/5.7 specific)
-    if (page_size >= 42) {
-        uint32_t max_trx_id = dbrecovery::endian::read_le32(page_data, 38);
-        if (max_trx_id != 0 && max_trx_id != 0xFFFFFFFF) {
-            if (page_size >= 50) {
-                uint16_t n_dir_slots = dbrecovery::endian::read_le16(page_data, 48);
-                if (n_dir_slots > 0) {
-                    return MySQLVersion::MYSQL_57;
-                }
-            }
-            return MySQLVersion::MYSQL_56;
-        }
-    }
-    
-    // Check for 5.5/5.1 specific patterns
-    if (page_size >= 38) {
-        uint16_t data_start = dbrecovery::endian::read_le16(page_data, 38);
-        if (data_start == 0 || data_start == 38 || data_start == 0xFFFF) {
-            return MySQLVersion::MYSQL_55;
-        }
-    }
-    
-    // Default to 5.6
-    return MySQLVersion::MYSQL_56;
+    // Use canonical FIL header reads (big-endian) from the version detector.
+    // Delegate to the canonical implementation to avoid duplicating logic.
+    return MySQLVersionDetector::detect(page_data, page_size);
 }
 
 std::string versionToString(MySQLVersion version) {
@@ -591,22 +544,23 @@ std::string rowFormatToString(RowFormat format) {
 // ==================== Page Type Detection ====================
 
 PageType detectPageType(const uint8_t* page_data, size_t page_size) {
-    if (!page_data || page_size < 18) {
+    if (!page_data || page_size < 18 || page_size < dbrecovery::innodb::FIL_HEADER_SIZE) {
         return PageType::UNKNOWN;
     }
 
-    uint16_t page_type = dbrecovery::endian::read_le16(page_data, 16);
+    // FIL page type is big-endian at offset 24 (FIL_PAGE_TYPE_ABS).
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
     switch (page_type) {
-        case 9969:  // FIL_PAGE_INDEX
+        case 17855:  // FIL_PAGE_INDEX (0x45BF)
             return PageType::INDEX;
-        case 9971:  // FIL_PAGE_SDI
+        case 17854:  // FIL_PAGE_SDI (0x45BE)
             return PageType::SDI;
-        case 9970:  // FIL_PAGE_UNDO_LOG
+        case 17842:  // FIL_PAGE_UNDO_LOG (0x45B2)
             return PageType::UNDO_LOG;
-        case 9972:  // FIL_PAGE_BLOB
+        case 17853:  // FIL_PAGE_BLOB / FIL_PAGE_SDI_ZIP (0x45BD)
             return PageType::BLOB;
-        case 9973:  // FIL_PAGE_COMPRESSED
+        case 17849:  // FIL_PAGE_TYPE_XDES (0x45B9)
             return PageType::COMPRESSED;
         default:
             return PageType::UNKNOWN;

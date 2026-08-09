@@ -3,6 +3,7 @@
 #include "page/page_parser_v84.h"
 #include "page/page_parser_factory.h"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <algorithm>
@@ -62,9 +63,9 @@ bool PageFactory::is_sdi_page(const uint8_t* page_data, size_t page_size) {
         return false;
     }
 
-    // Check page type
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 16);
-    if (page_type == static_cast<uint16_t>(PageType::SDI)) {
+    // Check page type — canonical FIL header is big-endian at offset 24.
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
         return true;
     }
 
@@ -383,9 +384,9 @@ bool SDIParser::is_sdi_page(const uint8_t* page_data, size_t page_size) {
         return false;
     }
 
-    // Check page type
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 16);
-    if (page_type == static_cast<uint16_t>(PageType::SDI)) {
+    // Check page type — canonical FIL header is big-endian at offset 24.
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
         return true;
     }
 

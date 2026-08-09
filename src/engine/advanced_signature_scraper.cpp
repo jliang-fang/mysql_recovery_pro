@@ -261,10 +261,10 @@ MySQLVersion InnoDBSignatureLibrary::detect_version(const uint8_t* page_data, si
             }
         }
 
-        return MySQLVersion::MYSQL_56;
+        return MySQLVersion::UNKNOWN;
     }
 
-    return MySQLVersion::MYSQL_56; // Default
+    return MySQLVersion::UNKNOWN;
 }
 
 bool InnoDBSignatureLibrary::is_valid_page_type(uint16_t type) {

@@ -157,10 +157,12 @@ inline VersionConfig get_version_config(MySQLVersion version) {
             break;
 
         default:
-            // 默认使用 MySQL 8.0 配置
-            config = get_version_config(MySQLVersion::MYSQL_80);
-            config.version = MySQLVersion::UNKNOWN;
-            config.name = "Unknown";
+            config = {
+                MySQLVersion::UNKNOWN, "Unknown", 0,
+                false, false, false, false, false, false, false,
+                false, false, false, false,
+                0, 0
+            };
             break;
     }
 

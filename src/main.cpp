@@ -1714,10 +1714,33 @@ int main(int argc, char** argv) {
             try { ver = std::stoul(mysql_version); } catch (...) {}
             if (ver > 0) index_parser.set_mysql_version(ver);
         } else {
-            // No explicit version and no detection: use a neutral modern default.
-            // Prefer 8.0 (DYNAMIC row format, FIL_DATADIR PAGE_TYPE) over 5.6;
-            // unknown versions must not be silently assumed to be MySQL 5.6.
-            index_parser.set_mysql_version(80000);  // Neutral default: MySQL 8.0
+            // No explicit version: attempt auto-detection from the first page.
+            // Require explicit --mysql-version when detection is unresolved.
+            std::ifstream ver_file(effective_ibd, std::ios::binary);
+            if (ver_file) {
+                std::vector<uint8_t> ver_page(page_size > 0 ? page_size : 16384);
+                ver_file.read(reinterpret_cast<char*>(ver_page.data()), ver_page.size());
+                auto detected = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), ver_page.size());
+                if (detected != dbrecovery::MySQLVersion::UNKNOWN) {
+                    switch (detected) {
+                        case dbrecovery::MySQLVersion::MYSQL_56: index_parser.set_mysql_version(50600); break;
+                        case dbrecovery::MySQLVersion::MYSQL_57: index_parser.set_mysql_version(50700); break;
+                        case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
+                        case dbrecovery::MySQLVersion::MYSQL_84: index_parser.set_mysql_version(80400); break;
+                        case dbrecovery::MySQLVersion::MYSQL_90: index_parser.set_mysql_version(90000); break;
+                        default: break;
+                    }
+                    std::cout << "[INFO] Auto-detected MySQL version from file header\n";
+                } else {
+                    std::cerr << "[ERROR] Could not auto-detect MySQL version. "
+                              << "Use --mysql-version=<version> to specify explicitly.\n";
+                    return 1;
+                }
+            } else {
+                std::cerr << "[ERROR] Cannot read input file for version detection. "
+                          << "Use --mysql-version=<version> to specify explicitly.\n";
+                return 1;
+            }
         }
 
         // Parse schema from --schema option if provided
@@ -2186,11 +2209,16 @@ int main(int argc, char** argv) {
                     case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
                     case dbrecovery::MySQLVersion::MYSQL_84: index_parser.set_mysql_version(80400); break;
                     case dbrecovery::MySQLVersion::MYSQL_90: index_parser.set_mysql_version(90000); break;
-                    default: index_parser.set_mysql_version(80000); break;  // Neutral default: 8.0
+                    default:
+                        std::cerr << "[ERROR] Could not auto-detect MySQL version from file header. "
+                                  << "Use --mysql-version=<version> to specify explicitly.\n";
+                        return 1;
                 }
                 std::cout << "[INFO] Auto-detected MySQL version from file header\n";
             } else {
-                index_parser.set_mysql_version(80000);  // Neutral default: 8.0
+                std::cerr << "[ERROR] Could not read file header to detect MySQL version. "
+                          << "Use --mysql-version=<version> to specify explicitly.\n";
+                return 1;
             }
         }
 

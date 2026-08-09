@@ -11,6 +11,7 @@
 
 // Include dbrecovery::innodb namespace for read_le functions
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/common/mysql_version_detector.hpp"
 
 namespace mysql_recovery {
 
@@ -132,77 +133,13 @@ public:
             return MySQLVersion::UNKNOWN;
         }
 
-        // Step 1: Check for SDI page (MySQL 8.0+)
-        uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 16);
-        if (page_type == static_cast<uint16_t>(PageType::SDI)) {
-            return MySQLVersion::MYSQL_80;
-        }
-
-        // Step 2: Check Page Header Version (MySQL 8.0+) - before SDI signature check
-        // This allows us to distinguish 8.4+ (header_version >= 2) from 8.0 (header_version == 1)
-        if (page_size >= 42) {
-            uint16_t header_version = dbrecovery::innodb::read_le<uint16_t>(page_data, 40);
-            if (header_version >= 2) {
-                // MySQL 8.4+ has header_version >= 2
-                return MySQLVersion::MYSQL_84;
-            }
-            if (header_version > 0) {
-                return MySQLVersion::MYSQL_80;
-            }
-        }
-
-        // Step 3: Check SDI Signature (8 bytes at offset 64)
-        if (page_size >= 72) {
-            if (std::memcmp(page_data + 64, SDI_SIG_80, 8) == 0) {
-                return MySQLVersion::MYSQL_80;
-            }
-            if (std::memcmp(page_data + 64, SDI_SIG_57, 8) == 0) {
-                return MySQLVersion::MYSQL_57;
-            }
-        }
-
-        // Step 4: Check FIL_PAGE_FILE_FLUSH_LSN (8 bytes in 8.0+)
-        if (page_size >= 32) {
-            uint64_t flush_lsn = dbrecovery::innodb::read_le<uint64_t>(page_data, 24);
-            if (flush_lsn > 0xFFFFFFFF) {
-                return MySQLVersion::MYSQL_80;
-            }
-        }
-
-        // Step 5: Check PAGE_MAX_TRX_ID (5.6/5.7 specific)
-        if (page_size >= 42) {
-            uint32_t max_trx_id = dbrecovery::innodb::read_le<uint32_t>(page_data, 38);
-            // For 5.6/5.7, max_trx_id is non-zero and not 0xFFFFFFFF
-            if (max_trx_id != 0 && max_trx_id != 0xFFFFFFFF) {
-                // Could be 5.6 or 5.7, check for additional fields
-                if (page_size >= 50) {
-                    uint16_t n_dir_slots = dbrecovery::innodb::read_le<uint16_t>(page_data, 48);
-                    if (n_dir_slots > 0) {
-                        return MySQLVersion::MYSQL_57;
-                    }
-                }
-                return MySQLVersion::MYSQL_56;
-            }
-        }
-
-        // Step 6: Check space ID
-        if (page_size >= 22) {
-            uint32_t space_id = dbrecovery::innodb::read_le<uint32_t>(page_data, 18);
-            if (space_id > 0 && page_type == static_cast<uint16_t>(PageType::INDEX)) {
-                return MySQLVersion::MYSQL_80;
-            }
-        }
-
-        // Step 7: Check page size field (compressed pages)
-        if (page_size >= 64) {
-            uint16_t page_size_field = dbrecovery::innodb::read_le<uint16_t>(page_data, 60);
-            if (page_size_field != 0 && (page_size_field & 0x0FFF) < DEFAULT_PAGE_SIZE) {
-                return MySQLVersion::MYSQL_80;
-            }
-        }
-
-        // Default to 5.6
-        return MySQLVersion::MYSQL_56;
+        // Delegate to the canonical detector. It uses big-endian FIL header
+        // reads, page-class-aware checks, and returns UNKNOWN for unresolved
+        // layouts instead of guessing a version.
+        // Both dbrecovery::MySQLVersion and mysql_recovery::MySQLVersion have
+        // the same underlying integer values, so static_cast is safe.
+        return static_cast<MySQLVersion>(
+            dbrecovery::MySQLVersionDetector::detect(page_data, page_size));
     }
 
     /**
