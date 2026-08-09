@@ -93,8 +93,10 @@ std::string FlashbackGenerator::decode_field_value(
         }
         case mysql_types::INT24: { // 9
             if (len < 3) return "?";
-            // 3-byte signed integer, little-endian
-            int32_t v = static_cast<int32_t>(read_le<uint32_t>(data, 0)) & 0xFFFFFF;
+            // 3-byte signed integer, little-endian — read 3 bytes, not 4
+            int32_t v = static_cast<int32_t>(data[0])
+                      | (static_cast<int32_t>(data[1]) << 8)
+                      | (static_cast<int32_t>(data[2]) << 16);
             if (v & 0x800000) v |= ~0xFFFFFF; // sign extend
             return std::to_string(v);
         }
@@ -148,7 +150,9 @@ std::string FlashbackGenerator::decode_field_value(
             // MySQL 5.6.4+ TIME2 format: 3 bytes base + fractional
             // Base: 3 bytes little-endian, sign bit in bit 23
             if (len < 3) return "?";
-            uint32_t base = read_le<uint32_t>(data, 0) & 0xFFFFFF;
+            uint32_t base = static_cast<uint32_t>(data[0])
+                          | (static_cast<uint32_t>(data[1]) << 8)
+                          | (static_cast<uint32_t>(data[2]) << 16);
             bool negative = (base & 0x800000) != 0;
             if (negative) base = (~base & 0x7FFFFF) + 1;
             uint32_t sec = base % 100; base /= 100;
