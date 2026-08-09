@@ -157,11 +157,6 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64" OR CMAKE_SYSTEM_PROCESSOR STREQU
     # x86_64 优化已在头文件中实现
 endif()
 
-# ✅ 新增：确保 file_mapper.cpp 被正确包含（如果尚未存在则创建）
-if(NOT EXISTS "${CMAKE_SOURCE_DIR}/src/utils/file_mapper.cpp")
-    file(WRITE "${CMAKE_SOURCE_DIR}/src/utils/file_mapper.cpp" "#include \"dbrecovery/utils/file_mapper.hpp\"\nnamespace dbrecovery { namespace utils {} }\n")
-endif()
-
 add_library(dbrecovery_innodb STATIC ${SOURCES})
 
 target_include_directories(dbrecovery_innodb PUBLIC
