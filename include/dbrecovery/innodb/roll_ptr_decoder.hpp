@@ -35,6 +35,23 @@ namespace dbrecovery {
 namespace innodb {
 
 /**
+ * @brief Explicit undo format profile for roll-pointer width selection
+ *
+ * This enum controls how roll_ptr bytes are parsed in undo records.
+ * The profile must be selected from resolved physical-format context
+ * (MySQLVersion) or operator override, never inferred from remaining
+ * bytes in a record.
+ *
+ * @see UndoRecordV2Parser::set_undo_format_profile()
+ * @see DeepUndoAnalyzer::set_undo_format_profile()
+ */
+enum class UndoFormatProfile : uint8_t {
+    UNRESOLVED   = 0,  ///< No format evidence — strict mode, reject parsing
+    LEGACY_6BYTE = 1,  ///< MySQL 5.6/5.7: 6-byte BE roll_ptr in undo page header
+    MYSQL8_7BYTE = 2,  ///< MySQL 8.0+: 7-byte BE roll_ptr in undo page header
+};
+
+/**
  * @brief Unified DB_ROLL_PTR decoder for MySQL 5.6/5.7 and 8.0+
  *
  * All methods are static and thread-safe. No state is shared.
@@ -113,6 +130,13 @@ public:
 
     /**
      * @brief Decode from storage format (big-endian, 6 or 7 bytes)
+     *
+     * Size-based detection: reads 7 bytes if available, else 6. This form is
+     * retained for backward compatibility and callers that already know the
+     * physical width from context outside a record. Parsers of untrusted undo
+     * records MUST use the UndoFormatProfile overload instead, so the width is
+     * pinned by resolved format evidence rather than remaining bytes.
+     *
      * @param data  Pointer to the roll_ptr bytes in page data
      * @param size  Number of bytes (6 for 5.6/5.7, 7 for 8.0+)
      * @return Decoded components (empty/invalid if size < 6)
@@ -138,10 +162,59 @@ public:
     }
 
     /**
+     * @brief Decode from storage format with an explicit undo format profile
+     *
+     * Profile-pinned width selection: the number of bytes read is taken from
+     * the resolved profile, never from remaining data. Fail-closed: an
+     * UNRESOLVED profile returns an invalid (all-zero) result so callers can
+     * reject the record rather than guess.
+     *
+     * @param data    Pointer to the roll_ptr bytes in page data
+     * @param size    Number of bytes available at data
+     * @param profile Resolved undo format profile (LEGACY_6BYTE / MYSQL8_7BYTE)
+     * @return Decoded components; empty/invalid if size < required width or
+     *         profile is UNRESOLVED
+     */
+    static DecodedRollPtr decode_storage(const uint8_t* data, size_t size,
+                                         UndoFormatProfile profile) {
+        if (!data || profile == UndoFormatProfile::UNRESOLVED) return {};
+
+        const size_t want = (profile == UndoFormatProfile::MYSQL8_7BYTE) ? 7 : 6;
+        if (size < want) return {};
+
+        uint64_t val = 0;
+        for (size_t i = 0; i < want; i++) {
+            val = (val << 8) | data[i];
+        }
+
+        uint32_t page_no = static_cast<uint32_t>(val >> 20);
+        uint32_t offset  = static_cast<uint32_t>(val & 0x3FFFF);
+        uint8_t  flags   = 0;
+
+        if (profile == UndoFormatProfile::MYSQL8_7BYTE) {
+            flags = static_cast<uint8_t>((val >> 52) & 0x0F);
+        }
+
+        return {page_no, offset, flags};
+    }
+
+    /**
      * @brief Decode storage format directly to internal uint64_t
      */
     static uint64_t decode_storage_to_internal(const uint8_t* data, size_t size) {
         auto decoded = decode_storage(data, size);
+        if (decoded.is_null()) return 0;
+        return encode(decoded.page_no, decoded.offset, decoded.flags);
+    }
+
+    /**
+     * @brief Decode storage format to internal uint64_t with explicit profile
+     *
+     * Fail-closed: returns 0 for UNRESOLVED profile or null page_no.
+     */
+    static uint64_t decode_storage_to_internal(const uint8_t* data, size_t size,
+                                               UndoFormatProfile profile) {
+        auto decoded = decode_storage(data, size, profile);
         if (decoded.is_null()) return 0;
         return encode(decoded.page_no, decoded.offset, decoded.flags);
     }

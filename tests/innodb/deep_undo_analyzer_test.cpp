@@ -89,10 +89,14 @@ static std::vector<uint8_t> make_insert_rec(const std::vector<std::vector<uint8_
     return rec;
 }
 
-// Build UPDATE undo record (MySQL 8.0+ format with 7-byte roll_ptr)
+// Build UPDATE undo record. Profile selects roll-pointer width:
+//   MYSQL8_7BYTE -> 7-byte BE roll_ptr (MySQL 8.0+)
+//   LEGACY_6BYTE -> 6-byte BE roll_ptr (MySQL 5.6/5.7)
 static std::vector<uint8_t> make_update_rec(
     uint32_t page_no, uint16_t page_offset, uint64_t trx_id,
-    uint64_t prev_roll_ptr, const std::vector<std::vector<uint8_t>>& fields) {
+    uint64_t prev_roll_ptr, const std::vector<std::vector<uint8_t>>& fields,
+    UndoFormatProfile profile = UndoFormatProfile::MYSQL8_7BYTE) {
+    const size_t rp_len = (profile == UndoFormatProfile::MYSQL8_7BYTE) ? 7 : 6;
     std::vector<uint8_t> rec;
     rec.push_back(2);   // TRX_UNDO_UPDATE
     rec.push_back(static_cast<uint8_t>(fields.size()));
@@ -108,11 +112,12 @@ static std::vector<uint8_t> make_update_rec(
     // trx_id (5 LE)
     for (size_t i = 0; i < 5; i++)
         rec.push_back(static_cast<uint8_t>((trx_id >> (i * 8)) & 0xFF));
-    // prev_roll_ptr (7 bytes BE)
+    // prev_roll_ptr (BE, 6 or 7 bytes). encode_storage emits 7 bytes; for the
+    // 6-byte legacy format keep the low 6 (big-endian, drop the top byte).
     auto decoded = RollPtrDecoder::decode(prev_roll_ptr);
     uint8_t storage[7] = {0};
     RollPtrDecoder::encode_storage(storage, decoded);
-    rec.insert(rec.end(), storage, storage + 7);
+    rec.insert(rec.end(), storage + (7 - rp_len), storage + 7);
 
     for (const auto& f : fields) {
         auto fld = make_field(f);
@@ -121,10 +126,13 @@ static std::vector<uint8_t> make_update_rec(
     return rec;
 }
 
-// Build DELETE_MARK undo record (TRX_UNDO_DEL_REC = 13)
+// Build DELETE_MARK undo record (TRX_UNDO_DEL_REC = 13).
+// Profile selects roll-pointer width (7-byte 8.0+ / 6-byte 5.6/5.7).
 static std::vector<uint8_t> make_delete_rec(
     uint32_t page_no, uint16_t page_offset, uint64_t trx_id,
-    uint64_t prev_roll_ptr, const std::vector<std::vector<uint8_t>>& fields) {
+    uint64_t prev_roll_ptr, const std::vector<std::vector<uint8_t>>& fields,
+    UndoFormatProfile profile = UndoFormatProfile::MYSQL8_7BYTE) {
+    const size_t rp_len = (profile == UndoFormatProfile::MYSQL8_7BYTE) ? 7 : 6;
     std::vector<uint8_t> rec;
     rec.push_back(13);  // TRX_UNDO_DEL_REC
     rec.push_back(static_cast<uint8_t>(fields.size()));
@@ -138,7 +146,7 @@ static std::vector<uint8_t> make_delete_rec(
     auto decoded = RollPtrDecoder::decode(prev_roll_ptr);
     uint8_t storage[7] = {0};
     RollPtrDecoder::encode_storage(storage, decoded);
-    rec.insert(rec.end(), storage, storage + 7);
+    rec.insert(rec.end(), storage + (7 - rp_len), storage + 7);
     for (const auto& f : fields) {
         auto fld = make_field(f);
         rec.insert(rec.end(), fld.begin(), fld.end());
@@ -678,6 +686,7 @@ TEST(DeepUndoAnalyzerTest, ParserParseInsertRecord) {
 
 TEST(DeepUndoAnalyzerTest, ParserParseUpdateRecord) {
     UndoRecordV2Parser parser;
+    parser.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
 
     // Create an undo page with one UPDATE record
     uint64_t prev_ptr = RollPtrDecoder::encode(10, 50, 0);
@@ -700,6 +709,7 @@ TEST(DeepUndoAnalyzerTest, ParserParseUpdateRecord) {
 
 TEST(DeepUndoAnalyzerTest, ParserParseDeleteRecord) {
     UndoRecordV2Parser parser;
+    parser.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
 
     uint64_t prev_ptr = RollPtrDecoder::encode(5, 25, 0);
     auto rec = make_delete_rec(300, 400, 99, prev_ptr, {
@@ -715,6 +725,93 @@ TEST(DeepUndoAnalyzerTest, ParserParseDeleteRecord) {
     EXPECT_EQ(result->page_offset, 400u);
     EXPECT_EQ(result->trx_id, 99u);
     EXPECT_EQ(result->old_fields.size(), 1u);
+}
+
+TEST(DeepUndoAnalyzerTest, ParserParseUpdateRecordUnresolvedRejected) {
+    // UNRESOLVED profile must reject UPDATE/DELETE records (fail-closed).
+    UndoRecordV2Parser parser;
+    // Default profile is UNRESOLVED — no set_undo_format_profile call.
+
+    uint64_t prev_ptr = RollPtrDecoder::encode(10, 50, 0);
+    auto rec = make_update_rec(100, 200, 42, prev_ptr, {
+        {0x0A, 0x00, 0x00, 0x00},
+        {0x14, 0x00, 0x00, 0x00}
+    });
+
+    auto page = make_undo_page({rec});
+    auto result = parser.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE, nullptr);
+    EXPECT_FALSE(result.has_value()) << "UNRESOLVED profile must reject UPDATE records";
+}
+
+TEST(DeepUndoAnalyzerTest, ParserParseUpdateRecordLegacy6Byte) {
+    // LEGACY_6BYTE profile with a 6-byte roll_ptr (MySQL 5.6/5.7).
+    UndoRecordV2Parser parser;
+    parser.set_undo_format_profile(UndoFormatProfile::LEGACY_6BYTE);
+
+    uint64_t prev_ptr = RollPtrDecoder::encode(10, 50, 0);
+    auto rec = make_update_rec(100, 200, 42, prev_ptr, {
+        {0x0A, 0x00, 0x00, 0x00},
+        {0x14, 0x00, 0x00, 0x00}
+    }, UndoFormatProfile::LEGACY_6BYTE);
+
+    auto page = make_undo_page({rec});
+    auto result = parser.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE, nullptr);
+    ASSERT_TRUE(result.has_value());
+
+    EXPECT_EQ(result->type, UndoRecordV2::UPDATE);
+    EXPECT_EQ(result->page_no, 100u);
+    EXPECT_EQ(result->page_offset, 200u);
+    EXPECT_EQ(result->trx_id, 42u);
+    EXPECT_EQ(result->prev_undo_ptr, prev_ptr);
+    EXPECT_EQ(result->old_fields.size(), 2u);
+}
+
+TEST(DeepUndoAnalyzerTest, ParserParsePaired6And7Byte) {
+    // Same page with both a 6-byte and a 7-byte record, each parsed with
+    // the correct profile. This validates that width selection is purely
+    // profile-driven, not data-driven.
+    UndoRecordV2Parser parser_6;
+    parser_6.set_undo_format_profile(UndoFormatProfile::LEGACY_6BYTE);
+    UndoRecordV2Parser parser_7;
+    parser_7.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    uint64_t prev_ptr = RollPtrDecoder::encode(10, 50, 0);
+    auto rec_6 = make_update_rec(100, 200, 42, prev_ptr, {
+        {0x0A, 0x00, 0x00, 0x00}
+    }, UndoFormatProfile::LEGACY_6BYTE);
+    auto rec_7 = make_update_rec(200, 400, 99, prev_ptr, {
+        {0xBB, 0x00, 0x00, 0x00}
+    }, UndoFormatProfile::MYSQL8_7BYTE);
+
+    auto page = make_undo_page({rec_6, rec_7});
+
+    // Parse record 0 with 6-byte profile
+    size_t consumed = 0;
+    auto r1 = parser_6.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE, nullptr, &consumed);
+    ASSERT_TRUE(r1.has_value());
+    EXPECT_EQ(r1->page_no, 100u);
+    EXPECT_EQ(r1->prev_undo_ptr, prev_ptr);
+
+    // Parse record 1 with 7-byte profile
+    auto r2 = parser_7.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE + consumed, nullptr, &consumed);
+    ASSERT_TRUE(r2.has_value());
+    EXPECT_EQ(r2->page_no, 200u);
+    EXPECT_EQ(r2->prev_undo_ptr, prev_ptr);
+}
+
+TEST(DeepUndoAnalyzerTest, ParserParseDeleteRecordUnresolvedRejected) {
+    // UNRESOLVED profile must reject DELETE records (fail-closed).
+    UndoRecordV2Parser parser;
+    // Default profile is UNRESOLVED.
+
+    uint64_t prev_ptr = RollPtrDecoder::encode(5, 25, 0);
+    auto rec = make_delete_rec(300, 400, 99, prev_ptr, {
+        {0xFF, 0xFF, 0xFF, 0xFF}
+    });
+
+    auto page = make_undo_page({rec});
+    auto result = parser.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE, nullptr);
+    EXPECT_FALSE(result.has_value()) << "UNRESOLVED profile must reject DELETE records";
 }
 
 TEST(DeepUndoAnalyzerTest, ParserParseInvalidType) {
@@ -1209,6 +1306,7 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainThreeVersionWalk) {
     DeepUndoAnalyzer analyzer;
     analyzer.set_ibdata_path(path);
     analyzer.set_page_size(16384);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
 
     catalog::TableSchema schema;
     schema.table_name = "t";
@@ -1297,6 +1395,7 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainCycleDetected) {
     DeepUndoAnalyzer analyzer;
     analyzer.set_ibdata_path(path);
     analyzer.set_page_size(16384);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
 
     catalog::TableSchema schema;
     schema.table_name = "t";

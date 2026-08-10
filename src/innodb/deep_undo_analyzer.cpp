@@ -458,19 +458,25 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
             rec.trx_id |= static_cast<uint64_t>(page_data[offset + 13]) << 32;
         }
 
-        // Try MySQL 8.0+ format first (7-byte roll_ptr at offset+14)
-        if (data_size - offset >= ROLL_PTR_OFFSET + ROLL_PTR_LEN_80) {
-            header_size = ROLL_PTR_OFFSET + ROLL_PTR_LEN_80;
+        // Read prev_undo_ptr using the resolved undo format profile.
+        // The profile is set externally from MySQL version evidence — never
+        // inferred from remaining bytes. UNRESOLVED (strict mode) rejects
+        // the record because the roll-pointer width is untrusted.
+        const auto profile = undo_format_profile_;
+        if (profile == UndoFormatProfile::UNRESOLVED) {
+            // Fail-closed: no resolved format evidence → refuse to guess.
+            return std::nullopt;
+        }
+
+        const bool is_8byte_profile = (profile == UndoFormatProfile::MYSQL8_7BYTE);
+        const size_t roll_ptr_len = is_8byte_profile ? ROLL_PTR_LEN_80 : ROLL_PTR_LEN_56;
+        if (data_size - offset >= ROLL_PTR_OFFSET + roll_ptr_len) {
+            header_size = ROLL_PTR_OFFSET + roll_ptr_len;
             rec.prev_undo_ptr = RollPtrDecoder::decode_storage_to_internal(
-                page_data + offset + ROLL_PTR_OFFSET, ROLL_PTR_LEN_80);
-        } else if (data_size - offset >= ROLL_PTR_OFFSET + ROLL_PTR_LEN_56) {
-            // Fallback to MySQL 5.6/5.7 format (6-byte roll_ptr at offset+14)
-            header_size = ROLL_PTR_OFFSET + ROLL_PTR_LEN_56;
-            rec.prev_undo_ptr = RollPtrDecoder::decode_storage_to_internal(
-                page_data + offset + ROLL_PTR_OFFSET, ROLL_PTR_LEN_56);
+                page_data + offset + ROLL_PTR_OFFSET, roll_ptr_len, profile);
         } else {
-            // Fallback: minimal header, fields start right after the basic header
-            header_size = 8; // 2 + 4 + 2
+            // Data too short for the selected profile — treat as chain end.
+            header_size = 8;
             rec.prev_undo_ptr = 0;
         }
     }
@@ -548,7 +554,14 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
         // 7. Parse roll_ptr: [47:32] undo_page_no | [31:0] undo_page_offset
         auto [undo_page_no, undo_offset] = parse_roll_ptr(current_roll_ptr);
 
-        // 8. Read undo page
+        // 8. Read undo page and validate provenance
+        //    Fail-closed: if the page cannot be read, the chain is broken.
+        //    We do NOT emit partial results because the version between the
+        //    current record and the next readable record is untrustworthy.
+        if (undo_page_no == 0 || undo_page_no == FIL_NULL) {
+            stats_.broken_chains++;
+            break;  // No provenance — cannot trust the chain
+        }
         auto undo_page = page_manager_.read_undo_page(undo_page_no);
         if (undo_page.empty()) {
             stats_.broken_chains++;
@@ -579,6 +592,8 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
 
         auto& undo_rec = *undo_rec_opt;
         undo_rec.undo_page_no = undo_page_no;
+        undo_rec.tablespace_id = target_tablespace_id_;
+        undo_rec.has_valid_provenance = true;
         undo_rec.roll_ptr = current_roll_ptr;
 
         // 10. Extract old field values based on undo record type
@@ -776,6 +791,15 @@ std::vector<UndoRecordV2> DeepUndoAnalyzer::scan_records(
 
             auto& rec = *rec_opt;
             rec.undo_page_no = page_no;
+            rec.tablespace_id = target_tablespace_id_;
+            rec.has_valid_provenance = true;
+
+            // Fail-closed provenance: records must resolve to a known source
+            // page. A zero undo_page_no means the source identity is unconfirmed.
+            if (rec.undo_page_no == 0) {
+                offset += consumed;
+                continue;
+            }
 
             // Filter by type (empty = keep all)
             if (types.size() > 0) {
@@ -802,28 +826,41 @@ std::vector<UndoRecordV2> DeepUndoAnalyzer::scan_records(
                 continue;
             }
 
-            // Filter by LSN range
-            if (filter.start_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn < *filter.start_lsn) {
-                offset += consumed;
-                continue;
-            }
-            if (filter.end_lsn.has_value() && rec.commit_lsn.has_value() &&
-                *rec.commit_lsn > *filter.end_lsn) {
-                offset += consumed;
-                continue;
+            // Fail-closed LSN range: when an LSN filter is given, a record
+            // without resolved commit_lsn cannot be proven in-range and is
+            // rejected rather than admitted by default.
+            if (filter.start_lsn.has_value() || filter.end_lsn.has_value()) {
+                if (!rec.commit_lsn.has_value()) {
+                    offset += consumed;
+                    continue;
+                }
+                if (filter.start_lsn.has_value() && *rec.commit_lsn < *filter.start_lsn) {
+                    offset += consumed;
+                    continue;
+                }
+                if (filter.end_lsn.has_value() && *rec.commit_lsn > *filter.end_lsn) {
+                    offset += consumed;
+                    continue;
+                }
             }
 
-            // Filter by time range
-            if (filter.start_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp < *filter.start_time) {
-                offset += consumed;
-                continue;
-            }
-            if (filter.end_time.has_value() && rec.approx_timestamp.has_value() &&
-                *rec.approx_timestamp > *filter.end_time) {
-                offset += consumed;
-                continue;
+            // Fail-closed time range: same policy as LSN — missing metadata
+            // under an active time filter rejects the record.
+            if (filter.start_time.has_value() || filter.end_time.has_value()) {
+                if (!rec.approx_timestamp.has_value()) {
+                    offset += consumed;
+                    continue;
+                }
+                if (filter.start_time.has_value() &&
+                    *rec.approx_timestamp < *filter.start_time) {
+                    offset += consumed;
+                    continue;
+                }
+                if (filter.end_time.has_value() &&
+                    *rec.approx_timestamp > *filter.end_time) {
+                    offset += consumed;
+                    continue;
+                }
             }
 
             records.push_back(std::move(rec));
@@ -884,6 +921,8 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
 
             auto& rec = *rec_opt;
             rec.undo_page_no = page_no;
+            rec.tablespace_id = target_tablespace_id_;
+            rec.has_valid_provenance = true;
 
             // Extract table_id from record
             uint32_t rec_table_id = extract_table_id(rec.old_fields);
@@ -1014,6 +1053,13 @@ std::vector<FlashbackResult> DeepUndoAnalyzer::flashback_deletes(
         stats_.flashback_statements++;
     }
 
+    // Post-filter: exclude incomplete results unless include_incomplete is set
+    if (!filter.include_incomplete) {
+        auto it = std::remove_if(results.begin(), results.end(),
+            [](const FlashbackResult& fr) { return !fr.is_complete; });
+        results.erase(it, results.end());
+    }
+
     auto end_time = std::chrono::high_resolution_clock::now();
     stats_.analysis_time_ms += std::chrono::duration<double, std::milli>(
         end_time - start_time).count();
@@ -1049,6 +1095,8 @@ std::vector<RowVersionHistory> DeepUndoAnalyzer::heuristic_reconstruct_chains(
 
             auto& rec = *rec_opt;
             rec.undo_page_no = page_no;
+            rec.tablespace_id = target_tablespace_id_;
+            rec.has_valid_provenance = true;
 
             // Filter by table_id
             uint32_t rec_table_id = extract_table_id(rec.old_fields);

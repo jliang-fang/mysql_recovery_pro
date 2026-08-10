@@ -72,9 +72,11 @@ struct UndoFieldValue {
  *   TRX_UNDO_INS_REC=14       — insert by update (split/merge)
  */
 struct UndoRecordV2 {
-    // Location of this undo record
-    uint32_t undo_page_no   = 0;
-    uint16_t undo_page_offset = 0;
+    // Location of this undo record (provenance)
+    uint32_t undo_page_no   = 0;   // Source undo page number
+    uint16_t undo_page_offset = 0; // Offset within the undo page
+    uint32_t tablespace_id  = 0;   // Tablespace containing this undo record
+    bool     has_valid_provenance = false; // Set when source identity is confirmed
 
     // Transaction metadata
     uint64_t trx_id  = 0;
@@ -279,6 +281,7 @@ public:
      * @param page_size  Page size
      * @param offset     Byte offset within the page where the undo record starts
      * @param table_schema  Optional table schema for field decoding
+     * @param consumed_size  Optional output for bytes consumed
      * @return Parsed UndoRecordV2, or nullopt if parsing fails
      */
     std::optional<UndoRecordV2> parse(
@@ -287,6 +290,26 @@ public:
         size_t offset,
         const catalog::TableSchema* table_schema = nullptr,
         size_t* consumed_size = nullptr);
+
+    /**
+     * @brief Set the undo format profile for roll-pointer width selection
+     *
+     * Must be set from resolved physical-format context (MySQLVersion) or
+     * operator override. The default UNRESOLVED causes parse() to reject
+     * UPDATE/DELETE records that require roll-pointer decoding.
+     *
+     * @param profile  UndoFormatProfile (LEGACY_6BYTE, MYSQL8_7BYTE, or UNRESOLVED)
+     */
+    void set_undo_format_profile(UndoFormatProfile profile) {
+        undo_format_profile_ = profile;
+    }
+
+    /**
+     * @brief Get the current undo format profile
+     */
+    UndoFormatProfile get_undo_format_profile() const {
+        return undo_format_profile_;
+    }
 
     /**
      * @brief Extract prev_undo_ptr from the undo record's field data
@@ -300,6 +323,8 @@ public:
     static uint64_t extract_prev_ptr_from_field(const std::vector<uint8_t>& field_data);
 
 private:
+    UndoFormatProfile undo_format_profile_ = UndoFormatProfile::UNRESOLVED;
+
     // Friend test classes for P0 white-box testing
     friend class DeepUndoAnalyzerTest_ParserReadField_Test;
     friend class DeepUndoAnalyzerTest_ParserReadFieldLongLength_Test;
@@ -362,10 +387,46 @@ public:
     }
 
     /**
+     * @brief Set the target tablespace ID for provenance tracking
+     *
+     * When set, undo records are only accepted if they carry a confirmed
+     * provenance (tablespace_id) matching this value. LSN/time filters are
+     * enforced fail-closed: records whose metadata cannot be resolved are
+     * rejected rather than admitted by default.
+     *
+     * @param space_id  Target tablespace ID (0 = no provenance enforcement)
+     */
+    void set_tablespace_id(uint32_t space_id) {
+        target_tablespace_id_ = space_id;
+    }
+
+    /**
      * @brief Set max chain traversal depth (default 1000)
      */
     void set_max_chain_depth(uint32_t depth) {
         max_chain_depth_ = depth;
+    }
+
+    /**
+     * @brief Set the undo format profile for roll-pointer width selection
+     *
+     * Must be selected from resolved physical-format context (MySQLVersion)
+     * or operator override, never inferred from remaining bytes in a record.
+     * With UNRESOLVED (strict mode), UPDATE/DELETE undo records are rejected
+     * because their roll-pointer width cannot be trusted.
+     *
+     * @param profile  UndoFormatProfile (LEGACY_6BYTE, MYSQL8_7BYTE, or UNRESOLVED)
+     */
+    void set_undo_format_profile(UndoFormatProfile profile) {
+        undo_format_profile_ = profile;
+        record_parser_.set_undo_format_profile(profile);
+    }
+
+    /**
+     * @brief Get the current undo format profile
+     */
+    UndoFormatProfile get_undo_format_profile() const {
+        return undo_format_profile_;
     }
 
     // ==================== Core API ====================
@@ -542,6 +603,7 @@ private:
     std::string ibdata_path_;
     size_t page_size_ = 16384;
     uint32_t max_chain_depth_ = 1000;
+    UndoFormatProfile undo_format_profile_ = UndoFormatProfile::UNRESOLVED;
 
     // Helpers
     UndoPageManager page_manager_;
@@ -549,6 +611,7 @@ private:
     UndoPageIndex* undo_page_index_ = nullptr;  // External index (optional)
     UndoPageIndex internal_index_;               // Lazy-built fallback index
     TrxSysTimestampIndex timestamp_index_;       // TRX_SYS timestamp index
+    uint32_t target_tablespace_id_ = 0;          // Provenance enforcement (0 = off)
     bool index_built_ = false;
     AnalyzerStats stats_;
 

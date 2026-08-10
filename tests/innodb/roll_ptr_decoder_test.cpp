@@ -276,6 +276,110 @@ TEST(RollPtrDecoderTest, EncodeMaxValues) {
     EXPECT_EQ(decoded.flags, 0x3Fu);
 }
 
+// ==================== Profile-based decode_storage Tests ====================
+
+TEST(RollPtrDecoderTest, DecodeStorageWithProfile7Bytes) {
+    // 7 bytes BE with MYSQL8_7BYTE profile
+    uint64_t val = (1ULL << 52) | (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[7];
+    for (int i = 6; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    auto decoded = RollPtrDecoder::decode_storage(data, 7, UndoFormatProfile::MYSQL8_7BYTE);
+    EXPECT_EQ(decoded.page_no, 0x1000u);
+    EXPECT_EQ(decoded.offset, 0x200u);
+    EXPECT_EQ(decoded.flags, 0x1u);
+    EXPECT_TRUE(decoded.is_valid());
+}
+
+TEST(RollPtrDecoderTest, DecodeStorageWithProfile6Bytes) {
+    // 6 bytes BE with LEGACY_6BYTE profile
+    uint64_t val = (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[6];
+    for (int i = 5; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    auto decoded = RollPtrDecoder::decode_storage(data, 6, UndoFormatProfile::LEGACY_6BYTE);
+    EXPECT_EQ(decoded.page_no, 0x1000u);
+    EXPECT_EQ(decoded.offset, 0x200u);
+    EXPECT_EQ(decoded.flags, 0u);  // No flags in 6-byte format
+    EXPECT_TRUE(decoded.is_valid());
+}
+
+TEST(RollPtrDecoderTest, DecodeStorageWithProfileUnresolved) {
+    uint64_t val = (1ULL << 52) | (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[7];
+    for (int i = 6; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    // UNRESOLVED must return invalid regardless of data
+    auto decoded = RollPtrDecoder::decode_storage(data, 7, UndoFormatProfile::UNRESOLVED);
+    EXPECT_FALSE(decoded.is_valid());
+    EXPECT_TRUE(decoded.is_null());
+}
+
+TEST(RollPtrDecoderTest, DecodeStorageWithProfileWrongWidth) {
+    // 6 bytes data with MYSQL8_7BYTE profile — expects 7 bytes, should fail
+    uint64_t val = (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[6];
+    for (int i = 5; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    auto decoded = RollPtrDecoder::decode_storage(data, 6, UndoFormatProfile::MYSQL8_7BYTE);
+    EXPECT_FALSE(decoded.is_valid());
+    EXPECT_TRUE(decoded.is_null());
+}
+
+TEST(RollPtrDecoderTest, DecodeStorageToInternalWithProfileUnresolved) {
+    uint64_t val = (1ULL << 52) | (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[7];
+    for (int i = 6; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    uint64_t internal = RollPtrDecoder::decode_storage_to_internal(data, 7, UndoFormatProfile::UNRESOLVED);
+    EXPECT_EQ(internal, 0u);
+}
+
+TEST(RollPtrDecoderTest, DecodeStorageToInternalWithProfile7Bytes) {
+    uint64_t val = (1ULL << 52) | (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[7];
+    for (int i = 6; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    uint64_t internal = RollPtrDecoder::decode_storage_to_internal(data, 7, UndoFormatProfile::MYSQL8_7BYTE);
+    auto decoded = RollPtrDecoder::decode(internal);
+    EXPECT_EQ(decoded.page_no, 0x1000u);
+    EXPECT_EQ(decoded.offset, 0x200u);
+    EXPECT_EQ(decoded.flags, 0x1u);
+}
+
+TEST(RollPtrDecoderTest, DecodeStorageToInternalWithProfile6Bytes) {
+    uint64_t val = (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data[6];
+    for (int i = 5; i >= 0; i--) {
+        data[i] = static_cast<uint8_t>(val & 0xFF);
+        val >>= 8;
+    }
+
+    uint64_t internal = RollPtrDecoder::decode_storage_to_internal(data, 6, UndoFormatProfile::LEGACY_6BYTE);
+    auto decoded = RollPtrDecoder::decode(internal);
+    EXPECT_EQ(decoded.page_no, 0x1000u);
+    EXPECT_EQ(decoded.offset, 0x200u);
+    EXPECT_EQ(decoded.flags, 0u);
+}
+
 } // namespace innodb
 } // namespace dbrecovery
 
