@@ -73,7 +73,7 @@ std::pair<RepairAttemptResult, SalvagePageResult> DamagedPageHandler::handle_pag
     if (repair_result.improved()) {
         stats_.pages_repaired++;
     }
-    if (after_level > DamageLevel::LEVEL_0_HEALTHY || salvage_result.record_count() > 0) {
+    if (after_level > LEVEL_0_HEALTHY || salvage_result.record_count() > 0) {
         stats_.pages_salvaged++;
     }
 
@@ -93,11 +93,11 @@ std::vector<std::pair<RepairAttemptResult, SalvagePageResult>> DamagedPageHandle
 
 RepairStrategy DamagedPageHandler::select_repair_strategy(DamageLevel level) {
     switch (level) {
-        case DamageLevel::LEVEL_0_HEALTHY:      return RepairStrategy::NONE;
-        case DamageLevel::LEVEL_1_MINOR:        return RepairStrategy::HEADER_ONLY;
-        case DamageLevel::LEVEL_2_MODERATE:     return RepairStrategy::FULL_REPAIR;
-        case DamageLevel::LEVEL_3_SEVERE:       return RepairStrategy::STRUCTURE_ONLY;
-        case DamageLevel::LEVEL_4_CATASTROPHIC: return RepairStrategy::SALVAGE_ONLY;
+        case LEVEL_0_HEALTHY:      return RepairStrategy::NONE;
+        case LEVEL_1_MINOR:        return RepairStrategy::HEADER_ONLY;
+        case LEVEL_2_MODERATE:     return RepairStrategy::FULL_REPAIR;
+        case LEVEL_3_SEVERE:       return RepairStrategy::STRUCTURE_ONLY;
+        case LEVEL_4_CATASTROPHIC: return RepairStrategy::SALVAGE_ONLY;
         default:                                return RepairStrategy::SALVAGE_ONLY;
     }
 }

@@ -20,18 +20,16 @@
 #include <fstream>
 #include <iomanip>
 
+#include "dbrecovery/common/damage_level.hpp"
+
 namespace dbrecovery {
 namespace recovery {
 
 // ==================== Damage Classification ====================
 
-enum class DamageLevel : uint8_t {
-    NONE = 0,
-    L1_MINOR = 1,
-    L2_MODERATE = 2,
-    L3_SEVERE = 3,
-    L4_CRITICAL = 4
-};
+// Unified damage classification shared across the recovery and salvage engines.
+using DamageLevel = common::DamageLevel;
+using common::ForensicEvidence;
 
 struct DamageReport {
     DamageLevel level = DamageLevel::NONE;
@@ -64,6 +62,7 @@ struct SalvagedRow {
     std::vector<std::string> fields;
     double confidence = 0.0;
     std::string recovery_method;
+    ForensicEvidence evidence;  // provenance metadata for L3/L4 heuristic results
 };
 
 // ==================== Salvage Result ====================

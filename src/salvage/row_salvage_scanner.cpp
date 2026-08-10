@@ -24,19 +24,6 @@ namespace salvage {
 using innodb::FIL_HEADER_SIZE;
 using innodb::PAGE_INFIMUM_REC_OFFSET_ABS;
 
-// ==================== damage_level_to_string ====================
-
-std::string damage_level_to_string(DamageLevel level) {
-    switch (level) {
-        case DamageLevel::LEVEL_0_HEALTHY:      return "HEALTHY";
-        case DamageLevel::LEVEL_1_MINOR:        return "MINOR_DAMAGE";
-        case DamageLevel::LEVEL_2_MODERATE:     return "MODERATE_DAMAGE";
-        case DamageLevel::LEVEL_3_SEVERE:       return "SEVERE_DAMAGE";
-        case DamageLevel::LEVEL_4_CATASTROPHIC: return "CATASTROPHIC_DAMAGE";
-        default:                                return "UNKNOWN";
-    }
-}
-
 // ==================== SchemaHint::from_table_schema ====================
 
 SchemaHint SchemaHint::from_table_schema(const catalog::TableSchema& schema) {
@@ -106,7 +93,7 @@ DamageLevel RowSalvageScanner::detect_damage_level(
     const uint8_t* page_data, size_t data_size) const {
 
     if (!page_data || data_size < FIL_HEADER_SIZE + 56) {
-        return DamageLevel::LEVEL_4_CATASTROPHIC;
+        return LEVEL_4_CATASTROPHIC;
     }
 
     uint32_t failures = 0;
@@ -197,22 +184,22 @@ DamageLevel RowSalvageScanner::detect_damage_level(
     }
 
     double fail_ratio = static_cast<double>(failures) / static_cast<double>(total_checks);
-    if (fail_ratio == 0.0) return DamageLevel::LEVEL_0_HEALTHY;
-    if (fail_ratio <= 0.2) return DamageLevel::LEVEL_1_MINOR;
-    if (fail_ratio <= 0.4) return DamageLevel::LEVEL_2_MODERATE;
-    if (fail_ratio <= 0.7) return DamageLevel::LEVEL_3_SEVERE;
-    return DamageLevel::LEVEL_4_CATASTROPHIC;
+    if (fail_ratio == 0.0) return LEVEL_0_HEALTHY;
+    if (fail_ratio <= 0.2) return LEVEL_1_MINOR;
+    if (fail_ratio <= 0.4) return LEVEL_2_MODERATE;
+    if (fail_ratio <= 0.7) return LEVEL_3_SEVERE;
+    return LEVEL_4_CATASTROPHIC;
 }
 
 // ==================== RowSalvageScanner — select_strategy ====================
 
 ScanStrategy RowSalvageScanner::select_strategy(DamageLevel level) {
     switch (level) {
-        case DamageLevel::LEVEL_0_HEALTHY:      return ScanStrategy::BPLUS_TREE;
-        case DamageLevel::LEVEL_1_MINOR:        return ScanStrategy::PAGE_DIR;
-        case DamageLevel::LEVEL_2_MODERATE:     return ScanStrategy::LINEAR_SCAN;
-        case DamageLevel::LEVEL_3_SEVERE:       return ScanStrategy::BRUTE_FORCE;
-        case DamageLevel::LEVEL_4_CATASTROPHIC: return ScanStrategy::FRAGMENT;
+        case LEVEL_0_HEALTHY:      return ScanStrategy::BPLUS_TREE;
+        case LEVEL_1_MINOR:        return ScanStrategy::PAGE_DIR;
+        case LEVEL_2_MODERATE:     return ScanStrategy::LINEAR_SCAN;
+        case LEVEL_3_SEVERE:       return ScanStrategy::BRUTE_FORCE;
+        case LEVEL_4_CATASTROPHIC: return ScanStrategy::FRAGMENT;
         default:                                return ScanStrategy::BRUTE_FORCE;
     }
 }
@@ -227,7 +214,7 @@ SalvagePageResult RowSalvageScanner::salvage_scan_page(
     result.page_no = page_no;
 
     if (!page_data || data_size < 54) {
-        result.damage_level = DamageLevel::LEVEL_4_CATASTROPHIC;
+        result.damage_level = LEVEL_4_CATASTROPHIC;
         result.strategy_used = ScanStrategy::FRAGMENT;
         return result;
     }
@@ -236,7 +223,7 @@ SalvagePageResult RowSalvageScanner::salvage_scan_page(
     result.strategy_used = select_strategy(result.damage_level);
 
     stats_.pages_scanned++;
-    if (result.damage_level > DamageLevel::LEVEL_0_HEALTHY) {
+    if (result.damage_level > LEVEL_0_HEALTHY) {
         stats_.pages_with_damage++;
     }
     stats_.damage_level_distribution[result.damage_level]++;

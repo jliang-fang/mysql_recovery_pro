@@ -257,6 +257,11 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l1(
             row.field_count = field_count;
             row.confidence = 0.7;
             row.recovery_method = "header_repair";
+            row.evidence.level = DamageLevel::L1_MINOR;
+            row.evidence.strategy = "header_repair";
+            row.evidence.source_offset = rec_off;
+            row.evidence.confidence = 0.7f;
+            row.evidence.tags = {"verified"};
 
             // Extract field values as hex
             uint16_t data_start = rec_off + field_count * 2 + 1; // +1 for info_bits
@@ -318,6 +323,11 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l2(
             row.field_count = field_count;
             row.confidence = 0.5;
             row.recovery_method = "signature_scan";
+            row.evidence.level = DamageLevel::L2_MODERATE;
+            row.evidence.strategy = "signature_scan";
+            row.evidence.source_offset = static_cast<uint16_t>(pos);
+            row.evidence.confidence = 0.5f;
+            row.evidence.tags = {"reconstructed"};
 
             // Re-read offset table entries
             std::vector<uint16_t> offsets;
@@ -380,6 +390,11 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l3(
             row.fields.push_back(it->str());
             row.confidence = 0.4;
             row.recovery_method = method;
+            row.evidence.level = DamageLevel::L3_SEVERE;
+            row.evidence.strategy = method;
+            row.evidence.source_offset = static_cast<uint16_t>(it->position());
+            row.evidence.confidence = 0.4f;
+            row.evidence.tags = {"heuristic", "partial"};
             rows.push_back(row);
         }
     };
@@ -413,6 +428,11 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
                 row.fields.push_back(current);
                 row.confidence = 0.3;
                 row.recovery_method = "string_extract";
+                row.evidence.level = DamageLevel::L4_CRITICAL;
+                row.evidence.strategy = "string_extract";
+                row.evidence.source_offset = static_cast<uint16_t>(start_pos);
+                row.evidence.confidence = 0.3f;
+                row.evidence.tags = {"heuristic", "fragment"};
                 rows.push_back(row);
             }
             current.clear();
@@ -428,6 +448,11 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
         row.fields.push_back(current);
         row.confidence = 0.3;
         row.recovery_method = "string_extract";
+        row.evidence.level = DamageLevel::L4_CRITICAL;
+        row.evidence.strategy = "string_extract";
+        row.evidence.source_offset = static_cast<uint16_t>(start_pos);
+        row.evidence.confidence = 0.3f;
+        row.evidence.tags = {"heuristic", "fragment"};
         rows.push_back(row);
     }
 

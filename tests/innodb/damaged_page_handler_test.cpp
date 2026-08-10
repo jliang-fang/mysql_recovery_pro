@@ -64,17 +64,17 @@ static std::vector<uint8_t> create_damaged_page(
     size_t page_size = 16384) {
 
     switch (target) {
-    case DamageLevel::LEVEL_0_HEALTHY:
+    case LEVEL_0_HEALTHY:
         return create_healthy_page(0, page_size);
 
-    case DamageLevel::LEVEL_1_MINOR: {
+    case LEVEL_1_MINOR: {
         // 1 failure: invalid page type
         auto page = create_healthy_page(0, page_size);
         write_be<uint16_t>(page.data(), 24, 0xFFFF);
         return page;
     }
 
-    case DamageLevel::LEVEL_2_MODERATE: {
+    case LEVEL_2_MODERATE: {
         // 3 failures: invalid page type, LSN=0, n_dir_slots=0
         auto page = create_healthy_page(0, page_size);
         write_be<uint16_t>(page.data(), 24, 0xFFFF);
@@ -83,7 +83,7 @@ static std::vector<uint8_t> create_damaged_page(
         return page;
     }
 
-    case DamageLevel::LEVEL_3_SEVERE: {
+    case LEVEL_3_SEVERE: {
         // 5 failures: checksum mismatch, invalid page type, LSN=0,
         //             n_dir_slots=0, INFIMUM corrupted
         auto page = create_healthy_page(0, page_size);
@@ -95,7 +95,7 @@ static std::vector<uint8_t> create_damaged_page(
         return page;
     }
 
-    case DamageLevel::LEVEL_4_CATASTROPHIC: {
+    case LEVEL_4_CATASTROPHIC: {
         // 9 failures: all 10 checks fail except check 1 (checksum=0 passes)
         // page_header_ok stays true (n_dir_slots=2, heap_top=205)
         // so checks 8,9,10 are also evaluated and fail
@@ -134,8 +134,8 @@ TEST(DamagedPageHandlerTest, HealthyPage) {
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_0_HEALTHY);
-    EXPECT_EQ(repair_result.after_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.after_level, LEVEL_0_HEALTHY);
     EXPECT_FALSE(repair_result.header_repaired);
     EXPECT_FALSE(repair_result.structure_repaired);
     EXPECT_FALSE(repair_result.checksum_fixed);
@@ -144,39 +144,39 @@ TEST(DamagedPageHandlerTest, HealthyPage) {
 }
 
 TEST(DamagedPageHandlerTest, MinorDamage) {
-    auto page = create_damaged_page(DamageLevel::LEVEL_1_MINOR);
+    auto page = create_damaged_page(LEVEL_1_MINOR);
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_1_MINOR);
+    EXPECT_EQ(repair_result.before_level, LEVEL_1_MINOR);
     // Strategy should be HEADER_ONLY
-    EXPECT_GE(repair_result.after_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_GE(repair_result.after_level, LEVEL_0_HEALTHY);
 }
 
 TEST(DamagedPageHandlerTest, ModerateDamage) {
-    auto page = create_damaged_page(DamageLevel::LEVEL_2_MODERATE);
+    auto page = create_damaged_page(LEVEL_2_MODERATE);
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_2_MODERATE);
-    EXPECT_GE(repair_result.after_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_2_MODERATE);
+    EXPECT_GE(repair_result.after_level, LEVEL_0_HEALTHY);
 }
 
 TEST(DamagedPageHandlerTest, SevereDamage) {
-    auto page = create_damaged_page(DamageLevel::LEVEL_3_SEVERE);
+    auto page = create_damaged_page(LEVEL_3_SEVERE);
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_3_SEVERE);
-    EXPECT_GE(repair_result.after_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_3_SEVERE);
+    EXPECT_GE(repair_result.after_level, LEVEL_0_HEALTHY);
 }
 
 TEST(DamagedPageHandlerTest, CatastrophicDamage) {
-    auto page = create_damaged_page(DamageLevel::LEVEL_4_CATASTROPHIC);
+    auto page = create_damaged_page(LEVEL_4_CATASTROPHIC);
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_4_CATASTROPHIC);
+    EXPECT_EQ(repair_result.before_level, LEVEL_4_CATASTROPHIC);
     // CATASTROPHIC → SALVAGE_ONLY, no repair attempted
     EXPECT_FALSE(repair_result.header_repaired);
     EXPECT_FALSE(repair_result.structure_repaired);
@@ -186,27 +186,27 @@ TEST(DamagedPageHandlerTest, CatastrophicDamage) {
 // ==================== select_repair_strategy Tests ====================
 
 TEST(DamagedPageHandlerTest, SelectRepairStrategyMapping) {
-    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(DamageLevel::LEVEL_0_HEALTHY),
+    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(LEVEL_0_HEALTHY),
               RepairStrategy::NONE);
-    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(DamageLevel::LEVEL_1_MINOR),
+    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(LEVEL_1_MINOR),
               RepairStrategy::HEADER_ONLY);
-    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(DamageLevel::LEVEL_2_MODERATE),
+    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(LEVEL_2_MODERATE),
               RepairStrategy::FULL_REPAIR);
-    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(DamageLevel::LEVEL_3_SEVERE),
+    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(LEVEL_3_SEVERE),
               RepairStrategy::STRUCTURE_ONLY);
-    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(DamageLevel::LEVEL_4_CATASTROPHIC),
+    EXPECT_EQ(DamagedPageHandler::select_repair_strategy(LEVEL_4_CATASTROPHIC),
               RepairStrategy::SALVAGE_ONLY);
 }
 
 // ==================== Repair Disabled Tests ====================
 
 TEST(DamagedPageHandlerTest, RepairDisabled) {
-    auto page = create_damaged_page(DamageLevel::LEVEL_1_MINOR);
+    auto page = create_damaged_page(LEVEL_1_MINOR);
     DamagedPageHandler handler;
     handler.set_enable_repair(false);
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_1_MINOR);
+    EXPECT_EQ(repair_result.before_level, LEVEL_1_MINOR);
     // No repair should be attempted
     EXPECT_FALSE(repair_result.header_repaired);
     EXPECT_FALSE(repair_result.structure_repaired);
@@ -219,8 +219,8 @@ TEST(DamagedPageHandlerTest, RepairDisabled) {
 
 TEST(DamagedPageHandlerTest, HandleMultiplePages) {
     auto healthy = create_healthy_page(0);
-    auto minor = create_damaged_page(DamageLevel::LEVEL_1_MINOR, 16384);
-    auto severe = create_damaged_page(DamageLevel::LEVEL_3_SEVERE, 16384);
+    auto minor = create_damaged_page(LEVEL_1_MINOR, 16384);
+    auto severe = create_damaged_page(LEVEL_3_SEVERE, 16384);
 
     std::vector<std::pair<std::vector<uint8_t>, uint32_t>> pages;
     pages.emplace_back(std::move(healthy), 0);
@@ -251,7 +251,7 @@ TEST(DamagedPageHandlerTest, NullData) {
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(nullptr, 0, 0);
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_4_CATASTROPHIC);
+    EXPECT_EQ(repair_result.before_level, LEVEL_4_CATASTROPHIC);
     EXPECT_TRUE(salvage_result.records.empty());
     EXPECT_FALSE(repair_result.header_repaired);
     EXPECT_FALSE(repair_result.structure_repaired);
@@ -262,7 +262,7 @@ TEST(DamagedPageHandlerTest, EmptyBuffer) {
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(empty.data(), 0, empty.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_4_CATASTROPHIC);
+    EXPECT_EQ(repair_result.before_level, LEVEL_4_CATASTROPHIC);
     EXPECT_TRUE(salvage_result.records.empty());
 }
 
@@ -272,7 +272,7 @@ TEST(DamagedPageHandlerTest, TooSmallBuffer) {
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(small.data(), 0, small.size());
 
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_4_CATASTROPHIC);
+    EXPECT_EQ(repair_result.before_level, LEVEL_4_CATASTROPHIC);
 }
 
 // ==================== Statistics Tests ====================
@@ -300,9 +300,9 @@ TEST(DamagedPageHandlerTest, StatsAfterSinglePage) {
 
     const auto& stats = handler.get_stats();
     EXPECT_EQ(stats.pages_handled, 1u);
-    EXPECT_TRUE(stats.damage_distribution.find(DamageLevel::LEVEL_0_HEALTHY)
+    EXPECT_TRUE(stats.damage_distribution.find(LEVEL_0_HEALTHY)
                 != stats.damage_distribution.end());
-    EXPECT_EQ(stats.damage_distribution.at(DamageLevel::LEVEL_0_HEALTHY), 1u);
+    EXPECT_EQ(stats.damage_distribution.at(LEVEL_0_HEALTHY), 1u);
     EXPECT_TRUE(stats.repair_strategy_usage.find(RepairStrategy::NONE)
                 != stats.repair_strategy_usage.end());
 }
@@ -323,7 +323,7 @@ TEST(DamagedPageHandlerTest, StatsReset) {
 TEST(DamagedPageHandlerTest, StatsMultiplePages) {
     DamagedPageHandler handler;
     auto healthy = create_healthy_page(0);
-    auto minor = create_damaged_page(DamageLevel::LEVEL_1_MINOR);
+    auto minor = create_damaged_page(LEVEL_1_MINOR);
 
     handler.handle_page(healthy.data(), 0, healthy.size());
     handler.handle_page(minor.data(), 1, minor.size());
@@ -342,7 +342,7 @@ TEST(DamagedPageHandlerTest, SetMinConfidence) {
     handler.set_min_confidence(0.5);
     auto page = create_healthy_page();
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_0_HEALTHY);
 }
 
 TEST(DamagedPageHandlerTest, SetPageSize) {
@@ -361,7 +361,7 @@ TEST(DamagedPageHandlerTest, SetPageSize) {
     write_le<uint16_t>(page.data(), 201, 0);
 
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_0_HEALTHY);
 }
 
 TEST(DamagedPageHandlerTest, SetEnableDedup) {
@@ -369,7 +369,7 @@ TEST(DamagedPageHandlerTest, SetEnableDedup) {
     handler.set_enable_dedup(false);
     auto page = create_healthy_page();
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_0_HEALTHY);
 }
 
 TEST(DamagedPageHandlerTest, SetScanBruteForceStep) {
@@ -377,7 +377,7 @@ TEST(DamagedPageHandlerTest, SetScanBruteForceStep) {
     handler.set_scan_brute_force_step(4);
     auto page = create_healthy_page();
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
-    EXPECT_EQ(repair_result.before_level, DamageLevel::LEVEL_0_HEALTHY);
+    EXPECT_EQ(repair_result.before_level, LEVEL_0_HEALTHY);
 }
 
 // ==================== Report Tests ====================
@@ -392,7 +392,7 @@ TEST(DamagedPageHandlerTest, GenerateReportWithoutData) {
 TEST(DamagedPageHandlerTest, GenerateReportAfterHandling) {
     DamagedPageHandler handler;
     auto healthy = create_healthy_page(0);
-    auto minor = create_damaged_page(DamageLevel::LEVEL_1_MINOR);
+    auto minor = create_damaged_page(LEVEL_1_MINOR);
     handler.handle_page(healthy.data(), 0, healthy.size());
     handler.handle_page(minor.data(), 1, minor.size());
 
@@ -456,7 +456,7 @@ TEST(DamagedPageHandlerTest, RepairSkippedForHealthy) {
 
 TEST(DamagedPageHandlerTest, RepairSkippedForCatastrophic) {
     // CATASTROPHIC → SALVAGE_ONLY → repair not attempted
-    auto page = create_damaged_page(DamageLevel::LEVEL_4_CATASTROPHIC);
+    auto page = create_damaged_page(LEVEL_4_CATASTROPHIC);
     DamagedPageHandler handler;
     auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
 
@@ -479,32 +479,32 @@ TEST(DamagedPageHandlerTest, RepairStrategyToString) {
 
 TEST(DamagedPageHandlerTest, RepairResultImproved) {
     RepairAttemptResult result;
-    result.before_level = DamageLevel::LEVEL_3_SEVERE;
-    result.after_level = DamageLevel::LEVEL_1_MINOR;
+    result.before_level = LEVEL_3_SEVERE;
+    result.after_level = LEVEL_1_MINOR;
     EXPECT_TRUE(result.improved());
     EXPECT_FALSE(result.is_fully_repaired());
 }
 
 TEST(DamagedPageHandlerTest, RepairResultFullyRepaired) {
     RepairAttemptResult result;
-    result.before_level = DamageLevel::LEVEL_1_MINOR;
-    result.after_level = DamageLevel::LEVEL_0_HEALTHY;
+    result.before_level = LEVEL_1_MINOR;
+    result.after_level = LEVEL_0_HEALTHY;
     EXPECT_TRUE(result.improved());
     EXPECT_TRUE(result.is_fully_repaired());
 }
 
 TEST(DamagedPageHandlerTest, RepairResultNotImproved) {
     RepairAttemptResult result;
-    result.before_level = DamageLevel::LEVEL_2_MODERATE;
-    result.after_level = DamageLevel::LEVEL_2_MODERATE;
+    result.before_level = LEVEL_2_MODERATE;
+    result.after_level = LEVEL_2_MODERATE;
     EXPECT_FALSE(result.improved());
     EXPECT_FALSE(result.is_fully_repaired());
 }
 
 TEST(DamagedPageHandlerTest, RepairResultWorse) {
     RepairAttemptResult result;
-    result.before_level = DamageLevel::LEVEL_1_MINOR;
-    result.after_level = DamageLevel::LEVEL_3_SEVERE;
+    result.before_level = LEVEL_1_MINOR;
+    result.after_level = LEVEL_3_SEVERE;
     EXPECT_FALSE(result.improved());
     EXPECT_FALSE(result.is_fully_repaired());
 }

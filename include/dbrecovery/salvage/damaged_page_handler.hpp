@@ -62,12 +62,12 @@ struct RepairAttemptResult {
     bool structure_repaired = false;
     bool checksum_fixed     = false;
     uint32_t page_no        = 0;
-    DamageLevel before_level = DamageLevel::LEVEL_4_CATASTROPHIC;
-    DamageLevel after_level  = DamageLevel::LEVEL_4_CATASTROPHIC;
+    DamageLevel before_level = LEVEL_4_CATASTROPHIC;
+    DamageLevel after_level  = LEVEL_4_CATASTROPHIC;
     std::vector<std::string> repair_log;
 
     bool improved() const { return after_level < before_level; }
-    bool is_fully_repaired() const { return after_level == DamageLevel::LEVEL_0_HEALTHY; }
+    bool is_fully_repaired() const { return after_level == LEVEL_0_HEALTHY; }
 };
 
 // ==================== DamagedPageHandler ====================

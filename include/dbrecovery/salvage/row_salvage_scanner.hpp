@@ -37,6 +37,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/common/damage_level.hpp"
 
 namespace dbrecovery {
 namespace salvage {
@@ -47,15 +48,17 @@ using innodb::REC_STATUS_SUPREMUM;
 
 // ==================== Damage Level Enum ====================
 
-enum class DamageLevel : uint8_t {
-    LEVEL_0_HEALTHY       = 0,
-    LEVEL_1_MINOR         = 1,
-    LEVEL_2_MODERATE      = 2,
-    LEVEL_3_SEVERE        = 3,
-    LEVEL_4_CATASTROPHIC  = 4
-};
+// Canonical damage classification (shared with the recovery engine).
+using DamageLevel = common::DamageLevel;
 
-std::string damage_level_to_string(DamageLevel level);
+inline constexpr DamageLevel LEVEL_0_HEALTHY      = DamageLevel::NONE;
+inline constexpr DamageLevel LEVEL_1_MINOR        = DamageLevel::L1_MINOR;
+inline constexpr DamageLevel LEVEL_2_MODERATE     = DamageLevel::L2_MODERATE;
+inline constexpr DamageLevel LEVEL_3_SEVERE       = DamageLevel::L3_SEVERE;
+inline constexpr DamageLevel LEVEL_4_CATASTROPHIC = DamageLevel::L4_CRITICAL;
+
+// damage_level_to_string is inherited from common::damage_level_to_string
+using common::damage_level_to_string;
 
 // ==================== Scan Strategy Enum ====================
 
@@ -107,7 +110,7 @@ struct DamageLogEntry {
 
 struct SalvagePageResult {
     uint32_t page_no = 0;
-    DamageLevel damage_level = DamageLevel::LEVEL_0_HEALTHY;
+    DamageLevel damage_level = LEVEL_0_HEALTHY;
     ScanStrategy strategy_used = ScanStrategy::BPLUS_TREE;
 
     std::vector<SalvagedRecord> records;
