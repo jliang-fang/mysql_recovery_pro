@@ -33,6 +33,8 @@
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/common/endian_compat.hpp"
 #include "dbrecovery/common/version_compat.hpp"
+#include "dbrecovery/validate/unified_validator.hpp"
+#include "dbrecovery/report/recovery_report.hpp"
 
 namespace dbrecovery {
 namespace {
@@ -1232,6 +1234,139 @@ TEST_F(ASanUBSanStressTest, NoLeaks) {
     }
     // No explicit assertions needed — ASan will fail the test if leaks are detected
     SUCCEED() << "100 iterations of basic operations completed without ASan/UBSan errors";
+}
+
+// ======================================================================
+// Phase 7: Integrated Validation & Capability Report
+// ======================================================================
+
+class CapabilityReportTest : public ::testing::Test {
+protected:
+    report::CapabilityReport run_report(MySQLVersion version) {
+        return validate::UnifiedValidator::validate_all(version);
+    }
+
+    void assert_feature(const report::CapabilityReport& report,
+                        const std::string& name, bool expected) {
+        for (const auto& f : report.features) {
+            if (f.name == name) {
+                EXPECT_EQ(f.supported, expected)
+                    << "Feature '" << name << "' for " << report.mysql_version
+                    << " expected " << (expected ? "SUPPORTED" : "NOT SUPPORTED")
+                    << " but got " << (f.supported ? "SUPPORTED" : "NOT SUPPORTED")
+                    << (f.supported == expected ? "" : " (" + f.limitation + ")");
+                return;
+            }
+        }
+        FAIL() << "Feature '" << name << "' not found in capability report for "
+               << report.mysql_version;
+    }
+};
+
+TEST_F(CapabilityReportTest, MySQL56NoSDI) {
+    // MySQL 5.6 does not support SDI, encryption, or temporary pages
+    // Compression IS supported (ROW_FORMAT=COMPRESSED with KEY_BLOCK_SIZE)
+    auto report = run_report(MySQLVersion::MYSQL_56);
+    assert_feature(report, "SDI extraction", false);
+    assert_feature(report, "TDE/page encryption", false);
+    assert_feature(report, "Page compression", true);
+    assert_feature(report, "Temporary pages", false);
+    EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_56);
+}
+
+TEST_F(CapabilityReportTest, MySQL80HasSDI) {
+    // MySQL 8.0 supports SDI, encryption, compression but not temporary pages
+    auto report = run_report(MySQLVersion::MYSQL_80);
+    assert_feature(report, "SDI extraction", true);
+    // MySQL 8.0 supports encryption and compression
+    assert_feature(report, "TDE/page encryption", true);
+    assert_feature(report, "Page compression", true);
+    // Temporary pages require MySQL 8.4+
+    assert_feature(report, "Temporary pages", false);
+    EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_80);
+}
+
+TEST_F(CapabilityReportTest, MySQL84HasTemporaryPages) {
+    // MySQL 8.4 supports all features including temporary pages
+    auto report = run_report(MySQLVersion::MYSQL_84);
+    assert_feature(report, "SDI extraction", true);
+    assert_feature(report, "Temporary pages", true);
+    EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_84);
+}
+
+TEST_F(CapabilityReportTest, MySQL90AllFeatures) {
+    // MySQL 9.0 supports all features
+    auto report = run_report(MySQLVersion::MYSQL_90);
+    assert_feature(report, "SDI extraction", true);
+    assert_feature(report, "Temporary pages", true);
+    EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_90);
+    // No warnings for supported version
+    EXPECT_TRUE(report.warnings.empty() ||
+                report.warnings[0].find("outside the supported range") == std::string::npos);
+}
+
+TEST_F(CapabilityReportTest, UnknownVersionWarning) {
+    // UNKNOWN version should produce a warning
+    auto report = run_report(MySQLVersion::UNKNOWN);
+    bool has_warning = false;
+    for (const auto& w : report.warnings) {
+        if (w.find("UNKNOWN") != std::string::npos) has_warning = true;
+    }
+    EXPECT_TRUE(has_warning) << "UNKNOWN version must produce a warning";
+}
+
+TEST_F(CapabilityReportTest, SalvageLevelsAlwaysAvailable) {
+    // Salvage L1-L4 are build capabilities, available for all versions
+    auto report = run_report(MySQLVersion::MYSQL_56);
+    assert_feature(report, "salvage L1 (header repair)", true);
+    assert_feature(report, "salvage L2 (signature scan)", true);
+    assert_feature(report, "salvage L3 (heuristic scan)", true);
+    assert_feature(report, "salvage L4 (fragment extract)", true);
+}
+
+TEST_F(CapabilityReportTest, PageTypeCapabilities) {
+    // Verify page type capability matrix for MySQL 5.6 (SDI & encrypted unsupported)
+    auto report_56 = run_report(MySQLVersion::MYSQL_56);
+    assert_feature(report_56, "page_type:FIL_PAGE_INDEX", true);
+    assert_feature(report_56, "page_type:FIL_PAGE_COMPRESSED", true);
+    assert_feature(report_56, "page_type:FIL_PAGE_SDI", false);
+    assert_feature(report_56, "page_type:FIL_PAGE_COMPRESSED_AND_ENCRYPTED", false);
+
+    // MySQL 8.0 supports SDI, compressed, and encrypted page types
+    auto report_80 = run_report(MySQLVersion::MYSQL_80);
+    assert_feature(report_80, "page_type:FIL_PAGE_COMPRESSED", true);
+    assert_feature(report_80, "page_type:FIL_PAGE_COMPRESSED_AND_ENCRYPTED", true);
+    assert_feature(report_80, "page_type:FIL_PAGE_SDI", true);
+}
+
+TEST_F(CapabilityReportTest, ReportToStringNotEmpty) {
+    // CapabilityReport::to_string() must produce non-empty output
+    auto report = run_report(MySQLVersion::MYSQL_80);
+    std::string s = report.to_string();
+    EXPECT_FALSE(s.empty()) << "CapabilityReport::to_string() must not be empty";
+    EXPECT_NE(s.find("Capability Report"), std::string::npos)
+        << "Report must contain title";
+    EXPECT_NE(s.find("SUPPORTED"), std::string::npos)
+        << "Report must contain SUPPORTED features";
+}
+
+TEST_F(CapabilityReportTest, FeatureLookupByName) {
+    // is_feature_supported() must work correctly
+    auto report = run_report(MySQLVersion::MYSQL_80);
+    EXPECT_TRUE(report.is_feature_supported("SDI extraction"));
+    EXPECT_FALSE(report.is_feature_supported("Temporary pages"));
+    EXPECT_FALSE(report.is_feature_supported("nonexistent_feature"));
+}
+
+TEST_F(CapabilityReportTest, MySQL57MidRange) {
+    // MySQL 5.7: no SDI, no encryption, compression supported, no temporary pages
+    auto report = run_report(MySQLVersion::MYSQL_57);
+    assert_feature(report, "SDI extraction", false);
+    assert_feature(report, "TDE/page encryption", false);
+    assert_feature(report, "Page compression", true);
+    assert_feature(report, "Temporary pages", false);
+    // But salvage levels are always available
+    assert_feature(report, "salvage L1 (header repair)", true);
 }
 
 } // namespace

@@ -42,6 +42,7 @@
 #include "dbrecovery/tools/interactive_schema_builder.hpp"
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
+#include "dbrecovery/validate/unified_validator.hpp"
 #include "dbrecovery/innodb/partition_table_recovery.hpp"
 #include "dbrecovery/innodb/shared_tablespace_recovery.hpp"
 #include "dbrecovery/innodb/ddl_change_detector.hpp"
@@ -225,6 +226,9 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--default-recovery\033[0m         Default recovery mode\n";
 	    std::cout << "  \033[1m--page-type-inferrer\033[0m       Enable 4-level progressive page detection\n";
 	    std::cout << "                                 (finds pages at non-aligned offsets, default: off)\n\n";
+	    std::cout << "\033[1mDiagnostic Options:\033[0m\n";
+	    std::cout << "  \033[1m--capability-report\033[0m        Print recovery capability report for --mysql-version\n";
+	    std::cout << "                                 and exit (no recovery performed)\n\n";
     std::cout << "\033[1mScan & Discovery Options:\033[0m\n";
     std::cout << "  \033[1m--scan\033[0m                     Scan and display page information\n";
     std::cout << "  \033[1m--scan-dir=<dir>\033[0m           Scan entire data directory\n";
@@ -463,6 +467,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     if (show_help_only) {
         show_help(argv[0]);
+        return 0;
+    }
+
+    // Phase 7: --capability-report — print and exit
+    if (parser_.has_option("capability-report")) {
+        std::string ver_str = parser_.get_option("mysql-version", "8.0");
+        MySQLVersion version = MySQLVersion::UNKNOWN;
+        // Map version string to enum
+        if (ver_str == "5.6") version = MySQLVersion::MYSQL_56;
+        else if (ver_str == "5.7") version = MySQLVersion::MYSQL_57;
+        else if (ver_str == "8.0") version = MySQLVersion::MYSQL_80;
+        else if (ver_str == "8.1") version = MySQLVersion::MYSQL_81;
+        else if (ver_str == "8.4") version = MySQLVersion::MYSQL_84;
+        else if (ver_str == "9.0") version = MySQLVersion::MYSQL_90;
+        else std::cerr << "[WARN] Unknown version '" << ver_str << "', using UNKNOWN\n";
+
+        auto report = validate::UnifiedValidator::validate_all(version);
+        std::cout << report.to_string() << "\n";
         return 0;
     }
 

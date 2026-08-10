@@ -22,6 +22,8 @@
 #include <fstream>
 #include <filesystem>
 
+#include "dbrecovery/common/version_compat.hpp"
+
 namespace dbrecovery {
 namespace report {
 
@@ -99,6 +101,57 @@ struct TimingInfo {
     double parse_time_seconds = 0.0;
     double export_time_seconds = 0.0;
     double total_time_seconds = 0.0;
+};
+
+// ==================== Capability Report ====================
+
+/**
+ * @brief CapabilityReport — what this build can/can't recover for a given version.
+ *
+ * Surfaces the recovery capability boundaries (SDI extraction, page type
+ * recovery, salvage levels, encryption/compression) so users can see at a
+ * glance which features are supported for the detected MySQL version.
+ */
+struct CapabilityReport {
+    struct Feature {
+        std::string name;
+        bool supported;
+        std::string limitation;
+
+        std::string to_string() const {
+            return name + ": " + (supported ? "SUPPORTED" : "NOT SUPPORTED")
+                + (limitation.empty() ? "" : " (" + limitation + ")");
+        }
+    };
+
+    std::string mysql_version;
+    dbrecovery::MySQLVersion version_id = dbrecovery::MySQLVersion::UNKNOWN;
+    std::vector<Feature> features;
+    std::vector<std::string> warnings;
+
+    bool is_feature_supported(const std::string& name) const {
+        for (const auto& f : features) {
+            if (f.name == name) return f.supported;
+        }
+        return false;
+    }
+
+    std::string to_string() const {
+        std::ostringstream oss;
+        oss << "=== Capability Report ===\n"
+            << "MySQL version: " << (mysql_version.empty() ? "UNKNOWN" : mysql_version) << "\n"
+            << "Features:\n";
+        for (const auto& f : features) {
+            oss << "  " << f.to_string() << "\n";
+        }
+        if (!warnings.empty()) {
+            oss << "Warnings:\n";
+            for (const auto& w : warnings) {
+                oss << "  - " << w << "\n";
+            }
+        }
+        return oss.str();
+    }
 };
 
 struct RecoveryReport {

@@ -141,6 +141,11 @@ set(UNDO_SOURCES
     undo/undo_page_manager.cpp
 )
 
+# Add validate module sources (Phase 7: Integrated validation + capability report)
+set(VALIDATE_SOURCES
+    validate/unified_validator.cpp
+)
+
 # Add all sources to dbrecovery_innodb library
 target_sources(dbrecovery_innodb PRIVATE
     ${COMMON_SOURCES}
@@ -160,6 +165,7 @@ target_sources(dbrecovery_innodb PRIVATE
     ${CARVE_SOURCES}
     ${ENTERPRISE_SOURCES}
     ${REPORT_SOURCES}
+    ${VALIDATE_SOURCES}
     tools/heuristic_inference.cpp
 )
 

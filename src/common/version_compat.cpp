@@ -125,6 +125,7 @@ MySQLVersionInfo::MySQLVersionInfo(MySQLVersion v) : version(v) {
             supports_sdi = true;
             supports_encryption = true;
             supports_compression = true;
+            supports_temporary_pages = true;
             break;
 
         case MySQLVersion::MYSQL_90:
@@ -136,6 +137,7 @@ MySQLVersionInfo::MySQLVersionInfo(MySQLVersion v) : version(v) {
             supports_sdi = true;
             supports_encryption = true;
             supports_compression = true;
+            supports_temporary_pages = true;
             break;
 
         default:
