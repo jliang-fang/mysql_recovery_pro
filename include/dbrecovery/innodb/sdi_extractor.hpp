@@ -14,15 +14,16 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include <nlohmann/json.hpp>
 
 namespace dbrecovery {
 namespace innodb {
 
-// SDI decompression safety limits
-constexpr size_t SDI_MAX_UNCOMPRESSED_SIZE = 16 * 1024 * 1024;  // 16MB
-constexpr size_t SDI_MAX_COMPRESSION_RATIO = 256;  // max 256:1 compression ratio
+// SDI decompression safety limits — shared from sdi_manager.hpp so the
+// compression-ratio policy cannot drift between extraction paths.
+// (Constants are in the same namespace, visible via the include above.)
 
 // SDI 提取的结构体定义（在类之前声明）
 struct ExtractedSDI {
@@ -94,6 +95,16 @@ public:
      * @return 解析后的表结构
      */
     std::optional<catalog::TableSchema> parse_sdi_json(const std::string& sdi_json);
+
+    /**
+     * @brief Version-gated extraction from a buffer
+     *
+     * SDI pages only exist in MySQL 8.0+. If the resolved version does not
+     * support SDI, extraction is skipped entirely so a 5.6/5.7 tablespace is
+     * never mis-parsed as SDI. Pass an empty/unknown version to force-scan.
+     */
+    std::vector<ExtractedSDI> extract_from_buffer_if_compatible(
+        const uint8_t* data, size_t size, dbrecovery::MySQLVersion version);
 
     /**
      * @brief 从损坏的页中提取 SDI（尝试多种偏移）
@@ -231,13 +242,19 @@ inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(con
         uint32_t compressed_len = read_le<uint32_t>(page_data, offset + 16);
 
         // 验证 SDI 头部
-        if (sdi_type <= 10 && id > 0 && uncompressed_len > 0 && compressed_len > 0 &&
-            compressed_len <= uncompressed_len) {
+        // MySQL 8.0 SDI header type is always 1 (DD object); reject anything else.
+        // Enforce the same safety limits as extract_sdi_json() so this path cannot
+        // accept a header the strict extractor would reject.
+        if (sdi_type != 1 || id == 0 || uncompressed_len == 0 || compressed_len == 0 ||
+            compressed_len > uncompressed_len ||
+            uncompressed_len > SDI_MAX_UNCOMPRESSED_SIZE ||
+            uncompressed_len / compressed_len > SDI_MAX_COMPRESSION_RATIO) {
+            continue;
+        }
             // 可能是有效的 SDI
             std::vector<uint8_t> payload(page_size - offset);
             std::copy(page_data + offset, page_data + page_size, payload.begin());
             return payload;
-        }
     }
 
     return std::nullopt;
@@ -439,6 +456,20 @@ inline std::vector<ExtractedSDI> SDIExtractor::extract_from_buffer(const uint8_t
     }
 
     return results;
+}
+
+inline std::vector<ExtractedSDI> SDIExtractor::extract_from_buffer_if_compatible(
+    const uint8_t* data, size_t size, dbrecovery::MySQLVersion version) {
+    // SDI metadata only exists in MySQL 8.0+. Fail-closed: if the version is
+    // known and doesn't support SDI, return nothing rather than scanning a
+    // 5.6/5.7 tablespace for pages that cannot be SDI.
+    if (version != dbrecovery::MySQLVersion::UNKNOWN &&
+        !dbrecovery::version_supports_sdi(version)) {
+        extract_stats_ = SDIExtractStats{};
+        extract_stats_.total_size = size;
+        return {};
+    }
+    return extract_from_buffer(data, size);
 }
 
 inline std::vector<ExtractedSDI> SDIExtractor::extract_from_file(const std::filesystem::path& file_path) {

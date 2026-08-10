@@ -10,6 +10,11 @@
 
 namespace dbrecovery::innodb {
 
+// Shared SDI decompression safety limits.
+// Single source of truth referenced by both SDIManager and SDIExtractor so the
+// compression ratio policy cannot drift between the two extraction paths.
+constexpr size_t SDI_MAX_UNCOMPRESSED_SIZE = 16 * 1024 * 1024;  // 16 MB
+constexpr size_t SDI_MAX_COMPRESSION_RATIO = 20;                // max 20:1
 
 class SDIManager {
 public:
@@ -31,16 +36,14 @@ public:
         hdr.compressed_len   = dbrecovery::innodb::read_le<uint32_t>(payload + 16);
 
         // ✅ 防御性长度校验
-        constexpr size_t MAX_SDI_SIZE = 16 * 1024 * 1024; // 16 MB
-        constexpr size_t MAX_COMPRESSION_RATIO = 20;
         if (hdr.uncompressed_len == 0 || hdr.compressed_len > hdr.uncompressed_len ||
-            hdr.uncompressed_len > MAX_SDI_SIZE) {
+            hdr.uncompressed_len > SDI_MAX_UNCOMPRESSED_SIZE) {
             return std::nullopt;
         }
 
         // ✅ 预解压压缩比检查（防 DoS）
         if (hdr.compressed_len > 0 &&
-            hdr.uncompressed_len / hdr.compressed_len > MAX_COMPRESSION_RATIO) {
+            hdr.uncompressed_len / hdr.compressed_len > SDI_MAX_COMPRESSION_RATIO) {
             return std::nullopt;
         }
 
@@ -71,7 +74,7 @@ public:
             ret = inflate(&strm, Z_NO_FLUSH);
             if (ret == Z_BUF_ERROR) {
                 // ✅ 动态扩展缓冲区（防 DoS）
-                size_t new_size = std::min(decompressed.size() * 2, MAX_SDI_SIZE);
+                size_t new_size = std::min(decompressed.size() * 2, SDI_MAX_UNCOMPRESSED_SIZE);
                 if (new_size <= decompressed.size()) break;
                 decompressed.resize(new_size);
                 strm.next_out = decompressed.data() + strm.total_out;
@@ -86,7 +89,7 @@ public:
         inflateEnd(&strm);
 
         // ✅ 压缩比校验（防 DoS）
-        if (data_len > 0 && decompressed.size() / data_len > MAX_COMPRESSION_RATIO) {
+        if (data_len > 0 && decompressed.size() / data_len > SDI_MAX_COMPRESSION_RATIO) {
             return std::nullopt;
         }
 
