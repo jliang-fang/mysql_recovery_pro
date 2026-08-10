@@ -56,6 +56,7 @@ enum class PageType {
     SDI = 9971,         // 0x26F3 - SDI Index page (MySQL 8.0+)
     BLOB = 9972,        // 0x26F4 - BLOB page
     COMPRESSED = 9973,  // 0x26F5 - Compressed page
+    COMPRESSED_AND_ENCRYPTED = 9975, // 0x26F7 - Compressed+Encrypted page
     TEMPORARY = 0x26F6, // MySQL 8.4+ temporary page
 };
 
@@ -108,6 +109,7 @@ struct PageTypeInfo {
     PageType type;
     std::string name;
     uint16_t value;
+    uint16_t raw_fil_value;   // raw on-disk FIL page type (0 if none)
     std::string description;
 
     // 构造函数
@@ -215,6 +217,12 @@ public:
     const PageTypeInfo& get_page_type_info(PageType type) const;
 
     /**
+     * @brief 检查页类型在当前版本下是否可恢复
+     * @return false for compressed/encrypted pages when version doesn't support them
+     */
+    bool can_recover_page_type(PageType type, MySQLVersion version) const;
+
+    /**
      * @brief 获取校验和类型信息
      */
     const ChecksumTypeInfo& get_checksum_type_info(ChecksumType type) const;
@@ -297,6 +305,13 @@ inline bool version_supports_encryption(MySQLVersion version) {
  */
 inline bool version_supports_compression(MySQLVersion version) {
     return VersionCompatibilityFactory::instance().supports_feature(version, "compression");
+}
+
+/**
+ * @brief 检查页类型是否可恢复（便捷函数）
+ */
+inline bool can_recover_page_type(PageType page_type, MySQLVersion version) {
+    return VersionCompatibilityFactory::instance().can_recover_page_type(page_type, version);
 }
 
 // ==================== 页大小辅助函数 ====================

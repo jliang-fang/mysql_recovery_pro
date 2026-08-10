@@ -5,13 +5,24 @@
 #include "page/page_parser_v84.h"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/common/version_compat.hpp"
 #include <cstring>
 #include <vector>
 #include <fstream>
 #include <filesystem>
 
+// detectPageType / pageTypeToString 是 version_compat.cpp 中的自由函数，
+// 未在头文件中声明；此处补充前向声明供测试调用。
+namespace dbrecovery {
+PageType detectPageType(const uint8_t* page_data, size_t page_size);
+std::string pageTypeToString(PageType type);
+}  // namespace dbrecovery
+
 namespace mysql_recovery {
 namespace test {
+
+using dbrecovery::detectPageType;
+using dbrecovery::pageTypeToString;
 
 // ==================== Test Data Directory ====================
 static constexpr const char* TEST_DATA_DIR = TEST_DATA_DIR_MACRO;
@@ -444,6 +455,89 @@ TEST(PageType, DetectUndoLogPageType) {
     ASSERT_NE(header, nullptr);
 
     EXPECT_EQ(header->get_page_type(), PageType::UNDO_LOG);
+}
+
+// ==================== Phase 5: detectPageType() Registry Tests ====================
+
+// 构造一个 mini 页：FIL page type 在偏移 24（大端）
+std::vector<uint8_t> create_mini_page(uint16_t raw_fil_type) {
+    std::vector<uint8_t> page(38, 0);
+    dbrecovery::innodb::write_be<uint16_t>(page.data(), 24, raw_fil_type);
+    return page;
+}
+
+TEST(detectPageType, RawFilValueRegistry) {
+    // 0x45B7 -> COMPRESSED_AND_ENCRYPTED（此前缺失的分支）
+    EXPECT_EQ(detectPageType(create_mini_page(0x45B7).data(), 38), dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED);
+    // 0x45B9 -> XDES（此前被错误映射为 COMPRESSED）
+    EXPECT_EQ(detectPageType(create_mini_page(0x45B9).data(), 38), dbrecovery::PageType::XDES);
+    // 其他原始 FIL 值保持不变
+    EXPECT_EQ(detectPageType(create_mini_page(0x45B5).data(), 38), dbrecovery::PageType::COMPRESSED);
+    EXPECT_EQ(detectPageType(create_mini_page(0x45B8).data(), 38), dbrecovery::PageType::FSP_HDR);
+    EXPECT_EQ(detectPageType(create_mini_page(0x45BF).data(), 38), dbrecovery::PageType::INDEX);
+    EXPECT_EQ(detectPageType(create_mini_page(0x45BE).data(), 38), dbrecovery::PageType::SDI);
+    EXPECT_EQ(detectPageType(create_mini_page(0x45B2).data(), 38), dbrecovery::PageType::UNDO_LOG);
+    EXPECT_EQ(detectPageType(create_mini_page(0x45BD).data(), 38), dbrecovery::PageType::BLOB);
+}
+
+TEST(detectPageType, CanonicalDetectPageTypeNullSafe) {
+    EXPECT_EQ(detectPageType(nullptr, 38), dbrecovery::PageType::UNKNOWN);
+    std::vector<uint8_t> tiny(10, 0);
+    EXPECT_EQ(detectPageType(tiny.data(), tiny.size()), dbrecovery::PageType::UNKNOWN);
+}
+
+TEST(pageTypeToString, NewTypes) {
+    EXPECT_EQ(dbrecovery::pageTypeToString(dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED), "COMPRESSED_AND_ENCRYPTED");
+    EXPECT_EQ(dbrecovery::pageTypeToString(dbrecovery::PageType::FSP_HDR), "FSP_HDR");
+    EXPECT_EQ(dbrecovery::pageTypeToString(dbrecovery::PageType::XDES), "XDES");
+}
+
+TEST(pageTypeToString, InnodbPageDefs) {
+    // page_defs.hpp 的 page_type_to_string() 覆盖新增页类型
+    EXPECT_EQ(dbrecovery::innodb::page_type_to_string(dbrecovery::innodb::FIL_PAGE_TYPE_FSP_HDR),
+              "FIL_PAGE_TYPE_FSP_HDR");
+    EXPECT_EQ(dbrecovery::innodb::page_type_to_string(dbrecovery::innodb::FIL_PAGE_TYPE_XDES),
+              "FIL_PAGE_TYPE_XDES");
+}
+
+TEST(PageTypeInfo, RawFilValue) {
+    const auto& factory = dbrecovery::VersionCompatibilityFactory::instance();
+    EXPECT_EQ(factory.get_page_type_info(dbrecovery::PageType::INDEX).raw_fil_value, 17855u);
+    EXPECT_EQ(factory.get_page_type_info(dbrecovery::PageType::SDI).raw_fil_value, 17854u);
+    EXPECT_EQ(factory.get_page_type_info(dbrecovery::PageType::COMPRESSED).raw_fil_value, 17845u);
+    EXPECT_EQ(factory.get_page_type_info(dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED).raw_fil_value, 17847u);
+    EXPECT_EQ(factory.get_page_type_info(dbrecovery::PageType::FSP_HDR).raw_fil_value, 17848u);
+    EXPECT_EQ(factory.get_page_type_info(dbrecovery::PageType::XDES).raw_fil_value, 17849u);
+}
+
+TEST(PageTypeInfo, RoundTripRawToDetect) {
+    // 每个已知原始 FIL 值都必须能通过 detectPageType 往返
+    std::vector<uint16_t> raws = {17845, 17847, 17848, 17849, 17855, 17854, 17842, 17853};
+    const auto& factory = dbrecovery::VersionCompatibilityFactory::instance();
+    for (uint16_t raw : raws) {
+        dbrecovery::PageType detected = dbrecovery::detectPageType(create_mini_page(raw).data(), 38);
+        EXPECT_EQ(factory.get_page_type_info(detected).raw_fil_value, raw)
+            << "raw_fil_value 0x" << std::hex << raw << " must round-trip";
+    }
+}
+
+TEST(CanRecoverPageType, VersionBoundaries) {
+    // 5.7 不支持 SDI / 加密，但支持压缩
+    EXPECT_FALSE(dbrecovery::can_recover_page_type(dbrecovery::PageType::SDI, dbrecovery::MySQLVersion::MYSQL_57));
+    EXPECT_FALSE(dbrecovery::can_recover_page_type(dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED, dbrecovery::MySQLVersion::MYSQL_57));
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::COMPRESSED, dbrecovery::MySQLVersion::MYSQL_57));
+
+    // 8.0 支持 SDI、压缩与加密（TDE）
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::SDI, dbrecovery::MySQLVersion::MYSQL_80));
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::COMPRESSED, dbrecovery::MySQLVersion::MYSQL_80));
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED, dbrecovery::MySQLVersion::MYSQL_80));
+
+    // 8.4 支持全部
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED, dbrecovery::MySQLVersion::MYSQL_84));
+
+    // 普通页类型始终可恢复
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::INDEX, dbrecovery::MySQLVersion::MYSQL_56));
+    EXPECT_TRUE(dbrecovery::can_recover_page_type(dbrecovery::PageType::UNDO_LOG, dbrecovery::MySQLVersion::MYSQL_56));
 }
 
 // ==================== PageFactoryEnhanced Tests ====================

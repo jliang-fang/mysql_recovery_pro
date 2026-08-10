@@ -128,6 +128,8 @@ inline std::string page_type_to_string(uint16_t type) {
         case FIL_PAGE_SDI:             return "FIL_PAGE_SDI";        // 0x45BE (uncompressed)
         case FIL_PAGE_COMPRESSED:      return "FIL_PAGE_COMPRESSED"; // 0x45B5
         case FIL_PAGE_COMPRESSED_AND_ENCRYPTED: return "FIL_PAGE_COMPRESSED_AND_ENCRYPTED"; // 0x45B7
+        case FIL_PAGE_TYPE_FSP_HDR:    return "FIL_PAGE_TYPE_FSP_HDR"; // 0x45B8
+        case FIL_PAGE_TYPE_XDES:       return "FIL_PAGE_TYPE_XDES";    // 0x45B9
         default: {
             // Handle 0x45BD which is used for both SDI_ZIP and BLOB
             if (type == FIL_PAGE_SDI_ZIP) {

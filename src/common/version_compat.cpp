@@ -192,47 +192,89 @@ RowFormatInfo::RowFormatInfo(RowFormat f) : format(f) {
 
 // ==================== PageTypeInfo Implementation ====================
 
-PageTypeInfo::PageTypeInfo(PageType t) : type(t) {
+PageTypeInfo::PageTypeInfo(PageType t) : type(t), raw_fil_value(0) {
     switch (type) {
         case PageType::INDEX:
             name = "FIL_PAGE_INDEX";
             value = 9969;
+            raw_fil_value = 17855;  // 0x45BF
             description = "B+Tree index page";
             break;
 
         case PageType::SDI:
             name = "FIL_PAGE_SDI";
             value = 9971;
+            raw_fil_value = 17854;  // 0x45BE
             description = "Serialized Dictionary Index page (MySQL 8.0+)";
             break;
 
         case PageType::UNDO_LOG:
             name = "FIL_PAGE_UNDO_LOG";
             value = 9970;
+            raw_fil_value = 17842;  // 0x45B2
             description = "Undo log page";
             break;
 
         case PageType::ALLOCATED:
             name = "FIL_PAGE_TYPE_ALLOCATED";
             value = 0;
+            raw_fil_value = 0;      // 0x0000
             description = "Freshly allocated page";
             break;
 
         case PageType::BLOB:
             name = "FIL_PAGE_BLOB";
             value = 9972;
+            raw_fil_value = 17853;  // 0x45BD
             description = "BLOB page";
             break;
 
         case PageType::COMPRESSED:
             name = "FIL_PAGE_COMPRESSED";
             value = 9973;
+            raw_fil_value = 17845;  // 0x45B5
             description = "Compressed page";
+            break;
+
+        case PageType::COMPRESSED_AND_ENCRYPTED:
+            name = "FIL_PAGE_COMPRESSED_AND_ENCRYPTED";
+            value = 9975;
+            raw_fil_value = 17847;  // 0x45B7
+            description = "Compressed and encrypted page";
+            break;
+
+        case PageType::FSP_HDR:
+            name = "FIL_PAGE_TYPE_FSP_HDR";
+            value = 0x45BF;
+            raw_fil_value = 17848;  // 0x45B8
+            description = "File space header page";
+            break;
+
+        case PageType::XDES:
+            name = "FIL_PAGE_TYPE_XDES";
+            value = 0x45BE;
+            raw_fil_value = 17849;  // 0x45B9
+            description = "Extent descriptor page";
+            break;
+
+        case PageType::SYSTEM:
+            name = "FIL_PAGE_TYPE_SYSTEM";
+            value = 9984;
+            raw_fil_value = 0;
+            description = "System page";
+            break;
+
+        case PageType::TEMPORARY:
+            name = "FIL_PAGE_TYPE_TEMPORARY";
+            value = 0x26F6;
+            raw_fil_value = 0;
+            description = "Temporary page (MySQL 8.4+)";
             break;
 
         default:
             name = "UNKNOWN";
             value = 0;
+            raw_fil_value = 0;
             description = "Unknown page type";
             break;
     }
@@ -291,10 +333,18 @@ void VersionCompatibilityFactory::init_version_info() {
     }
 
     // Initialize page type info map
-    for (int t = static_cast<int>(PageType::INDEX);
-         t <= static_cast<int>(PageType::COMPRESSED); t++) {
-        page_type_info_[static_cast<PageType>(t)] = PageTypeInfo(static_cast<PageType>(t));
-    }
+    // Handle non-contiguous PageType enum values explicitly
+    page_type_info_[PageType::INDEX] = PageTypeInfo(PageType::INDEX);
+    page_type_info_[PageType::SYSTEM] = PageTypeInfo(PageType::SYSTEM);
+    page_type_info_[PageType::UNDO_LOG] = PageTypeInfo(PageType::UNDO_LOG);
+    page_type_info_[PageType::ALLOCATED] = PageTypeInfo(PageType::ALLOCATED);
+    page_type_info_[PageType::FSP_HDR] = PageTypeInfo(PageType::FSP_HDR);
+    page_type_info_[PageType::XDES] = PageTypeInfo(PageType::XDES);
+    page_type_info_[PageType::SDI] = PageTypeInfo(PageType::SDI);
+    page_type_info_[PageType::BLOB] = PageTypeInfo(PageType::BLOB);
+    page_type_info_[PageType::COMPRESSED] = PageTypeInfo(PageType::COMPRESSED);
+    page_type_info_[PageType::COMPRESSED_AND_ENCRYPTED] = PageTypeInfo(PageType::COMPRESSED_AND_ENCRYPTED);
+    page_type_info_[PageType::TEMPORARY] = PageTypeInfo(PageType::TEMPORARY);
 
     // Initialize checksum type info map
     for (int c = static_cast<int>(ChecksumType::CRC32);
@@ -316,7 +366,8 @@ void VersionCompatibilityFactory::init_version_info() {
     // Initialize supported page types list
     supported_page_types_ = {
         PageType::INDEX, PageType::SDI, PageType::UNDO_LOG, PageType::ALLOCATED,
-        PageType::BLOB, PageType::COMPRESSED
+        PageType::BLOB, PageType::COMPRESSED, PageType::COMPRESSED_AND_ENCRYPTED,
+        PageType::FSP_HDR, PageType::XDES
     };
 
     // Initialize supported checksum types list
@@ -427,6 +478,23 @@ const PageTypeInfo& VersionCompatibilityFactory::get_page_type_info(PageType typ
         return it->second;
     }
     throw std::runtime_error("Unknown page type");
+}
+
+bool VersionCompatibilityFactory::can_recover_page_type(PageType type, MySQLVersion version) const {
+    // Compressed pages require MySQL 5.7+ compression support
+    if (type == PageType::COMPRESSED) {
+        return version_supports_compression(version);
+    }
+    // Compressed+Encrypted pages require both compression and encryption
+    if (type == PageType::COMPRESSED_AND_ENCRYPTED) {
+        return version_supports_compression(version) && version_supports_encryption(version);
+    }
+    // SDI pages require MySQL 8.0+
+    if (type == PageType::SDI) {
+        return version_supports_sdi(version);
+    }
+    // All other page types are universally recoverable
+    return true;
 }
 
 const ChecksumTypeInfo& VersionCompatibilityFactory::get_checksum_type_info(ChecksumType type) const {
@@ -560,8 +628,14 @@ PageType detectPageType(const uint8_t* page_data, size_t page_size) {
             return PageType::UNDO_LOG;
         case 17853:  // FIL_PAGE_BLOB / FIL_PAGE_SDI_ZIP (0x45BD)
             return PageType::BLOB;
-        case 17849:  // FIL_PAGE_TYPE_XDES (0x45B9)
+        case 17845:  // FIL_PAGE_COMPRESSED (0x45B5)
             return PageType::COMPRESSED;
+        case 17847:  // FIL_PAGE_COMPRESSED_AND_ENCRYPTED (0x45B7)
+            return PageType::COMPRESSED_AND_ENCRYPTED;
+        case 17848:  // FIL_PAGE_TYPE_FSP_HDR (0x45B8)
+            return PageType::FSP_HDR;
+        case 17849:  // FIL_PAGE_TYPE_XDES (0x45B9)
+            return PageType::XDES;
         default:
             return PageType::UNKNOWN;
     }
@@ -587,6 +661,8 @@ std::string pageTypeToString(PageType type) {
             return "BLOB";
         case PageType::COMPRESSED:
             return "COMPRESSED";
+        case PageType::COMPRESSED_AND_ENCRYPTED:
+            return "COMPRESSED_AND_ENCRYPTED";
         case PageType::TEMPORARY:
             return "TEMPORARY";
         default:

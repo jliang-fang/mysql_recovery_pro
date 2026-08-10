@@ -9,6 +9,7 @@
 #include <sstream>
 #include <iomanip>
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/common/version_compat.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -84,7 +85,20 @@ public:
      * @brief 扫描内存缓冲区
      */
     std::vector<ScannedPage> scan_buffer(const uint8_t* data, size_t size);
-    
+
+    /**
+     * @brief 版本感知扫描内存缓冲区（跳过当前版本不可恢复的页）
+     * @details 当版本未知时退化为无条件扫描（fail-open 到尽力而为）。
+     */
+    std::vector<ScannedPage> scan_buffer_if_compatible(
+        const uint8_t* data, size_t size, dbrecovery::MySQLVersion version);
+
+    /**
+     * @brief 版本感知扫描整个文件（跳过当前版本不可恢复的页）
+     */
+    std::vector<ScannedPage> scan_file_if_compatible(
+        const std::filesystem::path& file_path, dbrecovery::MySQLVersion version);
+
     /**
      * @brief 获取扫描统计
      */
@@ -316,6 +330,76 @@ inline std::vector<ScannedPage> PageScanner::scan_file(const std::filesystem::pa
         offset += page_size_;
     }
 
+    stats_.total_size = file_size;
+    return pages;
+}
+
+// 将原始 FIL 页类型映射为 dbrecovery::PageType（用于能力判定）
+inline dbrecovery::PageType to_compat_page_type(uint16_t raw_fil_type) {
+    switch (raw_fil_type) {
+        case FIL_PAGE_INDEX:                       return dbrecovery::PageType::INDEX;
+        case FIL_PAGE_SDI:                         return dbrecovery::PageType::SDI;
+        case FIL_PAGE_UNDO_LOG:                    return dbrecovery::PageType::UNDO_LOG;
+        case FIL_PAGE_TYPE_BLOB:                   return dbrecovery::PageType::BLOB;
+        case FIL_PAGE_COMPRESSED:                  return dbrecovery::PageType::COMPRESSED;
+        case FIL_PAGE_COMPRESSED_AND_ENCRYPTED:    return dbrecovery::PageType::COMPRESSED_AND_ENCRYPTED;
+        case FIL_PAGE_TYPE_FSP_HDR:                return dbrecovery::PageType::FSP_HDR;
+        case FIL_PAGE_TYPE_XDES:                   return dbrecovery::PageType::XDES;
+        default:                                   return dbrecovery::PageType::UNKNOWN;
+    }
+}
+
+inline std::vector<ScannedPage> PageScanner::scan_buffer_if_compatible(
+    const uint8_t* data, size_t size, dbrecovery::MySQLVersion version) {
+    // 版本未知：无法判定能力，退化为无条件扫描（尽力而为）。
+    if (version == dbrecovery::MySQLVersion::UNKNOWN) {
+        return scan_buffer(data, size);
+    }
+
+    std::vector<ScannedPage> pages;
+    stats_ = ScanStats{};
+    if (!data || size < page_size_) {
+        return pages;
+    }
+    stats_.total_size = size;
+
+    for (size_t offset = 0; offset + page_size_ <= size; offset += page_size_) {
+        // 读取原始 FIL 页类型并判定当前版本是否可恢复
+        uint16_t raw_type = read_be<uint16_t>(data + offset, FIL_PAGE_TYPE_ABS);
+        if (!dbrecovery::can_recover_page_type(to_compat_page_type(raw_type), version)) {
+            continue;  // 当前版本不支持，跳过该页
+        }
+
+        auto page_opt = scan_single_page(data + offset, offset);
+        if (page_opt.has_value()) {
+            auto& page = page_opt.value();
+            pages.push_back(page);
+            stats_.total_pages++;
+            if (page.is_valid) {
+                stats_.valid_pages++;
+            } else {
+                stats_.invalid_pages++;
+            }
+        }
+    }
+    return pages;
+}
+
+inline std::vector<ScannedPage> PageScanner::scan_file_if_compatible(
+    const std::filesystem::path& file_path, dbrecovery::MySQLVersion version) {
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return {};
+    }
+    size_t file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> buffer(file_size);
+    file.read(reinterpret_cast<char*>(buffer.data()), file_size);
+    size_t actual_read = file.gcount();
+    if (actual_read == 0) {
+        return {};
+    }
+    auto pages = scan_buffer_if_compatible(buffer.data(), actual_read, version);
     stats_.total_size = file_size;
     return pages;
 }
