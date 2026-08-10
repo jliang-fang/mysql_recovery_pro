@@ -190,6 +190,19 @@ records,
     void set_undo_data_path(const std::string& path) { undo_data_path_ = path; }
 
     /**
+     * @brief Set MySQL version for flashback undo-format selection
+     *
+     * Propagated to FlashbackGenerator so its internal DeepUndoAnalyzer picks
+     * the correct roll-pointer width (LEGACY_6BYTE for 5.6/5.7, MYSQL8_7BYTE
+     * otherwise). Without this the analyzer defaults to UNRESOLVED and rejects
+     * UPDATE/DELETE undo records.
+     */
+    void set_mysql_version(const std::string& version) {
+        mysql_version_ = version;
+        flashback_generator_.set_mysql_version(version);
+    }
+
+    /**
      * @brief Recover deleted records from undo logs for a specific table
      *
      * Scans undo logs for TRX_UNDO_DEL_MARK records, reconstructs row data
@@ -336,6 +349,11 @@ private:
      * @brief 页大小提示（如果非零，覆盖自动检测）
      */
     uint32_t page_size_hint_ = 0;
+
+    /**
+     * @brief MySQL 版本字符串（用于 flashback undo 格式选择）
+     */
+    std::string mysql_version_;
     
     /**
      * @brief 获取页大小提示

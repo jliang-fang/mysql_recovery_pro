@@ -960,6 +960,12 @@ std::vector<std::string> RecoveryEngine::flashback_deletes(
     if (file_reader_) {
         flashback_generator_.set_page_size(file_reader_->get_page_size());
     }
+    // Propagate MySQL version so the internal DeepUndoAnalyzer selects the
+    // correct undo roll-pointer format (LEGACY_6BYTE for 5.6/5.7, MYSQL8_7BYTE
+    // otherwise). Without this it defaults to UNRESOLVED and rejects records.
+    if (!mysql_version_.empty()) {
+        flashback_generator_.set_mysql_version(mysql_version_);
+    }
 
     innodb::FlashbackConfig fg_config;
     fg_config.mode = innodb::FlashbackMode::DELETE;

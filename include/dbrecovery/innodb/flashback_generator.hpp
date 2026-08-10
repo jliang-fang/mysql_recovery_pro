@@ -130,6 +130,8 @@ public:
     void set_ibdata_path(const std::string& path);
     void set_page_size(size_t page_size);
     void set_config(const FlashbackConfig& config);
+    void set_undo_format_profile(UndoFormatProfile profile);
+    void set_mysql_version(const std::string& version);
     FlashbackConfig& config() { return config_; }
     const FlashbackConfig& config() const { return config_; }
 

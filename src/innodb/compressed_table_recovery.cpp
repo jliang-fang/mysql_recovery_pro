@@ -54,7 +54,12 @@ std::vector<ScannedPage> CompressedTableRecovery::scan_pages() {
     size_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    size_t total_pages = file_size / page_size_;
+    // Use compressed_page_size_ as stride when the on-disk pages are smaller
+    // than the logical page_size_ (key fix for compressed tables — without this
+    // the scan reads inter-page boundaries and breaks on the first page).
+    size_t stride = compressed_page_size_ > 0 && compressed_page_size_ < page_size_
+                        ? compressed_page_size_ : page_size_;
+    size_t total_pages = file_size / stride;
     stats_.total_pages = total_pages;
 
     if (total_pages == 0) {
@@ -64,18 +69,18 @@ std::vector<ScannedPage> CompressedTableRecovery::scan_pages() {
     // Deterministic fixed-size reads; page numbers derive from full physical
     // file offsets so they do not reset per buffer. FIL fields parsed with the
     // canonical big-endian offsets from page_defs.hpp.
-    std::vector<uint8_t> page_buf(page_size_);
+    std::vector<uint8_t> page_buf(stride);
     for (size_t page_no = 0; page_no < total_pages; ++page_no) {
-        file.seekg(static_cast<std::streamoff>(page_no * page_size_), std::ios::beg);
+        file.seekg(static_cast<std::streamoff>(page_no * stride), std::ios::beg);
         file.read(reinterpret_cast<char*>(page_buf.data()),
-                  static_cast<std::streamsize>(page_size_));
-        if (file.gcount() < static_cast<std::streamsize>(page_size_)) {
+                  static_cast<std::streamsize>(stride));
+        if (file.gcount() < static_cast<std::streamsize>(stride)) {
             break;
         }
 
         const uint8_t* p = page_buf.data();
         ScannedPage page{};
-        page.offset = static_cast<uint32_t>(page_no * page_size_);
+        page.offset = static_cast<uint32_t>(page_no * stride);
         page.page_no = static_cast<uint32_t>(page_no);
         page.space_id = read_be<uint32_t>(p, FIL_PAGE_SPACE_ID);
         page.page_no = read_be<uint32_t>(p, FIL_PAGE_OFFSET);
@@ -84,9 +89,9 @@ std::vector<ScannedPage> CompressedTableRecovery::scan_pages() {
         page.lsn = read_be<uint64_t>(p, FIL_PAGE_LSN_ABS);
         page.type = read_be<uint16_t>(p, FIL_PAGE_TYPE_ABS);
         page.page_type = page.type;
-        page.is_valid = PageScanner::is_innodb_page(p, page_size_);
+        page.is_valid = PageScanner::is_innodb_page(p, stride);
 
-        if (is_page_compressed(p, page_size_)) {
+        if (is_page_compressed(p, stride)) {
             page.is_compressed = true;
             compressed_pages_.push_back(page.page_no);
         }
@@ -226,11 +231,13 @@ std::vector<std::map<std::string, std::string>> CompressedTableRecovery::parse_p
         std::ifstream file(file_path_, std::ios::binary);
         if (!file) continue;
 
-        size_t offset = static_cast<size_t>(page.page_no) * page_size_;
+        size_t stride = compressed_page_size_ > 0 && compressed_page_size_ < page_size_
+                            ? compressed_page_size_ : page_size_;
+        size_t offset = static_cast<size_t>(page.page_no) * stride;
         file.seekg(offset, std::ios::beg);
 
-        std::vector<uint8_t> page_data(page_size_);
-        file.read(reinterpret_cast<char*>(page_data.data()), page_size_);
+        std::vector<uint8_t> page_data(stride);
+        file.read(reinterpret_cast<char*>(page_data.data()), stride);
 
         if (file.gcount() < static_cast<std::streamsize>(page_size_)) {
             continue;

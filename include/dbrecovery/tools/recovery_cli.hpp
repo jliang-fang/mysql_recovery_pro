@@ -159,7 +159,8 @@ private:
 
     // v2.0: 生成恢复报告
     void generate_recovery_report(const std::string& report_fmt, const std::string& report_p,
-                                  const std::string& recovery_type, const std::string& output_dir);
+                                  const std::string& recovery_type, const std::string& output_dir,
+                                  const std::string& mysql_version = "auto-detected");
 
     // v2.0: 并行导出
     bool export_parallel(const std::vector<std::map<std::string, std::string>>& records,
@@ -543,8 +544,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                                 extract_sdi ? "SDI_EXTRACT" : "DEFAULT";
 
     // MySQL version hint for strategy recommendation
+    // Track whether the user explicitly supplied it so version-sensitive paths
+    // (e.g., flashback) can fail-closed instead of trusting a blind default.
+    bool mysql_version_explicit = parser_.has_option("mysql-version");
     std::string mysql_version = parser_.get_option("mysql-version", "");
-    if (mysql_version.empty()) mysql_version = "8.0";  // default
+    if (mysql_version.empty()) mysql_version = "8.0";  // default for non-flashback
 
     // Index ID filtering options
     std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
@@ -889,6 +893,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] v2.0 Flashback Mode: "
                   << (flashback_delete ? "DELETE->INSERT" : "UPDATE->OLD_VALUES") << "\n";
 
+        // Fail-closed: flashback is version-sensitive — require explicit
+        // --mysql-version rather than trusting the blind default.
+        if (!mysql_version_explicit) {
+            std::cerr << "[ERROR] Flashback requires explicit --mysql-version "
+                      << "(5.6, 5.7, 8.0, 8.4, 9.0) for correct undo format selection\n";
+            return 1;
+        }
+
         std::string sys_ts = system_tablespace;
         if (sys_ts.empty()) {
             std::cerr << "[ERROR] --flashback-delete/--flashback-update requires --system-tablespace\n";
@@ -907,6 +919,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::FlashbackGenerator generator;
         generator.set_ibdata_path(sys_ts);
         generator.set_page_size(page_size);
+        generator.set_mysql_version(mysql_version);
 
         dbrecovery::innodb::FlashbackConfig config;
         if (flashback_update) {
@@ -1613,7 +1626,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         test_file.read(reinterpret_cast<char*>(test_page.data()), page_size);
                         if (dbrecovery::innodb::TDEDecryptor::is_encrypted(test_page.data(), page_size)) {
                             std::cout << "[INFO] TDE encryption DETECTED on input file\n";
-                            auto decrypted = tde.decrypt_page(test_page.data(), page_size, 0, 0);
+                            // Parse real page identity from FIL header instead of
+                            // hardcoding (0,0) — corrects the mismatch that would
+                            // reject pages with non-zero space_id.
+                            uint32_t real_page_no = dbrecovery::innodb::read_be<uint32_t>(
+                                test_page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET);
+                            uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
+                                test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
+                            auto decrypted = tde.decrypt_page(test_page.data(), page_size,
+                                                              real_page_no, real_space_id);
                             if (!decrypted.empty()) {
                                 std::cout << "[INFO] Page decryption SUCCESS ("
                                           << decrypted.size() << " bytes)\n";
@@ -1669,9 +1690,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // When combined with recovery, the parallel export is triggered
         // automatically for large result sets (>100K records).
         std::cout << "[INFO] Parallel export will be used for large result sets.\n";
-        std::cout << "[INFO] Add --parallel-export to any recovery command to enable.\n";
 
-        return 0;
+        // Fall through to the normal recovery flow below; the export section
+        // will use export_parallel() when this flag is set.
     }
 
     // Disk carving recovery mode - raw device scanning (no backup needed)
@@ -1949,7 +1970,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 stats_.elapsed_seconds = xfs_result.elapsed_seconds;
 
                 std::cout << "\n✅ XFS Recovery completed: " << output_dir << "\n";
-                generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+                generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
                 return 0;
             } else {
                 std::cerr << "[ERROR] XFS disk carving failed.\n";
@@ -2150,7 +2171,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 stats_.elapsed_seconds = ext4_result.elapsed_seconds;
 
                 std::cout << "\n✅ ext4 Recovery completed: " << output_dir << "\n";
-                generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+                generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
                 return 0;
             } else {
                 std::cerr << "[ERROR] ext4 recovery failed. Falling back to raw disk carving.\n";
@@ -2392,7 +2413,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             stats_.elapsed_seconds = scan_stats.elapsed_seconds;
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
-            generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+            generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
             return 0;
         } else {
             std::cerr << "[ERROR] Disk carving failed.\n";
@@ -2452,7 +2473,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
-            generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+            generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
             return 0;
         } else {
             std::cerr << "[ERROR] DROP TABLE recovery failed.\n";
@@ -2501,7 +2522,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         show_stats(stats_);
-        generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+        generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
         return 0;
     }
 
@@ -2517,7 +2538,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Found " << rebuilder.stats().orphan_pages << " orphan pages\n";
 
         show_stats(stats_);
-        generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+        generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
         return 0;
     }
 
@@ -2532,7 +2553,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         show_stats(stats_);
-        generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+        generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
         return 0;
     }
 
@@ -3854,7 +3875,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // 导出结果
     std::string output_path;
-    if (format == "csv") {
+
+    // v2.0: --parallel-export routes CSV/SQL export through the multi-threaded
+    // exporter instead of the single-threaded Exporter.
+    if (parallel_export && (format == "csv" || format == "sql")) {
+        uint32_t pw = static_cast<uint32_t>(num_workers_opt.value_or(4));
+        std::string export_table_name = "recovered_table";
+        if (recovered_column_order.empty() && !recovered_records.empty()) {
+            for (const auto& [key, value] : recovered_records[0]) {
+                recovered_column_order.push_back(key);
+            }
+        }
+        if (export_parallel(recovered_records, export_table_name, pw)) {
+            std::cout << "[INFO] Parallel export of " << recovered_records.size()
+                      << " records completed.\n";
+        } else {
+            std::cerr << "[WARN] Parallel export failed; falling back to sequential export.\n";
+        }
+    } else if (format == "csv") {
         output_path = output_dir + "/recovered.csv";
         // CSV导出时使用列顺序作为表头
         if (recovered_column_order.empty()) {
@@ -3908,7 +3946,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     show_stats(stats_);
     std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
-    generate_recovery_report(report_format, report_path, recovery_type, output_dir);
+    generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
 
     return 0;
 }
@@ -4135,13 +4173,14 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
 
 inline void RecoveryCLI::generate_recovery_report(
     const std::string& report_fmt, const std::string& report_p,
-    const std::string& recovery_type, const std::string& output_dir) {
+    const std::string& recovery_type, const std::string& output_dir,
+    const std::string& mysql_version) {
 
     using namespace dbrecovery::report;
 
     ReportBuilder builder;
     builder.set_recovery_type(recovery_type)
-           .set_mysql_version("auto-detected")
+           .set_mysql_version(mysql_version)
            .set_status(stats_.records_recovered > 0 ? "SUCCESS" : "PARTIAL");
 
     InputInfo input;

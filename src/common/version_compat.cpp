@@ -679,14 +679,14 @@ ChecksumType detectChecksumType(const uint8_t* page_data, MySQLVersion version, 
         return ChecksumType::NONE;
     }
 
-    // MySQL 5.6+ uses CRC32
-    if (version >= MySQLVersion::MYSQL_56) {
-        return ChecksumType::CRC32;
-    }
-
     // MySQL 8.0+ uses BLOCK_CHECKSUM
     if (version >= MySQLVersion::MYSQL_80) {
         return ChecksumType::BLOCK_CHECKSUM;
+    }
+
+    // MySQL 5.6+ uses CRC32
+    if (version >= MySQLVersion::MYSQL_56) {
+        return ChecksumType::CRC32;
     }
 
     // Older versions use INNODB
