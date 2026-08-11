@@ -241,6 +241,13 @@ public:
     size_t page_size() const { return page_size_; }
 
     /**
+     * @brief Set page size (non-16K tablespaces)
+     */
+    void set_page_size(size_t page_size) {
+        page_size_ = page_size;
+    }
+
+    /**
      * @brief Get number of registered undo tablespace files
      */
     size_t undo_tablespace_count() const { return undo_tablespace_paths_.size(); }
@@ -357,7 +364,7 @@ private:
  */
 class DeepUndoAnalyzer {
 public:
-    DeepUndoAnalyzer();
+    explicit DeepUndoAnalyzer(size_t page_size = 16384);
     ~DeepUndoAnalyzer() = default;
 
     // ==================== Configuration ====================
@@ -384,6 +391,7 @@ public:
      */
     void set_page_size(size_t page_size) {
         page_size_ = page_size;
+        page_manager_.set_page_size(page_size);
     }
 
     /**

@@ -523,8 +523,8 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
 
 // ==================== DeepUndoAnalyzer Implementation ====================
 
-DeepUndoAnalyzer::DeepUndoAnalyzer()
-    : page_manager_(16384) {}
+DeepUndoAnalyzer::DeepUndoAnalyzer(size_t page_size)
+    : page_size_(page_size), page_manager_(page_size) {}
 
 RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
     const std::vector<uint8_t>& current_record,

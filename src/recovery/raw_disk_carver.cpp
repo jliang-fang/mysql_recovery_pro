@@ -217,18 +217,42 @@ bool RawDiskCarver::is_index_page(const uint8_t* data, size_t page_size) {
     return page_type == FIL_PAGE_INDEX; // 0x45BF
 }
 
-bool RawDiskCarver::is_sdi_page(const uint8_t* data, size_t page_size) {
+bool RawDiskCarver::is_sdi_page(const uint8_t* data, size_t page_size, uint32_t page_no) {
     if (!data || page_size < 26) return false;
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
-    return page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP;
+    if (page_type == FIL_PAGE_SDI) return true;
+    if (page_type != FIL_PAGE_SDI_ZIP) return false;
+
+    // FIL_PAGE_SDI_ZIP (0x45BD) is shared with BLOB pages. Disambiguate:
+    // 1. SDI pages are typically at positions 3 and 4 in standalone tablespaces
+    // 2. SDI pages have a signature at offset 64-71: {0x08, 'S', 'D', 'I', '0', '0', '0', '0'}
+    if (is_sdi_page_position(page_no)) return true;
+
+    // Check SDI signature at offset 64-71
+    if (page_size >= 72) {
+        constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+        if (std::memcmp(data + 64, SDI_SIG, 8) == 0) return true;
+    }
+
+    return false;
 }
 
-bool RawDiskCarver::is_blob_page(const uint8_t* data, size_t page_size) {
+bool RawDiskCarver::is_blob_page(const uint8_t* data, size_t page_size, uint32_t page_no) {
     if (!data || page_size < 26) return false;
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
-    // FIL_PAGE_SDI_ZIP (0x45BD) is used for both compressed SDI and BLOB pages
-    // FIL_PAGE_COMPRESSED (0x45B5) is used for compressed pages
-    return page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_COMPRESSED;
+    if (page_type == FIL_PAGE_COMPRESSED) return true;
+    if (page_type != FIL_PAGE_SDI_ZIP) return false;
+
+    // FIL_PAGE_SDI_ZIP (0x45BD) is shared with compressed SDI pages.
+    // Exclude pages that are likely SDI by position or signature.
+    if (is_sdi_page_position(page_no)) return false;
+
+    if (page_size >= 72) {
+        constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+        if (std::memcmp(data + 64, SDI_SIG, 8) == 0) return false;
+    }
+
+    return true;
 }
 
 /**
@@ -620,7 +644,9 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             }
 
             // 也检测SDI页用于提取schema
-            if (config_.scan_sdi_pages && is_sdi_page(page_data, config_.page_size)) {
+            if (config_.scan_sdi_pages &&
+                is_sdi_page(page_data, config_.page_size,
+                            extract_page_no(page_data, config_.page_size))) {
                 // 提取SDI页数据
                 std::vector<uint8_t> sdi_copy(config_.page_size);
                 std::memcpy(sdi_copy.data(), page_data, config_.page_size);

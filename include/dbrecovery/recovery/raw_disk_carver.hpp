@@ -211,13 +211,21 @@ public:
 
     /**
      * @brief 检测是否是SDI页
+     * @param data 页数据
+     * @param page_size 页大小
+     * @param page_no 页号（FIL header 中读取）。FIL_PAGE_SDI_ZIP (0x45BD) 同时被
+     *        压缩 SDI 页和 BLOB 页使用，需用页号位置和 SDI 签名区分。
      */
-    static bool is_sdi_page(const uint8_t* data, size_t page_size);
+    static bool is_sdi_page(const uint8_t* data, size_t page_size, uint32_t page_no);
 
     /**
      * @brief 检测是否是BLOB页
+     * @param data 页数据
+     * @param page_size 页大小
+     * @param page_no 页号（FIL header 中读取）。FIL_PAGE_SDI_ZIP (0x45BD) 同时被
+     *        压缩 SDI 页和 BLOB 页使用，需用页号位置和 SDI 签名区分。
      */
-    static bool is_blob_page(const uint8_t* data, size_t page_size);
+    static bool is_blob_page(const uint8_t* data, size_t page_size, uint32_t page_no);
 
     /**
      * @brief 检测FRM文件签名

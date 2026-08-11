@@ -90,6 +90,11 @@ public:
         bool enable_signature_scan = true;
         bool enable_pattern_match = true;
         bool enable_string_extract = true;
+        // When false (default), FRAGMENT and STRING_ONLY (L3/L4) rows are excluded
+        // from structured salvage output. Heuristic fragments are high-noise, so
+        // structured consumers opt in via this flag rather than receiving them by
+        // default.
+        bool include_fragments = false;
         bool verbose = false;
     };
 

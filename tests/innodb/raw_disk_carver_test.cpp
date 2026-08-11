@@ -448,73 +448,108 @@ TEST(RawDiskCarverTest, IsIndexPageFalseForCompressed) {
 // ==================== is_sdi_page Tests ====================
 
 TEST(RawDiskCarverTest, IsSdiPageNullData) {
-    EXPECT_FALSE(RawDiskCarver::is_sdi_page(nullptr, 16384));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(nullptr, 16384, 0));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageSmallBuffer) {
     std::vector<uint8_t> small(16, 0);
-    EXPECT_FALSE(RawDiskCarver::is_sdi_page(small.data(), 16));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(small.data(), 16, 0));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageSDI) {
     auto page = create_page(FIL_PAGE_SDI);
-    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size()));
+    // Uncompressed SDI is always SDI regardless of page_no
+    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 0));
+    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 3));
+    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 99));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageSDIZip) {
     auto page = create_page(FIL_PAGE_SDI_ZIP);
-    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size()));
+    // Compressed SDI_ZIP at position 3/4 is SDI
+    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 3));
+    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 4));
+}
+
+TEST(RawDiskCarverTest, IsSdiPageSDIZipNonStandardPosition) {
+    auto page = create_page(FIL_PAGE_SDI_ZIP);
+    // SDI_ZIP at non-standard position (0) without SDI signature is NOT SDI
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 0));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 5));
+    // SDI signature at offset 64-71 causes it to be recognized as SDI
+    constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+    std::memcpy(page.data() + 64, SDI_SIG, 8);
+    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 99));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageFalseForIndex) {
     auto page = create_page(FIL_PAGE_INDEX);
-    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 0));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 3));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageFalseForUndoLog) {
     auto page = create_page(FIL_PAGE_UNDO_LOG);
-    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 0));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageFalseForAllocated) {
     auto page = create_page(FIL_PAGE_TYPE_ALLOCATED);
-    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 0));
 }
 
 // ==================== is_blob_page Tests ====================
 
 TEST(RawDiskCarverTest, IsBlobPageNullData) {
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(nullptr, 16384));
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(nullptr, 16384, 0));
 }
 
 TEST(RawDiskCarverTest, IsBlobPageSmallBuffer) {
     std::vector<uint8_t> small(16, 0);
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(small.data(), 16));
-}
-
-TEST(RawDiskCarverTest, IsBlobPageSDIZip) {
-    auto page = create_page(FIL_PAGE_SDI_ZIP);
-    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(small.data(), 16, 0));
 }
 
 TEST(RawDiskCarverTest, IsBlobPageCompressed) {
     auto page = create_page(FIL_PAGE_COMPRESSED);
-    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size()));
+    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 0));
+    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 3));
+}
+
+TEST(RawDiskCarverTest, IsBlobPageSDIZipNonStandard) {
+    // SDI_ZIP at non-standard position (0, 5) without SDI signature is BLOB
+    auto page = create_page(FIL_PAGE_SDI_ZIP);
+    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 0));
+    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 5));
+}
+
+TEST(RawDiskCarverTest, IsBlobPageSDIZipAtSdiPosition) {
+    // SDI_ZIP at position 3 or 4 is NOT a BLOB
+    auto page = create_page(FIL_PAGE_SDI_ZIP);
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 3));
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 4));
+}
+
+TEST(RawDiskCarverTest, IsBlobPageSDIZipWithSignature) {
+    // SDI_ZIP with SDI signature at offset 64-71 is NOT a BLOB
+    auto page = create_page(FIL_PAGE_SDI_ZIP);
+    constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+    std::memcpy(page.data() + 64, SDI_SIG, 8);
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 99));
 }
 
 TEST(RawDiskCarverTest, IsBlobPageFalseForIndex) {
     auto page = create_page(FIL_PAGE_INDEX);
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 0));
 }
 
 TEST(RawDiskCarverTest, IsBlobPageFalseForSDI) {
     auto page = create_page(FIL_PAGE_SDI);
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 0));
 }
 
 TEST(RawDiskCarverTest, IsBlobPageFalseForUndoLog) {
     auto page = create_page(FIL_PAGE_UNDO_LOG);
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size()));
+    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 0));
 }
 
 // ==================== is_frm_signature Tests ====================

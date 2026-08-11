@@ -506,6 +506,10 @@ std::vector<SalvagedRow> SalvageEngine::salvage_page(
     rows.erase(std::remove_if(rows.begin(), rows.end(),
         [this](const SalvagedRow& r) {
             if (r.confidence < config_.min_confidence) return true;
+            // L3/L4 heuristic fragments are high-noise; only include them when
+            // explicitly requested via include_fragments.
+            if (!config_.include_fragments &&
+                r.salvage_level != SalvageLevel::STRUCTURED) return true;
             if (r.salvage_level == SalvageLevel::STRUCTURED &&
                 r.field_count < config_.min_record_fields) return true;
             return false;

@@ -210,6 +210,10 @@ inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(con
                     } while (ret == Z_OK);
 
                     if (ret == Z_STREAM_END) {
+                        if (strm.total_out != uncompressed_len) {
+                            inflateEnd(&strm);
+                            return std::nullopt;
+                        }
                         decompressed.resize(strm.total_out);
                         inflateEnd(&strm);
                         return decompressed;

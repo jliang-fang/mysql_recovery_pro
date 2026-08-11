@@ -1,5 +1,7 @@
 # Build directories
 build/
+build_asan/
+build_phase/
 bin/
 lib/
 

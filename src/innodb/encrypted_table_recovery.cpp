@@ -47,9 +47,7 @@ bool EncryptedTableRecovery::load_keyring(const std::string& keyring_path) {
     }
 
     for (const auto& mk : parser.get_master_keys()) {
-        uint32_t key_id = static_cast<uint32_t>(
-            std::hash<std::string>{}(mk.key_name));
-        decryptor_.add_table_key(key_id, mk.key_data, mk.algorithm);
+        decryptor_.add_table_key(mk.key_id, mk.key_data, mk.algorithm);
     }
 
     return !parser.get_master_keys().empty();

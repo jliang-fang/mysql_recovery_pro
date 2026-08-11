@@ -102,7 +102,8 @@ public:
                               uint32_t compressed_page_size);
     void set_compressed_page_size(const std::string& table_name, size_t size);
     std::optional<size_t> get_compressed_page_size(const std::string& table_name) const;
-    std::optional<size_t> parse_compression_info(const std::string& ibd_path);
+    std::optional<size_t> parse_compression_info(const std::string& ibd_path,
+                                                      size_t page_size = 16384);
     const std::map<std::string, size_t>& get_tables() const { return tables_; }
 
 private:

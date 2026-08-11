@@ -88,6 +88,13 @@ public:
         decompressed.resize(strm.total_out);
         inflateEnd(&strm);
 
+        // Verify decompressed size matches the expected uncompressed length.
+        // Without this check, a truncated SDI payload could silently produce
+        // a shorter result, leading to JSON parse errors or data corruption.
+        if (strm.total_out != hdr.uncompressed_len) {
+            return std::nullopt;
+        }
+
         // ✅ 压缩比校验（防 DoS）
         if (data_len > 0 && decompressed.size() / data_len > SDI_MAX_COMPRESSION_RATIO) {
             return std::nullopt;

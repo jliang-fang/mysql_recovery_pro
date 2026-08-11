@@ -1025,6 +1025,15 @@ protected:
         // Set FIL header page type to FIL_PAGE_INDEX (0x45BF) at offset 24 (big-endian)
         page[24] = 0x45;
         page[25] = 0xBF;
+        // Set non-zero LSN at offset 16 (8 bytes, big-endian) — required by verify_derived_key
+        page[16] = 0x00;
+        page[17] = 0x00;
+        page[18] = 0x00;
+        page[19] = 0x01;
+        page[20] = 0x23;
+        page[21] = 0x45;
+        page[22] = 0x67;
+        page[23] = 0x89;
         return page;
     }
 

@@ -170,6 +170,13 @@ constexpr uint16_t BTR_PAGE_OFFSET_DIRECTION = 12; // relative to BTR header
 
 /// @brief Offset of PAGE_N_DIR_SLOTS within Page Header (relative to FIL_HEADER_SIZE)
 constexpr uint16_t PAGE_N_DIR_SLOTS_OFFSET = 0;
+/// @brief Absolute offset of the MySQL 8.0.13+ page_version field (byte at offset 38).
+/// WARNING: This byte overlaps PAGE_N_DIR_SLOTS low byte. For INDEX pages on
+/// MySQL 8.0.13+ it holds the page version (e.g. 2 = compact, 3 = dynamic,
+/// 4 = instant), while for older versions it is the low byte of the
+/// directory-slots count. Version detectors must gate on the MySQL version
+/// before interpreting this byte.
+constexpr size_t FIL_PAGE_PAGE_VERSION_OFFSET = FIL_HEADER_SIZE; // 38
 /// @brief Offset of PAGE_HEAP_TOP within Page Header (relative to FIL_HEADER_SIZE)
 constexpr uint16_t PAGE_HEAP_TOP_OFFSET    = 2;
 /// @brief Offset of PAGE_N_HEAP within Page Header (relative to FIL_HEADER_SIZE)
