@@ -102,17 +102,26 @@ std::optional<TDEPageHeader> TDEDecryptor::decrypt_page_header(const uint8_t* da
 }
 
 bool TDEDecryptor::verify_checksum(const uint8_t* data, size_t size) {
-    if (!data || size < 52) {
+    if (!data || size < 8) {
         return false;
     }
 
-    // Calculate checksum (simplified - would use CRC32C in production)
-    uint32_t checksum = calculate_checksum(data, size);
+    // InnoDB FIL header checksum is at offset 0 (4 bytes, big-endian).
+    // The trailing checksum is at offset size-8 (4 bytes, big-endian).
+    // CRC32C is computed with bytes 0-3 zeroed during computation.
+    uint32_t stored_checksum = dbrecovery::innodb::read_be<uint32_t>(data, 0);
 
-    // Read stored checksum
-    uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(data, 24);
+    // Read trailing checksum (4 bytes at page_size - 8, big-endian)
+    uint32_t trailing_checksum = dbrecovery::innodb::read_be<uint32_t>(data, size - 8);
 
-    return checksum == stored_checksum;
+    // If stored checksum matches trailing checksum, it's self-consistent
+    if (stored_checksum != 0 && stored_checksum == trailing_checksum) {
+        return true;
+    }
+
+    // Verify via CRC32C computation
+    uint32_t computed = calculate_checksum(data, size);
+    return computed == stored_checksum;
 }
 
 std::vector<uint8_t> TDEDecryptor::derive_table_key(const TDEKey& primary_key,
@@ -161,7 +170,7 @@ std::vector<uint8_t> TDEDecryptor::derive_table_key(const TDEKey& primary_key,
     }
 
     if (result != 0) {
-        return primary_key.key_data;  // Fallback: return master key unchanged
+        return {};  // Security: key derivation failed, return empty not master key
     }
 
     // ECB mode: encrypt each 16-byte block independently

@@ -475,9 +475,13 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
             rec.prev_undo_ptr = RollPtrDecoder::decode_storage_to_internal(
                 page_data + offset + ROLL_PTR_OFFSET, roll_ptr_len, profile);
         } else {
-            // Data too short for the selected profile — treat as chain end.
-            header_size = 8;
-            rec.prev_undo_ptr = 0;
+            // Data too short for the selected profile — the record header is
+            // truncated. Return nullopt (fail-closed) rather than returning a
+            // record with prev_undo_ptr=0 that the caller interprets as the
+            // end of the version chain. Silent chain truncation would cause
+            // the recovery to produce a logically incomplete result without
+            // any diagnostic signal.
+            return std::nullopt;
         }
     }
 

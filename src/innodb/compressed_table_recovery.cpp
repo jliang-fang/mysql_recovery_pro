@@ -239,7 +239,7 @@ std::vector<std::map<std::string, std::string>> CompressedTableRecovery::parse_p
         std::vector<uint8_t> page_data(stride);
         file.read(reinterpret_cast<char*>(page_data.data()), stride);
 
-        if (file.gcount() < static_cast<std::streamsize>(page_size_)) {
+        if (file.gcount() < static_cast<std::streamsize>(stride)) {
             continue;
         }
 

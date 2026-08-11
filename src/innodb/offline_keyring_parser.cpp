@@ -174,8 +174,18 @@ std::vector<uint8_t> OfflineKeyringParser::derive_table_key(
 bool OfflineKeyringParser::verify_derived_key(const std::vector<uint8_t>& decrypted_page) {
     if (decrypted_page.size() < 38) return false;
     uint16_t page_type = (decrypted_page[24] << 8) | decrypted_page[25];
-    return page_type == 0x45BF || page_type == 0x45BE ||
-           page_type == 0x45B2 || page_type == 0x0000;
+    // Must be a real page type (not just 0x0000 which is common in garbage)
+    if (page_type != 0x45BF && page_type != 0x45BE &&
+        page_type != 0x45B2 && page_type != 0x45B5) {
+        return false;
+    }
+    // Verify LSN is non-zero and reasonable (offset 16, 8 bytes big-endian)
+    uint64_t lsn = 0;
+    for (int i = 0; i < 8; i++) {
+        lsn = (lsn << 8) | decrypted_page[16 + i];
+    }
+    if (lsn == 0 || lsn == UINT64_MAX) return false;
+    return true;
 }
 
 std::optional<MasterKey> OfflineKeyringParser::find_key(const std::string& name_hint) const {

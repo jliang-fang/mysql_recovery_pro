@@ -187,9 +187,12 @@ std::vector<std::map<std::string, std::string>> EncryptedTableRecovery::parse_pa
                 if (!try_recovery_without_key_) {
                     continue;
                 }
+                // Security: never feed undecrypted ciphertext to the B+Tree parser.
+                // Without a verified key, the page content is unknowable — emitting
+                // it as structured rows would fabricate data from AES ciphertext.
                 std::cerr << "[WARN] Page " << page.page_no
-                          << " could not be decrypted (no key); falling back to raw bytes\n";
-                working_data = page_data;
+                          << " could not be decrypted (no key); skipping page\n";
+                continue;
             }
         }
 
