@@ -48,12 +48,16 @@ void FlashbackGenerator::set_undo_format_profile(UndoFormatProfile profile) {
 
 void FlashbackGenerator::set_mysql_version(const std::string& version) {
     // Map version string to UndoFormatProfile:
-    //   "5.6" / "5.7"  → LEGACY_6BYTE  (6-byte roll pointer)
-    //   everything else → MYSQL8_7BYTE  (7-byte roll pointer, 8.0+)
+    //   5.6 / 5.7            → LEGACY_6BYTE  (6-byte roll pointer)
+    //   8.0 / 8.1/8.2/8.3/8.4 / 9.0 → MYSQL8_7BYTE  (7-byte roll pointer, 8.0+)
+    //   anything else         → UNRESOLVED   (fail-closed, no structured decoding)
     if (version == "5.6" || version == "5.7") {
         analyzer_->set_undo_format_profile(UndoFormatProfile::LEGACY_6BYTE);
-    } else {
+    } else if (version == "8.0" || version == "8.1" || version == "8.2" ||
+               version == "8.3" || version == "8.4" || version == "9.0") {
         analyzer_->set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+    } else {
+        analyzer_->set_undo_format_profile(UndoFormatProfile::UNRESOLVED);
     }
 }
 

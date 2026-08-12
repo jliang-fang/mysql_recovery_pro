@@ -548,7 +548,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // (e.g., flashback) can fail-closed instead of trusting a blind default.
     bool mysql_version_explicit = parser_.has_option("mysql-version");
     std::string mysql_version = parser_.get_option("mysql-version", "");
-    if (mysql_version.empty()) mysql_version = "8.0";  // default for non-flashback
+    // No blind default: version-sensitive paths (flashback, strategy recommendation)
+    // must explicitly check mysql_version_explicit and reject unknown values.
+    // Non-sensitive paths (scan, basic recovery) use auto-detection from page data.
 
     // Index ID filtering options
     std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
@@ -899,6 +901,19 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cerr << "[ERROR] Flashback requires explicit --mysql-version "
                       << "(5.6, 5.7, 8.0, 8.4, 9.0) for correct undo format selection\n";
             return 1;
+        }
+
+        // Also validate the version value — reject unknown/invalid version strings
+        {
+            bool version_known = (mysql_version == "5.6" || mysql_version == "5.7" ||
+                                  mysql_version == "8.0" || mysql_version == "8.1" ||
+                                  mysql_version == "8.2" || mysql_version == "8.3" ||
+                                  mysql_version == "8.4" || mysql_version == "9.0");
+            if (!version_known) {
+                std::cerr << "[ERROR] Unsupported --mysql-version '" << mysql_version
+                          << "' for flashback. Supported: 5.6, 5.7, 8.0, 8.1, 8.2, 8.3, 8.4, 9.0\n";
+                return 1;
+            }
         }
 
         std::string sys_ts = system_tablespace;
