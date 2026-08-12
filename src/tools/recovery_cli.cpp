@@ -21,7 +21,6 @@
 #include <iostream>
 #include <fstream>
 #include <cstring>
-#include <zlib.h>
 
 namespace dbrecovery {
 namespace tools {
@@ -77,34 +76,26 @@ std::optional<catalog::TableSchema> parse_schema_from_sdi(
                         offset1 + 33 + compressed_len <= page_size) {
                         const uint8_t* compressed_data = page_data.data() + offset1 + 33;
 
-                        z_stream strm = {};
-                        strm.next_in = const_cast<Bytef*>(compressed_data);
-                        strm.avail_in = compressed_len;
+                        // Build synthetic SDI header (20 bytes LE) and reuse the shared
+                        // bounded SDIManager::extract_sdi_json boundary instead of a
+                        // second inflateInit path. This keeps raw-deflate window bits,
+                        // 16MB ceiling and 20:1 ratio policy in one place.
+                        std::vector<uint8_t> synthetic_header(20, 0);
+                        innodb::write_le<uint32_t>(synthetic_header.data(), 0, 7);  // type = SDI
+                        innodb::write_le<uint64_t>(synthetic_header.data(), 4, 0);  // id = 0
+                        innodb::write_le<uint32_t>(synthetic_header.data(), 12, uncompressed_len);
+                        innodb::write_le<uint32_t>(synthetic_header.data(), 16, compressed_len);
 
-                        std::vector<uint8_t> decompressed(
-                            uncompressed_len > 0 ? uncompressed_len : compressed_len * 4);
-                        strm.next_out = decompressed.data();
-                        strm.avail_out = decompressed.size();
+                        std::vector<uint8_t> sdi_blob;
+                        sdi_blob.reserve(synthetic_header.size() + compressed_len);
+                        sdi_blob.insert(sdi_blob.end(), synthetic_header.begin(), synthetic_header.end());
+                        sdi_blob.insert(sdi_blob.end(), compressed_data, compressed_data + compressed_len);
 
-                        int ret = inflateInit(&strm);
-                        if (ret == Z_OK) {
-                            do {
-                                ret = inflate(&strm, Z_NO_FLUSH);
-                                if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
-                                    decompressed.resize(decompressed.size() * 2);
-                                    strm.next_out = decompressed.data() + strm.total_out;
-                                    strm.avail_out = decompressed.size() - strm.total_out;
-                                }
-                            } while (ret == Z_OK);
+                        auto json_opt = innodb::SDIManager::extract_sdi_json(
+                            sdi_blob.data(), sdi_blob.size());
 
-                            if (ret == Z_STREAM_END) {
-                                decompressed.resize(strm.total_out);
-                                std::string json_str(
-                                    reinterpret_cast<const char*>(decompressed.data()),
-                                    decompressed.size());
-                                sdi_payloads.push_back({offset1, json_str});
-                            }
-                            inflateEnd(&strm);
+                        if (json_opt.has_value()) {
+                            sdi_payloads.push_back({offset1, json_opt.value()});
                         }
                     }
                 }

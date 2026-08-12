@@ -53,6 +53,8 @@
 #include "dbrecovery/recovery/strategy_recommender.hpp"
 #include "dbrecovery/carve/page_identity_engine.hpp"
 #include "dbrecovery/salvage/data_correlation.hpp"
+#include "dbrecovery/innodb/compressed_table_recovery.hpp"
+#include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 
 namespace fs = std::filesystem;
 
@@ -2628,6 +2630,38 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     std::vector<std::map<std::string, std::string>> recovered_records;
     std::vector<std::string> recovered_column_order;  // 用于保持列顺序
+    bool shared_specialized_handled = false;
+
+    // Phase 6: 专用格式分类器 — 在 page size 解析后、路由到 InnoDBIndexParser 之前，
+    // 检测压缩表 (ZSD/FSP ZIP_SSIZE) 与加密表 (TDE 算法字节)，
+    // 只路由到经过 fixture 验证的专用引擎，避免对未知物理格式做通用解析。
+    // 返回: "none" (无专用格式) / "compressed" / "encrypted" / "compressed+encrypted" (不支持)
+    auto classify_physical_format = [](const std::string& path, uint32_t page_sz) -> std::string {
+        std::ifstream f(path, std::ios::binary);
+        if (!f) return "none";
+        std::vector<uint8_t> page0(page_sz, 0);
+        f.read(reinterpret_cast<char*>(page0.data()), page_sz);
+        if (f.gcount() < 38) return "none";
+
+        bool compressed = false;
+        bool encrypted = false;
+
+        // 压缩表: FSP_SPACE_FLAGS (仅 page 0, offset 42) 的 ZIP_SSIZE 位 (bits 1-4)
+        if (page_sz >= 46) {
+            uint32_t fsp_flags = dbrecovery::innodb::read_be<uint32_t>(page0.data(), 42);
+            uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
+            compressed = (zip_ssize != 0);
+        }
+
+        // 加密表: FIL 页头 offset 38 的 TDE 算法字节 (0x01-0x09)
+        uint8_t algo = page0[38];
+        encrypted = (algo >= 0x01 && algo <= 0x09);
+
+        if (compressed && encrypted) return "compressed+encrypted";
+        if (compressed) return "compressed";
+        if (encrypted) return "encrypted";
+        return "none";
+    };
 
     // 辅助函数：从 SDI 页解析表结构
     auto parse_schema_from_sdi = [&](const std::string& ibd_path, uint64_t table_id) -> std::optional<dbrecovery::catalog::TableSchema> {
@@ -2740,6 +2774,71 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         schema.page_size = 16384;
         // 不添加任何预定义列 - 让引擎根据实际数据推断
         return schema;
+    };
+
+    // Phase 6: 从 .ibd 解析 TableSchema (SDI 优先，其次空 schema) 的公共辅助
+    auto resolve_table_schema = [&](const std::string& ibd, uint64_t tid,
+                                     uint32_t page_sz) -> dbrecovery::catalog::TableSchema {
+        auto schema_opt = parse_schema_from_sdi(ibd, tid);
+        dbrecovery::catalog::TableSchema schema;
+        if (schema_opt.has_value()) {
+            schema = schema_opt.value();
+        } else {
+            schema = create_empty_schema();
+        }
+        schema.page_size = page_sz;
+        return schema;
+    };
+
+    // Phase 6: 压缩表专用恢复 — 复用 CompressedTableRecovery
+    auto run_compressed_recovery = [&](const std::string& ibd, uint32_t page_sz) -> bool {
+        std::cout << "[INFO] Compressed tablespace detected — routing to CompressedTableRecovery\n";
+        dbrecovery::innodb::CompressedTableRecovery comp_rec;
+        comp_rec.set_file_path(ibd);
+        comp_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz));
+        if (!comp_rec.auto_detect_compression(ibd)) {
+            std::cout << "[WARN] Compression auto-detection failed — no records recovered\n";
+            return false;
+        }
+        auto recs = comp_rec.recover();
+        if (!recs.empty()) {
+            recovered_records = recs;
+            std::cout << "[INFO] CompressedTableRecovery recovered " << recs.size() << " records\n";
+        } else {
+            std::cout << "[INFO] CompressedTableRecovery found no records\n";
+        }
+        return true;
+    };
+
+    // Phase 6: 加密表专用恢复 — 复用 EncryptedTableRecovery。
+    // 无 key / key 校验失败 / 不支持的后端 / 密文解密失败都必须输出零结构化行。
+    // EncryptedTableRecovery::load_keyring() 内部使用 OfflineKeyringParser，
+    // 不支持加密 keyring 密码 — 需密码的 keyring 由上层 CLI 处理（见 ~line 1608）。
+    auto run_encrypted_recovery = [&](const std::string& ibd, uint32_t page_sz) -> bool {
+        std::cout << "[INFO] Encrypted tablespace detected — routing to EncryptedTableRecovery\n";
+        dbrecovery::innodb::EncryptedTableRecovery enc_rec;
+        enc_rec.set_file_path(ibd);
+        enc_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz));
+
+        bool key_ready = false;
+        if (!keyring_file.empty()) {
+            std::cout << "[INFO] Loading keyring for encrypted recovery: " << keyring_file << "\n";
+            enc_rec.set_try_recovery_without_key(false);
+            key_ready = enc_rec.load_keyring(keyring_file);
+        }
+        if (!key_ready) {
+            std::cout << "[WARN] No usable key material for encrypted table — emitting zero structured rows\n";
+            return false;
+        }
+
+        auto recs = enc_rec.recover();
+        if (!recs.empty()) {
+            recovered_records = recs;
+            std::cout << "[INFO] EncryptedTableRecovery recovered " << recs.size() << " records\n";
+        } else {
+            std::cout << "[INFO] EncryptedTableRecovery found no records (fail-closed)\n";
+        }
+        return true;
     };
 
     // 辅助函数：从 FRM 文件解析 schema 并设置到 InnoDBIndexParser
@@ -3374,6 +3473,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         if (page_size == 0) page_size = 16384;
 
+        // Phase 6: 专用格式路由 — 压缩/加密表走验证过的专用引擎，不落入通用解析
+        {
+            std::string fmt = classify_physical_format(ibd_path, page_size);
+            if (fmt == "compressed+encrypted") {
+                std::cout << "[WARN] Compressed+encrypted tablespace — no fixture-validated combined path; "
+                          << "explicitly unsupported. Emitting zero structured rows.\n";
+            } else if (fmt == "compressed") {
+                run_compressed_recovery(ibd_path, page_size);
+            } else if (fmt == "encrypted") {
+                run_encrypted_recovery(ibd_path, page_size);
+            }
+            if (fmt != "none") {
+                shared_specialized_handled = true;
+            }
+        }
+        if (shared_specialized_handled) {
+            /* 路由完成，跳过通用 InnoDBIndexParser 路径 */
+        } else {
         // Use InnoDBIndexParser for recovery
         dbrecovery::innodb::InnoDBIndexParser index_parser;
         index_parser.set_recover_deleted(true);
@@ -3555,7 +3672,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::cout << "[INFO] TRUNCATE recovery found no records.\n";
             }
         }
-    }
+        } // end else (shared_specialized_handled)
+    } // if (default_recovery)
 
     // Truncate 恢复 - 使用 InnoDBIndexParser 进行高精度恢复
     if (truncate_recovery) {
@@ -3579,6 +3697,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         if (page_size == 0) page_size = 16384;
 
+        // Phase 6: 专用格式路由
+        {
+            std::string fmt = classify_physical_format(ibd_path, page_size);
+            if (fmt == "compressed+encrypted") {
+                std::cout << "[WARN] Compressed+encrypted tablespace — no fixture-validated combined path; "
+                          << "explicitly unsupported. Emitting zero structured rows.\n";
+            } else if (fmt == "compressed") {
+                run_compressed_recovery(ibd_path, page_size);
+            } else if (fmt == "encrypted") {
+                run_encrypted_recovery(ibd_path, page_size);
+            }
+            if (fmt != "none") {
+                shared_specialized_handled = true;
+            }
+        }
+        if (shared_specialized_handled) {
+            /* 路由完成，跳过通用 InnoDBIndexParser 路径 */
+        } else {
         // Use InnoDBIndexParser for high-accuracy recovery
         dbrecovery::innodb::InnoDBIndexParser index_parser;
         index_parser.set_recover_deleted(true);  // Include deleted records (critical for TRUNCATE)
@@ -3631,6 +3767,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::cout << "[INFO] Truncate recovery found no records.\n";
             }
         }
+        } // end else (shared_specialized_handled)
     }
 
     // rm -rf 恢复 - 使用 InnoDBIndexParser 进行高精度恢复
@@ -3657,6 +3794,24 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         if (page_size == 0) page_size = 16384;
 
+        // Phase 6: 专用格式路由
+        {
+            std::string fmt = classify_physical_format(ibd_path, page_size);
+            if (fmt == "compressed+encrypted") {
+                std::cout << "[WARN] Compressed+encrypted tablespace — no fixture-validated combined path; "
+                          << "explicitly unsupported. Emitting zero structured rows.\n";
+            } else if (fmt == "compressed") {
+                run_compressed_recovery(ibd_path, page_size);
+            } else if (fmt == "encrypted") {
+                run_encrypted_recovery(ibd_path, page_size);
+            }
+            if (fmt != "none") {
+                shared_specialized_handled = true;
+            }
+        }
+        if (shared_specialized_handled) {
+            /* 路由完成，跳过通用 InnoDBIndexParser 路径 */
+        } else {
         // Use InnoDBIndexParser for high-accuracy recovery
         dbrecovery::innodb::InnoDBIndexParser index_parser;
         index_parser.set_recover_deleted(true);  // Include deleted records
@@ -3736,6 +3891,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::cout << "[WARN] rm -rf recovery returned no records.\n";
             }
         }
+        } // end else (shared_specialized_handled)
     }
 
     // BLOB 恢复
