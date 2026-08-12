@@ -82,7 +82,7 @@ struct MySQLVersionInfo {
     bool supports_sdi;
     bool supports_encryption;
     bool supports_compression;
-    bool supports_temporary_pages;
+    bool supports_temporary_pages = false;
     std::vector<RowFormat> supported_row_formats;
 
     // 构造函数

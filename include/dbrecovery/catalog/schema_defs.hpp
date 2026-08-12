@@ -28,7 +28,7 @@ struct ColumnInfo {
     uint32_t charset_id;          // 如: utf8mb4_0900_ai_ci=255
     uint32_t collation_id;
     std::optional<std::string> generated_expr;  // VIRTUAL/STORED 表达式
-    bool is_auto_increment;
+    bool is_auto_increment = false;
 
     // MySQL 8.0 新增字段（用于精确解析）
     int datetime_precision = -1;   // DATETIME/TIMESTAMP 的小数位精度 (0-6)
