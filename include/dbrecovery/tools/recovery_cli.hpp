@@ -1590,6 +1590,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     }
 
     // v2.0: Keyring file parsing for TDE support
+    // NOTE: XOR diagnostic format is intentionally unsupported. The offline keyring
+    // parser handles JSON, encrypted-JSON (password), and HashiCorp Vault export
+    // formats only. MySQL's native binary keyring format (xor-encoded) is not a
+    // supported backend — it exists only as an internal diagnostic encoding and
+    // will be rejected by the parser. This is fail-closed: unsupported keyring
+    // formats return error, no decryption is attempted, and no ciphertext reaches
+    // the B+Tree parser. See encrypted_table_recovery.cpp:188-193.
     if (!keyring_file.empty()) {
         std::cout << "[INFO] Loading keyring: " << keyring_file << "\n";
 
@@ -1649,7 +1656,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
                                 test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
                             auto decrypted = tde.decrypt_page(test_page.data(), page_size,
-                                                              real_page_no, real_space_id);
+                                                              real_space_id, real_page_no);
                             if (!decrypted.empty()) {
                                 std::cout << "[INFO] Page decryption SUCCESS ("
                                           << decrypted.size() << " bytes)\n";
