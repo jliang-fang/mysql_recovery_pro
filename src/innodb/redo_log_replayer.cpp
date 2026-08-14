@@ -36,7 +36,7 @@ void RedoLogReplayer::add_redo_records(const std::vector<RedoLogRecord>& records
     redo_records_.insert(redo_records_.end(), records.begin(), records.end());
 }
 
-RedoReplayResult RedoLogReplayer::replay(const catalog::TableSchema& schema) {
+RedoReplayResult RedoLogReplayer::replay() {
     RedoReplayResult result;
     result.success = true;
     result.records_processed = 0;

@@ -60,10 +60,17 @@ private:
 
     std::vector<SDIEntry> extract_sdi_entries();
 
+    /// Populate page_cache_ from the tablespace file (idempotent)
+    void ensure_cache_populated();
+
     size_t page_size_;
     std::string ts_path_;
     std::string output_dir_;
     SharedTablespaceStats stats_;
+
+    /// Page cache: populated once on first scan, reused across all methods
+    std::map<uint32_t, std::vector<uint8_t>> page_cache_;
+    bool cache_populated_ = false;
 };
 
 } // namespace innodb

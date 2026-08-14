@@ -24,7 +24,7 @@ namespace dbrecovery {
 namespace innodb {
 
 SharedTablespaceRecovery::SharedTablespaceRecovery(size_t page_size)
-    : page_size_(page_size) {}
+    : page_size_(page_size), cache_populated_(false) {}
 
 void SharedTablespaceRecovery::set_tablespace_path(const std::string& path) {
     ts_path_ = path;
@@ -55,34 +55,41 @@ std::vector<TableIdentity> SharedTablespaceRecovery::list_tables() {
     return tables;
 }
 
-bool SharedTablespaceRecovery::extract_table(uint32_t target_space_id, const std::string& output_ibd_path) {
-    auto start = std::chrono::high_resolution_clock::now();
+void SharedTablespaceRecovery::ensure_cache_populated() {
+    if (cache_populated_) return;
 
     std::ifstream file(ts_path_, std::ios::binary | std::ios::ate);
-    if (!file) {
-        std::cerr << "[ERROR] Cannot open: " << ts_path_ << "\n";
-        return false;
-    }
+    if (!file) return;
 
     uint64_t file_size = file.tellg();
     file.seekg(0, std::ios::beg);
     uint32_t total_pages = static_cast<uint32_t>(file_size / page_size_);
-
-    std::map<uint32_t, std::vector<uint8_t>> pages_by_no;
     std::vector<uint8_t> page_buf(page_size_);
 
     for (uint32_t pg = 0; pg < total_pages; pg++) {
         file.seekg(static_cast<std::streamoff>(pg) * page_size_, std::ios::beg);
         file.read(reinterpret_cast<char*>(page_buf.data()), page_size_);
         if (file.gcount() < static_cast<std::streamsize>(page_size_)) break;
+        page_cache_[pg] = page_buf;
+    }
 
-        stats_.total_pages_scanned++;
+    stats_.total_pages_scanned = total_pages;
+    cache_populated_ = true;
+}
 
+bool SharedTablespaceRecovery::extract_table(uint32_t target_space_id, const std::string& output_ibd_path) {
+    auto start = std::chrono::high_resolution_clock::now();
+
+    ensure_cache_populated();
+
+    std::map<uint32_t, std::vector<uint8_t>> pages_by_no;
+
+    for (const auto& [pg, page_buf] : page_cache_) {
         uint32_t space_id = read_le<uint32_t>(page_buf.data(), 34);
         if (space_id != target_space_id) continue;
 
         uint32_t page_no = read_le<uint32_t>(page_buf.data(), 4);
-        uint16_t page_type = read_le<uint16_t>(page_buf.data(), 24);
+        uint16_t page_type = read_be<uint16_t>(page_buf.data(), 24);
 
         if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
             page_type == FIL_PAGE_SDI_ZIP || page_no == 0 || page_no == 1 ||
@@ -132,21 +139,13 @@ std::vector<std::map<std::string, std::string>> SharedTablespaceRecovery::recove
         return all_records;
     }
 
-    std::ifstream file(tmp_ibd, std::ios::binary | std::ios::ate);
-    uint64_t file_size = file.tellg();
-    file.close();
+    ensure_cache_populated();
 
-    if (file_size < page_size_) return all_records;
+    for (const auto& [pg, page_buf] : page_cache_) {
+        uint32_t space_id = read_le<uint32_t>(page_buf.data(), 34);
+        if (space_id != target_space_id) continue;
 
-    uint32_t total_pages = static_cast<uint32_t>(file_size / page_size_);
-    std::vector<uint8_t> page_buf(page_size_);
-    std::ifstream infile(tmp_ibd, std::ios::binary);
-
-    for (uint32_t pg = 0; pg < total_pages; pg++) {
-        infile.seekg(static_cast<std::streamoff>(pg) * page_size_, std::ios::beg);
-        infile.read(reinterpret_cast<char*>(page_buf.data()), page_size_);
-
-        uint16_t page_type = read_le<uint16_t>(page_buf.data(), 24);
+        uint16_t page_type = read_be<uint16_t>(page_buf.data(), 24);
         if (page_type != FIL_PAGE_INDEX) continue;
 
         BPlusTreeParser parser(page_buf);
@@ -163,20 +162,10 @@ std::vector<std::map<std::string, std::string>> SharedTablespaceRecovery::recove
 std::vector<SharedTablespaceRecovery::SDIEntry> SharedTablespaceRecovery::extract_sdi_entries() {
     std::vector<SDIEntry> entries;
 
-    std::ifstream file(ts_path_, std::ios::binary | std::ios::ate);
-    if (!file) return entries;
+    ensure_cache_populated();
 
-    uint64_t file_size = file.tellg();
-    file.seekg(0, std::ios::beg);
-    uint32_t total_pages = static_cast<uint32_t>(file_size / page_size_);
-    std::vector<uint8_t> page_buf(page_size_);
-
-    for (uint32_t pg = 0; pg < total_pages; pg++) {
-        file.seekg(static_cast<std::streamoff>(pg) * page_size_, std::ios::beg);
-        file.read(reinterpret_cast<char*>(page_buf.data()), page_size_);
-        if (file.gcount() < static_cast<std::streamsize>(page_size_)) break;
-
-        uint16_t page_type = read_le<uint16_t>(page_buf.data(), 24);
+    for (const auto& [pg, page_buf] : page_cache_) {
+        uint16_t page_type = read_be<uint16_t>(page_buf.data(), 24);
         if (page_type != FIL_PAGE_SDI && page_type != FIL_PAGE_SDI_ZIP) continue;
 
         stats_.sdi_pages_found++;

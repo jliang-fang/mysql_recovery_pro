@@ -53,6 +53,7 @@
 #include "dbrecovery/recovery/strategy_recommender.hpp"
 #include "dbrecovery/carve/page_identity_engine.hpp"
 #include "dbrecovery/salvage/data_correlation.hpp"
+#include "dbrecovery/salvage/evidence_serializer.hpp"
 #include "dbrecovery/innodb/compressed_table_recovery.hpp"
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 
@@ -263,8 +264,10 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "                                 Brute-force scans for any parseable row fragments\n";
     std::cout << "                                 0=L1 header_repair, 1=L2 signature_scan,\n";
     std::cout << "                                 2=L3 pattern_match, 3=L4 string_extract\n";
-    std::cout << "  \033[1m--include-fragments\033[0m         In salvage mode, also export L3 FRAGMENT and L4\n";
-    std::cout << "                                 STRING_ONLY rows (default: STRUCTURED rows only)\n";
+    std::cout << "  \033[1m--include-fragments\033[0m         In salvage mode, include L3 FRAGMENT and L4\n";
+    std::cout << "                                 STRING_ONLY items in the separate evidence report.\n";
+    std::cout << "                                 Evidence is NEVER exported to CSV/SQL; it is\n";
+    std::cout << "                                 forensic-only and non-importable.\n";
     std::cout << "  \033[1m--auto-salvage\033[0m              Auto salvage — try all strategies, correlate results\n";
     std::cout << "                                 Uses SalvageEngine + DataCorrelationEngine\n";
     std::cout << "  \033[1m--deep-carve\033[0m                Deep carve mode — sector-level PageIdentityEngine scanning\n";
@@ -1039,8 +1042,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 auto result = engine.salvage_pages(raw_pages);
                 std::cout << "[AUTO-SALVAGE] SalvageEngine found " << result.rows.size() << " rows\n";
 
-                // Convert SalvagedRow → RowFragment for correlation
+                // Convert SalvagedRow → RowFragment for correlation.
+                // rows must contain STRUCTURED (L1/L2) entries only; reject any
+                // non-structured salvage level defensively at this boundary.
                 for (const auto& sr : result.rows) {
+                    if (sr.salvage_level != dbrecovery::recovery::SalvageLevel::STRUCTURED) {
+                        std::cerr << "[WARN] Skipping non-structured salvage row "
+                                  << "(level=" << static_cast<int>(sr.salvage_level)
+                                  << ") in auto-salvage correlation\n";
+                        continue;
+                    }
                     dbrecovery::salvage::RowFragment frag;
                     frag.fragment_id = all_fragments.size();
                     frag.overall_confidence = sr.confidence;
@@ -1050,8 +1061,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         f.field_index = static_cast<uint32_t>(fi);
                         f.data.assign(sr.fields[fi].begin(), sr.fields[fi].end());
                         f.confidence = sr.confidence;
-                        f.is_complete = (sr.salvage_level ==
-                            dbrecovery::recovery::SalvageLevel::STRUCTURED);
+                        f.is_complete = true;  // structured rows are complete by contract
                         f.source = "salvage_engine";
                         frag.fields.push_back(std::move(f));
                     }
@@ -1127,6 +1137,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         dbrecovery::recovery::SalvageEngine::Config salvage_config;
         salvage_config.page_size = page_size;
+        salvage_config.include_fragments = include_fragments;
         salvage_config.verbose = verbose;
         salvage_config.min_string_len = 4;
         salvage_config.min_record_fields = 1;
@@ -1137,35 +1148,63 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         std::cout << result.to_report() << "\n";
 
+        fs::create_directories(output_dir);
+
+        // Structured rows (L1/L2) are always exportable to CSV.
         if (!result.rows.empty()) {
-            fs::create_directories(output_dir);
             std::string csv_path = output_dir + "/salvaged_data.csv";
 
-            // By default export only STRUCTURED rows (L1/L2); L3/L4 fragments are
-            // low-confidence and only included when --include-fragments is set.
-            std::vector<dbrecovery::recovery::SalvagedRow> export_rows;
-            for (const auto& row : result.rows) {
-                if (include_fragments ||
-                    row.salvage_level == dbrecovery::recovery::SalvageLevel::STRUCTURED) {
-                    export_rows.push_back(row);
-                }
-            }
-
-            if (export_rows.empty()) {
-                std::cout << "[WARN] No structured rows to export "
-                          << "(use --include-fragments to export L3/L4 fragments)\n";
-            } else if (dbrecovery::recovery::SalvageEngine::export_csv(csv_path, export_rows)) {
-                std::cout << "[INFO] Salvaged data written to: " << csv_path << "\n";
-                std::cout << "[INFO] Total rows salvaged: " << export_rows.size() << "\n";
-                if (export_rows.size() < result.rows.size()) {
-                    std::cout << "[INFO] Skipped " << (result.rows.size() - export_rows.size())
-                              << " low-confidence fragment rows "
-                              << "(use --include-fragments to export them)\n";
-                }
+            if (dbrecovery::recovery::SalvageEngine::export_csv(csv_path, result.rows)) {
+                std::cout << "[INFO] Recovered structured rows written to: " << csv_path << "\n";
+                std::cout << "[INFO] Total structured rows exported: " << result.rows.size() << "\n";
+            } else {
+                std::cerr << "[ERROR] Failed to export structured rows to: " << csv_path << "\n";
             }
         } else {
-            std::cout << "[WARN] No data could be salvaged\n";
+            std::cout << "[WARN] No structured rows to export\n";
         }
+
+        // Forensic evidence (L3/L4) is never exported to CSV/SQL. When
+        // --include-fragments is set, write a separate non-importable evidence
+        // report with metadata, hashes, and bounded previews only.
+        if (!result.evidence_fragments.empty()) {
+            std::string counter = std::to_string(result.evidence_fragments.size());
+            std::cout << "[INFO] " << counter
+                      << " forensic evidence fragments retained (L3/L4, non-importable)\n";
+
+            if (include_fragments) {
+                std::string evidence_path = output_dir + "/salvage_evidence.json";
+                dbrecovery::salvage::SalvageEvidenceSerializer serializer;
+                std::map<std::string, std::string> metadata;
+                if (!ibd_path.empty()) {
+                    metadata["source_file"] = ibd_path;
+                }
+                metadata["page_size"] = std::to_string(page_size);
+                metadata["recovery_mode"] = "salvage";
+
+                if (serializer.write_evidence(evidence_path, result.evidence_fragments, metadata)) {
+                    std::cout << "[INFO] Evidence report written to: " << evidence_path << "\n";
+                    std::cout << "[WARN] Evidence fragments are forensic-only and CANNOT be\n";
+                    std::cout << "       imported into a database. Use --include-fragments to\n";
+                    std::cout << "       include this report in the output.\n";
+                } else {
+                    std::cerr << "[ERROR] Failed to write evidence report to: "
+                              << evidence_path << "\n";
+                }
+            } else {
+                std::cout << "[INFO] Evidence fragments omitted from output. Enable\n";
+                std::cout << "       --include-fragments to write salvage_evidence.json\n";
+                std::cout << "       (forensic-only report, never imported).\n";
+            }
+        } else {
+            std::cout << "[INFO] No forensic evidence fragments found\n";
+        }
+
+        // Normal recovery, report, and capability output must distinguish
+        // recovered structured rows from forensic evidence fragments.
+        std::cout << "[INFO] Salvage summary: " << result.rows.size()
+                  << " structured rows, " << result.evidence_fragments.size()
+                  << " evidence fragments\n";
         return 0;
     }
 
@@ -1446,8 +1485,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         // Replay
-        catalog::TableSchema replay_schema_val = replay_schema.value_or(catalog::TableSchema{});
-        auto replay_result = replayer.replay(replay_schema_val);
+        auto replay_result = replayer.replay();
 
         // Report results
         std::cout << "\n[RESULT] Redo Log Replay Complete\n";
@@ -1591,6 +1629,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return 0;
     }
 
+    std::vector<dbrecovery::innodb::MasterKey> parsed_tde_keys;
+
     // v2.0: Keyring file parsing for TDE support
     // NOTE: XOR diagnostic format is intentionally unsupported. The offline keyring
     // parser handles JSON, encrypted-JSON (password), and HashiCorp Vault export
@@ -1629,6 +1669,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             // Set up TDEDecryptor with loaded keys
             auto& keys = keyring_parser.get_master_keys();
+            parsed_tde_keys = keys;
             if (!keys.empty()) {
                 dbrecovery::innodb::TDEDecryptor tde;
                 tde.set_primary_key(keys[0].key_data);
@@ -2632,35 +2673,29 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::vector<std::string> recovered_column_order;  // 用于保持列顺序
     bool shared_specialized_handled = false;
 
-    // Phase 6: 专用格式分类器 — 在 page size 解析后、路由到 InnoDBIndexParser 之前，
-    // 检测压缩表 (ZSD/FSP ZIP_SSIZE) 与加密表 (TDE 算法字节)，
-    // 只路由到经过 fixture 验证的专用引擎，避免对未知物理格式做通用解析。
-    // 返回: "none" (无专用格式) / "compressed" / "encrypted" / "compressed+encrypted" (不支持)
-    auto classify_physical_format = [](const std::string& path, uint32_t page_sz) -> std::string {
+    struct PhysicalFormat {
+        std::string kind = "none";
+        std::optional<dbrecovery::innodb::FSPCompressionMetadata> compression;
+    };
+
+    auto classify_physical_format = [](const std::string& path, uint32_t page_sz) -> PhysicalFormat {
         std::ifstream f(path, std::ios::binary);
-        if (!f) return "none";
+        if (!f) return {};
         std::vector<uint8_t> page0(page_sz, 0);
         f.read(reinterpret_cast<char*>(page0.data()), page_sz);
-        if (f.gcount() < 38) return "none";
+        const size_t bytes_read = static_cast<size_t>(f.gcount());
+        if (bytes_read < dbrecovery::innodb::FIL_HEADER_SIZE) return {};
 
-        bool compressed = false;
-        bool encrypted = false;
+        const auto compression = dbrecovery::innodb::parse_fsp_compression_metadata(
+            page0.data(), bytes_read, page_sz);
+        const bool compressed = compression && compression->is_compressed();
+        const bool encrypted = dbrecovery::innodb::TDEDecryptor::is_encrypted(
+            page0.data(), bytes_read);
 
-        // 压缩表: FSP_SPACE_FLAGS (仅 page 0, offset 42) 的 ZIP_SSIZE 位 (bits 1-4)
-        if (page_sz >= 46) {
-            uint32_t fsp_flags = dbrecovery::innodb::read_be<uint32_t>(page0.data(), 42);
-            uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
-            compressed = (zip_ssize != 0);
-        }
-
-        // 加密表: FIL 页头 offset 38 的 TDE 算法字节 (0x01-0x09)
-        uint8_t algo = page0[38];
-        encrypted = (algo >= 0x01 && algo <= 0x09);
-
-        if (compressed && encrypted) return "compressed+encrypted";
-        if (compressed) return "compressed";
-        if (encrypted) return "encrypted";
-        return "none";
+        if (compressed && encrypted) return {"compressed+encrypted", compression};
+        if (compressed) return {"compressed", compression};
+        if (encrypted) return {"encrypted", std::nullopt};
+        return {};
     };
 
     // 辅助函数：从 SDI 页解析表结构
@@ -2685,53 +2720,27 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
             if (dbrecovery::innodb::is_sdi_page_type(page_type)) {
-                // For compressed SDI (0x45BD), construct synthetic SDI header + call extract_sdi_json()
                 if (page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP && page_size >= 100) {
-                    // offset = struct.unpack('>h',data[97:99])[0] + 99
-                    int16_t slot_offset = static_cast<int16_t>(
+                    const int16_t slot_offset = static_cast<int16_t>(
                         (static_cast<uint16_t>(page_data[97]) << 8) |
                         static_cast<uint16_t>(page_data[98]));
-                    uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
-
-                    if (record_offset > 0 && record_offset < page_size - 50) {
-                        // Read lengths at offset+25 and offset+29 (big-endian)
-                        uint32_t uncompressed_len = dbrecovery::innodb::read_be<uint32_t>(
-                            page_data.data(), record_offset + 25);
-                        uint32_t compressed_len = dbrecovery::innodb::read_be<uint32_t>(
-                            page_data.data(), record_offset + 29);
-
-                        if (compressed_len > 0 && compressed_len < page_size &&
-                            record_offset + 33 + compressed_len <= page_size) {
-                            // Build synthetic SDI header: 20 bytes LE
-                            std::vector<uint8_t> synthetic_header(20, 0);
-                            dbrecovery::innodb::write_le<uint32_t>(synthetic_header.data(), 0, 7);  // type = SDI
-                            dbrecovery::innodb::write_le<uint64_t>(synthetic_header.data(), 4, 0);  // id = 0
-                            dbrecovery::innodb::write_le<uint32_t>(synthetic_header.data(), 12, uncompressed_len);
-                            dbrecovery::innodb::write_le<uint32_t>(synthetic_header.data(), 16, compressed_len);
-
-                            // Concatenate synthetic header + compressed payload
-                            const uint8_t* compressed_data = page_data.data() + record_offset + 33;
-                            std::vector<uint8_t> sdi_blob;
-                            sdi_blob.reserve(synthetic_header.size() + compressed_len);
-                            sdi_blob.insert(sdi_blob.end(), synthetic_header.begin(), synthetic_header.end());
-                            sdi_blob.insert(sdi_blob.end(), compressed_data, compressed_data + compressed_len);
-
-                            auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
-                                sdi_blob.data(), sdi_blob.size());
-
-                            if (json_opt.has_value()) {
-                                try {
-                                    auto json = nlohmann::json::parse(json_opt.value());
-                                    dbrecovery::catalog::TableSchema schema;
-                                    if (json.contains("dd_object")) {
-                                        schema.from_json(json["dd_object"]);
-                                    } else {
-                                        schema.from_json(json);
-                                    }
+                    const int64_t record_offset = static_cast<int64_t>(slot_offset) + 99;
+                    if (record_offset >= 0) {
+                        const auto extraction = dbrecovery::innodb::SDIManager::extract_zip_record(
+                            page_data.data(), page_data.size(), static_cast<size_t>(record_offset));
+                        if (extraction.success()) {
+                            try {
+                                const auto json = nlohmann::json::parse(extraction.json);
+                                dbrecovery::catalog::TableSchema schema;
+                                const bool parsed = json.contains("dd_object")
+                                    ? schema.from_json(json["dd_object"])
+                                    : schema.from_json(json);
+                                if (parsed) {
                                     std::cout << "[INFO] Successfully parsed schema from compressed SDI: "
                                               << schema.table_name << " (" << schema.columns.size() << " columns)\n";
                                     return schema;
-                                } catch (const nlohmann::json::parse_error&) {}
+                                }
+                            } catch (const nlohmann::json::parse_error&) {
                             }
                         }
                     }
@@ -2791,11 +2800,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     };
 
     // Phase 6: 压缩表专用恢复 — 复用 CompressedTableRecovery
-    auto run_compressed_recovery = [&](const std::string& ibd, uint32_t page_sz) -> bool {
+    auto run_compressed_recovery = [&](const std::string& ibd,
+                                       const dbrecovery::innodb::FSPCompressionMetadata& compression) -> bool {
         std::cout << "[INFO] Compressed tablespace detected — routing to CompressedTableRecovery\n";
-        dbrecovery::innodb::CompressedTableRecovery comp_rec;
+        dbrecovery::innodb::CompressedTableRecovery comp_rec(compression.logical_page_size);
+        comp_rec.set_compressed_page_size(compression.physical_page_size);
         comp_rec.set_file_path(ibd);
-        comp_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz));
+        comp_rec.set_schema(resolve_table_schema(ibd, table_id, compression.logical_page_size));
         if (!comp_rec.auto_detect_compression(ibd)) {
             std::cout << "[WARN] Compression auto-detection failed — no records recovered\n";
             return false;
@@ -2816,15 +2827,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 不支持加密 keyring 密码 — 需密码的 keyring 由上层 CLI 处理（见 ~line 1608）。
     auto run_encrypted_recovery = [&](const std::string& ibd, uint32_t page_sz) -> bool {
         std::cout << "[INFO] Encrypted tablespace detected — routing to EncryptedTableRecovery\n";
-        dbrecovery::innodb::EncryptedTableRecovery enc_rec;
+        dbrecovery::innodb::EncryptedTableRecovery enc_rec(page_sz);
         enc_rec.set_file_path(ibd);
         enc_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz));
 
         bool key_ready = false;
-        if (!keyring_file.empty()) {
-            std::cout << "[INFO] Loading keyring for encrypted recovery: " << keyring_file << "\n";
+        if (!parsed_tde_keys.empty()) {
             enc_rec.set_try_recovery_without_key(false);
-            key_ready = enc_rec.load_keyring(keyring_file);
+            key_ready = enc_rec.configure_keys(parsed_tde_keys);
         }
         if (!key_ready) {
             std::cout << "[WARN] No usable key material for encrypted table — emitting zero structured rows\n";
@@ -3475,16 +3485,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // Phase 6: 专用格式路由 — 压缩/加密表走验证过的专用引擎，不落入通用解析
         {
-            std::string fmt = classify_physical_format(ibd_path, page_size);
-            if (fmt == "compressed+encrypted") {
+            const auto format = classify_physical_format(ibd_path, page_size);
+            if (format.kind == "compressed+encrypted") {
                 std::cout << "[WARN] Compressed+encrypted tablespace — no fixture-validated combined path; "
                           << "explicitly unsupported. Emitting zero structured rows.\n";
-            } else if (fmt == "compressed") {
-                run_compressed_recovery(ibd_path, page_size);
-            } else if (fmt == "encrypted") {
+            } else if (format.kind == "compressed" && format.compression) {
+                run_compressed_recovery(ibd_path, *format.compression);
+            } else if (format.kind == "encrypted") {
                 run_encrypted_recovery(ibd_path, page_size);
             }
-            if (fmt != "none") {
+            if (format.kind != "none") {
                 shared_specialized_handled = true;
             }
         }
@@ -3699,16 +3709,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // Phase 6: 专用格式路由
         {
-            std::string fmt = classify_physical_format(ibd_path, page_size);
-            if (fmt == "compressed+encrypted") {
+            const auto format = classify_physical_format(ibd_path, page_size);
+            if (format.kind == "compressed+encrypted") {
                 std::cout << "[WARN] Compressed+encrypted tablespace — no fixture-validated combined path; "
                           << "explicitly unsupported. Emitting zero structured rows.\n";
-            } else if (fmt == "compressed") {
-                run_compressed_recovery(ibd_path, page_size);
-            } else if (fmt == "encrypted") {
+            } else if (format.kind == "compressed" && format.compression) {
+                run_compressed_recovery(ibd_path, *format.compression);
+            } else if (format.kind == "encrypted") {
                 run_encrypted_recovery(ibd_path, page_size);
             }
-            if (fmt != "none") {
+            if (format.kind != "none") {
                 shared_specialized_handled = true;
             }
         }
@@ -3796,16 +3806,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // Phase 6: 专用格式路由
         {
-            std::string fmt = classify_physical_format(ibd_path, page_size);
-            if (fmt == "compressed+encrypted") {
+            const auto format = classify_physical_format(ibd_path, page_size);
+            if (format.kind == "compressed+encrypted") {
                 std::cout << "[WARN] Compressed+encrypted tablespace — no fixture-validated combined path; "
                           << "explicitly unsupported. Emitting zero structured rows.\n";
-            } else if (fmt == "compressed") {
-                run_compressed_recovery(ibd_path, page_size);
-            } else if (fmt == "encrypted") {
+            } else if (format.kind == "compressed" && format.compression) {
+                run_compressed_recovery(ibd_path, *format.compression);
+            } else if (format.kind == "encrypted") {
                 run_encrypted_recovery(ibd_path, page_size);
             }
-            if (fmt != "none") {
+            if (format.kind != "none") {
                 shared_specialized_handled = true;
             }
         }

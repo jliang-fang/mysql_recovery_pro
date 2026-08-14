@@ -61,7 +61,7 @@ public:
     /**
      * @brief Replay redo log on pages
      */
-    RedoReplayResult replay(const catalog::TableSchema& schema);
+    RedoReplayResult replay();
 
     /**
      * @brief Apply single redo record to page

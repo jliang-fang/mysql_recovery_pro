@@ -9,9 +9,11 @@
 #include <filesystem>
 #include <set>
 #include <algorithm>
+#include <fstream>
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/innodb/btree.hpp"
+#include "dbrecovery/innodb/sdi_extractor.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -271,11 +273,42 @@ inline std::vector<std::map<std::string, std::string>> PartitionTableRecovery::r
     uint32_t total_pages = static_cast<uint32_t>(file_size / page_size_);
     std::vector<uint8_t> page_data(page_size_);
 
+    // SDI auto-detection: MySQL 8.0+ stores the table schema as SDI metadata
+    // pages. Scan for them first so recovery no longer depends on an external
+    // --schema-file; schema_ (if pre-set) is only a fallback.
+    catalog::TableSchema work_schema = schema_;
+    SDIExtractor sdi_extractor(page_size_);
+    bool schema_from_sdi = false;
+    if (work_schema.table_name.empty()) {
+        for (uint32_t page_no = 0; page_no < total_pages && !schema_from_sdi; ++page_no) {
+            file.seekg(page_no * page_size_, std::ios::beg);
+            file.read(reinterpret_cast<char*>(page_data.data()), page_size_);
+
+            uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+            if (page_type != FIL_PAGE_SDI && page_type != FIL_PAGE_SDI_ZIP) {
+                continue;
+            }
+
+            auto sdi_results = sdi_extractor.extract_from_page(page_data.data(), page_size_);
+            for (const auto& sdi : sdi_results) {
+                if (!sdi.is_valid || sdi.sdi_json.empty()) {
+                    continue;
+                }
+                auto parsed = sdi_extractor.parse_sdi_json(sdi.sdi_json);
+                if (parsed.has_value() && !parsed->table_name.empty()) {
+                    work_schema = std::move(parsed.value());
+                    schema_from_sdi = true;
+                    break;
+                }
+            }
+        }
+    }
+
     for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
         file.seekg(page_no * page_size_, std::ios::beg);
         file.read(reinterpret_cast<char*>(page_data.data()), page_size_);
 
-        uint16_t page_type = read_le<uint16_t>(page_data.data(), 16);
+        uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
         if (page_type != FIL_PAGE_INDEX) {
             continue;
         }
@@ -285,7 +318,7 @@ inline std::vector<std::map<std::string, std::string>> PartitionTableRecovery::r
             continue;
         }
 
-        auto page_records = parser.parse_records(schema_);
+        auto page_records = parser.parse_records(work_schema);
         records.insert(records.end(), page_records.begin(), page_records.end());
     }
 
@@ -307,7 +340,8 @@ inline bool PartitionTableRecovery::scan_partitions() {
 inline std::vector<std::map<std::string, std::string>> PartitionTableRecovery::recover() {
     auto total_start = std::chrono::high_resolution_clock::now();
 
-    clear();
+    records_.clear();
+    std::memset(&stats_, 0, sizeof(stats_));
 
     if (partitions_.empty()) {
         return records_;

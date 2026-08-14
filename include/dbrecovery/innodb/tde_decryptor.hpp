@@ -242,7 +242,8 @@ inline void TDEDecryptor::add_table_key(uint32_t key_id, const std::vector<uint8
 }
 
 inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
-    if (size < 44) return false;
+    constexpr size_t kTDEHeaderSize = 45;
+    if (data == nullptr || size < FIL_HEADER_SIZE + kTDEHeaderSize) return false;
 
     // TDE page header starts at byte 0 of the page body (after FIL header at offset 38)
     // The FIL header's page type field tells us if this is an index page
@@ -284,7 +285,18 @@ inline bool TDEDecryptor::is_encrypted(const uint8_t* data, size_t size) {
 /**
  * @brief MySQL Keyring file format
  *
- * MySQL Keyring stores encryption keys with XOR obfuscation
+ * MySQL Keyring stores encryption keys with XOR obfuscation.
+ * This is the CORRECT format for MySQL binary keyring files
+ * (keyring_file). The XOR is the real MySQL encoding, not a
+ * placeholder — MySQL source: plugin/component_keyring_file/.
+ *
+ * For JSON keyring_encrypted_file format (AES-256-CBC), use
+ * OfflineKeyringParser instead.
+ *
+ * @deprecated KeyringFile is retained for backward compatibility
+ * with legacy binary keyring files. New code should prefer
+ * OfflineKeyringParser which handles both JSON and encrypted
+ * keyring formats.
  */
 inline bool KeyringFile::load(const std::string& path) {
     std::ifstream file(path, std::ios::binary);
