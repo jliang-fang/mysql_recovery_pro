@@ -17,6 +17,7 @@
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
+#include "dbrecovery/innodb/offline_keyring_parser.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 
 namespace dbrecovery {
@@ -60,6 +61,7 @@ public:
     void set_primary_key(const std::vector<uint8_t>& key);
     void add_table_key(uint32_t key_id, const std::vector<uint8_t>& key,
                        TDEAlgorithm algorithm);
+    bool configure_keys(const std::vector<MasterKey>& keys);
     bool load_keyring(const std::string& keyring_path);
     void set_try_recovery_without_key(bool try_recovery);
     const std::string& get_last_error() const { return last_error_; }

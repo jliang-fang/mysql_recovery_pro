@@ -52,7 +52,7 @@ struct ForensicEvidence {
     DamageLevel level = DamageLevel::NONE;
     std::string strategy;         // e.g. "signature_scan", "pattern_match_email", "string_extract"
     uint32_t source_page_no = 0;  // page number the fragment came from
-    uint16_t source_offset = 0;   // byte offset of the fragment within the page
+    uint64_t source_offset = 0;   // byte offset of the fragment within the source buffer
     float confidence = 0.0f;      // 0.0 to 1.0
     std::vector<std::string> tags; // e.g. "partial", "reconstructed", "heuristic", "verified"
 

@@ -30,7 +30,10 @@ struct MasterKey {
     std::string algorithm_str;
     TDEAlgorithm algorithm = TDEAlgorithm::AES_256_CBC;
 
-    bool is_valid() const { return !key_data.empty() && key_data.size() >= 16; }
+    bool is_valid() const {
+        return key_id != 0 &&
+               (key_data.size() == 16 || key_data.size() == 24 || key_data.size() == 32);
+    }
 };
 
 /**

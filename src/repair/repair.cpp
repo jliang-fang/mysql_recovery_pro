@@ -4,11 +4,7 @@
 #include "dbrecovery/innodb/blob_pointer.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/utils/innodb_checksum.hpp"
-#include "dbrecovery/utils/zlib_helper.hpp"
 #include <algorithm>
-#include <cmath>
-
-#include <zlib.h>
 #include <nlohmann/json.hpp>
 #include <cctype>
 #include <memory>
@@ -299,47 +295,12 @@ bool Repairer::fix_sdi_record(std::vector<uint8_t>& data, size_t page_size) {
         return false;
     }
 
-    // 尝试解析SDI记录
-    uint32_t compressed_len = dbrecovery::innodb::read_le<uint32_t>(data.data(), 16);
-    uint32_t uncompressed_len = dbrecovery::innodb::read_le<uint32_t>(data.data(), 12);
-
-    if (compressed_len == 0 || uncompressed_len == 0) {
-        // 尝试修复：假设未压缩的大小为1024
-        uncompressed_len = 1024;
-        compressed_len = 1024;
-        // 重新写入
-        dbrecovery::innodb::write_le<uint32_t>(data.data(), 12, uncompressed_len);
-        dbrecovery::innodb::write_le<uint32_t>(data.data(), 16, compressed_len);
-    }
-
-    // 尝试解压
-    std::vector<uint8_t> json_data;
-    try {
-        json_data = dbrecovery::utils::ZlibHelper::decompress(
-            data.data() + 20, compressed_len, uncompressed_len
-        );
-    } catch (const std::exception& e) {
-        // 如果解压失败，尝试其他方法
-        if (compressed_len == 0) {
-            // 直接使用未压缩数据
-            json_data = std::vector<uint8_t>(data.data() + 20, data.data() + 20 + uncompressed_len);
-        }
-    }
-
-    // 尝试解析JSON
-    try {
-        auto j = nlohmann::json::parse(json_data);
-        // 验证JSON结构
-        if (!j.contains("dd_object") || !j["dd_object"].contains("name")) {
-            throw std::runtime_error("Invalid SDI structure");
-        }
-        return true;
-    } catch (const std::exception&) {
-        // 如果JSON解析失败，返回 false
-        return false;
-    }
-
-    return false;
+    // Delegate to the bounded SDIManager which enforces 16 MiB / 20:1 limits
+    // and validates the decompressed JSON.  The input is expected to be a
+    // standard 20-byte LE SDI header + raw-deflate payload.
+    auto result = dbrecovery::innodb::SDIManager::extract_standard_payload(
+        data.data(), data.size());
+    return result.success();
 }
 
 bool Repairer::repair_page(const std::vector<uint8_t>& input, std::vector<uint8_t>& output, size_t page_size) {

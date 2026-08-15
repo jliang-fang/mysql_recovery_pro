@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 #include "dbrecovery/recovery/salvage_engine.hpp"
+#include "dbrecovery/salvage/evidence_serializer.hpp"
 
 #include <vector>
 #include <cstdint>
@@ -16,6 +17,8 @@
 #include <algorithm>
 #include <random>
 #include <limits>
+#include <fstream>
+#include <regex>
 
 namespace dbrecovery {
 namespace test {
@@ -249,6 +252,7 @@ TEST(P1SalvageFuzzTest, MixedDamageLevels) {
     cfg.enable_signature_scan = true;
     cfg.enable_pattern_match = true;
     cfg.enable_string_extract = true;
+    // include_fragments=false (default) — L3/L4 must be in evidence_fragments only
     engine.set_config(cfg);
 
     for (int iter = 0; iter < 5; iter++) {
@@ -272,18 +276,23 @@ TEST(P1SalvageFuzzTest, MixedDamageLevels) {
         EXPECT_TRUE(result.success);
         EXPECT_GE(result.total_pages_scanned, 3);
 
-        int structured = 0, fragment = 0, string_only = 0;
+        // rows must contain only STRUCTURED entries
         for (const auto& row : result.rows) {
-            switch (row.salvage_level) {
-                case SalvageLevel::STRUCTURED:  structured++;  break;
-                case SalvageLevel::FRAGMENT:    fragment++;    break;
-                case SalvageLevel::STRING_ONLY: string_only++; break;
-            }
+            EXPECT_EQ(row.salvage_level, SalvageLevel::STRUCTURED);
             EXPECT_GE(row.confidence, 0.0);
             EXPECT_LE(row.confidence, 1.0);
         }
 
-        EXPECT_GT(result.rows.size(), 0);
+        // evidence_fragments must contain only FRAGMENT/STRING_ONLY entries
+        for (const auto& frag : result.evidence_fragments) {
+            EXPECT_TRUE(frag.salvage_level == SalvageLevel::FRAGMENT ||
+                        frag.salvage_level == SalvageLevel::STRING_ONLY);
+            EXPECT_GE(frag.confidence, 0.0);
+            EXPECT_LE(frag.confidence, 1.0);
+        }
+
+        // At least one of rows or evidence_fragments should be non-empty
+        EXPECT_TRUE(result.rows.size() > 0 || result.evidence_fragments.size() > 0);
     }
 }
 
@@ -398,6 +407,372 @@ TEST(P1SalvageFuzzTest, ExtremeConfidenceThresholds) {
         engine.set_config(cfg);
         auto rows3 = engine.salvage_page(page.data(), page.size(), damage);
     }
+}
+
+// ==================== Evidence Separation (L3/L4 → evidence_fragments) ====================
+
+TEST(P1SalvageFuzzTest, EvidenceSeparationDefault) {
+    // With include_fragments=false (default), L3/L4 must route to evidence_fragments,
+    // never to rows. STRUCTURED rows must remain in rows.
+    SalvageEngine engine;
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    cfg.enable_signature_scan = true;
+    cfg.enable_pattern_match = true;
+    cfg.enable_string_extract = true;
+    cfg.include_fragments = false;
+    engine.set_config(cfg);
+
+    std::vector<std::pair<const uint8_t*, size_t>> pages;
+    std::vector<std::vector<uint8_t>> buffers;
+
+    // Page 0: valid index page → STRUCTURED rows
+    buffers.push_back(make_valid_index_page());
+    pages.emplace_back(buffers.back().data(), buffers.back().size());
+
+    // Page 1: random data with string → L3/L4 fragments
+    buffers.push_back(std::vector<uint8_t>(16384, static_cast<uint8_t>(rand() % 256)));
+    const std::string email = "evidence@test.org";
+    if (100 + email.size() <= buffers.back().size())
+        std::memcpy(buffers.back().data() + 100, email.data(), email.size());
+    pages.emplace_back(buffers.back().data(), buffers.back().size());
+
+    auto result = engine.salvage_pages(pages);
+
+    // All rows must be STRUCTURED
+    for (const auto& row : result.rows) {
+        EXPECT_EQ(row.salvage_level, SalvageLevel::STRUCTURED);
+    }
+
+    // All evidence_fragments must be FRAGMENT or STRING_ONLY
+    for (const auto& frag : result.evidence_fragments) {
+        EXPECT_TRUE(frag.salvage_level == SalvageLevel::FRAGMENT ||
+                    frag.salvage_level == SalvageLevel::STRING_ONLY);
+    }
+
+    // Evidence provenance metadata should be populated
+    for (const auto& frag : result.evidence_fragments) {
+        EXPECT_FALSE(frag.evidence.strategy.empty());
+        EXPECT_GE(frag.evidence.confidence, 0.0);
+        EXPECT_LE(frag.evidence.confidence, 1.0);
+    }
+}
+
+TEST(P1SalvageFuzzTest, EvidenceSeparationIncludeFragments) {
+    // With include_fragments=true, evidence_fragments should be preserved
+    SalvageEngine engine;
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    cfg.enable_signature_scan = true;
+    cfg.enable_pattern_match = true;
+    cfg.enable_string_extract = true;
+    cfg.include_fragments = true;
+    engine.set_config(cfg);
+
+    std::vector<std::pair<const uint8_t*, size_t>> pages;
+    std::vector<std::vector<uint8_t>> buffers;
+
+    buffers.push_back(std::vector<uint8_t>(16384, static_cast<uint8_t>(rand() % 256)));
+    const std::string email = "included@test.org";
+    if (100 + email.size() <= buffers.back().size())
+        std::memcpy(buffers.back().data() + 100, email.data(), email.size());
+    pages.emplace_back(buffers.back().data(), buffers.back().size());
+
+    auto result = engine.salvage_pages(pages);
+
+    // With include_fragments=true, evidence_fragments must be non-empty
+    // (random data pages typically produce L3/L4 fragments)
+    bool has_evidence = !result.evidence_fragments.empty();
+    EXPECT_TRUE(has_evidence);
+
+    // All evidence_fragments must be FRAGMENT or STRING_ONLY
+    for (const auto& frag : result.evidence_fragments) {
+        EXPECT_TRUE(frag.salvage_level == SalvageLevel::FRAGMENT ||
+                    frag.salvage_level == SalvageLevel::STRING_ONLY);
+    }
+}
+
+// ==================== CSV Export Fail-Closed ====================
+
+TEST(P1SalvageFuzzTest, ExportCsvFailClosedNonStructured) {
+    // export_csv must return false (fail closed) when any row is non-STRUCTURED,
+    // and must not create a partial output file.
+    std::string temp_path = std::string(std::getenv("TEST_TMPDIR") ? std::getenv("TEST_TMPDIR") : "/tmp") +
+                            "/p1_csv_fail_closed_test.csv";
+
+    // Remove any pre-existing file
+    std::remove(temp_path.c_str());
+
+    // Build a vector with mixed levels
+    SalvagedRow structured;
+    structured.salvage_level = SalvageLevel::STRUCTURED;
+    structured.fields = {"val1", "val2"};
+    structured.confidence = 0.9;
+
+    SalvagedRow fragment;
+    fragment.salvage_level = SalvageLevel::FRAGMENT;
+    fragment.fields = {"frag1", "frag2"};
+    fragment.confidence = 0.4;
+
+    std::vector<SalvagedRow> mixed_rows = {structured, fragment};
+
+    // export_csv must fail and not create a partial file
+    bool result = SalvageEngine::export_csv(temp_path, mixed_rows);
+    EXPECT_FALSE(result);
+
+    // Verify no partial file was created
+    std::ifstream f(temp_path);
+    EXPECT_FALSE(f.good()) << "export_csv created a partial file despite non-STRUCTURED input";
+    f.close();
+    std::remove(temp_path.c_str());
+
+    // Same vector with only STRUCTURED rows must succeed
+    std::vector<SalvagedRow> clean_rows = {structured};
+    bool clean_result = SalvageEngine::export_csv(temp_path, clean_rows);
+    EXPECT_TRUE(clean_result);
+    std::remove(temp_path.c_str());
+}
+
+TEST(P1SalvageFuzzTest, ExportCsvFailClosedAllFragments) {
+    // export_csv must fail when ALL rows are non-STRUCTURED
+    std::string temp_path = std::string(std::getenv("TEST_TMPDIR") ? std::getenv("TEST_TMPDIR") : "/tmp") +
+                            "/p1_csv_fail_closed_fragments_test.csv";
+    std::remove(temp_path.c_str());
+
+    SalvagedRow fragment;
+    fragment.salvage_level = SalvageLevel::FRAGMENT;
+    fragment.fields = {"frag1", "frag2"};
+    fragment.confidence = 0.4;
+
+    SalvagedRow string_only;
+    string_only.salvage_level = SalvageLevel::STRING_ONLY;
+    string_only.fields = {"str1"};
+    string_only.confidence = 0.2;
+
+    std::vector<SalvagedRow> frag_rows = {fragment, string_only};
+    bool result = SalvageEngine::export_csv(temp_path, frag_rows);
+    EXPECT_FALSE(result);
+
+    std::ifstream f(temp_path);
+    EXPECT_FALSE(f.good()) << "export_csv created a partial file despite all-fragment input";
+    f.close();
+    std::remove(temp_path.c_str());
+}
+
+// ==================== Evidence Serializer ====================
+
+TEST(P1SalvageFuzzTest, EvidenceSerializerNonImportableMarker) {
+    // Evidence JSON must contain the non-importable warning marker
+    salvage::SalvageEvidenceSerializer serializer;
+
+    SalvagedRow frag;
+    frag.salvage_level = SalvageLevel::FRAGMENT;
+    frag.recovery_method = "pattern_match";
+    frag.confidence = 0.45;
+    frag.page_offset = 0x1000;
+    frag.record_offset = 0x50;
+    frag.evidence.level = common::DamageLevel::L3_SEVERE;
+    frag.evidence.strategy = "pattern_match";
+    frag.evidence.source_offset = 0x1050;
+    frag.evidence.confidence = 0.45;
+    frag.evidence.tags = {"extracted", "partial"};
+    frag.fields = {"sensitive_data_12345", "another_field_value"};
+
+    std::vector<SalvagedRow> fragments = {frag};
+    std::map<std::string, std::string> metadata = {
+        {"source_file", "test.ibd"},
+        {"page_size", "16384"}
+    };
+
+    std::string json = serializer.to_json(fragments, metadata);
+
+    // Must contain non-importable warning
+    EXPECT_NE(json.find("non_importable_warning"), std::string::npos);
+    EXPECT_NE(json.find("forensic evidence"), std::string::npos);
+    EXPECT_NE(json.find("NOT verified"), std::string::npos);
+
+    // Must contain SHA-256 hashes of the full values
+    EXPECT_NE(json.find("sha256"), std::string::npos);
+
+    // Must contain bounded previews
+    EXPECT_NE(json.find("preview"), std::string::npos);
+    EXPECT_NE(json.find("preview_length"), std::string::npos);
+
+    // Short values appear inside the bounded preview (expected); the guarantee
+    // is that values longer than MAX_PREVIEW_LENGTH are truncated and never
+    // emitted in full. That is covered by EvidenceSerializerBoundedPreview.
+    EXPECT_NE(json.find("source_file"), std::string::npos);
+    EXPECT_NE(json.find("test.ibd"), std::string::npos);
+    EXPECT_NE(json.find("page_size"), std::string::npos);
+
+    // Must contain provenance fields
+    EXPECT_NE(json.find("salvage_level"), std::string::npos);
+    EXPECT_NE(json.find("recovery_method"), std::string::npos);
+    EXPECT_NE(json.find("source_page_offset"), std::string::npos);
+    EXPECT_NE(json.find("source_record_offset"), std::string::npos);
+
+    // Must contain evidence metadata
+    EXPECT_NE(json.find("strategy"), std::string::npos);
+    EXPECT_NE(json.find("tags"), std::string::npos);
+
+    // Must contain fragment and string_only counts
+    EXPECT_NE(json.find("fragment_count"), std::string::npos);
+    EXPECT_NE(json.find("string_only_count"), std::string::npos);
+}
+
+TEST(P1SalvageFuzzTest, EvidenceSerializerWriteAndRead) {
+    // Write evidence to a temp file and verify it can be read back
+    salvage::SalvageEvidenceSerializer serializer;
+
+    SalvagedRow frag;
+    frag.salvage_level = SalvageLevel::FRAGMENT;
+    frag.recovery_method = "pattern_match";
+    frag.confidence = 0.5;
+    frag.page_offset = 0x2000;
+    frag.record_offset = 0x80;
+    frag.evidence.level = common::DamageLevel::L3_SEVERE;
+    frag.evidence.strategy = "pattern_match";
+    frag.evidence.source_offset = 0x2080;
+    frag.evidence.confidence = 0.5;
+    frag.fields = {"field1", "field2_with_longer_value_for_testing"};
+
+    SalvagedRow string_only;
+    string_only.salvage_level = SalvageLevel::STRING_ONLY;
+    string_only.recovery_method = "string_extract";
+    string_only.confidence = 0.25;
+    string_only.page_offset = 0x3000;
+    string_only.record_offset = 0;
+    string_only.evidence.level = common::DamageLevel::L4_CRITICAL;
+    string_only.evidence.strategy = "string_extract";
+    string_only.evidence.source_offset = 0x3050;
+    string_only.evidence.confidence = 0.25;
+    string_only.fields = {"extracted_string"};
+
+    std::vector<SalvagedRow> fragments = {frag, string_only};
+
+    std::string temp_path = std::string(std::getenv("TEST_TMPDIR") ? std::getenv("TEST_TMPDIR") : "/tmp") +
+                            "/p1_evidence_serializer_test.json";
+
+    bool written = serializer.write_evidence(temp_path, fragments);
+    EXPECT_TRUE(written);
+
+    // Read back and verify basic structure
+    std::ifstream f(temp_path);
+    ASSERT_TRUE(f.good());
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    f.close();
+
+    EXPECT_NE(content.find("salvage_evidence"), std::string::npos);
+    EXPECT_NE(content.find("fragment_count"), std::string::npos);
+    EXPECT_NE(content.find("string_only_count"), std::string::npos);
+
+    std::remove(temp_path.c_str());
+}
+
+TEST(P1SalvageFuzzTest, EvidenceSerializerBoundedPreview) {
+    // Verify that bounded_preview truncates long values and escapes non-printable bytes
+    salvage::SalvageEvidenceSerializer serializer;
+
+    // Build a fragment with a very long field value
+    std::string long_value(1000, 'A');
+    SalvagedRow frag;
+    frag.salvage_level = SalvageLevel::FRAGMENT;
+    frag.recovery_method = "test";
+    frag.confidence = 0.5;
+    frag.evidence.strategy = "test";
+    frag.evidence.confidence = 0.5;
+    frag.fields = {long_value};
+
+    std::string json = serializer.to_json({frag}, {});
+
+    // Must contain truncated marker
+    EXPECT_NE(json.find("truncated"), std::string::npos);
+
+    // Must not contain the full 1000-byte value
+    std::string full_run(1000, 'A');
+    EXPECT_EQ(json.find(full_run), std::string::npos);
+}
+
+// ==================== Auto-Salvage Correlation Boundary ====================
+
+TEST(P1SalvageFuzzTest, AutoSalvageStructuredOnly) {
+    // Verify that salvage_pages with default config returns only STRUCTURED in rows,
+    // which is what the auto-salvage correlation block consumes.
+    SalvageEngine engine;
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    cfg.enable_signature_scan = true;
+    cfg.enable_pattern_match = true;
+    cfg.enable_string_extract = true;
+    cfg.include_fragments = false;
+    engine.set_config(cfg);
+
+    std::vector<std::pair<const uint8_t*, size_t>> pages;
+    std::vector<std::vector<uint8_t>> buffers;
+
+    buffers.push_back(make_valid_index_page());
+    pages.emplace_back(buffers.back().data(), buffers.back().size());
+
+    auto result = engine.salvage_pages(pages);
+
+    for (const auto& row : result.rows) {
+        // auto-salvage uses is_complete = (sr.salvage_level == STRUCTURED)
+        // Since rows only contain STRUCTURED, is_complete is always true
+        EXPECT_EQ(row.salvage_level, SalvageLevel::STRUCTURED);
+    }
+
+    // evidence_fragments must not contain STRUCTURED
+    for (const auto& frag : result.evidence_fragments) {
+        EXPECT_NE(frag.salvage_level, SalvageLevel::STRUCTURED);
+    }
+}
+
+TEST(P1SalvageFuzzTest, SalvageEvidencePreservesWideOffsets) {
+    salvage::SalvageEvidenceSerializer serializer;
+
+    SalvagedRow fragment;
+    fragment.salvage_level = SalvageLevel::FRAGMENT;
+    fragment.recovery_method = "pattern_match";
+    fragment.evidence.level = DamageLevel::L3_SEVERE;
+    fragment.evidence.strategy = "pattern_match";
+    fragment.evidence.source_offset = static_cast<uint64_t>(UINT16_MAX) + 1234;
+
+    const std::string json = serializer.to_json({fragment}, {});
+    EXPECT_NE(json.find("66769"), std::string::npos);
+}
+
+TEST(P1SalvageFuzzTest, L4StringExtractionUsesBoundedContinuationFragments) {
+    SalvageEngine::Config cfg;
+    cfg.min_string_len = 1;
+    cfg.max_l4_fragment_bytes = 8;
+    cfg.max_l4_fragments = 3;
+    cfg.enable_signature_scan = false;
+    cfg.enable_pattern_match = false;
+    cfg.enable_string_extract = true;
+    cfg.min_confidence = 0.0;
+    SalvageEngine engine(cfg);
+
+    std::vector<uint8_t> page(64, 0);
+    std::fill(page.begin() + 5, page.begin() + 35, static_cast<uint8_t>('A'));
+    DamageReport damage;
+    damage.level = DamageLevel::L4_CRITICAL;
+
+    const auto rows = engine.salvage_page(page.data(), page.size(), damage);
+    ASSERT_EQ(rows.size(), 3);
+    for (size_t i = 0; i < rows.size(); ++i) {
+        EXPECT_EQ(rows[i].salvage_level, SalvageLevel::STRING_ONLY);
+        ASSERT_EQ(rows[i].fields.size(), 1);
+        EXPECT_LE(rows[i].fields.front().size(), cfg.max_l4_fragment_bytes);
+        EXPECT_EQ(rows[i].evidence.source_offset, 5 + i * cfg.max_l4_fragment_bytes);
+        EXPECT_NE(std::find(rows[i].evidence.tags.begin(), rows[i].evidence.tags.end(), "truncated"),
+                  rows[i].evidence.tags.end());
+        if (i > 0) {
+            EXPECT_NE(std::find(rows[i].evidence.tags.begin(), rows[i].evidence.tags.end(), "continuation"),
+                      rows[i].evidence.tags.end());
+        }
+    }
+    EXPECT_FALSE(SalvageEngine::export_csv("/tmp/p1_l4_fragment_export.csv", rows));
 }
 
 } // namespace test

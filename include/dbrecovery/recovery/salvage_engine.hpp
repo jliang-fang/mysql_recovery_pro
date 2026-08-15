@@ -56,7 +56,7 @@ enum class SalvageLevel : uint8_t {
 
 struct SalvagedRow {
     uint64_t page_offset = 0;
-    uint16_t record_offset = 0;
+    uint64_t record_offset = 0;
     uint16_t field_count = 0;
     SalvageLevel salvage_level = SalvageLevel::STRUCTURED;
     std::vector<std::string> fields;
@@ -70,7 +70,8 @@ struct SalvagedRow {
 struct SalvageResult {
     bool success = false;
     DamageReport damage;
-    std::vector<SalvagedRow> rows;
+    std::vector<SalvagedRow> rows;                // STRUCTURED only (L1/L2)
+    std::vector<SalvagedRow> evidence_fragments;   // FRAGMENT/STRING_ONLY (L3/L4)
     uint32_t total_pages_scanned = 0;
     uint32_t pages_with_data = 0;
     std::vector<std::string> warnings;
@@ -85,15 +86,19 @@ public:
     struct Config {
         uint32_t page_size = 16384;
         uint32_t min_string_len = 4;
+        uint32_t max_l4_fragment_bytes = 4096;
+        uint32_t max_l4_fragments = 1024;
         uint32_t min_record_fields = 2;
         double min_confidence = 0.3;
         bool enable_signature_scan = true;
         bool enable_pattern_match = true;
         bool enable_string_extract = true;
-        // When false (default), FRAGMENT and STRING_ONLY (L3/L4) rows are excluded
-        // from structured salvage output. Heuristic fragments are high-noise, so
-        // structured consumers opt in via this flag rather than receiving them by
-        // default.
+        // When false (default), FRAGMENT and STRING_ONLY (L3/L4) rows are not
+        // promoted into the structured collection (`rows`). Heuristic fragments
+        // are high-noise, so structured consumers opt in via this flag rather
+        // than receiving them by default. This flag never authorizes export:
+        // L3/L4 items always land in `evidence_fragments` and are serialized
+        // only through the evidence report, never CSV/SQL export.
         bool include_fragments = false;
         bool verbose = false;
     };

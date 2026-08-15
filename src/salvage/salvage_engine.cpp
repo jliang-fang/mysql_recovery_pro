@@ -48,15 +48,31 @@ std::string SalvageResult::to_report() const {
     oss << "Diagnosis: " << damage.diagnosis << "\n";
     oss << "Pages scanned: " << total_pages_scanned << "\n";
     oss << "Pages with recoverable data: " << pages_with_data << "\n";
-    oss << "Rows salvaged: " << rows.size() << "\n";
+    oss << "Recovered structured rows: " << rows.size() << "\n";
+    oss << "Forensic evidence fragments: " << evidence_fragments.size() << "\n";
 
-    std::map<std::string, uint32_t> method_counts;
-    for (const auto& row : rows) {
-        method_counts[row.recovery_method]++;
+    if (!rows.empty()) {
+        std::map<std::string, uint32_t> method_counts;
+        for (const auto& row : rows) {
+            method_counts[row.recovery_method]++;
+        }
+        oss << "\nRecovery methods (structured rows):\n";
+        for (const auto& [method, count] : method_counts) {
+            oss << "  " << method << ": " << count << " rows\n";
+        }
     }
-    oss << "\nRecovery methods:\n";
-    for (const auto& [method, count] : method_counts) {
-        oss << "  " << method << ": " << count << " rows\n";
+
+    if (!evidence_fragments.empty()) {
+        std::map<std::string, uint32_t> frag_method_counts;
+        for (const auto& frag : evidence_fragments) {
+            frag_method_counts[frag.recovery_method]++;
+        }
+        oss << "\nEvidence fragment methods (L3/L4, not exportable):\n";
+        for (const auto& [method, count] : frag_method_counts) {
+            oss << "  " << method << ": " << count << " fragments\n";
+        }
+        oss << "\nWARNING: Evidence fragments are heuristic-only and cannot be\n";
+        oss << "exported as CSV/SQL. They are stored in the evidence report.\n";
     }
 
     if (!warnings.empty()) {
@@ -319,13 +335,13 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l2(
         if (detect_offset_table(data, pos, size, field_count, record_len)) {
             SalvagedRow row;
             row.page_offset = pos;
-            row.record_offset = static_cast<uint16_t>(pos);
+            row.record_offset = pos;
             row.field_count = field_count;
             row.confidence = 0.5;
             row.recovery_method = "signature_scan";
             row.evidence.level = DamageLevel::L2_MODERATE;
             row.evidence.strategy = "signature_scan";
-            row.evidence.source_offset = static_cast<uint16_t>(pos);
+            row.evidence.source_offset = pos;
             row.evidence.confidence = 0.5f;
             row.evidence.tags = {"reconstructed"};
 
@@ -392,7 +408,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l3(
             row.recovery_method = method;
             row.evidence.level = DamageLevel::L3_SEVERE;
             row.evidence.strategy = method;
-            row.evidence.source_offset = static_cast<uint16_t>(it->position());
+            row.evidence.source_offset = static_cast<uint64_t>(it->position());
             row.evidence.confidence = 0.4f;
             row.evidence.tags = {"heuristic", "partial"};
             rows.push_back(row);
@@ -411,51 +427,56 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
     const uint8_t* data, size_t size) {
 
     std::vector<SalvagedRow> rows;
-    uint32_t min_len = config_.min_string_len;
+    const size_t min_len = config_.min_string_len;
+    const size_t max_fragment_bytes = config_.max_l4_fragment_bytes;
+    const size_t max_fragments = config_.max_l4_fragments;
+    if (max_fragment_bytes == 0 || max_fragments == 0) return rows;
+
     std::string current;
+    current.reserve(max_fragment_bytes);
     size_t start_pos = 0;
+    bool continued = false;
 
-    for (size_t i = 0; i < size; i++) {
-        if (data[i] >= 0x20 && data[i] <= 0x7E) {
-            if (current.empty()) start_pos = i;
-            current += static_cast<char>(data[i]);
-        } else {
-            if (current.size() >= min_len) {
-                SalvagedRow row;
-                row.page_offset = start_pos;
-                row.field_count = 1;
-                row.salvage_level = SalvageLevel::STRING_ONLY;
-                row.fields.push_back(current);
-                row.confidence = 0.3;
-                row.recovery_method = "string_extract";
-                row.evidence.level = DamageLevel::L4_CRITICAL;
-                row.evidence.strategy = "string_extract";
-                row.evidence.source_offset = static_cast<uint16_t>(start_pos);
-                row.evidence.confidence = 0.3f;
-                row.evidence.tags = {"heuristic", "fragment"};
-                rows.push_back(row);
-            }
+    const auto emit = [&](bool truncated) {
+        if (current.size() < min_len || rows.size() >= max_fragments) {
             current.clear();
+            return;
         }
-    }
 
-    // Don't forget trailing string
-    if (current.size() >= min_len) {
         SalvagedRow row;
         row.page_offset = start_pos;
         row.field_count = 1;
         row.salvage_level = SalvageLevel::STRING_ONLY;
-        row.fields.push_back(current);
+        row.fields.push_back(std::move(current));
         row.confidence = 0.3;
         row.recovery_method = "string_extract";
         row.evidence.level = DamageLevel::L4_CRITICAL;
         row.evidence.strategy = "string_extract";
-        row.evidence.source_offset = static_cast<uint16_t>(start_pos);
+        row.evidence.source_offset = start_pos;
         row.evidence.confidence = 0.3f;
         row.evidence.tags = {"heuristic", "fragment"};
-        rows.push_back(row);
+        if (continued) row.evidence.tags.push_back("continuation");
+        if (truncated) row.evidence.tags.push_back("truncated");
+        rows.push_back(std::move(row));
+        current.clear();
+    };
+
+    for (size_t i = 0; i < size; ++i) {
+        if (data[i] >= 0x20 && data[i] <= 0x7E) {
+            if (current.empty()) start_pos = i;
+            current += static_cast<char>(data[i]);
+            if (current.size() == max_fragment_bytes) {
+                emit(true);
+                continued = true;
+            }
+        } else {
+            emit(false);
+            current.clear();
+            continued = false;
+        }
     }
 
+    emit(false);
     return rows;
 }
 
@@ -506,10 +527,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_page(
     rows.erase(std::remove_if(rows.begin(), rows.end(),
         [this](const SalvagedRow& r) {
             if (r.confidence < config_.min_confidence) return true;
-            // L3/L4 heuristic fragments are high-noise; only include them when
-            // explicitly requested via include_fragments.
-            if (!config_.include_fragments &&
-                r.salvage_level != SalvageLevel::STRUCTURED) return true;
+            // For STRUCTURED rows, enforce minimum field count
             if (r.salvage_level == SalvageLevel::STRUCTURED &&
                 r.field_count < config_.min_record_fields) return true;
             return false;
@@ -536,17 +554,23 @@ SalvageResult SalvageEngine::salvage_pages(
         }
 
         if (damage.level > DamageLevel::NONE) {
-            auto rows = salvage_page(data, size, damage);
-            if (!rows.empty()) {
+            auto page_rows = salvage_page(data, size, damage);
+            if (!page_rows.empty()) {
                 result.pages_with_data++;
-                for (auto& row : rows) {
-                    result.rows.push_back(std::move(row));
+                for (auto& row : page_rows) {
+                    // Route L3/L4 heuristic fragments into evidence_fragments,
+                    // STRUCTURED (L1/L2) rows into rows.
+                    if (row.salvage_level == SalvageLevel::STRUCTURED) {
+                        result.rows.push_back(std::move(row));
+                    } else {
+                        result.evidence_fragments.push_back(std::move(row));
+                    }
                 }
             }
         }
     }
 
-    if (result.rows.empty()) {
+    if (result.rows.empty() && result.evidence_fragments.empty()) {
         result.warnings.push_back("No salvageable data found in any page");
     }
 
@@ -560,6 +584,15 @@ SalvageResult SalvageEngine::salvage_pages(
 
 bool SalvageEngine::export_csv(
     const std::string& path, const std::vector<SalvagedRow>& rows) {
+
+    // Fail closed: evidence fragments (L3/L4) are forensic-only and must never
+    // be written as CSV records. Reject the whole export instead of silently
+    // dropping or emitting them, so callers cannot generate a partial file.
+    for (const auto& row : rows) {
+        if (row.salvage_level != SalvageLevel::STRUCTURED) {
+            return false;
+        }
+    }
 
     std::ofstream file(path);
     if (!file) return false;

@@ -39,6 +39,33 @@ void EncryptedTableRecovery::add_table_key(uint32_t key_id, const std::vector<ui
     decryptor_.add_table_key(key_id, key, algorithm);
 }
 
+bool EncryptedTableRecovery::configure_keys(const std::vector<MasterKey>& keys) {
+    if (keys.empty()) {
+        last_error_ = "No usable key material provided";
+        return false;
+    }
+
+    std::set<uint32_t> key_ids;
+    for (const auto& key : keys) {
+        const size_t key_size = key.key_data.size();
+        if (!key.is_valid() || key.key_id == 0 ||
+            (key_size != 16 && key_size != 24 && key_size != 32)) {
+            last_error_ = "Keyring contains invalid key material or key ID";
+            return false;
+        }
+        if (!key_ids.insert(key.key_id).second) {
+            last_error_ = "Keyring contains duplicate key IDs";
+            return false;
+        }
+    }
+
+    for (const auto& key : keys) {
+        decryptor_.add_table_key(key.key_id, key.key_data, key.algorithm);
+    }
+    last_error_.clear();
+    return true;
+}
+
 bool EncryptedTableRecovery::load_keyring(const std::string& keyring_path) {
     OfflineKeyringParser parser;
     if (!parser.parse_keyring_file(keyring_path)) {
@@ -46,11 +73,7 @@ bool EncryptedTableRecovery::load_keyring(const std::string& keyring_path) {
         return false;
     }
 
-    for (const auto& mk : parser.get_master_keys()) {
-        decryptor_.add_table_key(mk.key_id, mk.key_data, mk.algorithm);
-    }
-
-    return !parser.get_master_keys().empty();
+    return configure_keys(parser.get_master_keys());
 }
 
 void EncryptedTableRecovery::set_try_recovery_without_key(bool try_recovery) {
@@ -126,12 +149,7 @@ std::vector<ScannedPage> EncryptedTableRecovery::scan_pages() {
 }
 
 bool EncryptedTableRecovery::is_page_encrypted(const uint8_t* page_data, size_t page_size) {
-    if (page_size < 44) {
-        return false;
-    }
-    // TDE algorithm byte is at FIL header offset 38, not at offset 0 (which is FIL checksum)
-    uint8_t algo = page_data[38];
-    return algo >= 0x01 && algo <= 0x09;
+    return TDEDecryptor::is_encrypted(page_data, page_size);
 }
 
 std::vector<uint8_t> EncryptedTableRecovery::decrypt_page_data(const uint8_t* encrypted_data,
@@ -287,12 +305,17 @@ EncryptedTableRecoveryManager::parse_encryption_info(const std::string& ibd_path
     std::vector<uint8_t> page_data(16384);
     file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-    // TDE algorithm byte is at FIL header offset 38, not at offset 0 (which is FIL checksum)
-    // TDE header at offset 38: 1 byte algorithm, 4 bytes key_id, 12 bytes IV, 28 bytes encrypted header
-    if (page_data.size() >= 83 && page_data[38] >= 0x01 && page_data[38] <= 0x09) {
+    // Use canonical TDE detection: validates FIL page type first, then the
+    // encryption algorithm byte at the TDE header (FIL_PAGE_DATA + 0).
+    if (page_data.size() >= 83 && TDEDecryptor::is_encrypted(page_data.data(), page_data.size())) {
+        TDEPageHeader header;
+        if (!header.parse(page_data.data() + 38, page_data.size() - 38)) {
+            return std::nullopt;
+        }
         EncryptedTableInfo info;
-        info.key_id = read_le<uint32_t>(page_data.data(), 39);
-        info.algorithm = static_cast<TDEAlgorithm>(page_data[38]);
+        info.key_id = header.key_id[0] | (header.key_id[1] << 8) |
+                      (header.key_id[2] << 16) | (header.key_id[3] << 24);
+        info.algorithm = static_cast<TDEAlgorithm>(header.algorithm);
         info.has_key = false;
         return info;
     }

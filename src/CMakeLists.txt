@@ -62,7 +62,6 @@ set(UTILS_SOURCES
     utils/cli_parser.cpp
     utils/file_mapper.cpp
     utils/innodb_checksum.cpp
-    utils/zlib_helper.cpp
 )
 
 # Add tools module sources
@@ -80,6 +79,7 @@ set(SALVAGE_SOURCES
     salvage/salvage_engine.cpp
     salvage/secondary_index_rescuer.cpp
     salvage/data_correlation.cpp
+    salvage/evidence_serializer.cpp
 )
 
 # Add carve module sources (Phase 2: Disk carving page reassembly)

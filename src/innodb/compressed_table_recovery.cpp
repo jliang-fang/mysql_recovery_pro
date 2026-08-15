@@ -296,21 +296,15 @@ bool CompressedTableRecovery::auto_detect_compression(const std::string& file_pa
     file.read(reinterpret_cast<char*>(page0.data()), page0.size());
     if (file.gcount() < 46) return false;
 
-    // FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4), big-endian
-    uint32_t fsp_flags = read_be<uint32_t>(page0.data(), 42);
-    // ZIP_SSIZE at bits 1-4 (4 bits): compressed_page_size = page_size / (1 << zip_ssize)
-    uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
-
-    // Validate zip_ssize: values >= 5 produce invalid page sizes (< 1024 bytes)
-    if (zip_ssize >= 5) {
+    auto metadata = parse_fsp_compression_metadata(page0.data(),
+                                                   static_cast<size_t>(file.gcount()),
+                                                   page_size_);
+    if (!metadata || !metadata->is_compressed()) {
         return false;
     }
 
-    if (zip_ssize > 0) {
-        compressed_page_size_ = page_size_ / (1 << zip_ssize);
-        return true;
-    }
-    return false;
+    compressed_page_size_ = metadata->physical_page_size;
+    return true;
 }
 
 void CompressedTableRecoveryManager::add_compressed_table(const std::string& table_name,
@@ -345,16 +339,11 @@ std::optional<size_t> CompressedTableRecoveryManager::parse_compression_info(
     std::vector<uint8_t> page_data(page_size);
     file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-    // FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4), big-endian
-    // Bit layout: POST_ANTELOPE=bit0, ZIP_SSIZE=bits1-4, ATOMIC_BLOBS=bit5
-    // Compressed page size = page_size / (1 << zip_ssize) for zip_ssize > 0
-    if (page_data.size() >= 46) {
-        uint32_t fsp_flags = read_be<uint32_t>(page_data.data(), 42);
-        uint32_t zip_ssize = (fsp_flags >> 1) & 0x0F;
-        // Reject invalid zip_ssize values (>= 5 produce page sizes < 1024 bytes)
-        if (zip_ssize > 0 && zip_ssize < 5) {
-            return static_cast<size_t>(page_size / (1 << zip_ssize));
-        }
+    auto metadata = parse_fsp_compression_metadata(page_data.data(),
+                                                   static_cast<size_t>(file.gcount()),
+                                                   page_size);
+    if (metadata && metadata->is_compressed()) {
+        return metadata->physical_page_size;
     }
 
     return std::nullopt;

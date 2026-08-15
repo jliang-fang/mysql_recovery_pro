@@ -7,6 +7,7 @@
 #include <fstream>
 #include <filesystem>
 #include "dbrecovery/innodb/tde_decryptor.hpp"
+#include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 #include "dbrecovery/recovery/engine.hpp"
 
 using namespace dbrecovery;
@@ -143,11 +144,11 @@ TEST_F(TDEKeyringTest, FindKeyByName) {
     EXPECT_FALSE(not_found.has_value()) << "Should not find nonexistent key";
 }
 
-TEST_F(TDEKeyringTest, RecoveryEngineLoadKeyring) {
+TEST_F(TDEKeyringTest, RecoveryEngineRejectsNativeKeyringWithoutNumericKeyIdentity) {
     create_test_keyring();
 
     recovery::RecoveryEngine engine;
-    EXPECT_TRUE(engine.load_tde_keyring(keyring_path_)) << "Engine should load keyring";
+    EXPECT_FALSE(engine.load_tde_keyring(keyring_path_));
 }
 
 TEST_F(TDEKeyringTest, SetTDEPrimaryKey) {
@@ -240,16 +241,107 @@ TEST_F(TDEKeyringTest, TDEPageHeaderParsing) {
 }
 
 TEST_F(TDEKeyringTest, IsEncryptedDetection) {
-    // The TDE header starts at offset 38 (right after the FIL header).
-    // FIL header at offset 24 has page_type (big-endian), and TDE algorithm byte is at data[38].
-    // Non-encrypted page (algorithm byte = 0 at TDE header offset)
-    std::vector<uint8_t> normal_page(100, 0);
-    // Set a valid page type so is_encrypted proceeds to check the TDE byte
-    normal_page[24] = 0x45;  // FIL_PAGE_INDEX (big-endian)
-    normal_page[25] = 0xBF;
-    EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
+    std::vector<uint8_t> page(100, 0);
+    page[24] = 0x45;
+    page[25] = 0xBF;
+    EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(page.data(), page.size()));
 
-    // Encrypted page (algorithm byte = 1-9 at TDE header offset 38)
-    normal_page[38] = 6;  // AES-256-CBC
-    EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
+    page[38] = 6;
+    EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(page.data(), page.size()));
+    EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(nullptr, page.size()));
+    EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(page.data(), 82));
+    EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(page.data(), 83));
+
+    page[24] = 0;
+    page[25] = 1;
+    EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(page.data(), page.size()));
+}
+
+TEST_F(TDEKeyringTest, ConfigureKeysRejectsUnusableMaterial) {
+    innodb::EncryptedTableRecovery recovery;
+
+    // Empty keys vector — hits the keys.empty() gate
+    EXPECT_FALSE(recovery.configure_keys({}));
+    EXPECT_EQ(recovery.get_last_error(), "No usable key material provided");
+    EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 0u);
+
+    // Key with key_id=0 — hits the is_valid() gate before the loop body
+    innodb::MasterKey zero_id;
+    zero_id.key_name = "zero-id";
+    EXPECT_FALSE(recovery.configure_keys({zero_id}));
+    EXPECT_EQ(recovery.get_last_error(), "Keyring contains invalid key material or key ID");
+    EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 0u);
+}
+
+TEST_F(TDEKeyringTest, ConfigureKeysRejectsMixedInvalidKeyAtomically) {
+    innodb::MasterKey invalid;
+    invalid.key_name = "invalid";
+
+    innodb::MasterKey valid;
+    valid.key_id = 42;
+    valid.key_name = "parsed-key";
+    valid.key_data.assign(32, 0xAB);
+    valid.algorithm = innodb::TDEAlgorithm::AES_256_CBC;
+
+    innodb::EncryptedTableRecovery recovery;
+    EXPECT_FALSE(recovery.configure_keys({invalid, valid}));
+    EXPECT_FALSE(recovery.get_last_error().empty());
+    EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 0u);
+}
+
+TEST_F(TDEKeyringTest, ConfigureKeysRejectsZeroId) {
+    innodb::MasterKey key;
+    key.key_id = 0;
+    key.key_name = "zero-id";
+    key.key_data.assign(32, 0xAB);
+    key.algorithm = innodb::TDEAlgorithm::AES_256_CBC;
+
+    innodb::EncryptedTableRecovery recovery;
+    EXPECT_FALSE(recovery.configure_keys({key}));
+    EXPECT_FALSE(recovery.get_last_error().empty());
+    EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 0u);
+}
+
+TEST_F(TDEKeyringTest, ConfigureKeysRejectsDuplicateIds) {
+    innodb::MasterKey key;
+    key.key_id = 7;
+    key.key_name = "first";
+    key.key_data.assign(32, 0xAB);
+    key.algorithm = innodb::TDEAlgorithm::AES_256_CBC;
+
+    innodb::MasterKey dup = key;
+    dup.key_name = "second";
+
+    innodb::EncryptedTableRecovery recovery;
+    EXPECT_FALSE(recovery.configure_keys({key, dup}));
+    EXPECT_FALSE(recovery.get_last_error().empty());
+    EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 0u);
+}
+
+TEST_F(TDEKeyringTest, ConfigureKeysRejectsUnsupportedKeyLength) {
+    innodb::MasterKey key;
+    key.key_id = 9;
+    key.key_name = "bad-length";
+    key.key_data.assign(20, 0xAB);
+    key.algorithm = innodb::TDEAlgorithm::AES_256_CBC;
+
+    innodb::EncryptedTableRecovery recovery;
+    EXPECT_FALSE(recovery.configure_keys({key}));
+    EXPECT_FALSE(recovery.get_last_error().empty());
+    EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 0u);
+}
+
+TEST_F(TDEKeyringTest, ConfigureKeysAcceptsAllSupportedKeyLengths) {
+    for (size_t len : {size_t(16), size_t(24), size_t(32)}) {
+        innodb::MasterKey key;
+        key.key_id = static_cast<uint32_t>(len);
+        key.key_name = "len-" + std::to_string(len);
+        key.key_data.assign(len, 0xCD);
+        key.algorithm = innodb::TDEAlgorithm::AES_256_CBC;
+
+        innodb::EncryptedTableRecovery recovery;
+        EXPECT_TRUE(recovery.configure_keys({key})) << "length " << len << " should be accepted";
+        EXPECT_TRUE(recovery.get_last_error().empty());
+        EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 1u);
+    }
 }

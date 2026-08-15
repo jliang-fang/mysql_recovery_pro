@@ -6,6 +6,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/common/version_compat.hpp"
+#include "dbrecovery/common/mysql_version_detector.hpp"
 #include <cstring>
 #include <vector>
 #include <fstream>
@@ -178,9 +179,12 @@ std::vector<uint8_t> create_test_page_v80(
     // INDEX pages (already set by create_test_page).
     dbrecovery::innodb::write_be<uint16_t>(page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET_N_DIR_SLOTS, 1);
 
-    // SDI signature at offset 64 (for SDI-specific tests).
+    // Automatic 8.0-family detection requires a typed, signed SDI page.
+    dbrecovery::innodb::write_be<uint16_t>(page.data(),
+                                           dbrecovery::innodb::FIL_PAGE_TYPE_ABS,
+                                           dbrecovery::innodb::FIL_PAGE_SDI);
     const uint8_t sdi_sig[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
-    std::memcpy(page.data() + 64, sdi_sig, 8);
+    std::memcpy(page.data() + 64, sdi_sig, sizeof(sdi_sig));
 
     // Legacy dual-write: header_version = 1 at offset 40 (LE) for
     // legacy PageHeader::get_header_version().
@@ -255,13 +259,30 @@ TEST(VersionDetection, DetectMySQL80) {
         << "Should detect 8.0 version, got " << static_cast<int>(version);
 }
 
-TEST(VersionDetection, DetectMySQL84) {
-    // Create an 8.4 page (space_id = 0 to avoid detection as 8.0)
+TEST(VersionDetection, HeaderBytesDoNotIdentifyMySQL84) {
     auto page = create_test_page_v84(0, static_cast<uint16_t>(PageType::INDEX));
 
     MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
-    EXPECT_EQ(version, MySQLVersion::MYSQL_84)
-        << "Should detect 8.4 version, got " << static_cast<int>(version);
+    EXPECT_EQ(version, MySQLVersion::UNKNOWN)
+        << "Header bytes must not identify MySQL 8.4, got " << static_cast<int>(version);
+}
+
+TEST(VersionDetection, ConfidenceRequiresSignedSdiEvidence) {
+    auto page80 = create_test_page_v80();
+    auto header_only = create_test_page_v84();
+
+    EXPECT_EQ(dbrecovery::MySQLVersionDetector::get_confidence(
+                  dbrecovery::MySQLVersion::UNKNOWN, page80.data(), page80.size()),
+              0);
+    EXPECT_EQ(dbrecovery::MySQLVersionDetector::get_confidence(
+                  dbrecovery::MySQLVersion::MYSQL_84, page80.data(), page80.size()),
+              0);
+    EXPECT_EQ(dbrecovery::MySQLVersionDetector::get_confidence(
+                  dbrecovery::MySQLVersion::MYSQL_80, page80.data(), page80.size()),
+              100);
+    EXPECT_EQ(dbrecovery::MySQLVersionDetector::get_confidence(
+                  dbrecovery::MySQLVersion::MYSQL_84, header_only.data(), header_only.size()),
+              0);
 }
 
 TEST(VersionDetection, DetectSDIPage) {
@@ -301,7 +322,8 @@ TEST(VersionDetection, CreatePageHeaderV55) {
 TEST(VersionDetection, CreatePageHeaderV80) {
     auto page = create_test_page_v80(1, 0x100000000ULL);
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_80, page.data(), page.size());
     ASSERT_NE(header, nullptr);
 
     EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_80);
@@ -309,10 +331,10 @@ TEST(VersionDetection, CreatePageHeaderV80) {
 }
 
 TEST(VersionDetection, CreatePageHeaderV84) {
-    // Create an 8.4 page (space_id = 0 to avoid detection as 8.0)
     auto page = create_test_page_v84(0, static_cast<uint16_t>(PageType::INDEX));
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_84, page.data(), page.size());
     ASSERT_NE(header, nullptr);
 
     EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_84);
@@ -605,7 +627,6 @@ TEST(VersionDetection, EmptyPage) {
 TEST(VersionDetection, InvalidPageSize) {
     auto page = create_test_page_v80(1, 0x100000000ULL);
 
-    // Test with invalid page size
     MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), 1024);
     EXPECT_EQ(version, MySQLVersion::MYSQL_80);
 }
@@ -638,13 +659,12 @@ TEST(Compatibility, V80ForwardCompatible) {
 }
 
 TEST(Compatibility, V84EnhancedFeatures) {
-    // Create an 8.4 page with enhanced features (space_id = 0)
     auto page = create_test_page_v84(0, static_cast<uint16_t>(PageType::INDEX));
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_84, page.data(), page.size());
     ASSERT_NE(header, nullptr);
 
-    // Should support 8.4+ features
     EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_84);
     EXPECT_EQ(header->get_page_type(), PageType::INDEX);
 }

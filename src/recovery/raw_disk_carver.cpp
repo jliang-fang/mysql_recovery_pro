@@ -223,10 +223,8 @@ bool RawDiskCarver::is_sdi_page(const uint8_t* data, size_t page_size, uint32_t 
     if (page_type == FIL_PAGE_SDI) return true;
     if (page_type != FIL_PAGE_SDI_ZIP) return false;
 
-    // FIL_PAGE_SDI_ZIP (0x45BD) is shared with BLOB pages. Disambiguate:
-    // 1. SDI pages are typically at positions 3 and 4 in standalone tablespaces
-    // 2. SDI pages have a signature at offset 64-71: {0x08, 'S', 'D', 'I', '0', '0', '0', '0'}
-    if (is_sdi_page_position(page_no)) return true;
+    // FIL_PAGE_SDI_ZIP (0x45BD) is shared with BLOB pages. Only its
+    // signature establishes SDI identity; physical location is not authority.
 
     // Check SDI signature at offset 64-71
     if (page_size >= 72) {
@@ -244,9 +242,8 @@ bool RawDiskCarver::is_blob_page(const uint8_t* data, size_t page_size, uint32_t
     if (page_type != FIL_PAGE_SDI_ZIP) return false;
 
     // FIL_PAGE_SDI_ZIP (0x45BD) is shared with compressed SDI pages.
-    // Exclude pages that are likely SDI by position or signature.
-    if (is_sdi_page_position(page_no)) return false;
-
+    // Only an on-page signature establishes SDI identity.
+    (void)page_no;
     if (page_size >= 72) {
         constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
         if (std::memcmp(data + 64, SDI_SIG, 8) == 0) return false;
@@ -776,9 +773,12 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
 
                 } else if (candidate.page_type == FIL_PAGE_SDI ||
                            candidate.page_type == FIL_PAGE_SDI_ZIP) {
-                    // Collect SDI pages for schema extraction
                     std::vector<uint8_t> sdi_copy(detected_size);
                     std::memcpy(sdi_copy.data(), buffer.data() + candidate.file_offset, detected_size);
+
+                    if (!is_sdi_page(sdi_copy.data(), sdi_copy.size(), 0)) {
+                        continue;
+                    }
 
                     {
                         std::lock_guard<std::mutex> lock(pages_mutex_);
@@ -1589,10 +1589,9 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
 
     const uint8_t* data = page_data.data();
     size_t page_size = page_data.size();
-
-    // 检查是否是SDI页
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
-    if (page_type != FIL_PAGE_SDI && page_type != FIL_PAGE_SDI_ZIP) {
+
+    if (!is_sdi_page(data, page_size, 0)) {
         return std::nullopt;
     }
 
@@ -1614,122 +1613,34 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
     size_t sdi_payload_len = page_size - FIL_HEADER_SIZE - 8;  // FIL_TRAILER = 8
 
     if (page_type == FIL_PAGE_SDI_ZIP) {
-        // FIL_PAGE_SDI_ZIP 使用 INDEX 页格式存储 SDI 记录
-        // 但 InnoDBIndexParser 可能无法正确解析（SDI 记录格式特殊）
-        // 直接搜索 zlib 签名 (78 9c) 并解压
+        // FIL_PAGE_SDI_ZIP 使用 INDEX 页格式存储 SDI 记录。
+        // 先通过 SDIManager 的严格 ZIP record adapter 在已知记录偏移处解析，
+        // 失败时仅对损坏页使用 SDIManager 拥有的有界启发式回退。
+        // 所有解压均经过 SDIManager 的 16 MiB / 20:1 边界，禁止此处直接 inflate。
 
-        std::cerr << "[INFO] SDI page is compressed (0x45BD), searching for zlib signatures" << std::endl;
+        std::cerr << "[INFO] SDI page is compressed (0x45BD), trying bounded ZIP record adapter" << std::endl;
 
-        // 搜索 zlib 压缩数据签名 (78 9c 或 78 da 等)
-        // SDI 记录存储在 INDEX 页格式的 record area 中
-        // 从 offset 100 开始搜索（跳过 FIL header 和 BTR header）
-        const size_t search_start = 100;
-        const size_t search_end = page_size - 8;  // 跳过 FIL trailer
-
-        for (size_t offset = search_start; offset + 2 < search_end; offset++) {
-            // 检查 zlib 签名: 78 9c (default compression), 78 da (best compression), 78 01 (no compression)
-            if (data[offset] == 0x78 && (data[offset + 1] == 0x9c || data[offset + 1] == 0xda ||
-                                          data[offset + 1] == 0x01 || data[offset + 1] == 0x5e)) {
-
-                if (dbrecovery::innodb::g_verbose) 
-                std::cerr << "[DEBUG] Found zlib signature at offset " << offset << std::endl;
-
-                // 直接解压 zlib 数据（不包含 SDI header）
-                const uint8_t* zlib_data = data + offset;
-                size_t max_zlib_len = search_end - offset;
-
-                // 使用 raw deflate 解压
-                std::vector<uint8_t> decompressed;
-                z_stream strm = {};
-                strm.next_in = const_cast<Bytef*>(zlib_data);
-                strm.avail_in = static_cast<uInt>(max_zlib_len);
-
-                // 初始缓冲区大小 64KB
-                decompressed.resize(64 * 1024);
-                strm.next_out = decompressed.data();
-                strm.avail_out = static_cast<uInt>(decompressed.size());
-
-                // 使用自动检测窗口大小 (32 + 15 = 47) 自动检测 zlib/gzip 头
-                int ret = inflateInit2(&strm, 47);
-                if (ret != Z_OK) {
-                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] inflateInit2 failed: " << ret << std::endl;
-                    continue;
-                }
-
-                bool decompress_ok = false;
-                do {
-                    ret = inflate(&strm, Z_NO_FLUSH);
-                    if (ret == Z_STREAM_END) {
-                        decompress_ok = true;
-                        break;
-                    }
-                    if (ret == Z_BUF_ERROR) {
-                        // 扩展缓冲区
-                        size_t new_size = decompressed.size() * 2;
-                        if (new_size > 16 * 1024 * 1024) break;  // 最大 16MB
-                        decompressed.resize(new_size);
-                        strm.next_out = decompressed.data() + strm.total_out;
-                        strm.avail_out = static_cast<uInt>(new_size - strm.total_out);
-                    } else if (ret != Z_OK) {
-                        break;
-                    }
-                } while (strm.avail_in > 0);
-
-                inflateEnd(&strm);
-
-                if (!decompress_ok || strm.total_out == 0) {
-                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] Decompression failed at offset " << offset << std::endl;
-                    continue;
-                }
-
-                decompressed.resize(strm.total_out);
-                if (dbrecovery::innodb::g_verbose)                 std::cerr << "[DEBUG] Decompressed " << strm.total_out << " bytes from zlib" << std::endl;
-
-                // 解析 JSON
+        // 1) 严格 ZIP record adapter：已知记录偏移
+        for (uint32_t record_offset : {127u, 403u, 679u}) {
+            auto result = innodb::SDIManager::extract_zip_record(data, page_size, record_offset);
+            if (result.success()) {
                 try {
-                    auto json_obj = nlohmann::json::parse(decompressed.begin(), decompressed.end());
-
+                    auto json_obj = nlohmann::json::parse(result.json);
                     catalog::TableSchema schema;
                     schema = parse_sdi_json_to_schema(json_obj);
-
                     if (!schema.columns.empty()) {
-                        std::cerr << "[INFO] Successfully extracted schema from zlib compressed SDI: "
+                        std::cerr << "[INFO] Successfully extracted schema from strict ZIP SDI record: "
                                   << schema.columns.size() << " columns" << std::endl;
                         return schema;
                     }
                 } catch (const std::exception& e) {
-                    if (dbrecovery::innodb::g_verbose)                     std::cerr << "[DEBUG] JSON parse failed: " << e.what() << std::endl;
-                    // 继续搜索下一个 zlib 签名
+                    if (dbrecovery::innodb::g_verbose)
+                        std::cerr << "[DEBUG] JSON parse failed: " << e.what() << std::endl;
                 }
             }
         }
 
-        // 如果直接搜索失败，尝试使用 InnoDBIndexParser
-        std::cerr << "[INFO] Direct zlib search failed, trying InnoDBIndexParser" << std::endl;
-
-        innodb::InnoDBIndexParser parser;
-        auto records = parser.parse_page(data, page_size, 0);
-
-        std::cerr << "[INFO] Found " << records.size() << " records in SDI page" << std::endl;
-
-        // 每条记录包含一个 SDI payload
-        for (const auto& rec : records) {
-            if (rec.fields.size() >= 1 && !rec.fields[0].raw_bytes.empty()) {
-                const auto& raw_bytes = rec.fields[0].raw_bytes;
-
-                if (dbrecovery::innodb::g_verbose) 
-                std::cerr << "[DEBUG] SDI record field size: " << raw_bytes.size() << std::endl;
-
-                auto schema = innodb::SDIManager::parse_sdi_record(raw_bytes.data(), raw_bytes.size());
-                if (!schema.columns.empty()) {
-                    std::cerr << "[INFO] Successfully extracted schema from SDI record: "
-                              << schema.columns.size() << " columns" << std::endl;
-                    return schema;
-                }
-            }
-        }
-
-        std::cerr << "[WARN] No valid SDI schema found in SDI page" << std::endl;
+        std::cerr << "[WARN] No authoritative SDI schema found in ZIP SDI page" << std::endl;
         return std::nullopt;
     }
 

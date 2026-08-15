@@ -55,17 +55,19 @@ std::vector<uint8_t> make_index_page(
     return page;
 }
 
-/// @brief Build a MySQL 8.x INDEX page (LSN extension + page version field).
+/// @brief Build a typed and signed SDI page, the only automatic 8.0-family marker.
 std::vector<uint8_t> make_mysql80_page() {
-    return make_index_page(innodb::FIL_PAGE_INDEX, 0x100000000ULL, 1);
+    auto page = make_index_page(innodb::FIL_PAGE_SDI, 0, 0);
+    constexpr uint8_t sdi_signature[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+    std::memcpy(page.data() + 64, sdi_signature, sizeof(sdi_signature));
+    return page;
 }
 
-/// @brief Build a MySQL 8.4 INDEX page (page_version == 2).
+/// @brief Offset-38 content is page-header data, never version evidence.
 std::vector<uint8_t> make_mysql84_page() {
     return make_index_page(innodb::FIL_PAGE_INDEX, 0x100000000ULL, 2);
 }
 
-/// @brief Build a MySQL 9.0 INDEX page (page_version >= 3).
 std::vector<uint8_t> make_mysql90_page() {
     return make_index_page(innodb::FIL_PAGE_INDEX, 0x100000000ULL, 3);
 }
@@ -128,16 +130,13 @@ TEST(VersionDetectionTest, DetectsMySQL80) {
     EXPECT_EQ(v, MySQLVersion::MYSQL_80);
 }
 
-TEST(VersionDetectionTest, DetectsMySQL84) {
-    auto page = make_mysql84_page();
-    MySQLVersion v = MySQLVersionDetector::detect(page.data(), page.size());
-    EXPECT_EQ(v, MySQLVersion::MYSQL_84);
-}
-
-TEST(VersionDetectionTest, DetectsMySQL90) {
-    auto page = make_mysql90_page();
-    MySQLVersion v = MySQLVersionDetector::detect(page.data(), page.size());
-    EXPECT_EQ(v, MySQLVersion::MYSQL_90);
+TEST(VersionDetectionTest, HeaderBytesDoNotIdentifyVersions) {
+    auto v84 = make_mysql84_page();
+    auto v90 = make_mysql90_page();
+    EXPECT_EQ(MySQLVersionDetector::detect(v84.data(), v84.size()),
+              MySQLVersion::UNKNOWN);
+    EXPECT_EQ(MySQLVersionDetector::detect(v90.data(), v90.size()),
+              MySQLVersion::UNKNOWN);
 }
 
 // Non-INDEX pages must not be classified via the page-version field.
@@ -145,7 +144,65 @@ TEST(VersionDetectionTest, NonIndexPageWithHighVersionFieldIsUnknown) {
     // UNDO_LOG page type with a bogus high value at offset 38.
     auto page = make_index_page(innodb::FIL_PAGE_UNDO_LOG, 0x100000000ULL, 3);
     MySQLVersion v = MySQLVersionDetector::detect(page.data(), page.size());
-    EXPECT_NE(v, MySQLVersion::MYSQL_90);
+    EXPECT_EQ(v, MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, FlushLsnWithoutIndexVersionIsUnknown) {
+    auto page = make_index_page(innodb::FIL_PAGE_INDEX, 0x100000000ULL, 0);
+    EXPECT_EQ(MySQLVersionDetector::detect(page.data(), page.size()),
+              MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, UnsignedSdiPageIsUnknown) {
+    auto page = make_index_page(innodb::FIL_PAGE_SDI, 0x100000000ULL, 0);
+    EXPECT_EQ(MySQLVersionDetector::detect(page.data(), page.size()),
+              MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, UnsignedCompressedSdiPageIsUnknown) {
+    auto page = make_index_page(innodb::FIL_PAGE_SDI_ZIP, 0x100000000ULL, 0);
+    EXPECT_EQ(MySQLVersionDetector::detect(page.data(), page.size()),
+              MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, SignedSdiIdentifiesMySQL80Family) {
+    auto page = make_mysql80_page();
+    EXPECT_EQ(MySQLVersionDetector::detect(page.data(), page.size()),
+              MySQLVersion::MYSQL_80);
+}
+
+TEST(VersionDetectionTest, UnsupportedPageTypeIsUnknown) {
+    auto page = make_index_page(0xFFFF, 0x100000000ULL, 3);
+    EXPECT_EQ(MySQLVersionDetector::detect(page.data(), page.size()),
+              MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, TruncatedPageIsUnknown) {
+    auto page = make_mysql90_page();
+    EXPECT_EQ(MySQLVersionDetector::detect(page.data(), 37),
+              MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, FspFlagsIdentifyMySQL57) {
+    auto fsp = make_index_page(innodb::FIL_PAGE_TYPE_FSP_HDR, 0, 0);
+    innodb::write_be<uint32_t>(fsp.data(), innodb::FIL_HEADER_SIZE + 4, 0x21);
+    EXPECT_EQ(MySQLVersionDetector::detect(fsp.data(), fsp.size()),
+              MySQLVersion::MYSQL_57);
+
+    auto undo = make_index_page(innodb::FIL_PAGE_UNDO_LOG, 0, 0);
+    innodb::write_be<uint16_t>(undo.data(), innodb::FIL_HEADER_SIZE, 1);
+    EXPECT_EQ(MySQLVersionDetector::detect(undo.data(), undo.size()),
+              MySQLVersion::UNKNOWN);
+}
+
+TEST(VersionDetectionTest, MatchesVersionRequiresCompleteEvidence) {
+    auto lsn_only = make_index_page(innodb::FIL_PAGE_INDEX, 0x100000000ULL, 0);
+    EXPECT_FALSE(MySQLVersionDetector::matches_version(
+        lsn_only.data(), lsn_only.size(), MySQLVersion::MYSQL_80));
+
+    auto unsigned_sdi = make_index_page(innodb::FIL_PAGE_SDI, 0x100000000ULL, 0);
+    EXPECT_FALSE(MySQLVersionDetector::matches_version(
+        unsigned_sdi.data(), unsigned_sdi.size(), MySQLVersion::MYSQL_80));
 }
 
 // ==================== DetailedVersionDetector alignment ====================
@@ -154,19 +211,18 @@ TEST(DetailedVersionDetectorTest, AlignedWithCanonicalDetector) {
     VersionDetectionFactory& factory = VersionDetectionFactory::instance();
 
     auto ambiguous = make_ambiguous_index_page();
-    auto v80 = make_mysql80_page();
-    auto v84 = make_mysql84_page();
-    auto v90 = make_mysql90_page();
+    auto sdi = make_mysql80_page();
+    auto header_bytes_84 = make_mysql84_page();
+    auto header_bytes_90 = make_mysql90_page();
 
     EXPECT_EQ(factory.detect_version_detailed(ambiguous.data(), ambiguous.size()).version,
               MySQLVersion::UNKNOWN);
-    // SDI is not required for 8.x detection on non-SDI pages.
-    EXPECT_EQ(factory.detect_version_detailed(v80.data(), v80.size()).version,
+    EXPECT_EQ(factory.detect_version_detailed(sdi.data(), sdi.size()).version,
               MySQLVersion::MYSQL_80);
-    EXPECT_EQ(factory.detect_version_detailed(v84.data(), v84.size()).version,
-              MySQLVersion::MYSQL_84);
-    EXPECT_EQ(factory.detect_version_detailed(v90.data(), v90.size()).version,
-              MySQLVersion::MYSQL_90);
+    EXPECT_EQ(factory.detect_version_detailed(header_bytes_84.data(), header_bytes_84.size()).version,
+              MySQLVersion::UNKNOWN);
+    EXPECT_EQ(factory.detect_version_detailed(header_bytes_90.data(), header_bytes_90.size()).version,
+              MySQLVersion::UNKNOWN);
 }
 
 // ==================== Engine: unresolved automatic detection fails closed ====================

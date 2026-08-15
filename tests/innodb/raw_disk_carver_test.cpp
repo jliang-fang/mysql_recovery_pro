@@ -6,6 +6,7 @@
 #include <vector>
 #include <cstring>
 #include <string>
+#include <zlib.h>
 
 namespace dbrecovery {
 namespace recovery {
@@ -464,11 +465,10 @@ TEST(RawDiskCarverTest, IsSdiPageSDI) {
     EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 99));
 }
 
-TEST(RawDiskCarverTest, IsSdiPageSDIZip) {
+TEST(RawDiskCarverTest, IsSdiPageUnsignedSDIZipIsNotSdi) {
     auto page = create_page(FIL_PAGE_SDI_ZIP);
-    // Compressed SDI_ZIP at position 3/4 is SDI
-    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 3));
-    EXPECT_TRUE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 4));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 3));
+    EXPECT_FALSE(RawDiskCarver::is_sdi_page(page.data(), page.size(), 4));
 }
 
 TEST(RawDiskCarverTest, IsSdiPageSDIZipNonStandardPosition) {
@@ -522,11 +522,10 @@ TEST(RawDiskCarverTest, IsBlobPageSDIZipNonStandard) {
     EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 5));
 }
 
-TEST(RawDiskCarverTest, IsBlobPageSDIZipAtSdiPosition) {
-    // SDI_ZIP at position 3 or 4 is NOT a BLOB
+TEST(RawDiskCarverTest, IsBlobPageUnsignedSDIZipAtAnyPosition) {
     auto page = create_page(FIL_PAGE_SDI_ZIP);
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 3));
-    EXPECT_FALSE(RawDiskCarver::is_blob_page(page.data(), page.size(), 4));
+    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 3));
+    EXPECT_TRUE(RawDiskCarver::is_blob_page(page.data(), page.size(), 4));
 }
 
 TEST(RawDiskCarverTest, IsBlobPageSDIZipWithSignature) {
@@ -784,6 +783,45 @@ TEST(RawDiskCarverTest, IsValidPageStrictInodeType) {
     write_be<uint32_t>(page.data(), page.size() - 8, 0x12345678); // matching checksum
     write_be<uint32_t>(page.data(), page.size() - 4, 0x9ABCDEF0); // matching LSN low
     EXPECT_TRUE(RawDiskCarver::is_valid_page_strict(page.data(), page.size()));
+}
+
+// ==================== P1: SDI schema authority is fail-closed ====================
+
+// A valid SDI ZIP page whose canonical record offsets are corrupted, but which
+// contains a valid deflate stream at a non-canonical offset, carries only
+// forensic heuristic evidence. extract_schema_from_sdi must not turn that into
+// an authoritative TableSchema.
+TEST(RawDiskCarverTest, SdiZipHeuristicEvidenceYieldsNoSchema) {
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), 24, FIL_PAGE_SDI_ZIP);
+    constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+    std::memcpy(page.data() + 64, SDI_SIG, 8);
+
+    // Corrupt all canonical record offsets used by the strict ZIP adapter.
+    for (uint32_t off : {127u, 403u, 679u}) {
+        write_be<uint32_t>(page.data(), off + 25, 0xFFFFFFFF);
+        write_be<uint32_t>(page.data(), off + 29, 0);
+    }
+
+    // Valid raw-deflate JSON stream at a non-canonical offset: the kind of
+    // evidence only a heuristic scan could recover.
+    const std::string json = R"({"table":"corrupted"})";
+    z_stream stream{};
+    ASSERT_EQ(deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8,
+                           Z_DEFAULT_STRATEGY), Z_OK);
+    std::vector<uint8_t> compressed(deflateBound(&stream, json.size()));
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(json.data()));
+    stream.avail_in = static_cast<uInt>(json.size());
+    stream.next_out = compressed.data();
+    stream.avail_out = static_cast<uInt>(compressed.size());
+    ASSERT_EQ(deflate(&stream, Z_FINISH), Z_STREAM_END);
+    compressed.resize(stream.total_out);
+    deflateEnd(&stream);
+    std::copy(compressed.begin(), compressed.end(), page.end() - 8 - compressed.size());
+
+    RawDiskCarver carver;
+    auto schema = carver.extract_schema_from_sdi(page);
+    EXPECT_FALSE(schema.has_value());
 }
 
 } // namespace recovery

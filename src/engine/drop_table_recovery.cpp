@@ -10,6 +10,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
+#include "dbrecovery/innodb/sdi_manager.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -18,7 +19,6 @@
 #include <filesystem>
 #include <set>
 #include <nlohmann/json.hpp>
-#include <zlib.h>
 
 namespace dbrecovery {
 namespace engine {
@@ -186,81 +186,41 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             uint16_t page_type = (static_cast<uint16_t>(page_buffer[24]) << 8) | page_buffer[25];
 
             if (page_type == 0x45BD) {  // FIL_PAGE_SDI_ZIP (compressed SDI)
-                // Parse SDI record using the same method as sdi_manager.cpp
-                // SDI records have: header + uncompressed_len (4 bytes LE) + compressed_len (4 bytes LE) + data
+                // Use SDIManager::extract_zip_record() which reads BE lengths,
+                // constructs the standard LE SDI header, and decompresses through
+                // the bounded manager (16 MiB / 20:1 limits).
+                for (uint32_t record_offset : {127u, 403u, 679u}) {
+                    auto result = dbrecovery::innodb::SDIManager::extract_zip_record(
+                        page_buffer.data(), page_size_, record_offset);
+                    if (!result.success()) continue;
 
-                // Try to find SDI record at different offsets within the page
-                // The record can be at offset 127 or 403 typically
-                for (uint32_t record_offset : {127, 403, 679}) {
-                    if (record_offset + 20 >= page_size_) continue;
+                    try {
+                        auto json = nlohmann::json::parse(result.json);
 
-                    // Read lengths as little-endian (like sdi_manager.cpp does)
-                    uint32_t uncompressed_len = *reinterpret_cast<const uint32_t*>(page_buffer.data() + record_offset + 12);
-                    uint32_t compressed_len = *reinterpret_cast<const uint32_t*>(page_buffer.data() + record_offset + 16);
+                        // Check if this is a DD table (mysql.tables, mysql.columns, etc.)
+                        if (json.contains("dd_object")) {
+                            auto& dd_obj = json["dd_object"];
+                            std::string schema_ref = dd_obj.value("schema_ref", "");
+                            std::string table_name = dd_obj.value("name", "");
 
-                    if (compressed_len > 0 && compressed_len < page_size_ - record_offset - 20 &&
-                        uncompressed_len > 0 && uncompressed_len < 100000) {
-
-                        const uint8_t* compressed_data = page_buffer.data() + record_offset + 20;
-
-                        // Decompress using raw deflate (wbits=-15)
-                        z_stream strm = {};
-                        strm.next_in = const_cast<Bytef*>(compressed_data);
-                        strm.avail_in = compressed_len;
-
-                        std::vector<uint8_t> decompressed(uncompressed_len);
-                        strm.next_out = decompressed.data();
-                        strm.avail_out = static_cast<uInt>(decompressed.size());
-
-                        int ret = inflateInit2(&strm, -15);  // Raw deflate
-                        if (ret == Z_OK) {
-                            do {
-                                ret = inflate(&strm, Z_NO_FLUSH);
-                                if (ret == Z_BUF_ERROR && strm.avail_out == 0) {
-                                    decompressed.resize(decompressed.size() * 2);
-                                    strm.next_out = decompressed.data() + strm.total_out;
-                                    strm.avail_out = static_cast<uInt>(decompressed.size() - strm.total_out);
-                                } else if (ret != Z_OK && ret != Z_STREAM_END) {
-                                    break;
-                                }
-                            } while (ret == Z_OK);
-
-                            if (ret == Z_STREAM_END) {
-                                decompressed.resize(strm.total_out);
-                                std::string json_str(reinterpret_cast<const char*>(decompressed.data()),
-                                                      decompressed.size());
-
-                                try {
-                                    auto json = nlohmann::json::parse(json_str);
-
-                                    // Check if this is a DD table (mysql.tables, mysql.columns, etc.)
-                                    if (json.contains("dd_object")) {
-                                        auto& dd_obj = json["dd_object"];
-                                        std::string schema_ref = dd_obj.value("schema_ref", "");
-                                        std::string table_name = dd_obj.value("name", "");
-
-                                        if (schema_ref == "mysql" && dd_obj.contains("indexes")) {
-                                            // Get the PRIMARY index ID from se_private_data
-                                            for (auto& idx : dd_obj["indexes"]) {
-                                                if (idx.value("name", "") == "PRIMARY" && idx.contains("se_private_data")) {
-                                                    std::string private_data = idx["se_private_data"].get<std::string>();
-                                                    // Parse id=xxx from se_private_data
-                                                    size_t id_pos = private_data.find("id=");
-                                                    if (id_pos != std::string::npos) {
-                                                        uint64_t idx_id = std::stoull(private_data.substr(id_pos + 3));
-                                                        dd_table_index_ids[table_name] = idx_id;
-                                                        index_id_to_table_name[idx_id] = table_name;
-                                                    }
-                                                }
-                                            }
+                            if (schema_ref == "mysql" && dd_obj.contains("indexes")) {
+                                // Get the PRIMARY index ID from se_private_data
+                                for (auto& idx : dd_obj["indexes"]) {
+                                    if (idx.value("name", "") == "PRIMARY" && idx.contains("se_private_data")) {
+                                        std::string private_data = idx["se_private_data"].get<std::string>();
+                                        // Parse id=xxx from se_private_data
+                                        size_t id_pos = private_data.find("id=");
+                                        if (id_pos != std::string::npos) {
+                                            uint64_t idx_id = std::stoull(private_data.substr(id_pos + 3));
+                                            dd_table_index_ids[table_name] = idx_id;
+                                            index_id_to_table_name[idx_id] = table_name;
                                         }
                                     }
-                                } catch (const nlohmann::json::parse_error&) {
-                                    // Ignore parse errors
                                 }
                             }
-                            inflateEnd(&strm);
                         }
+                    } catch (const nlohmann::json::parse_error&) {
+                        // Ignore parse errors
                     }
                 }
             }

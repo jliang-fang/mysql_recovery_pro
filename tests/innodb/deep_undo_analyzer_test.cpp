@@ -11,7 +11,7 @@
 // Undo page header constants (from deep_undo_analyzer.cpp, not exposed in header)
 constexpr uint16_t TRX_UNDO_PAGE_START    = 28;
 constexpr uint16_t TRX_UNDO_PAGE_FREE     = 30;
-constexpr uint16_t TRX_UNDO_PAGE_N_RECS   = 34;
+constexpr uint16_t TRX_UNDO_PAGE_N_RECS   = 32;
 constexpr uint16_t TRX_UNDO_PAGE_HDR_SIZE = 40;
 
 namespace dbrecovery {
@@ -46,9 +46,10 @@ static std::string create_ibdata_with_pages(
 // Layout: FIL header + undo page header + records
 static std::vector<uint8_t> make_undo_page(
     const std::vector<std::vector<uint8_t>>& record_datas,
-    size_t page_size = 16384) {
+    size_t page_size = 16384,
+    uint32_t space_id = 0) {
     std::vector<uint8_t> page(page_size, 0);
-    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
 
     uint16_t start = TRX_UNDO_PAGE_HDR_SIZE;
     uint16_t free_off = start;
@@ -61,6 +62,7 @@ static std::vector<uint8_t> make_undo_page(
     write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
     write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS,
                        static_cast<uint16_t>(record_datas.size()));
+    write_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID, space_id);
     return page;
 }
 
@@ -416,34 +418,6 @@ TEST(DeepUndoAnalyzerTest, RowVersionHistoryToInsertSqlWithChain) {
 
     std::string sql = hist.to_insert_sql(schema);
     EXPECT_NE(sql.find("42"), std::string::npos);
-}
-
-// ==================== FlashbackResult Tests ====================
-
-TEST(DeepUndoAnalyzerTest, FlashbackResultDefault) {
-    FlashbackResult fr;
-    EXPECT_TRUE(fr.reverse_sql.empty());
-    EXPECT_EQ(fr.trx_id, 0u);
-    EXPECT_EQ(fr.undo_no, 0u);
-    EXPECT_FALSE(fr.timestamp.has_value());
-    EXPECT_DOUBLE_EQ(fr.confidence, 0.0);
-    EXPECT_FALSE(fr.is_complete);
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackResultWithValues) {
-    FlashbackResult fr;
-    fr.reverse_sql = "INSERT INTO t VALUES (1)";
-    fr.trx_id = 42;
-    fr.undo_no = 7;
-    fr.confidence = 0.95;
-    fr.is_complete = true;
-    fr.timestamp = std::chrono::system_clock::now();
-    EXPECT_EQ(fr.reverse_sql, "INSERT INTO t VALUES (1)");
-    EXPECT_EQ(fr.trx_id, 42u);
-    EXPECT_EQ(fr.undo_no, 7u);
-    EXPECT_DOUBLE_EQ(fr.confidence, 0.95);
-    EXPECT_TRUE(fr.is_complete);
-    EXPECT_TRUE(fr.timestamp.has_value());
 }
 
 // ==================== FlashbackFilter Tests ====================
@@ -855,7 +829,6 @@ TEST(DeepUndoAnalyzerTest, Constructor) {
     EXPECT_EQ(stats.chains_traced, 0u);
     EXPECT_EQ(stats.total_undo_records, 0u);
     EXPECT_EQ(stats.broken_chains, 0u);
-    EXPECT_EQ(stats.flashback_statements, 0u);
     EXPECT_EQ(stats.pages_scanned, 0u);
     EXPECT_DOUBLE_EQ(stats.analysis_time_ms, 0.0);
 }
@@ -982,80 +955,6 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainNoIbdata) {
     EXPECT_EQ(stats.broken_chains, 1u);
 }
 
-TEST(DeepUndoAnalyzerTest, FlashbackDeletesNoFilter) {
-    DeepUndoAnalyzer analyzer;
-    analyzer.set_ibdata_path("/nonexistent/ibdata1");
-    catalog::TableSchema schema;
-    schema.table_name = "test";
-    schema.table_id = 1;
-
-    auto results = analyzer.flashback_deletes(0, schema, {});
-    EXPECT_TRUE(results.empty());
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackDeletesWithTrxFilter) {
-    DeepUndoAnalyzer analyzer;
-    analyzer.set_ibdata_path("/nonexistent/ibdata1");
-    catalog::TableSchema schema;
-    schema.table_name = "test";
-    schema.table_id = 1;
-
-    FlashbackFilter filter;
-    filter.trx_id = 42;
-    auto results = analyzer.flashback_deletes(0, schema, filter);
-    EXPECT_TRUE(results.empty());
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackDeletesWithLsnFilter) {
-    DeepUndoAnalyzer analyzer;
-    analyzer.set_ibdata_path("/nonexistent/ibdata1");
-    catalog::TableSchema schema;
-    schema.table_name = "test";
-
-    FlashbackFilter filter;
-    filter.start_lsn = 1000;
-    filter.end_lsn = 2000;
-    auto results = analyzer.flashback_deletes(0, schema, filter);
-    EXPECT_TRUE(results.empty());
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackDeletesWithTimeFilter) {
-    DeepUndoAnalyzer analyzer;
-    analyzer.set_ibdata_path("/nonexistent/ibdata1");
-    catalog::TableSchema schema;
-    schema.table_name = "test";
-
-    FlashbackFilter filter;
-    filter.start_time = std::chrono::system_clock::now();
-    filter.end_time = std::chrono::system_clock::now();
-    auto results = analyzer.flashback_deletes(0, schema, filter);
-    EXPECT_TRUE(results.empty());
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackDeletesMaxRecords) {
-    DeepUndoAnalyzer analyzer;
-    analyzer.set_ibdata_path("/nonexistent/ibdata1");
-    catalog::TableSchema schema;
-    schema.table_name = "test";
-
-    FlashbackFilter filter;
-    filter.max_records = 0;
-    auto results = analyzer.flashback_deletes(0, schema, filter);
-    EXPECT_TRUE(results.empty());
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackDeletesIncludeIncomplete) {
-    DeepUndoAnalyzer analyzer;
-    analyzer.set_ibdata_path("/nonexistent/ibdata1");
-    catalog::TableSchema schema;
-    schema.table_name = "test";
-
-    FlashbackFilter filter;
-    filter.include_incomplete = true;
-    auto results = analyzer.flashback_deletes(0, schema, filter);
-    EXPECT_TRUE(results.empty());
-}
-
 TEST(DeepUndoAnalyzerTest, RebuildAllHistoriesEmpty) {
     DeepUndoAnalyzer analyzer;
     analyzer.set_ibdata_path("/nonexistent/ibdata1");
@@ -1123,6 +1022,96 @@ TEST(DeepUndoAnalyzerTest, ScanUndoPagesNoIndex) {
     auto pages = analyzer.scan_undo_pages();
     // May or may not find pages depending on internal index build
     // Just verify no crash
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, ScanRecordsAcceptsVerifiedPhysicalProvenance) {
+    auto rec = make_update_rec(100, 200, 42, 0, {{0x01}});
+    auto page = make_undo_page({rec}, 16384, 77);
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_provenance");
+
+    UndoPageIndex index;
+    index.build(path, 16384, 0);
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_undo_page_index(&index);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    auto records = analyzer.scan_records(schema);
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_TRUE(records[0].has_valid_provenance);
+    EXPECT_EQ(records[0].tablespace_id, 77u);
+    EXPECT_EQ(records[0].undo_page_no, 5u);
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, ScanRecordsRejectsTargetTablespaceMismatch) {
+    auto rec = make_update_rec(100, 200, 42, 0, {{0x01}});
+    auto page = make_undo_page({rec}, 16384, 77);
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_provenance_mismatch");
+
+    UndoPageIndex index;
+    index.build(path, 16384, 0);
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_undo_page_index(&index);
+    analyzer.set_tablespace_id(78);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    EXPECT_TRUE(analyzer.scan_records(schema).empty());
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, ScanRecordsRejectsMissingMetadataForLsnFilter) {
+    auto rec = make_update_rec(100, 200, 42, 0, {{0x01}});
+    auto page = make_undo_page({rec});
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_missing_lsn");
+
+    UndoPageIndex index;
+    index.build(path, 16384, 0);
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_undo_page_index(&index);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    EXPECT_EQ(analyzer.scan_records(schema).size(), 1u);
+
+    FlashbackFilter filter;
+    filter.start_lsn = 1;
+    EXPECT_TRUE(analyzer.scan_records(schema, filter).empty());
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, RebuildHistoriesRejectsMissingMetadataForLsnRange) {
+    auto rec = make_update_rec(100, 200, 42, 0, {{0x01}});
+    auto page = make_undo_page({rec});
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_rebuild_lsn");
+
+    UndoPageIndex index;
+    index.build(path, 16384, 0);
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_undo_page_index(&index);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    EXPECT_TRUE(analyzer.rebuild_all_histories(0, schema, 1,
+                                               std::make_pair(1ULL, 2ULL)).empty());
 
     std::remove(path.c_str());
 }
@@ -1239,9 +1228,11 @@ struct ChainLayout {
 
 static ChainLayout build_version_chain_page(
     std::vector<uint8_t>& out_page,
-    size_t page_size = 16384) {
+    size_t page_size = 16384,
+    uint32_t space_id = 0) {
     std::vector<uint8_t> page(page_size, 0);
-    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
+    write_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID, space_id);
 
     uint16_t free_off = TRX_UNDO_PAGE_HDR_SIZE;
     // (next_ptr_page, next_ptr_off) for each record's old DB_ROLL_PTR field.
@@ -1261,9 +1252,13 @@ static ChainLayout build_version_chain_page(
         // First field: old DB_ROLL_PTR. Patched for records 1,2 after layout.
         std::vector<uint8_t> ptr_field = make_roll_ptr_field(chain_ptrs[i].first,
                                                              chain_ptrs[i].second);
+        // The header roll_ptr is the authoritative continuation. It must agree
+        // with the old DB_ROLL_PTR field: both point to the previous record.
+        uint64_t header_prev =
+            (i == 0) ? 0 : RollPtrDecoder::encode(5, offsets[i - 1], 0);
         auto rec = make_update_rec( /*page_no*/100, /*page_offset*/200,
             /*trx_id*/100 + static_cast<uint64_t>(i),
-            /*prev_roll_ptr*/0, {ptr_field, val_field});
+            /*prev_roll_ptr*/header_prev, {ptr_field, val_field});
         if (free_off + rec.size() > page_size) break;
         std::memcpy(page.data() + free_off, rec.data(), rec.size());
         free_off += static_cast<uint16_t>(rec.size());
@@ -1282,6 +1277,7 @@ static ChainLayout build_version_chain_page(
     write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_START, TRX_UNDO_PAGE_HDR_SIZE);
     write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
     write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS, 3);
+    write_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID, space_id);
     out_page = std::move(page);
     ChainLayout layout;
     layout.page_no = 5;
@@ -1412,27 +1408,220 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainCycleDetected) {
     std::remove(path.c_str());
 }
 
+// ==================== Header vs field continuation authority ====================
+
+// Two consistent UPDATE records on page 5 (older then newer), each carrying
+// the old DB_ROLL_PTR as its first field. Both the newer record's header and
+// its first field point at the older record by default. Adversarial tests
+// patch the returned page with the patch helpers below, then re-write the
+// file so the on-disk chain matches the mutated page.
+struct TwoRecordChain {
+    std::string path;
+    uint32_t page_no = 5;
+    uint16_t new_off = 0;
+    uint16_t old_off = 0;
+    std::vector<uint8_t> page;  // the undo page (page 5 content)
+    std::vector<uint8_t> file;  // the full multi-page ibdata image
+};
+
+// Patch the header roll_ptr (BE at record offset +14) of a record in `page`.
+static void patch_header_ptr(std::vector<uint8_t>& page, uint16_t rec_off,
+                             uint32_t target_page, uint16_t target_off) {
+    auto decoded = RollPtrDecoder::decode(RollPtrDecoder::encode(target_page, target_off, 0));
+    uint8_t storage[7] = {0};
+    RollPtrDecoder::encode_storage(storage, decoded);
+    std::memcpy(page.data() + rec_off + 14, storage, 7);
+}
+
+// Patch the first field (old DB_ROLL_PTR, 6 LE bytes at record offset +22).
+static void patch_first_field_ptr(std::vector<uint8_t>& page, uint16_t rec_off,
+                                  uint32_t target_page, uint16_t target_off) {
+    auto field = make_roll_ptr_field(target_page, target_off);
+    std::memcpy(page.data() + rec_off + 22, field.data(), field.size());
+}
+
+static void rewrite_chain_file(TwoRecordChain& chain) {
+    std::memcpy(chain.file.data() + 5 * 16384, chain.page.data(), chain.page.size());
+    std::ofstream out(chain.path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(chain.file.data()), chain.file.size());
+    out.close();
+}
+
+static TwoRecordChain build_two_record_chain() {
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+
+    uint16_t old_off = TRX_UNDO_PAGE_HDR_SIZE;
+    auto rec_old = make_update_rec(100, 200, 101, 0,
+                                   {make_roll_ptr_field(0, 0), {0x0A, 0, 0, 0}});
+    std::memcpy(page.data() + old_off, rec_old.data(), rec_old.size());
+
+    uint16_t new_off = old_off + static_cast<uint16_t>(rec_old.size());
+    auto rec_new = make_update_rec(300, 400, 102, 0,
+                                   {make_roll_ptr_field(0, 0), {0x14, 0, 0, 0}});
+    std::memcpy(page.data() + new_off, rec_new.data(), rec_new.size());
+    uint16_t free_off = new_off + static_cast<uint16_t>(rec_new.size());
+
+    // Consistent default: newest points at the older record in both header
+    // and field. Adversarial tests override via the patch helpers above.
+    patch_header_ptr(page, new_off, 5, old_off);
+    patch_first_field_ptr(page, new_off, 5, old_off);
+
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_START, TRX_UNDO_PAGE_HDR_SIZE);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS, 2);
+
+    TwoRecordChain chain;
+    chain.file.assign(16384 * 6, 0);
+    std::memcpy(chain.file.data() + 5 * 16384, page.data(), page.size());
+    chain.path = create_temp_file(chain.file, "_chain_conflict");
+    chain.page = std::move(page);
+    chain.new_off = new_off;
+    chain.old_off = old_off;
+    return chain;
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainConflictingHeaderAndFieldBreak) {
+    // Newest record's header points to the older record, but its old
+    // DB_ROLL_PTR field points to a *different* nonzero target. The conflict
+    // must break the chain instead of following the corroborating field.
+    auto chain = build_two_record_chain();
+    patch_first_field_ptr(chain.page, chain.new_off, 5, chain.new_off);  // field -> self
+    rewrite_chain_file(chain);
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(chain.path);
+    analyzer.set_page_size(16384);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    uint64_t roll_ptr = RollPtrDecoder::encode(chain.page_no, chain.new_off, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 11);
+
+    ASSERT_EQ(history.undo_chain.size(), 1u) << "conflict must stop the chain";
+    EXPECT_EQ(history.undo_chain[0].trx_id, 102u);
+    EXPECT_EQ(history.n_versions, 2u);
+    EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
+
+    std::remove(chain.path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainNullHeaderEndsDespiteNonzeroField) {
+    // The header roll_ptr is authoritative. A null header ends the chain even
+    // when the old DB_ROLL_PTR field points onward: the field alone must never
+    // be chosen solely because it is nonzero.
+    auto chain = build_two_record_chain();
+    patch_header_ptr(chain.page, chain.new_off, 0, 0);  // null header
+    rewrite_chain_file(chain);
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(chain.path);
+    analyzer.set_page_size(16384);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    uint64_t roll_ptr = RollPtrDecoder::encode(chain.page_no, chain.new_off, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 12);
+
+    ASSERT_EQ(history.undo_chain.size(), 1u);
+    EXPECT_EQ(history.n_versions, 2u);
+    EXPECT_EQ(analyzer.get_stats().broken_chains, 0u)
+        << "null header is a normal chain end, not corruption";
+
+    std::remove(chain.path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainNullFieldContinuesViaHeader) {
+    // A missing (null) field candidate must not stop the chain: the resolved
+    // header remains authoritative and continuation proceeds through it.
+    auto chain = build_two_record_chain();
+    patch_first_field_ptr(chain.page, chain.new_off, 0, 0);  // null field
+    rewrite_chain_file(chain);
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(chain.path);
+    analyzer.set_page_size(16384);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    uint64_t roll_ptr = RollPtrDecoder::encode(chain.page_no, chain.new_off, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 13);
+
+    ASSERT_EQ(history.undo_chain.size(), 2u);
+    EXPECT_EQ(history.undo_chain[0].trx_id, 101u);  // oldest first
+    EXPECT_EQ(history.undo_chain[1].trx_id, 102u);
+    EXPECT_EQ(history.n_versions, 3u);
+    EXPECT_EQ(analyzer.get_stats().broken_chains, 0u);
+
+    std::remove(chain.path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainInvalidContinuationBreaks) {
+    // A single record whose header points to an offset past the page's
+    // free-space limit. The continuation is invalid -> broken chain.
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+
+    uint16_t rec_off = TRX_UNDO_PAGE_HDR_SIZE;
+    auto rec = make_update_rec(100, 200, 101, RollPtrDecoder::encode(5, 545, 0),
+                               {make_roll_ptr_field(0, 0), {0x0A, 0, 0, 0}});
+    std::memcpy(page.data() + rec_off, rec.data(), rec.size());
+    uint16_t free_off = rec_off + static_cast<uint16_t>(rec.size());
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_START, TRX_UNDO_PAGE_HDR_SIZE);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS, 1);
+
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + 5 * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_chain_invalid");
+
+    DeepUndoAnalyzer analyzer;
+    analyzer.set_ibdata_path(path);
+    analyzer.set_page_size(16384);
+    analyzer.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    uint64_t roll_ptr = RollPtrDecoder::encode(5, rec_off, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 14);
+
+    ASSERT_EQ(history.undo_chain.size(), 1u);
+    EXPECT_EQ(history.n_versions, 2u);
+    EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, TraceVersionChainUnresolvedProfileRejects) {
+    // Without a resolved undo format profile, an otherwise valid UPDATE chain
+    // must produce no records and count a broken chain (fail-closed).
+    auto chain = build_two_record_chain();
+
+    DeepUndoAnalyzer analyzer;  // No set_undo_format_profile -> UNRESOLVED
+    analyzer.set_ibdata_path(chain.path);
+    analyzer.set_page_size(16384);
+
+    catalog::TableSchema schema;
+    schema.table_name = "t";
+
+    uint64_t roll_ptr = RollPtrDecoder::encode(chain.page_no, chain.new_off, 0);
+    auto history = analyzer.trace_version_chain({}, roll_ptr, schema, 15);
+
+    EXPECT_TRUE(history.undo_chain.empty());
+    EXPECT_EQ(history.n_versions, 1u);
+    EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
+
+    std::remove(chain.path.c_str());
+}
+
 // ==================== FlashbackGenerator-style Output Tests ====================
-
-TEST(DeepUndoAnalyzerTest, FlashbackResultConfidence) {
-    FlashbackResult fr;
-    fr.is_complete = true;
-    EXPECT_TRUE(fr.is_complete);
-    fr.confidence = 0.5;
-    fr.is_complete = false;
-    EXPECT_FALSE(fr.is_complete);
-    EXPECT_DOUBLE_EQ(fr.confidence, 0.5);
-}
-
-TEST(DeepUndoAnalyzerTest, FlashbackResultTimestamp) {
-    FlashbackResult fr;
-    auto now = std::chrono::system_clock::now();
-    fr.timestamp = now;
-    ASSERT_TRUE(fr.timestamp.has_value());
-    auto diff = std::chrono::duration_cast<std::chrono::seconds>(
-        *fr.timestamp - now).count();
-    EXPECT_EQ(diff, 0);
-}
 
 } // namespace innodb
 } // namespace dbrecovery

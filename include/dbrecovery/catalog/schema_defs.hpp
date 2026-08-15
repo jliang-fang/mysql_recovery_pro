@@ -69,10 +69,10 @@ struct ColumnInfo {
 // 索引定义（PRIMARY / UNIQUE / SECONDARY，参考 sql/dd/types/index.h）
 struct IndexInfo {
     std::string name;
-    bool is_primary;
+    bool is_primary = false;
     std::vector<std::string> columns;       // 索引列名列表
     std::vector<uint32_t> column_offsets;   // 索引列在表中的偏移位置（用于快速定位）
-    bool is_unique;
+    bool is_unique = false;
     uint32_t algorithm = 0;                 // BTREE(0), HASH(1) 等
     bool is_visible = true;                 // MySQL 8.0 新增：索引是否可见
 };

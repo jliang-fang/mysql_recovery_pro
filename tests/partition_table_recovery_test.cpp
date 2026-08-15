@@ -1,0 +1,147 @@
+/**
+ * @file partition_table_recovery_test.cpp
+ * @brief Focused tests for PartitionTableRecovery P1 state semantics
+ *
+ * Verifies that caller-configured partitions survive recover() (only
+ * per-run records/statistics are reset) and that an INDEX page is
+ * recognized only by its canonical big-endian FIL page type.
+ */
+
+#include <gtest/gtest.h>
+#include <vector>
+#include <cstdint>
+#include <string>
+#include <fstream>
+#include <filesystem>
+
+#include "dbrecovery/innodb/partition_table_recovery.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/innodb/mach_read.hpp"
+
+using namespace dbrecovery;
+using namespace dbrecovery::innodb;
+
+namespace {
+
+std::string make_temp_file(const std::string& name, const std::vector<uint8_t>& data) {
+    auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(data.data()),
+              static_cast<std::streamsize>(data.size()));
+    out.close();
+    return path.string();
+}
+
+/// @brief Build an INDEX leaf page with one live user record.
+/// @param canonical_be true: FIL_PAGE_INDEX (0x45BF) big-endian at
+/// FIL_PAGE_TYPE_ABS; false: the same bytes in little-endian order.
+std::vector<uint8_t> build_index_page(bool canonical_be) {
+    std::vector<uint8_t> page(16384, 0);
+
+    if (canonical_be) {
+        write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    } else {
+        // Swapped byte order: a big-endian read at FIL_PAGE_TYPE_ABS
+        // yields 0xBF45, which is not a recognized FIL page type.
+        page[FIL_PAGE_TYPE_ABS]     = static_cast<uint8_t>(FIL_PAGE_INDEX & 0xFF);
+        page[FIL_PAGE_TYPE_ABS + 1] = static_cast<uint8_t>(FIL_PAGE_INDEX >> 8);
+    }
+
+    // Page header (relative to FIL_HEADER_SIZE = 38): n_dir_slots at 38,
+    // heap_top at 40, n_heap at 42.
+    write_le<uint16_t>(page.data(), 38, 3);     // n_dir_slots
+    write_le<uint16_t>(page.data(), 40, 150);   // heap_top
+    write_le<uint16_t>(page.data(), 42, 5);     // n_heap
+
+    // INFIMUM -> deleted user record @75 -> live user record @99 -> SUPREMUM @120.
+    page[54] = REC_STATUS_INFIMUM;
+    write_le<uint16_t>(page.data(), 55, 75);
+
+    page[75] = REC_INFO_DELETED_FLAG;
+    write_le<uint16_t>(page.data(), 76, 99);
+
+    page[99] = 0x00;
+    write_le<uint16_t>(page.data(), 100, 120);
+
+    page[120] = REC_STATUS_SUPREMUM;
+    write_le<uint16_t>(page.data(), 121, 0xFFFF);
+
+    return page;
+}
+
+catalog::TableSchema make_schema() {
+    catalog::TableSchema schema;
+    schema.table_name = "partition_test";
+    schema.row_format = 0;  // COMPACT
+
+    catalog::ColumnInfo col;
+    col.name = "id";
+    col.mysql_type_id = mysql_types::LONGLONG;
+    col.is_nullable = false;
+    schema.columns[1] = col;
+    return schema;
+}
+
+PartitionInfo make_partition(const std::string& name, uint32_t id,
+                             const std::string& path) {
+    PartitionInfo p;
+    p.partition_name = name;
+    p.partition_id = id;
+    p.tablespace_id = id + 10;
+    p.ibd_path = path;
+    p.first_page_no = 0;
+    p.last_page_no = 0;
+    return p;
+}
+
+}  // namespace
+
+// ==================== P1: configured partitions survive recover() ====================
+
+TEST(PartitionTableRecoveryTest, ConfiguredPartitionsSurviveRecover) {
+    PartitionTableRecovery engine;
+    engine.add_partition(make_partition("p0", 0, "/nonexistent/p0.ibd"));
+    engine.add_partition(make_partition("p1", 1, "/nonexistent/p1.ibd"));
+
+    auto records = engine.recover();
+    EXPECT_TRUE(records.empty());
+
+    // Per-run state resets, but caller-configured partitions must persist.
+    EXPECT_EQ(engine.get_partitions().size(), 2);
+    EXPECT_EQ(engine.get_stats().total_partitions, 2);
+
+    // Partitions added after a run must not be lost by the next run either.
+    engine.add_partition(make_partition("p2", 2, "/nonexistent/p2.ibd"));
+    engine.recover();
+    EXPECT_EQ(engine.get_partitions().size(), 3);
+    EXPECT_EQ(engine.get_stats().total_partitions, 3);
+}
+
+// ==================== P1: INDEX page recognized only in canonical byte order ====================
+
+TEST(PartitionTableRecoveryTest, IndexPageRecognizedOnlyInCanonicalByteOrder) {
+    std::string canonical_path =
+        make_temp_file("dbrec_part_canonical.ibd", build_index_page(true));
+    std::string swapped_path =
+        make_temp_file("dbrec_part_swapped.ibd", build_index_page(false));
+
+    PartitionTableRecovery engine;
+    engine.set_schema(make_schema());
+    engine.add_partition(make_partition("canonical", 0, canonical_path));
+    engine.add_partition(make_partition("swapped", 1, swapped_path));
+
+    auto records = engine.recover();
+
+    // The canonical big-endian page is recognized and parsed; the swapped
+    // byte-order page must be skipped entirely.
+    EXPECT_EQ(records.size(), 1);
+    EXPECT_EQ(engine.get_stats().recovered_partitions, 1);
+    EXPECT_EQ(engine.get_stats().failed_partitions, 1);
+}
+
+// ==================== Main ====================
+
+int main(int argc, char** argv) {
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

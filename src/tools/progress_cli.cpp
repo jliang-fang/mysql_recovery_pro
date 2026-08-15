@@ -571,20 +571,15 @@ std::optional<catalog::TableSchema> ProgressRecoveryCLI::parse_schema_from_sdi(
         // Check if this is an SDI page (supports both compressed 0x45BD and uncompressed 0x45BE)
         if (!sdi_extractor.is_sdi_page(page_data.data())) continue;
 
-        // Extract SDI payload (handles both compressed and uncompressed)
-        auto sdi_payload = sdi_extractor.extract_sdi_payload(page_data.data(), page_data.size());
-        if (!sdi_payload.has_value() || sdi_payload->empty()) continue;
-
-        // Parse as JSON string
-        std::string json_str(reinterpret_cast<const char*>(sdi_payload->data()), sdi_payload->size());
-        try {
-            auto json = nlohmann::json::parse(json_str);
-            catalog::TableSchema schema;
-            if (schema.from_json(json)) {
-                return schema;
+        const auto extracted = sdi_extractor.extract_from_page(page_data.data(), page_data.size());
+        for (const auto& record : extracted) {
+            if (!record.is_valid) continue;
+            try {
+                const auto json = nlohmann::json::parse(record.sdi_json);
+                catalog::TableSchema schema;
+                if (schema.from_json(json)) return schema;
+            } catch (const nlohmann::json::parse_error&) {
             }
-        } catch (const nlohmann::json::parse_error& e) {
-            // Ignore parse errors, try next page
         }
     }
 

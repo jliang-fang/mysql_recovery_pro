@@ -19,6 +19,15 @@ namespace innodb {
 
 /// @brief Size of the FIL header (fixed at 38 bytes)
 constexpr uint16_t FIL_HEADER_SIZE      = 38;
+constexpr uint16_t FSP_SPACE_FLAGS_OFFSET = FIL_HEADER_SIZE + 4;
+
+struct FSPCompressionMetadata {
+    size_t logical_page_size;
+    uint8_t zip_ssize;
+    size_t physical_page_size;
+
+    bool is_compressed() const { return zip_ssize != 0; }
+};
 
 /// @brief Offset of page type within FIL Header (relative to start of page)
 /// In InnoDB, FIL_PAGE_TYPE is at offset 24 (relative to page start)
@@ -73,6 +82,32 @@ constexpr uint16_t FIL_PAGE_COMPRESSED  = 17845; // 0x45B5 — Compressed page
 constexpr uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 17847; // 0x45B7 — Compressed+Encrypted page
 /// @brief FSP_HDR (File Space Header) page type — Page 0 of every tablespace (0x45B8 = 17848)
 constexpr uint16_t FIL_PAGE_TYPE_FSP_HDR = 17848; // 0x45B8 — FSP header page
+
+inline std::optional<FSPCompressionMetadata> parse_fsp_compression_metadata(
+    const uint8_t* page0, size_t available_bytes, size_t logical_page_size) {
+    constexpr size_t kFlagsEnd = FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t);
+    if (page0 == nullptr || available_bytes < kFlagsEnd ||
+        (logical_page_size != 4096 && logical_page_size != 8192 &&
+         logical_page_size != 16384 && logical_page_size != 32768 &&
+         logical_page_size != 65536) ||
+        available_bytes < logical_page_size ||
+        read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS) != FIL_PAGE_TYPE_FSP_HDR) {
+        return std::nullopt;
+    }
+
+    const uint32_t flags = read_be<uint32_t>(page0, FSP_SPACE_FLAGS_OFFSET);
+    const uint8_t zip_ssize = static_cast<uint8_t>((flags >> 1) & 0x0F);
+    if (zip_ssize >= 5) {
+        return std::nullopt;
+    }
+
+    const size_t physical_page_size = logical_page_size >> zip_ssize;
+    if (physical_page_size < 1024 || physical_page_size > logical_page_size) {
+        return std::nullopt;
+    }
+
+    return FSPCompressionMetadata{logical_page_size, zip_ssize, physical_page_size};
+}
 /// @brief XDES (Extent Descriptor) page type (0x45B9 = 17849)
 constexpr uint16_t FIL_PAGE_TYPE_XDES    = 17849; // 0x45B9 — Extent descriptor page
 

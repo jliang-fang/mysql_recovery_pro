@@ -12,8 +12,10 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <iterator>
+#include <set>
 #include <openssl/evp.h>
 #include <openssl/sha.h>
 
@@ -89,35 +91,40 @@ bool OfflineKeyringParser::parse_encrypted_keyring(const std::string& path, cons
 
 bool OfflineKeyringParser::parse_vault_export(const std::string& path) {
     std::ifstream file(path);
-    if (!file) return false;
+    if (!file) {
+        last_error_ = "Cannot open Vault export: " + path;
+        return false;
+    }
 
     try {
-        auto j = nlohmann::json::parse(file);
-
-        auto data = j.contains("data") ? j["data"] : j;
-        auto inner = data.contains("data") ? data["data"] : data;
-
-        for (auto it = inner.begin(); it != inner.end(); ++it) {
-            MasterKey mk;
-            mk.key_name = it.key();
-            mk.algorithm = TDEAlgorithm::AES_256_CBC;
-
-            if (it.value().is_string()) {
-                std::string val = it.value().get<std::string>();
-                mk.key_data = std::vector<uint8_t>(val.begin(), val.end());
-            } else if (it.value().is_object() && it.value().contains("key_data")) {
-                std::string encoded = it.value()["key_data"].get<std::string>();
-                mk.key_data = decode_base64(encoded);
-                mk.algorithm_str = it.value().value("algorithm", "AES-256-CBC");
-            }
-
-            if (mk.is_valid()) {
-                master_keys_.push_back(mk);
-            }
+        const auto j = nlohmann::json::parse(file);
+        const auto& data = j.contains("data") ? j["data"] : j;
+        const auto& inner = data.contains("data") ? data["data"] : data;
+        if (!inner.is_object()) {
+            last_error_ = "Vault export does not contain a key object";
+            return false;
         }
-        return true;
+
+        nlohmann::json normalized = nlohmann::json::object();
+        for (auto it = inner.begin(); it != inner.end(); ++it) {
+            if (!it.value().is_object()) {
+                last_error_ = "Vault key '" + it.key() + "' lacks numeric key metadata";
+                return false;
+            }
+
+            const auto& value = it.value();
+            if (!value.contains("master_key_id") ||
+                (!value.contains("key_data") && !value.contains("key"))) {
+                last_error_ = "Vault key '" + it.key() +
+                              "' lacks a page-compatible numeric key ID or key material";
+                return false;
+            }
+            normalized[it.key()] = value;
+        }
+
+        return parse_keyring_json(normalized);
     } catch (const std::exception& e) {
-        last_error_ = e.what();
+        last_error_ = std::string("Vault export parse failed: ") + e.what();
         return false;
     }
 }
@@ -211,31 +218,70 @@ OfflineKeyringParser::KeyringSummary OfflineKeyringParser::get_summary() const {
 // ==================== Private Methods ====================
 
 bool OfflineKeyringParser::parse_keyring_json(const nlohmann::json& j) {
+    if (!j.is_object() || j.empty()) {
+        last_error_ = "Keyring JSON contains no keys";
+        return false;
+    }
+
+    std::vector<MasterKey> parsed_keys;
+    std::set<uint32_t> key_ids;
+
     for (auto it = j.begin(); it != j.end(); ++it) {
-        if (!it.value().is_object()) continue;
+        if (!it.value().is_object()) {
+            last_error_ = "Keyring entry '" + it.key() + "' is not an object";
+            return false;
+        }
+
+        const auto& value = it.value();
+        if (!value.contains("master_key_id")) {
+            last_error_ = "Keyring entry '" + it.key() + "' lacks numeric master_key_id";
+            return false;
+        }
+        if (!value["master_key_id"].is_number_unsigned() &&
+            !value["master_key_id"].is_number_integer()) {
+            last_error_ = "Keyring entry '" + it.key() + "' has a non-numeric master_key_id";
+            return false;
+        }
 
         MasterKey mk;
         mk.key_name = it.key();
-        mk.algorithm_str = it.value().value("algorithm", "AES-256-CBC");
+        mk.algorithm_str = value.value("algorithm", "AES-256-CBC");
         mk.algorithm = parse_algorithm(mk.algorithm_str);
-        mk.key_type = it.value().value("key_type", "AES");
+        mk.key_type = value.value("key_type", "AES");
+        mk.key_id = value["master_key_id"].get<uint32_t>();
 
-        if (it.value().contains("key_data")) {
-            std::string encoded = it.value()["key_data"].get<std::string>();
-            mk.key_data = decode_base64(encoded);
-        } else if (it.value().contains("key")) {
-            std::string encoded = it.value()["key"].get<std::string>();
-            mk.key_data = decode_hex(encoded);
+        if (value.contains("key_data")) {
+            if (!value["key_data"].is_string()) {
+                last_error_ = "Keyring entry '" + it.key() + "' has non-string key_data";
+                return false;
+            }
+            mk.key_data = decode_base64(value["key_data"].get<std::string>());
+        } else if (value.contains("key")) {
+            if (!value["key"].is_string()) {
+                last_error_ = "Keyring entry '" + it.key() + "' has non-string key";
+                return false;
+            }
+            mk.key_data = decode_hex(value["key"].get<std::string>());
+        } else {
+            last_error_ = "Keyring entry '" + it.key() + "' lacks key material";
+            return false;
         }
 
-        if (it.value().contains("master_key_id")) {
-            mk.key_id = it.value()["master_key_id"].get<uint32_t>();
+        if (!mk.is_valid()) {
+            last_error_ = "Keyring entry '" + it.key() +
+                          "' has zero ID or unsupported AES key length";
+            return false;
+        }
+        if (!key_ids.insert(mk.key_id).second) {
+            last_error_ = "Keyring contains duplicate master_key_id " + std::to_string(mk.key_id);
+            return false;
         }
 
-        if (mk.is_valid()) {
-            master_keys_.push_back(mk);
-        }
+        parsed_keys.push_back(std::move(mk));
     }
+
+    master_keys_ = std::move(parsed_keys);
+    last_error_.clear();
     return true;
 }
 

@@ -152,11 +152,6 @@ public:
     bool repair_sdi_page(uint8_t* data, size_t size, uint32_t page_no);
 
     /**
-     * @brief 解压 SDI BLOB 数据
-     */
-    std::optional<std::vector<uint8_t>> decompress_sdi_blob(const uint8_t* compressed_data, size_t compressed_len, size_t uncompressed_len);
-
-    /**
      * @brief 重建 Page 0 (FSP header)
      */
     bool rebuild_page_zero(uint8_t* data, size_t size);

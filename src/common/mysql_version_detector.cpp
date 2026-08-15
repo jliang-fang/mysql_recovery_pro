@@ -37,17 +37,18 @@ MySQLVersion MySQLVersionDetector::detect(const uint8_t* page_data, size_t page_
         return MySQLVersion::UNKNOWN;
     }
 
-    // 执行所有检查并获取分数
-    int lsn_score = check_lsn_extension(page_data, page_size);
-    int sdi_score = check_sdi_signature(page_data, page_size);
-    int page_version_score = check_page_version_field(page_data, page_size);
-    int checksum_score = check_checksum_type(page_data, page_size);
-    int fsp_score = check_fsp_flags(page_data, page_size);
-    int undo_score = check_undo_log_format(page_data, page_size);
+    if (check_page_type_range(page_data, page_size) <= 0) {
+        return MySQLVersion::UNKNOWN;
+    }
 
-    // 决定版本
-    return decide_version(lsn_score, sdi_score, page_version_score,
-                         checksum_score, fsp_score, undo_score);
+    const int lsn_score = check_lsn_extension(page_data, page_size);
+    const int sdi_score = check_sdi_signature(page_data, page_size);
+    const int checksum_score = check_checksum_type(page_data, page_size);
+    const int fsp_score = check_fsp_flags(page_data, page_size);
+    const int undo_score = check_undo_log_format(page_data, page_size);
+
+    return decide_version(lsn_score, sdi_score, 0,
+                          checksum_score, fsp_score, undo_score);
 }
 
 MySQLVersion MySQLVersionDetector::detect_from_multiple_pages(
@@ -94,48 +95,21 @@ MySQLVersion MySQLVersionDetector::detect_from_multiple_pages(
 int MySQLVersionDetector::get_confidence(MySQLVersion version,
                                           const uint8_t* page_data,
                                           size_t page_size) {
-    if (!page_data || version == MySQLVersion::UNKNOWN) {
+    if (!page_data || version == MySQLVersion::UNKNOWN ||
+        detect(page_data, page_size) != version) {
         return 0;
     }
 
-    int total_score = 0;
-    int max_score = 0;
+    int supported = 10;  // Valid InnoDB page type, required by detect().
 
-    // 检查LSN扩展
-    int lsn_score = check_lsn_extension(page_data, page_size);
-    total_score += std::abs(lsn_score);
-    if (version >= MySQLVersion::MYSQL_80) {
-        max_score += 10;
-        if (lsn_score > 0) total_score += lsn_score;
-    } else {
-        max_score += 10;
-        if (lsn_score <= 0) total_score += std::abs(lsn_score);
+    if (version == MySQLVersion::MYSQL_80) {
+        if (check_sdi_signature(page_data, page_size) <= 0) {
+            return 0;
+        }
+        supported += 90;
     }
 
-    // 检查SDI
-    int sdi_score = check_sdi_signature(page_data, page_size);
-    total_score += std::abs(sdi_score);
-    if (version >= MySQLVersion::MYSQL_80) {
-        max_score += 15;
-        if (sdi_score > 0) total_score += sdi_score;
-    } else {
-        max_score += 15;
-        if (sdi_score <= 0) total_score += std::abs(sdi_score);
-    }
-
-    // 检查页版本字段
-    int page_version_score = check_page_version_field(page_data, page_size);
-    total_score += std::abs(page_version_score);
-    max_score += 10;
-
-    // 检查校验和
-    int checksum_score = check_checksum_type(page_data, page_size);
-    total_score += std::abs(checksum_score);
-    max_score += 10;
-
-    // 计算置信度
-    if (max_score == 0) return 0;
-    return static_cast<int>(std::min(100.0, (static_cast<double>(total_score) / max_score) * 100));
+    return supported;
 }
 
 bool MySQLVersionDetector::matches_version(const uint8_t* page_data,
@@ -145,35 +119,21 @@ bool MySQLVersionDetector::matches_version(const uint8_t* page_data,
         return false;
     }
 
-    // 检查所有关键特征
-    int lsn_score = check_lsn_extension(page_data, page_size);
-    int sdi_score = check_sdi_signature(page_data, page_size);
-    int page_version_score = check_page_version_field(page_data, page_size);
-
-    // 对于MySQL 8.0+，需要LSN扩展
-    if (version >= MySQLVersion::MYSQL_80) {
-        if (lsn_score <= 0) return false;
-    } else if (version == MySQLVersion::MYSQL_57) {
-        // For MySQL 5.7: no LSN extension, no SDI, but should have POST_ANTELOPE
-        if (lsn_score > 0) return false;
-        if (sdi_score > 0) return false;
-        int fsp_score = check_fsp_flags(page_data, page_size);
-        if (fsp_score <= 0) return false;
-    } else {
-        if (lsn_score > 0) return false;
+    if (check_page_type_range(page_data, page_size) <= 0) {
+        return false;
     }
 
-    // 对于MySQL 8.0+，需要SDI支持
-    if (version >= MySQLVersion::MYSQL_80) {
-        if (sdi_score <= 0) return false;
-    } else if (version == MySQLVersion::MYSQL_57) {
-        // MySQL 5.7: no SDI support
-        if (sdi_score > 0) return false;
-    } else {
-        if (sdi_score > 0) return false;
+    const int sdi_score = check_sdi_signature(page_data, page_size);
+
+    if (version == MySQLVersion::MYSQL_80) {
+        return sdi_score > 0;
     }
 
-    return true;
+    if (version == MySQLVersion::MYSQL_57) {
+        return sdi_score <= 0 && check_fsp_flags(page_data, page_size) > 0;
+    }
+
+    return false;
 }
 
 // ==================== 版本特征检查方法 ====================
@@ -193,12 +153,13 @@ int MySQLVersionDetector::check_lsn_extension(const uint8_t* page_data, size_t p
     // Read FLUSH_LSN at offset 26 (FIL_PAGE_TYPE_ABS + 2), big-endian
     uint64_t flush_lsn = endian::read_be64(page_data, innodb::FIL_PAGE_TYPE_ABS + 2);
 
-    // If FLUSH_LSN is non-zero, this is MySQL 8.0+
+    // FLUSH_LSN is corroborating evidence only. It must be paired with a
+    // page-type-specific version marker before selecting a version.
     if (flush_lsn > 0) {
-        return 10;  // Supports LSN extension
+        return 1;
     }
 
-    return -5;  // No LSN extension
+    return 0;
 }
 
 int MySQLVersionDetector::check_sdi_signature(const uint8_t* page_data, size_t page_size) {
@@ -215,57 +176,27 @@ int MySQLVersionDetector::check_sdi_signature(const uint8_t* page_data, size_t p
     if (page_type == innodb::FIL_PAGE_SDI || page_type == innodb::FIL_PAGE_SDI_ZIP) {
         // Check SDI signature
         if (std::memcmp(page_data + 64, SDI_SIG, 8) == 0) {
-            return 15;  // Matches SDI signature
+            return 15;
         }
-        return 5;  // SDI page but no signature (possibly older version)
+        return 0;
     }
 
     return -10;  // Not an SDI page type
 }
 
 int MySQLVersionDetector::check_page_version_field(const uint8_t* page_data, size_t page_size) {
-    // 检查FIL_PAGE_PAGE_VERSION字段（INDEX页偏移38-39）
-    // MySQL 8.0+ 在FIL header末尾引入了此字段（offset 38, 2 bytes）
-    // 注意：MySQL 5.6/5.7中offset 38是PAGE_N_DIR_SLOTS，因此只在INDEX页上读取此字段。
-    // 对于非INDEX页（FSP_HDR、UNDO_LOG等），offset 38是page_header的一部分，
-    // 不能解释为page_version。
-    if (page_size < 40) return 0;
-
-    // Page-type guard: 只有INDEX页才有page_version字段在offset 38
-    uint16_t page_type = dbrecovery::innodb::get_page_type(page_data);
-    if (page_type != dbrecovery::innodb::FIL_PAGE_INDEX) {
-        return 0;  // 非INDEX页，无法判断page_version
-    }
-
-    uint16_t page_version = endian::read_be16(page_data, 38);
-
-    if (page_version > 0) {
-        if (page_version == 1) return 8;   // MySQL 8.0
-        if (page_version == 2) return 10;  // MySQL 8.4
-        if (page_version >= 3) return 15;  // MySQL 9.0+
-        return 5;  // 未知版本
-    }
-
-    return -5;  // 无页版本字段
+    // Offset 38 belongs to the page header and overlaps PAGE_N_DIR_SLOTS on
+    // layouts where it is not a version field. It is not server-version evidence.
+    (void)page_data;
+    (void)page_size;
+    return 0;
 }
 
 int MySQLVersionDetector::check_checksum_type(const uint8_t* page_data, size_t page_size) {
-    // Check checksum type in FIL header
-    // Checksum is stored at offset 0 in the FIL header, in big-endian format
-    // MySQL 5.6+ uses CRC32 checksum (typically a large value)
-    // MySQL 5.5 and earlier use OLD or INNODB checksum
-
-    if (page_size < 4) return 0;
-
-    // Read checksum at offset 0, big-endian (InnoDB FIL header stores all fields big-endian)
-    uint32_t checksum = endian::read_be32(page_data, 0);
-
-    // CRC32 checksum values are typically large (> 16 million)
-    if (checksum > 0x1000000) {
-        return 8;  // Likely CRC32
-    }
-
-    return 5;  // Unknown checksum type
+    // A checksum value alone does not identify an algorithm or server version.
+    (void)page_data;
+    (void)page_size;
+    return 0;
 }
 
 int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_size) {
@@ -346,36 +277,22 @@ MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
                                                    int page_version_score,
                                                    int checksum_score, int fsp_score,
                                                    int undo_score) {
-    // MySQL 8.0+: LSN extension + page version field are the primary indicators.
-    // SDI support is additional evidence (only applicable to SDI pages), but
-    // non-SDI pages have sdi_score < 0 and should not block 8.0+ detection.
-    if (lsn_score > 0 && page_version_score > 0) {
-        if (page_version_score >= 15) {
-            return MySQLVersion::MYSQL_90;  // 9.0 (page_version >= 3)
-        }
-        if (page_version_score >= 10) {
-            return MySQLVersion::MYSQL_84;  // 8.4 (page_version == 2)
-        }
-        return MySQLVersion::MYSQL_80;  // 8.0-8.3 (page_version == 1)
-    } else if (lsn_score <= 0 && sdi_score <= 0) {
-        // MySQL 5.x
-        if (checksum_score >= 8) {
-            // 区分5.7和5.6：优先使用FSP POST_ANTELOPE标志（仅page 0有效）
-            if (fsp_score > 0) {
-                return MySQLVersion::MYSQL_57;  // 5.7+ (POST_ANTELOPE)
-            }
-            // 非FSP页面的5.7检测：使用undo_log格式作为辅助信号
-            // 5.7引入了ATOMIC_BLOBS，undo page格式有细微变化
-            if (undo_score >= 8) {
-                return MySQLVersion::MYSQL_57;  // 5.7 (undo格式辅助判断)
-            }
-            // 仅有checksum证据不足以区分5.6和更早版本，返回UNKNOWN
-            return MySQLVersion::UNKNOWN;
-        }
-        return MySQLVersion::UNKNOWN;  // No clear version signal
+    // FLUSH_LSN, checksum values, undo layout, and page-header bytes do not
+    // uniquely identify a server version. Only page-type-scoped markers select
+    // an automatic compatibility family.
+    (void)lsn_score;
+    (void)page_version_score;
+    (void)checksum_score;
+    (void)undo_score;
+
+    if (sdi_score > 0) {
+        return MySQLVersion::MYSQL_80;
     }
 
-    // 默认返回未知
+    if (fsp_score > 0) {
+        return MySQLVersion::MYSQL_57;
+    }
+
     return MySQLVersion::UNKNOWN;
 }
 
@@ -458,11 +375,11 @@ std::vector<DetailedVersionDetector::FeatureCheckResult> DetailedVersionDetector
     // 检查页版本字段
     {
         FeatureCheckResult r;
-        r.feature_name = "Page Version Field";
+        r.feature_name = "Page Header Version Bytes";
         int score = MySQLVersionDetector::check_page_version_field(page_data, page_size);
         r.matches = (score > 0);
         r.score = std::abs(score);
-        r.description = r.matches ? "Has page version field" : "No page version field";
+        r.description = "Not used for server-version detection";
         results.push_back(r);
     }
 
@@ -474,6 +391,17 @@ std::vector<DetailedVersionDetector::FeatureCheckResult> DetailedVersionDetector
         r.matches = (score >= 8);
         r.score = std::abs(score);
         r.description = r.matches ? "Uses CRC32 checksum" : "Uses old checksum";
+        results.push_back(r);
+    }
+
+    // 检查FSP格式标志
+    {
+        FeatureCheckResult r;
+        r.feature_name = "FSP Format Flags";
+        int score = MySQLVersionDetector::check_fsp_flags(page_data, page_size);
+        r.matches = (score > 0);
+        r.score = std::abs(score);
+        r.description = r.matches ? "Has modern FSP format flags" : "No modern FSP format flags";
         results.push_back(r);
     }
 
@@ -492,43 +420,30 @@ std::vector<DetailedVersionDetector::FeatureCheckResult> DetailedVersionDetector
 }
 
 MySQLVersion DetailedVersionDetector::match_version(const std::vector<FeatureCheckResult>& results) {
-    int lsn_matches = 0;
-    int sdi_matches = 0;
-    int page_version_score = 0;
-    bool has_page_version = false;
-    bool has_checksum = false;
+    bool has_sdi = false;
+    bool has_fsp_flags = false;
     bool has_valid_page_type = false;
 
     for (const auto& r : results) {
-        if (r.feature_name == "LSN Extension (8-byte)") {
-            lsn_matches = r.matches ? 1 : -1;
-        } else if (r.feature_name == "SDI Support") {
-            sdi_matches = r.matches ? 1 : -1;
-        } else if (r.feature_name == "Page Version Field") {
-            has_page_version = r.matches;
-            page_version_score = r.score;
-        } else if (r.feature_name == "CRC32 Checksum") {
-            has_checksum = r.matches;
+        if (r.feature_name == "SDI Support") {
+            has_sdi = r.matches;
+        } else if (r.feature_name == "FSP Format Flags") {
+            has_fsp_flags = r.matches;
         } else if (r.feature_name == "Valid Page Type") {
             has_valid_page_type = r.matches;
         }
     }
 
-    // Aligned with canonical decide_version():
-    // 8.x requires LSN extension AND page version field (SDI not required for non-SDI pages)
-    if (lsn_matches > 0 && has_page_version) {
-        if (page_version_score >= 15) return MySQLVersion::MYSQL_90;
-        if (page_version_score >= 10) return MySQLVersion::MYSQL_84;
+    if (!has_valid_page_type) {
+        return MySQLVersion::UNKNOWN;
+    }
+
+    if (has_sdi) {
         return MySQLVersion::MYSQL_80;
     }
 
-    // 5.x: no LSN extension, no SDI support
-    if (lsn_matches <= 0 && sdi_matches <= 0) {
-        if (has_checksum && has_valid_page_type) {
-            // Cannot distinguish 5.6 from 5.7 without FSP flags or UNDO format
-            return MySQLVersion::UNKNOWN;
-        }
-        return MySQLVersion::UNKNOWN;
+    if (has_fsp_flags) {
+        return MySQLVersion::MYSQL_57;
     }
 
     return MySQLVersion::UNKNOWN;

@@ -39,7 +39,7 @@ constexpr uint8_t TRX_UNDO_INS_REC       = 14;
 // Undo page header offsets
 constexpr uint16_t TRX_UNDO_PAGE_START   = 28;
 constexpr uint16_t TRX_UNDO_PAGE_FREE    = 30;
-constexpr uint16_t TRX_UNDO_PAGE_N_RECS  = 34;
+constexpr uint16_t TRX_UNDO_PAGE_N_RECS  = 32;
 constexpr uint16_t TRX_UNDO_PAGE_HDR_SIZE = 40;
 
 // Rollback segment array in TRX_SYS page
@@ -526,6 +526,68 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
 DeepUndoAnalyzer::DeepUndoAnalyzer(size_t page_size)
     : page_size_(page_size), page_manager_(page_size) {}
 
+std::optional<UndoRecordV2> DeepUndoAnalyzer::parse_verified_undo_record(
+    const std::vector<uint8_t>& page_data,
+    uint32_t undo_page_no,
+    size_t offset,
+    const catalog::TableSchema& schema,
+    size_t* consumed_size) {
+    if (undo_page_no == 0 || undo_page_no == FIL_NULL ||
+        page_data.size() < FIL_HEADER_SIZE || offset > UINT16_MAX) {
+        return std::nullopt;
+    }
+
+    if (read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS) != FIL_PAGE_UNDO_LOG) {
+        return std::nullopt;
+    }
+
+    const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
+    if (offset < TRX_UNDO_PAGE_HDR_SIZE || offset >= page_free || page_free > page_data.size()) {
+        return std::nullopt;
+    }
+
+    size_t parsed_size = 0;
+    auto record = record_parser_.parse(
+        page_data.data(), page_data.size(), offset, &schema, &parsed_size);
+    if (!record || parsed_size == 0 || parsed_size > page_free - offset) {
+        return std::nullopt;
+    }
+
+    const uint32_t physical_space_id =
+        read_be<uint32_t>(page_data.data(), FIL_PAGE_SPACE_ID);
+    if (target_tablespace_id_ != 0 && physical_space_id != target_tablespace_id_) {
+        return std::nullopt;
+    }
+
+    record->undo_page_no = undo_page_no;
+    record->undo_page_offset = static_cast<uint16_t>(offset);
+    record->tablespace_id = physical_space_id;
+    record->has_valid_provenance = true;
+    if (consumed_size) {
+        *consumed_size = parsed_size;
+    }
+    return record;
+}
+
+void DeepUndoAnalyzer::enrich_transaction_metadata(UndoRecordV2& record) {
+    if (record.trx_id == 0 || ibdata_path_.empty()) {
+        return;
+    }
+
+    if (!timestamp_index_.is_built()) {
+        timestamp_index_.build(ibdata_path_, page_size_);
+    }
+
+    const auto entry = timestamp_index_.lookup(record.trx_id);
+    if (!entry || !entry->is_valid || entry->commit_lsn == 0) {
+        return;
+    }
+
+    record.commit_lsn = entry->commit_lsn;
+    record.approx_timestamp = std::chrono::system_clock::time_point(
+        std::chrono::nanoseconds(entry->commit_lsn));
+}
+
 RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
     const std::vector<uint8_t>& current_record,
     uint64_t roll_ptr,
@@ -572,32 +634,15 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
             break;  // Page not readable → chain break
         }
 
-        // Validate page type
-        uint16_t page_type = read_be<uint16_t>(undo_page.data(), FIL_PAGE_TYPE_ABS);
-        if (page_type != FIL_PAGE_UNDO_LOG) {
-            stats_.broken_chains++;
-            break;
-        }
-
-        // Validate offset within page free space
-        const uint16_t page_free = read_le<uint16_t>(undo_page.data(), TRX_UNDO_PAGE_FREE);
-        if (undo_offset < TRX_UNDO_PAGE_HDR_SIZE || undo_offset >= page_free) {
-            stats_.broken_chains++;
-            break;
-        }
-
-        // 9. Parse undo record
-        auto undo_rec_opt = record_parser_.parse(
-            undo_page.data(), undo_page.size(), undo_offset, &schema);
+        // 9. Parse undo record only after physical provenance is established.
+        auto undo_rec_opt = parse_verified_undo_record(
+            undo_page, undo_page_no, undo_offset, schema);
         if (!undo_rec_opt) {
             stats_.broken_chains++;
-            break;  // Record corrupted → chain break
+            break;
         }
 
         auto& undo_rec = *undo_rec_opt;
-        undo_rec.undo_page_no = undo_page_no;
-        undo_rec.tablespace_id = target_tablespace_id_;
-        undo_rec.has_valid_provenance = true;
         undo_rec.roll_ptr = current_roll_ptr;
 
         // 10. Extract old field values based on undo record type
@@ -624,22 +669,21 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
         history.undo_chain.push_back(std::move(undo_rec));
 
         // 12. Move to previous version
-        // The prev_undo_ptr is stored in the undo record's field data
-        // For UPDATE records, the old DB_ROLL_PTR is the first field's value
         auto& last_rec = history.undo_chain.back();
-        if (!last_rec.old_fields.empty()) {
-            // Try to extract prev_undo_ptr from the first field
-            uint64_t prev_ptr = UndoRecordV2Parser::extract_prev_ptr_from_field(
-                last_rec.old_fields[0].old_value);
-            if (prev_ptr != 0) {
-                current_roll_ptr = prev_ptr;
-            } else {
-                // Fallback: use the prev_undo_ptr from the header
-                current_roll_ptr = last_rec.prev_undo_ptr;
-            }
-        } else {
-            current_roll_ptr = last_rec.prev_undo_ptr;
+        const uint64_t header_prev_ptr = last_rec.prev_undo_ptr;
+        const uint64_t field_prev_ptr = last_rec.old_fields.empty()
+            ? 0
+            : UndoRecordV2Parser::extract_prev_ptr_from_field(
+                  last_rec.old_fields.front().old_value);
+
+        if (header_prev_ptr != 0 &&
+            field_prev_ptr != 0 &&
+            header_prev_ptr != field_prev_ptr) {
+            stats_.broken_chains++;
+            break;
         }
+
+        current_roll_ptr = header_prev_ptr;
 
         // 13. If reached INSERT version, stop
         if (last_rec.type == UndoRecordV2::INSERT) {
@@ -658,47 +702,9 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
     // 15. Order oldest-first (INSERT first, newest undo last)
     std::reverse(history.undo_chain.begin(), history.undo_chain.end());
 
-    // 15a. Populate commit_lsn and approx_timestamp for each undo record
-    //      Collect unique trx_ids from the chain
-    std::vector<uint64_t> chain_trx_ids;
-    for (const auto& rec : history.undo_chain) {
-        if (rec.trx_id > 0) {
-            chain_trx_ids.push_back(rec.trx_id);
-        }
-    }
-    if (!chain_trx_ids.empty()) {
-        // Remove duplicates
-        std::sort(chain_trx_ids.begin(), chain_trx_ids.end());
-        chain_trx_ids.erase(
-            std::unique(chain_trx_ids.begin(), chain_trx_ids.end()),
-            chain_trx_ids.end());
-
-        // Build timestamp index if not already built
-        TrxSysTimestampIndex ts_index;
-        if (!ibdata_path_.empty()) {
-            ts_index.build(ibdata_path_, page_size_);
-        }
-
-        // Lookup and populate each undo record
-        for (auto& rec : history.undo_chain) {
-            if (rec.trx_id > 0) {
-                auto entry = ts_index.lookup(rec.trx_id);
-                if (entry) {
-                    rec.commit_lsn = entry->commit_lsn;
-                    // Convert commit_lsn to an approximate timestamp
-                    // LSNs increase monotonically; we use a relative approximation
-                    // based on the LSN value. A real implementation would need
-                    // a log file to map LSN → wall clock time.
-                    if (entry->commit_lsn > 0) {
-                        // Approximate: treat LSN as a proxy for time ordering
-                        // (higher LSN = later time). Store as nanoseconds since epoch
-                        // for comparison purposes.
-                        auto duration = std::chrono::nanoseconds(entry->commit_lsn);
-                        rec.approx_timestamp = std::chrono::system_clock::time_point(duration);
-                    }
-                }
-            }
-        }
+    // 15a. Populate transaction metadata through the analyzer-owned index.
+    for (auto& rec : history.undo_chain) {
+        enrich_transaction_metadata(rec);
     }
 
     // 16. Set metadata
@@ -789,21 +795,12 @@ std::vector<UndoRecordV2> DeepUndoAnalyzer::scan_records(
         size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
         for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
             size_t consumed = 0;
-            auto rec_opt = record_parser_.parse(
-                page_data.data(), page_data.size(), offset, &schema, &consumed);
+            auto rec_opt = parse_verified_undo_record(
+                page_data, page_no, offset, schema, &consumed);
             if (!rec_opt) break;
 
             auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-            rec.tablespace_id = target_tablespace_id_;
-            rec.has_valid_provenance = true;
-
-            // Fail-closed provenance: records must resolve to a known source
-            // page. A zero undo_page_no means the source identity is unconfirmed.
-            if (rec.undo_page_no == 0) {
-                offset += consumed;
-                continue;
-            }
+            enrich_transaction_metadata(rec);
 
             // Filter by type (empty = keep all)
             if (types.size() > 0) {
@@ -919,14 +916,26 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
         size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
         for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
             size_t consumed = 0;
-            auto rec_opt = record_parser_.parse(
-                page_data.data(), page_data.size(), offset, &schema, &consumed);
+            auto rec_opt = parse_verified_undo_record(
+                page_data, page_no, offset, schema, &consumed);
             if (!rec_opt) break;
 
             auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-            rec.tablespace_id = target_tablespace_id_;
-            rec.has_valid_provenance = true;
+            enrich_transaction_metadata(rec);
+
+            if (space_id != 0 && rec.tablespace_id != space_id) {
+                offset += consumed;
+                continue;
+            }
+
+            if (lsn_range.has_value()) {
+                if (!rec.commit_lsn.has_value() ||
+                    *rec.commit_lsn < lsn_range->first ||
+                    *rec.commit_lsn > lsn_range->second) {
+                    offset += consumed;
+                    continue;
+                }
+            }
 
             // Extract table_id from record
             uint32_t rec_table_id = extract_table_id(rec.old_fields);
@@ -994,83 +1003,6 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
     return histories;
 }
 
-std::vector<FlashbackResult> DeepUndoAnalyzer::flashback_deletes(
-    uint32_t space_id,
-    const catalog::TableSchema& schema,
-    const FlashbackFilter& filter) {
-
-    std::vector<FlashbackResult> results;
-    auto start_time = std::chrono::high_resolution_clock::now();
-
-    // Use shared scan_records() to find DELETE_MARK records
-    auto delete_records = scan_records(schema, filter,
-        {UndoRecordV2::DELETE_MARK});
-
-    // Convert each delete record to a flashback result
-    for (auto& rec : delete_records) {
-        FlashbackResult fr;
-        fr.trx_id = rec.trx_id;
-        fr.undo_no = rec.undo_no;
-
-        // Generate INSERT INTO statement
-        std::ostringstream sql;
-        sql << "INSERT INTO " << schema.table_name << " (";
-        bool first = true;
-        for (const auto& [ord, col] : schema.columns) {
-            if (!first) sql << ", ";
-            sql << "`" << col.name << "`";
-            first = false;
-        }
-        sql << ") VALUES (";
-
-        size_t col_count = 0;
-        first = true;
-        for (const auto& [ord, col] : schema.columns) {
-            if (!first) sql << ", ";
-            first = false;
-
-            bool found = false;
-            for (const auto& fv : rec.old_fields) {
-                if (fv.field_no == static_cast<uint16_t>(ord + 1)) {
-                    if (fv.is_null) {
-                        sql << "NULL";
-                    } else {
-                        sql << format_sql_value(fv.old_value, col);
-                    }
-                    col_count++;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                sql << "DEFAULT";
-            }
-        }
-
-        sql << ");";
-        fr.reverse_sql = sql.str();
-        fr.confidence = static_cast<double>(col_count) /
-            std::max(size_t(1), schema.columns.size());
-        fr.is_complete = (col_count == schema.columns.size());
-
-        results.push_back(std::move(fr));
-        stats_.flashback_statements++;
-    }
-
-    // Post-filter: exclude incomplete results unless include_incomplete is set
-    if (!filter.include_incomplete) {
-        auto it = std::remove_if(results.begin(), results.end(),
-            [](const FlashbackResult& fr) { return !fr.is_complete; });
-        results.erase(it, results.end());
-    }
-
-    auto end_time = std::chrono::high_resolution_clock::now();
-    stats_.analysis_time_ms += std::chrono::duration<double, std::milli>(
-        end_time - start_time).count();
-
-    return results;
-}
-
 std::vector<RowVersionHistory> DeepUndoAnalyzer::heuristic_reconstruct_chains(
     uint32_t space_id,
     const catalog::TableSchema& schema) {
@@ -1093,14 +1025,16 @@ std::vector<RowVersionHistory> DeepUndoAnalyzer::heuristic_reconstruct_chains(
         size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
         for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
             size_t consumed = 0;
-            auto rec_opt = record_parser_.parse(
-                page_data.data(), page_data.size(), offset, &schema, &consumed);
+            auto rec_opt = parse_verified_undo_record(
+                page_data, page_no, offset, schema, &consumed);
             if (!rec_opt) break;
 
             auto& rec = *rec_opt;
-            rec.undo_page_no = page_no;
-            rec.tablespace_id = target_tablespace_id_;
-            rec.has_valid_provenance = true;
+
+            if (space_id != 0 && rec.tablespace_id != space_id) {
+                offset += consumed;
+                continue;
+            }
 
             // Filter by table_id
             uint32_t rec_table_id = extract_table_id(rec.old_fields);

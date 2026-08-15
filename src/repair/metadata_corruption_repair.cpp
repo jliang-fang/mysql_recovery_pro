@@ -2,12 +2,12 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/sdi_extractor.hpp"
 #include <cstring>
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
 #include <iostream>
-#include <zlib.h>
 
 namespace dbrecovery {
 namespace repair {
@@ -354,32 +354,6 @@ bool MetadataCorruptionRepairer::repair_sdi_page(uint8_t* data, size_t size, uin
     return true;
 }
 
-std::optional<std::vector<uint8_t>> MetadataCorruptionRepairer::decompress_sdi_blob(
-    const uint8_t* compressed_data, size_t compressed_len, size_t uncompressed_len) {
-
-    if (!compressed_data || compressed_len == 0 || uncompressed_len == 0) {
-        return std::nullopt;
-    }
-
-    std::vector<uint8_t> result(uncompressed_len);
-
-    // 使用 zlib 解压
-    uLongf dest_len = uncompressed_len;
-    int ret = uncompress(result.data(), &dest_len, compressed_data, compressed_len);
-
-    if (ret != Z_OK) {
-        last_error_ = "Failed to decompress SDI blob: zlib error " + std::to_string(ret);
-        return std::nullopt;
-    }
-
-    if (dest_len != uncompressed_len) {
-        last_error_ = "Decompressed size mismatch";
-        return std::nullopt;
-    }
-
-    return result;
-}
-
 bool MetadataCorruptionRepairer::rebuild_page_zero(uint8_t* data, size_t size) {
     return repair_fsp_header(data, size);
 }
@@ -453,9 +427,23 @@ std::optional<std::string> SdiDataRepairer::extract_sdi_json(const uint8_t* data
         return std::nullopt;
     }
 
-    // 使用 SDIManager 提取 SDI
-    dbrecovery::innodb::SDIManager sdi_manager;
-    auto json_opt = sdi_manager.extract_sdi_json(data, size);
+    // The input is a full page, not a bare SDI payload: locate the SDI payload
+    // on the page via the extractor, then decompress through the bounded
+    // manager.  Passing the whole page to SDIManager::extract_sdi_json() would
+    // mis-read page bytes as the 20-byte SDI header.
+    dbrecovery::innodb::SDIExtractor extractor(page_size_);
+    auto payload = extractor.extract_sdi_payload(data, size);
+    if (!payload) {
+        last_error_ = "no SDI payload found on page";
+        return std::nullopt;
+    }
+
+    auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
+        payload->data(), payload->size());
+    if (!json_opt) {
+        last_error_ = "SDI payload failed bounded decompression";
+        return std::nullopt;
+    }
 
     return json_opt;
 }

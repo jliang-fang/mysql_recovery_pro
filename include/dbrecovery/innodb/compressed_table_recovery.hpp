@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_scanner.hpp"
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"

@@ -24,9 +24,9 @@ public:
     struct ColumnInfo {
         std::string name;
         std::string type;
-        bool is_nullable;
-        bool is_primary_key;
-        bool is_auto_increment;
+        bool is_nullable = false;
+        bool is_primary_key = false;
+        bool is_auto_increment = false;
         uint32_t ordinal_position;
         std::optional<uint32_t> max_length;
         std::optional<uint32_t> precision;

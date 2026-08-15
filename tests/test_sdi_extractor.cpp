@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <filesystem>
+#include <fstream>
 #include "dbrecovery/innodb/sdi_extractor.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 
@@ -266,6 +268,95 @@ TEST(SDIExtractorTest, VersionGatedUnknownForcesScan) {
     EXPECT_EQ(results.size(), 0);
     EXPECT_EQ(extractor.stats().total_pages, 1);
     EXPECT_EQ(extractor.stats().sdi_pages, 1);
+}
+
+TEST(SDIExtractorTest, FileVersionGateSkipsMySQL57) {
+    const auto path = std::filesystem::temp_directory_path() / "sdi_extractor_mysql57.ibd";
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    std::ofstream(path, std::ios::binary).write(
+        reinterpret_cast<const char*>(page.data()), page.size());
+
+    SDIExtractor extractor;
+    const auto results = extractor.extract_from_file_if_compatible(
+        path, dbrecovery::MySQLVersion::MYSQL_57);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().total_size, page.size());
+    EXPECT_EQ(extractor.stats().total_pages, 0);
+    EXPECT_EQ(extractor.stats().sdi_pages, 0);
+    std::filesystem::remove(path);
+}
+
+TEST(SDIExtractorTest, FileVersionGateAllowsMySQL80) {
+    const auto path = std::filesystem::temp_directory_path() / "sdi_extractor_mysql80.ibd";
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    std::ofstream(path, std::ios::binary).write(
+        reinterpret_cast<const char*>(page.data()), page.size());
+
+    SDIExtractor extractor;
+    const auto results = extractor.extract_from_file_if_compatible(
+        path, dbrecovery::MySQLVersion::MYSQL_80);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().total_pages, 1);
+    EXPECT_EQ(extractor.stats().sdi_pages, 1);
+    std::filesystem::remove(path);
+}
+
+TEST(SDIExtractorTest, FileVersionGateUnknownForcesScan) {
+    const auto path = std::filesystem::temp_directory_path() / "sdi_extractor_unknown.ibd";
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    std::ofstream(path, std::ios::binary).write(
+        reinterpret_cast<const char*>(page.data()), page.size());
+
+    SDIExtractor extractor;
+    const auto results = extractor.extract_from_file_if_compatible(
+        path, dbrecovery::MySQLVersion::UNKNOWN);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().total_pages, 1);
+    EXPECT_EQ(extractor.stats().sdi_pages, 1);
+    std::filesystem::remove(path);
+}
+
+TEST(SDIExtractorTest, FileScanCountsPagesAcrossOneMiBBoundary) {
+    const auto path = std::filesystem::temp_directory_path() / "sdi_extractor_chunk_boundary.ibd";
+    std::vector<uint8_t> pages(65 * 16384, 0);
+    write_be<uint16_t>(pages.data() + 64 * 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    std::ofstream(path, std::ios::binary).write(
+        reinterpret_cast<const char*>(pages.data()), pages.size());
+
+    SDIExtractor extractor;
+    const auto results = extractor.extract_from_file_if_compatible(
+        path, dbrecovery::MySQLVersion::MYSQL_80);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().total_size, pages.size());
+    EXPECT_EQ(extractor.stats().total_pages, 65);
+    EXPECT_EQ(extractor.stats().sdi_pages, 1);
+    std::filesystem::remove(path);
+}
+
+TEST(SDIExtractorTest, FileScanIgnoresTrailingPartialPage) {
+    const auto path = std::filesystem::temp_directory_path() / "sdi_extractor_trailing_partial.ibd";
+    std::vector<uint8_t> data(16384 + 100, 0);
+    write_be<uint16_t>(data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint16_t>(data.data() + 16384, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    std::ofstream(path, std::ios::binary).write(
+        reinterpret_cast<const char*>(data.data()), data.size());
+
+    SDIExtractor extractor;
+    const auto results = extractor.extract_from_file_if_compatible(
+        path, dbrecovery::MySQLVersion::MYSQL_80);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().total_size, data.size());
+    EXPECT_EQ(extractor.stats().total_pages, 1);
+    EXPECT_EQ(extractor.stats().sdi_pages, 0);
+    std::filesystem::remove(path);
 }
 
 } // namespace innodb

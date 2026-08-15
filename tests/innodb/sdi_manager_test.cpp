@@ -4,10 +4,107 @@
 #include "dbrecovery/innodb/sdi_types.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include <vector>
+#include <string>
+#include <zlib.h>
 #include <iostream>
 
 namespace dbrecovery {
 namespace innodb {
+
+namespace {
+std::vector<uint8_t> raw_deflate(const std::string& text) {
+    z_stream stream{};
+    EXPECT_EQ(deflateInit2(&stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY), Z_OK);
+    std::vector<uint8_t> output(deflateBound(&stream, text.size()));
+    stream.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(text.data()));
+    stream.avail_in = static_cast<uInt>(text.size());
+    stream.next_out = output.data();
+    stream.avail_out = static_cast<uInt>(output.size());
+    EXPECT_EQ(deflate(&stream, Z_FINISH), Z_STREAM_END);
+    output.resize(stream.total_out);
+    EXPECT_EQ(deflateEnd(&stream), Z_OK);
+    return output;
+}
+
+std::vector<uint8_t> sdi_payload(const std::string& json) {
+    const auto compressed = raw_deflate(json);
+    std::vector<uint8_t> payload(20 + compressed.size());
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, json.size());
+    write_le<uint32_t>(payload.data(), 16, compressed.size());
+    std::copy(compressed.begin(), compressed.end(), payload.begin() + 20);
+    return payload;
+}
+}
+
+TEST(SDIManagerTest, StructuredResultAcceptsStrictValidJson) {
+    const auto payload = sdi_payload(R"({"table":"users"})");
+    const auto result = SDIManager::extract_standard_payload(payload.data(), payload.size());
+
+    EXPECT_TRUE(result.success());
+    EXPECT_TRUE(result.json_valid);
+    EXPECT_EQ(result.origin, SDIManager::ExtractionOrigin::StrictStandardPayload);
+    EXPECT_EQ(result.json, R"({"table":"users"})");
+    EXPECT_EQ(result.actual_uncompressed_length, result.declared_uncompressed_length);
+}
+
+TEST(SDIManagerTest, StructuredResultRejectsInvalidJson) {
+    const auto payload = sdi_payload("not json");
+    const auto result = SDIManager::extract_standard_payload(payload.data(), payload.size());
+
+    EXPECT_FALSE(result.success());
+    EXPECT_EQ(result.failure_reason, "invalid JSON");
+}
+
+TEST(SDIManagerTest, ZipAdapterUsesStrictLimitsAndOrigin) {
+    const std::string json = R"({"table":"zip_users"})";
+    const auto compressed = raw_deflate(json);
+    std::vector<uint8_t> page(256, 0);
+    constexpr size_t record_offset = 100;
+    write_be<uint32_t>(page.data(), record_offset + 25, json.size());
+    write_be<uint32_t>(page.data(), record_offset + 29, compressed.size());
+    std::copy(compressed.begin(), compressed.end(), page.begin() + record_offset + 33);
+
+    const auto result = SDIManager::extract_zip_record(page.data(), page.size(), record_offset);
+    EXPECT_TRUE(result.success());
+    EXPECT_EQ(result.origin, SDIManager::ExtractionOrigin::StrictZipRecordAdapter);
+    EXPECT_EQ(result.json, json);
+}
+
+// ==================== P1: heuristic extraction is forensic only ====================
+
+// A corrupted SDI ZIP page whose record header is garbage but which contains a
+// valid deflate stream at a non-canonical offset is the forensic-evidence
+// scenario the heuristic scan exists for. It must never masquerade as an
+// authoritative (Strict*) origin.
+TEST(SDIManagerTest, HeuristicExtractionIsForensicNotAuthoritative) {
+    const std::string json = R"({"table":"corrupted"})";
+    const auto compressed = raw_deflate(json);
+
+    // Canonical record area holds garbage: the strict ZIP adapter cannot parse it.
+    std::vector<uint8_t> page(512, 0);
+    write_be<uint32_t>(page.data(), 100 + 25, 0xFFFFFFFF);  // garbage uncompressed len
+    write_be<uint32_t>(page.data(), 100 + 29, 0);            // garbage compressed len
+
+    // Valid deflate stream embedded later in the page.
+    const size_t stream_offset = page.size() - 8 - compressed.size();
+    std::copy(compressed.begin(), compressed.end(), page.begin() + stream_offset);
+
+    // The strict adapter must reject the corrupted record header.
+    const auto strict = SDIManager::extract_zip_record(page.data(), page.size(), 100);
+    EXPECT_FALSE(strict.success());
+
+    // The heuristic scan must never yield an authoritative origin: it either
+    // fails closed or succeeds only under the forensic HeuristicCorruptedZip tag.
+    const auto heuristic = SDIManager::extract_heuristic_zip_page(page.data(), page.size());
+    EXPECT_EQ(heuristic.origin, SDIManager::ExtractionOrigin::HeuristicCorruptedZip);
+    EXPECT_NE(heuristic.origin, SDIManager::ExtractionOrigin::StrictStandardPayload);
+    EXPECT_NE(heuristic.origin, SDIManager::ExtractionOrigin::StrictZipRecordAdapter);
+    if (!heuristic.success()) {
+        EXPECT_FALSE(heuristic.failure_reason.empty());
+    }
+}
 
 // ==================== SDI Header 解析测试 ====================
 

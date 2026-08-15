@@ -167,17 +167,13 @@ TEST_F(FILHeaderEndiannessTest, ChecksumReadAsBigEndian) {
     EXPECT_EQ(checksum, expected_checksum) << "Checksum must be read as big-endian at offset 0";
 }
 
-TEST_F(FILHeaderEndiannessTest, ChecksumTypeDetection) {
-    // MySQL 5.6+ CRC32 checksums are typically large values
+TEST_F(FILHeaderEndiannessTest, ChecksumIsNotVersionEvidence) {
     auto buf = create_page_buffer();
+    set_be32(buf, 0, 0x3A4B5C6D);
 
-    // Set a large CRC32 checksum at offset 0 (big-endian)
-    uint32_t crc32_checksum = 0x3A4B5C6D;
-    set_be32(buf, 0, crc32_checksum);
-
-    // Verify via the version detector's checksum check
-    int checksum_score = MySQLVersionDetector::check_checksum_type(buf.data(), buf.size());
-    EXPECT_GT(checksum_score, 0) << "CRC32 checksum must be detected as valid";
+    const int checksum_score = MySQLVersionDetector::check_checksum_type(buf.data(), buf.size());
+    EXPECT_EQ(checksum_score, 0)
+        << "A raw checksum value must not be treated as algorithm or version evidence";
 }
 
 TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
@@ -209,8 +205,10 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
             << "Scenario 2: 5.6/5.7 ambiguity must be UNKNOWN, not guessed";
     }
 
-    // Scenario 3: MySQL 8.0 INDEX page — has LSN extension and page version
-    // field (page_version appears at offset 38 only on INDEX pages).
+    // Scenario 3: MySQL 8.0 INDEX page — has LSN extension and page_version
+    // field at offset 38. Offset 38 is not a reliable cross-version marker
+    // (it overlaps PAGE_N_DIR_SLOTS on older layouts), so the detector must
+    // not use it. Without SDI or FSP evidence, the version is UNKNOWN.
     {
         auto buf = create_page_buffer();
         set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
@@ -218,11 +216,14 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
         set_be16(buf, FIL_HEADER_SIZE, 1);                 // page_version = 1
 
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
-        EXPECT_EQ(version, MySQLVersion::MYSQL_80)
-            << "Scenario 3: MySQL 8.0 page must be detected as MYSQL_80";
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN)
+            << "Scenario 3: page_version at offset 38 is not reliable version evidence; "
+            << "INDEX page without SDI must be UNKNOWN";
     }
 
-    // Scenario 4: MySQL 8.4 INDEX page — has LSN extension, page version = 2.
+    // Scenario 4: MySQL 8.4 INDEX page — has LSN extension, page_version = 2.
+    // Same reasoning: offset 38 is not a reliable version marker so the
+    // detector must return UNKNOWN without SDI or FSP evidence.
     {
         auto buf = create_page_buffer();
         set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
@@ -230,8 +231,9 @@ TEST_F(FILHeaderEndiannessTest, VersionDetectorBugScenarios) {
         set_be16(buf, FIL_HEADER_SIZE, 2);                 // page_version = 2
 
         MySQLVersion version = MySQLVersionDetector::detect(buf.data(), buf.size());
-        EXPECT_EQ(version, MySQLVersion::MYSQL_84)
-            << "Scenario 4: MySQL 8.4 page must be detected as MYSQL_84";
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN)
+            << "Scenario 4: page_version at offset 38 is not reliable version evidence; "
+            << "INDEX page without SDI must be UNKNOWN";
     }
 
     // Scenario 5: SDI page type detection
@@ -729,138 +731,60 @@ TEST_F(SDIDecompressionSafetyTest, EmptyPayload) {
 
 class FSPFlagsCompressionTest : public ::testing::Test {
 protected:
-    /**
-     * Create an FSP header page (page 0) with given FSP_FLAGS at offset 80.
-     *
-     * FSP_FLAGS layout (4 bytes, little-endian at offset 80 of page 0):
-     *   Bits 5-7: zip_ssize (compressed page size exponent)
-     *   zip_ssize = 0 -> 16KB (no compression)
-     *   zip_ssize = 1 -> 8KB
-     *   zip_ssize = 2 -> 4KB
-     *   zip_ssize = 3 -> 2KB
-     *   ...
-     *   Compressed page size = 16384 / (2 ^ zip_ssize)
-     */
-    std::vector<uint8_t> create_fsp_page(uint32_t fsp_flags) {
-        std::vector<uint8_t> page(16384, 0);
-        // Set FSP_FLAGS at offset 80 (little-endian)
-        write_le<uint32_t>(page.data(), 80, fsp_flags);
+    std::vector<uint8_t> create_fsp_page(size_t logical_page_size, uint8_t zip_ssize) {
+        std::vector<uint8_t> page(logical_page_size, 0);
+        write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_TYPE_FSP_HDR);
+        write_be<uint32_t>(page.data(), FSP_SPACE_FLAGS_OFFSET,
+                           static_cast<uint32_t>(zip_ssize) << 1);
         return page;
-    }
-
-    // Extract zip_ssize from FSP flags
-    uint32_t get_zip_ssize(uint32_t fsp_flags) {
-        return (fsp_flags >> 5) & 0x07;
-    }
-
-    // Calculate compressed page size from zip_ssize
-    size_t get_compressed_page_size(uint32_t zip_ssize) {
-        if (zip_ssize == 0) return 16384;  // No compression
-        return static_cast<size_t>(16384 / (1 << zip_ssize));
-    }
-
-    // Simulate is_page_compressed() logic
-    bool is_page_compressed_by_flags(uint32_t fsp_flags) {
-        uint32_t zip_ssize = get_zip_ssize(fsp_flags);
-        return zip_ssize > 0;
     }
 };
 
-TEST_F(FSPFlagsCompressionTest, ZipSSizeZero) {
-    // zip_ssize = 0 means no compression (16KB pages)
-    // Bits 5-7 = 0
-    uint32_t fsp_flags = 0;  // All flags zero
-    uint32_t zip_ssize = get_zip_ssize(fsp_flags);
-    EXPECT_EQ(zip_ssize, 0u) << "zip_ssize must be 0 for uncompressed tablespace";
-    EXPECT_FALSE(is_page_compressed_by_flags(fsp_flags)) << "zip_ssize=0 must not be compressed";
-    EXPECT_EQ(get_compressed_page_size(zip_ssize), 16384u) << "zip_ssize=0 must give 16KB page size";
+TEST_F(FSPFlagsCompressionTest, ParsesCanonicalBigEndianFlags) {
+    const auto page = create_fsp_page(16384, 2);
+
+    const auto metadata = parse_fsp_compression_metadata(page.data(), page.size(), 16384);
+
+    ASSERT_TRUE(metadata.has_value());
+    EXPECT_TRUE(metadata->is_compressed());
+    EXPECT_EQ(metadata->zip_ssize, 2);
+    EXPECT_EQ(metadata->logical_page_size, 16384u);
+    EXPECT_EQ(metadata->physical_page_size, 4096u);
 }
 
-TEST_F(FSPFlagsCompressionTest, ZipSSizeOne) {
-    // zip_ssize = 1 -> 8KB compressed pages
-    // Set bits 5-7 = 001
-    uint32_t fsp_flags = (1 << 5);
-    uint32_t zip_ssize = get_zip_ssize(fsp_flags);
-    EXPECT_EQ(zip_ssize, 1u) << "zip_ssize must be 1";
-    EXPECT_TRUE(is_page_compressed_by_flags(fsp_flags)) << "zip_ssize=1 must be compressed";
-    EXPECT_EQ(get_compressed_page_size(zip_ssize), 8192u) << "zip_ssize=1 must give 8KB page size";
+TEST_F(FSPFlagsCompressionTest, AcceptsUncompressedTablespace) {
+    const auto page = create_fsp_page(8192, 0);
+
+    const auto metadata = parse_fsp_compression_metadata(page.data(), page.size(), 8192);
+
+    ASSERT_TRUE(metadata.has_value());
+    EXPECT_FALSE(metadata->is_compressed());
+    EXPECT_EQ(metadata->physical_page_size, 8192u);
 }
 
-TEST_F(FSPFlagsCompressionTest, ZipSSizeTwo) {
-    // zip_ssize = 2 -> 4KB compressed pages
-    uint32_t fsp_flags = (2 << 5);
-    uint32_t zip_ssize = get_zip_ssize(fsp_flags);
-    EXPECT_EQ(zip_ssize, 2u) << "zip_ssize must be 2";
-    EXPECT_TRUE(is_page_compressed_by_flags(fsp_flags)) << "zip_ssize=2 must be compressed";
-    EXPECT_EQ(get_compressed_page_size(zip_ssize), 4096u) << "zip_ssize=2 must give 4KB page size";
+TEST_F(FSPFlagsCompressionTest, PreservesOtherFlagBits) {
+    auto page = create_fsp_page(16384, 3);
+    write_be<uint32_t>(page.data(), FSP_SPACE_FLAGS_OFFSET, 0xA5000000u | (3u << 1));
+
+    const auto metadata = parse_fsp_compression_metadata(page.data(), page.size(), 16384);
+
+    ASSERT_TRUE(metadata.has_value());
+    EXPECT_EQ(metadata->zip_ssize, 3);
+    EXPECT_EQ(metadata->physical_page_size, 2048u);
 }
 
-TEST_F(FSPFlagsCompressionTest, ZipSSizeThree) {
-    // zip_ssize = 3 -> 2KB compressed pages
-    uint32_t fsp_flags = (3 << 5);
-    uint32_t zip_ssize = get_zip_ssize(fsp_flags);
-    EXPECT_EQ(zip_ssize, 3u) << "zip_ssize must be 3";
-    EXPECT_TRUE(is_page_compressed_by_flags(fsp_flags)) << "zip_ssize=3 must be compressed";
-    EXPECT_EQ(get_compressed_page_size(zip_ssize), 2048u) << "zip_ssize=3 must give 2KB page size";
-}
+TEST_F(FSPFlagsCompressionTest, RejectsInvalidOrIncompleteMetadata) {
+    auto page = create_fsp_page(16384, 5);
+    EXPECT_FALSE(parse_fsp_compression_metadata(page.data(), page.size(), 16384).has_value());
 
-TEST_F(FSPFlagsCompressionTest, ZipSSizeAllValid) {
-    // Test all valid zip_ssize values 0-7
-    struct { uint32_t zip_ssize; size_t expected_page_size; bool is_compressed; } cases[] = {
-        {0, 16384, false},
-        {1, 8192,  true},
-        {2, 4096,  true},
-        {3, 2048,  true},
-        {4, 1024,  true},
-        {5, 512,   true},
-        {6, 256,   true},
-        {7, 128,   true},
-    };
+    page = create_fsp_page(16384, 1);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    EXPECT_FALSE(parse_fsp_compression_metadata(page.data(), page.size(), 16384).has_value());
 
-    for (const auto& c : cases) {
-        uint32_t fsp_flags = (c.zip_ssize << 5);
-        uint32_t actual_zip_ssize = get_zip_ssize(fsp_flags);
-        size_t actual_page_size = get_compressed_page_size(actual_zip_ssize);
-
-        EXPECT_EQ(actual_zip_ssize, c.zip_ssize)
-            << "zip_ssize=" << c.zip_ssize << " must be extracted correctly";
-        EXPECT_EQ(actual_page_size, c.expected_page_size)
-            << "zip_ssize=" << c.zip_ssize << " must produce page size " << c.expected_page_size;
-        EXPECT_EQ(is_page_compressed_by_flags(fsp_flags), c.is_compressed)
-            << "zip_ssize=" << c.zip_ssize << " compression flag must be " << c.is_compressed;
-    }
-}
-
-TEST_F(FSPFlagsCompressionTest, FSPFlagsWithOtherBits) {
-    // Test that zip_ssize extraction correctly isolates bits 5-7
-    // even when other flag bits are set
-    struct { uint32_t fsp_flags; uint32_t expected_zip_ssize; } cases[] = {
-        {0x00000000, 0},  // No flags
-        {0x00000020, 1},  // Only bit 5 set
-        {0x00000040, 2},  // Only bit 6 set
-        {0x00000060, 3},  // Bits 5-6 set
-        {0x00000080, 4},  // Only bit 7 set
-        {0x000000E0, 7},  // Bits 5-7 all set
-        {0x0000001F, 0},  // Lower 5 bits set, zip_ssize = 0
-        {0xFFFF001F, 0},  // All other bits set except bits 5-7, zip_ssize = 0
-        {0xDEADBE8F, 4},  // Bits 5-7 = 100 = 4, other bits set (0xDEADBE8F & 0xE0 = 0x80, >>5 = 4)
-    };
-
-    for (const auto& c : cases) {
-        uint32_t actual_zip_ssize = get_zip_ssize(c.fsp_flags);
-        EXPECT_EQ(actual_zip_ssize, c.expected_zip_ssize)
-            << "FSP_FLAGS 0x" << std::hex << c.fsp_flags
-            << std::dec << " must extract zip_ssize=" << c.expected_zip_ssize;
-    }
-}
-
-TEST_F(FSPFlagsCompressionTest, CompressedPageSizeFormula) {
-    // Verify the formula: compressed_page_size = 16384 / (1 << zip_ssize)
-    for (uint32_t z = 0; z <= 7; z++) {
-        size_t expected = (z == 0) ? 16384 : (16384 / (1 << z));
-        size_t actual = get_compressed_page_size(z);
-        EXPECT_EQ(actual, expected) << "Formula must hold for zip_ssize=" << z;
-    }
+    page = create_fsp_page(16384, 1);
+    EXPECT_FALSE(parse_fsp_compression_metadata(page.data(), FSP_SPACE_FLAGS_OFFSET + 3, 16384).has_value());
+    EXPECT_FALSE(parse_fsp_compression_metadata(page.data(), page.size(), 12288).has_value());
+    EXPECT_FALSE(parse_fsp_compression_metadata(nullptr, 0, 16384).has_value());
 }
 
 // ======================================================================
@@ -1221,10 +1145,11 @@ protected:
         auto sdi = SDIManager::extract_sdi_json(nullptr, 0);
         (void)sdi;
 
-        // P0.5: FSP flags
-        uint32_t fsp = 0;
-        uint32_t z = (fsp >> 5) & 0x07;
-        (void)z;
+        // P0.5: Parse canonical big-endian FSP compression metadata.
+        write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_TYPE_FSP_HDR);
+        write_be<uint32_t>(page.data(), FSP_SPACE_FLAGS_OFFSET, 2u << 1);
+        auto compression = parse_fsp_compression_metadata(page.data(), page.size(), page.size());
+        (void)compression;
 
         // P0.6: Encrypted page detection
         bool enc = TDEDecryptor::is_encrypted(page.data(), page.size());

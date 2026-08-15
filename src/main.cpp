@@ -19,6 +19,8 @@
 #include "dbrecovery/recovery/truncate_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
+#include "dbrecovery/innodb/encrypted_table_recovery.hpp"
+#include "dbrecovery/innodb/offline_keyring_parser.hpp"
 #include "dbrecovery/repair/corruption_detector.hpp"
 #include "dbrecovery/repair/header_repairer.hpp"
 #include "dbrecovery/repair/physical_corruption.hpp"
@@ -42,48 +44,25 @@ std::string to_lower(const std::string& str) {
 
 // 辅助函数：从 SDI 页解析表结构
 std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
-    const std::string& ibd_path, uint64_t table_id) {
+    const std::string& ibd_path, uint64_t table_id,
+    dbrecovery::MySQLVersion version = dbrecovery::MySQLVersion::UNKNOWN) {
 
-    dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
-    if (!reader.is_valid()) {
-        std::cerr << "[ERROR] Failed to open file for SDI parsing: " << ibd_path << "\n";
-        return std::nullopt;
-    }
+    dbrecovery::innodb::SDIExtractor extractor;
+    auto results = extractor.extract_from_file_if_compatible(ibd_path, version);
+    for (const auto& extracted : results) {
+        if (!extracted.is_valid || extracted.sdi_json.empty()) continue;
 
-    uint32_t total_pages = reader.get_total_pages();
+        try {
+            auto json = nlohmann::json::parse(extracted.sdi_json);
+            dbrecovery::catalog::TableSchema schema;
 
-    // 遍历所有页查找 SDI 页
-    for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
-        auto page_data = reader.read_page_raw(page_no);
-        if (page_data.empty()) continue;
-
-        // Check page type (BIG-ENDIAN in InnoDB)
-        uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
-            page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
-
-        if (page_type == dbrecovery::innodb::FIL_PAGE_SDI) {
-            // 提取 SDI payload
-            const uint8_t* sdi_payload = page_data.data() + 38;
-            if (page_data.size() < 38 + 20) continue;
-
-            // 解析 SDI
-            auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
-                sdi_payload, page_data.size() - 38);
-
-            if (json_opt.has_value()) {
-                try {
-                    auto json = nlohmann::json::parse(json_opt.value());
-                    dbrecovery::catalog::TableSchema schema;
-
-                    if (schema.from_json(json)) {
-                        std::cout << "[INFO] Successfully parsed schema from SDI: "
-                                  << schema.table_name << "\n";
-                        return schema;
-                    }
-                } catch (const nlohmann::json::parse_error& e) {
-                    std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
-                }
+            if (schema.from_json(json)) {
+                std::cout << "[INFO] Successfully parsed schema from SDI: "
+                          << schema.table_name << "\n";
+                return schema;
             }
+        } catch (const nlohmann::json::parse_error& e) {
+            std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
         }
     }
 
@@ -593,7 +572,8 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+        auto schema_opt = parse_schema_from_sdi(ibd_path, table_id,
+            dbrecovery::MySQLVersion::UNKNOWN);
         if (schema_opt.has_value()) {
             auto json_str = schema_opt.value().to_json().dump(2);
             std::cout << json_str << "\n";
@@ -791,44 +771,190 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ✅ 恢复模式：Encryption detection
-    if (detect_encryption || !key.empty() || !keyring.empty()) {
-        std::cout << "[INFO] Detecting and handling encryption...\n";
-        
+    std::vector<dbrecovery::innodb::MasterKey> parsed_tde_keys;
+    bool tde_encrypted_ = false;
+    uint32_t tde_page_size_ = 0;
+
+    // TDE key provisioning before any recovery mode.
+    // Recovery modes (force-scan/TRUNCATE/rm-rf/default index parse) must operate
+    // on decrypted pages. The keyring flow mirrors the recovery CLI proven path:
+    // OfflineKeyringParser (JSON / encrypted-JSON / Vault export) -> validate via
+    // configure_keys() -> install keys into the shared TDE decryptor.
+    // Any parse/password/validation failure is a hard error — never promotes a
+    // detection-only report to a success exit with no recovery performed.
+    if (detect_encryption || !key.empty() || !keyring.empty() || !table_key.empty()) {
         if (ibd_path.empty()) {
-            std::cerr << "[ERROR] --ibd=<path> is required for encryption detection\n";
+            std::cerr << "[ERROR] --ibd=<path> is required with TDE key options\n";
             return 1;
         }
 
-        dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
-        if (!reader.is_valid()) {
-            std::cerr << "[ERROR] Failed to open file: " << ibd_path << "\n";
+        dbrecovery::innodb::OfflineKeyringParser keyring_parser;
+        bool loaded = false;
+
+        if (!key.empty()) {
+            // Manual primary/table key in hex form: raw key bytes, no keyring
+            loaded = true;
+            std::vector<uint8_t> manual_key;
+            std::string hex = key;
+            auto hex_digit = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            bool valid_hex = (hex.size() % 2 == 0);
+            for (size_t i = 0; valid_hex && i < hex.size(); i += 2) {
+                int hi = hex_digit(hex[i]), lo = hex_digit(hex[i + 1]);
+                if (hi < 0 || lo < 0) { valid_hex = false; break; }
+                manual_key.push_back(static_cast<uint8_t>((hi << 4) | lo));
+            }
+            if (!valid_hex || (manual_key.size() != 16 && manual_key.size() != 24 && manual_key.size() != 32)) {
+                std::cerr << "[ERROR] --key must be a hex string of 32/48/64 chars "
+                          << "(16/24/32 raw bytes)\n";
+                return 1;
+            }
+            if (tablespace_id == 0) {
+                std::cerr << "[ERROR] --key requires a non-zero --tablespace-id for key placement\n";
+                return 1;
+            }
+            dbrecovery::innodb::MasterKey mk;
+            mk.key_id = tablespace_id;
+            mk.key_name = "manual-" + std::to_string(tablespace_id);
+            mk.key_data = manual_key;
+            mk.algorithm = dbrecovery::innodb::TDEAlgorithm::AES_256_CBC;
+            parsed_tde_keys.push_back(mk);
+        } else if (!keyring.empty()) {
+            loaded = keyring_parser.parse_keyring_file(keyring);
+            if (!loaded) {
+                loaded = keyring_parser.parse_vault_export(keyring);
+            }
+            if (!loaded) {
+                std::cerr << "[ERROR] Failed to parse keyring " << keyring << ": "
+                          << keyring_parser.get_last_error() << "\n";
+                return 1;
+            }
+            parsed_tde_keys = keyring_parser.get_master_keys();
+        } else if (!table_key.empty()) {
+            // Exact per-space table key as raw hex (server-generated tablespace keys)
+            loaded = true;
+            std::vector<uint8_t> raw;
+            std::string hex = table_key;
+            auto hex_digit = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            bool valid_hex = (hex.size() % 2 == 0);
+            for (size_t i = 0; valid_hex && i < hex.size(); i += 2) {
+                int hi = hex_digit(hex[i]), lo = hex_digit(hex[i + 1]);
+                if (hi < 0 || lo < 0) { valid_hex = false; break; }
+                raw.push_back(static_cast<uint8_t>((hi << 4) | lo));
+            }
+            if (!valid_hex || raw.empty()) {
+                std::cerr << "[ERROR] --table-key must be a non-empty hex string\n";
+                return 1;
+            }
+            if (tablespace_id == 0) {
+                std::cerr << "[ERROR] --table-key requires a non-zero --tablespace-id "
+                          << "identifying the exact tablespace key\n";
+                return 1;
+            }
+            dbrecovery::innodb::MasterKey mk;
+            mk.key_id = tablespace_id;
+            mk.key_name = "table-key-" + std::to_string(tablespace_id);
+            mk.key_data = raw;
+            mk.algorithm = dbrecovery::innodb::TDEAlgorithm::AES_256_CBC;
+            parsed_tde_keys.push_back(mk);
+        }
+
+        if (!loaded || parsed_tde_keys.empty()) {
+            std::cerr << "[ERROR] No usable key material loaded for recovery configuration\n";
             return 1;
         }
 
-        auto header_data = reader.read_page_raw(0);
-        if (header_data.size() >= 100) {
-            uint16_t space_flags = dbrecovery::innodb::read_le<uint16_t>(
-                header_data.data(), 38);
-            bool is_encrypted = (space_flags & 0x8000) != 0;
-            
-            std::cout << "[INFO] File encryption status:\n";
-            std::cout << "  Space flags: 0x" << std::hex << space_flags << std::dec << "\n";
-            std::cout << "  Is encrypted: " << (is_encrypted ? "YES" : "NO") << "\n";
-            
-            if (is_encrypted && try_no_key) {
-                std::cout << "[INFO] Trying recovery without decryption key...\n";
+        // Validate keys atomically before they enter any recovery path.
+        auto parse_tde_file = [&](const std::string& path, uint32_t& out_page_size,
+                                  bool& out_encrypted) -> bool {
+            out_page_size = 0;
+            out_encrypted = false;
+            std::ifstream f(path, std::ios::binary | std::ios::ate);
+            if (!f) return false;
+            size_t fsize = static_cast<size_t>(f.tellg());
+            f.seekg(0, std::ios::beg);
+            if (fsize == 0) return false;
+            size_t guess = fsize < 16384 ? fsize : 16384;
+            std::vector<uint8_t> page(guess);
+            f.read(reinterpret_cast<char*>(page.data()), guess);
+            if (f.gcount() <= 0) return false;
+            size_t real_page_size = dbrecovery::innodb::smart_detect_page_size(page.data(), fsize);
+            if (real_page_size < dbrecovery::innodb::UNIV_PAGE_SIZE_MIN ||
+                real_page_size > dbrecovery::innodb::UNIV_PAGE_SIZE_MAX) {
+                real_page_size = dbrecovery::innodb::UNIV_PAGE_SIZE;
             }
-            
-            if (!key.empty()) {
-                std::cout << "[INFO] Primary key provided.\n";
+            if (page.size() < real_page_size) {
+                std::vector<uint8_t> full(real_page_size);
+                f.seekg(0, std::ios::beg);
+                f.read(reinterpret_cast<char*>(full.data()), real_page_size);
+                page = std::move(full);
             }
-            if (!keyring.empty()) {
-                std::cout << "[INFO] Keyring file path: " << keyring << "\n";
-            }
+            out_page_size = static_cast<uint32_t>(real_page_size);
+            out_encrypted = dbrecovery::innodb::TDEDecryptor::is_encrypted(page.data(), page.size());
+            return true;
+        };
+
+        uint32_t meta_page_size = 0;
+        bool meta_is_encrypted = false;
+        if (!parse_tde_file(ibd_path, meta_page_size, meta_is_encrypted)) {
+            std::cerr << "[ERROR] Failed to read TDE metadata from: " << ibd_path << "\n";
+            return 1;
         }
-        
-        return 0;
+        const uint32_t configured_page_size = page_size > 0 ? static_cast<uint32_t>(page_size) : meta_page_size;
+        tde_page_size_ = configured_page_size;
+        tde_encrypted_ = meta_is_encrypted;
+
+        dbrecovery::innodb::EncryptedTableRecovery key_validator(configured_page_size);
+        if (!key_validator.configure_keys(parsed_tde_keys)) {
+            std::cerr << "[ERROR] Keyring contains unusable recovery keys: "
+                      << key_validator.get_last_error() << "\n";
+            return 1;
+        }
+
+        auto tde_stats = key_validator.get_decryptor().get_stats();
+        std::cout << "[INFO] TDE decryptor initialized with " << tde_stats.keys_loaded << " keys\n";
+
+        if (meta_is_encrypted) {
+            std::cout << "[INFO] TDE encryption DETECTED on input file\n";
+            std::ifstream test_file(ibd_path, std::ios::binary);
+            if (test_file) {
+                std::vector<uint8_t> test_page(configured_page_size);
+                test_file.read(reinterpret_cast<char*>(test_page.data()), configured_page_size);
+                if (test_file.gcount() >= static_cast<std::streamsize>(configured_page_size)) {
+                    uint32_t real_page_no = dbrecovery::innodb::read_be<uint32_t>(
+                        test_page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET);
+                    uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
+                        test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
+                    auto decrypted = key_validator.get_decryptor().decrypt_page(
+                        test_page.data(), configured_page_size, real_space_id, real_page_no);
+                    if (decrypted.empty()) {
+                        std::cerr << "[ERROR] Page decryption failed — installed key does not "
+                                  << "match this tablespace. Aborting; no recovery attempted.\n";
+                        return 1;
+                    }
+                    std::cout << "[INFO] Page decryption SUCCESS ("
+                              << decrypted.size() << " bytes)\n";
+                }
+            }
+        } else if (key.empty() && keyring.empty() && table_key.empty()) {
+            // Detection mode only: --detect-encryption without key options reports
+            // status and exits, with no claims of recovery.
+            std::cout << "[INFO] File encryption status: NOT encrypted\n";
+            return 0;
+        }
+
+        // Recovery continues with parsed_tde_keys available. When the file is
+        // encrypted but decryption preparation above succeeded, TDE_prep passed.
+        std::cout << "[INFO] TDE key provisioning succeeded — proceeding with recovery\n";
     }
 
     // ✅ 恢复模式： corruption check
@@ -1454,7 +1580,26 @@ int main(int argc, char** argv) {
             has_schema = true;
             std::cout << "[INFO] Schema obtained from --schema option (" << schema_template.columns.size() << " columns)\n";
         } else {
-            auto sdi_schema = parse_schema_from_sdi(ibd_path, table_id);
+            dbrecovery::MySQLVersion tuple_detected = dbrecovery::MySQLVersion::UNKNOWN;
+            if (!mysql_version.empty()) {
+                try {
+                    uint32_t ver = std::stoul(mysql_version);
+                    if (ver >= 80000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_80;
+                    else if (ver >= 80400) tuple_detected = dbrecovery::MySQLVersion::MYSQL_84;
+                    else if (ver >= 90000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_90;
+                    else if (ver >= 50700) tuple_detected = dbrecovery::MySQLVersion::MYSQL_57;
+                    else if (ver >= 50600) tuple_detected = dbrecovery::MySQLVersion::MYSQL_56;
+                } catch (...) {}
+            } else {
+                std::ifstream ver_file(ibd_path, std::ios::binary);
+                if (ver_file) {
+                    std::vector<uint8_t> ver_page(page_size > 0 ? page_size : 16384);
+                    ver_file.read(reinterpret_cast<char*>(ver_page.data()), ver_page.size());
+                    tuple_detected = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), ver_page.size());
+                }
+            }
+
+            auto sdi_schema = parse_schema_from_sdi(ibd_path, table_id, tuple_detected);
             if (sdi_schema.has_value()) {
                 std::cout << "[INFO] Schema obtained from SDI\n";
                 // Map catalog::TableSchema to engine::SchemaTemplate
@@ -1709,6 +1854,7 @@ int main(int argc, char** argv) {
         if (page_size == 0) page_size = 16384;
 
         // Set MySQL version for format-specific behavior
+        dbrecovery::MySQLVersion detected_version = dbrecovery::MySQLVersion::UNKNOWN;
         if (!mysql_version.empty()) {
             uint32_t ver = 0;
             try { ver = std::stoul(mysql_version); } catch (...) {}
@@ -1720,9 +1866,9 @@ int main(int argc, char** argv) {
             if (ver_file) {
                 std::vector<uint8_t> ver_page(page_size > 0 ? page_size : 16384);
                 ver_file.read(reinterpret_cast<char*>(ver_page.data()), ver_page.size());
-                auto detected = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), ver_page.size());
-                if (detected != dbrecovery::MySQLVersion::UNKNOWN) {
-                    switch (detected) {
+                detected_version = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), ver_page.size());
+                if (detected_version != dbrecovery::MySQLVersion::UNKNOWN) {
+                    switch (detected_version) {
                         case dbrecovery::MySQLVersion::MYSQL_56: index_parser.set_mysql_version(50600); break;
                         case dbrecovery::MySQLVersion::MYSQL_57: index_parser.set_mysql_version(50700); break;
                         case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
@@ -1749,7 +1895,7 @@ int main(int argc, char** argv) {
         // First try to extract schema from SDI (MySQL 8.0+)
         if (schema_str.empty()) {
             std::cout << "[INFO] Attempting to extract schema from SDI pages...\\n";
-            auto schema_opt = parse_schema_from_sdi(effective_ibd, table_id);
+            auto schema_opt = parse_schema_from_sdi(effective_ibd, table_id, detected_version);
             if (schema_opt.has_value()) {
                 const auto& schema = schema_opt.value();
                 uint32_t n_pk = 0;
@@ -1962,6 +2108,142 @@ int main(int argc, char** argv) {
             if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
             index_parser.set_columns(index_columns, false, n_pk);
             std::cout << "[INFO] Schema set from --schema option (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
+        }
+
+        // If TDE encrypted with keys available, route through EncryptedTableRecovery
+        // instead of the plaintext InnoDBIndexParser path.
+        if (tde_encrypted_ && !parsed_tde_keys.empty()) {
+            std::string result_table = table_name.empty() ? "recovered_table" : table_name;
+            if (!effective_ibd.empty() && table_name.empty()) {
+                fs::path ibd_filepath(effective_ibd);
+                std::string stem = ibd_filepath.stem().string();
+                if (stem.size() > 4 && stem.substr(stem.size() - 4) == ".ibd") {
+                    stem = stem.substr(0, stem.size() - 4);
+                }
+                result_table = stem;
+            }
+
+            std::cout << "[INFO] TDE encrypted tablespace detected — routing to EncryptedTableRecovery\n";
+
+            dbrecovery::catalog::TableSchema tde_schema;
+            tde_schema.table_name = result_table;
+            tde_schema.page_size = tde_page_size_ > 0 ? tde_page_size_
+                                                       : static_cast<uint32_t>(page_size);
+            for (size_t ci = 0; ci < index_columns.size(); ci++) {
+                const auto& icol = index_columns[ci];
+                dbrecovery::catalog::ColumnInfo col_info;
+                col_info.name = icol.name;
+                col_info.ordinal = icol.ordinal_position;
+                col_info.physical_pos = icol.physical_pos;
+                col_info.mysql_type_id = icol.col_type;
+                col_info.is_nullable = icol.is_nullable;
+                col_info.is_signed = !icol.is_unsigned;
+                col_info.column_length = icol.col_length;
+                col_info.charset_id = icol.char_set_id;
+                col_info.numeric_precision = icol.precision;
+                col_info.numeric_scale = icol.scale;
+                col_info.datetime_precision = icol.datetime_precision;
+                col_info.enum_values = icol.enum_values;
+                col_info.set_values = icol.set_values;
+                tde_schema.columns[ci] = col_info;
+            }
+
+            dbrecovery::innodb::EncryptedTableRecovery enc_rec(tde_schema.page_size);
+            enc_rec.set_file_path(effective_ibd);
+            enc_rec.set_schema(tde_schema);
+            enc_rec.set_try_recovery_without_key(false);
+            if (!enc_rec.configure_keys(parsed_tde_keys)) {
+                std::cerr << "[ERROR] TDE key configuration failed: "
+                          << enc_rec.get_last_error() << "\n";
+                return 1;
+            }
+
+            auto scan_start = std::chrono::high_resolution_clock::now();
+            auto records = enc_rec.recover();
+            auto scan_end = std::chrono::high_resolution_clock::now();
+            double scan_seconds = std::chrono::duration<double>(scan_end - scan_start).count();
+
+            const auto& tde_stats = enc_rec.get_stats();
+            std::cout << "\n=== TDE Encrypted Recovery Results ===\n";
+            std::cout << "  Total pages: " << tde_stats.total_pages << "\n";
+            std::cout << "  Encrypted pages: " << tde_stats.encrypted_pages << "\n";
+            std::cout << "  Decrypted pages: " << tde_stats.decrypted_pages << "\n";
+            std::cout << "  Failed pages: " << tde_stats.failed_pages << "\n";
+            std::cout << "  Records recovered: " << records.size() << "\n";
+            std::cout << "  Recovery time: " << std::fixed << std::setprecision(2)
+                      << scan_seconds << "s\n";
+
+            // Export TDE recovered records
+            fs::create_directories(output_dir);
+            if (format == "csv" || format == "all") {
+                std::string csv_path = output_dir + "/" + result_table + "_tde.csv";
+                std::ofstream csv_file(csv_path);
+                if (csv_file) {
+                    if (!index_columns.empty()) {
+                        for (size_t i = 0; i < index_columns.size(); i++) {
+                            if (i > 0) csv_file << ",";
+                            csv_file << index_columns[i].name;
+                        }
+                        csv_file << "\n";
+                    }
+                    for (const auto& rec : records) {
+                        bool first = true;
+                        for (const auto& [key, value] : rec) {
+                            if (!first) csv_file << ",";
+                            std::string escaped = value;
+                            if (escaped.find(',') != std::string::npos ||
+                                escaped.find('"') != std::string::npos) {
+                                size_t pos = 0;
+                                while ((pos = escaped.find('"', pos)) != std::string::npos) {
+                                    escaped.insert(pos, 1, '"');
+                                    pos += 2;
+                                }
+                                csv_file << "\"" << escaped << "\"";
+                            } else {
+                                csv_file << escaped;
+                            }
+                            first = false;
+                        }
+                        csv_file << "\n";
+                    }
+                    csv_file.close();
+                    std::cout << "[INFO] TDE recovery CSV exported: " << csv_path << "\n";
+                }
+            }
+            if (format == "sql" || format == "all") {
+                std::string sql_path = output_dir + "/" + result_table + "_tde.sql";
+                std::ofstream sql_file(sql_path);
+                if (sql_file) {
+                    sql_file << "-- TDE recovered data from: " << effective_ibd << "\n";
+                    sql_file << "-- Total records: " << records.size() << "\n\n";
+                    for (const auto& rec : records) {
+                        sql_file << "INSERT INTO `" << result_table << "` (";
+                        bool first = true;
+                        for (const auto& [key, value] : rec) {
+                            if (!first) sql_file << ", ";
+                            sql_file << "`" << key << "`";
+                            first = false;
+                        }
+                        sql_file << ") VALUES (";
+                        first = true;
+                        for (const auto& [key, value] : rec) {
+                            if (!first) sql_file << ", ";
+                            std::string escaped = value;
+                            size_t pos = 0;
+                            while ((pos = escaped.find("'", pos)) != std::string::npos) {
+                                escaped.insert(pos, 1, '\'');
+                                pos += 2;
+                            }
+                            sql_file << "'" << escaped << "'";
+                            first = false;
+                        }
+                        sql_file << ");\n";
+                    }
+                    sql_file.close();
+                    std::cout << "[INFO] TDE recovery SQL exported: " << sql_path << "\n";
+                }
+            }
+            return 0;
         }
 
         // Force scan: scan all pages sequentially
@@ -2192,6 +2474,7 @@ int main(int argc, char** argv) {
         }
 
         // Auto-detect MySQL version from file
+        dbrecovery::MySQLVersion detected_version = dbrecovery::MySQLVersion::UNKNOWN;
         if (!mysql_version.empty()) {
             uint32_t ver = 0;
             try { ver = std::stoul(mysql_version); } catch (...) {}
@@ -2202,8 +2485,8 @@ int main(int argc, char** argv) {
             if (ver_file) {
                 std::vector<uint8_t> ver_page(page_size);
                 ver_file.read(reinterpret_cast<char*>(ver_page.data()), page_size);
-                auto detected = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), page_size);
-                switch (detected) {
+                detected_version = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), page_size);
+                switch (detected_version) {
                     case dbrecovery::MySQLVersion::MYSQL_56: index_parser.set_mysql_version(50600); break;
                     case dbrecovery::MySQLVersion::MYSQL_57: index_parser.set_mysql_version(50700); break;
                     case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
@@ -2487,7 +2770,7 @@ int main(int argc, char** argv) {
         }
         // Priority 3: SDI from IBD file (MySQL 8.0+)
         else if (!schemaless_recovery) {
-            auto sdi_schema = parse_schema_from_sdi(actual_ibd_path, table_id);
+            auto sdi_schema = parse_schema_from_sdi(actual_ibd_path, table_id, detected_version);
             if (sdi_schema.has_value()) {
                 std::cout << "[INFO] Schema obtained from SDI (" << sdi_schema->columns.size() << " columns)\n";
 
@@ -2600,6 +2883,132 @@ int main(int argc, char** argv) {
             } else {
                 std::cout << "[INFO] No SDI found in file, using schemaless mode\n";
             }
+        }
+
+        // TDE encrypted tablespace with keys routed through EncryptedTableRecovery
+        // before the plaintext index parser path.
+        if (tde_encrypted_ && !parsed_tde_keys.empty()) {
+            std::cout << "[INFO] TDE encrypted tablespace detected — routing to EncryptedTableRecovery\n";
+
+            dbrecovery::catalog::TableSchema tde_schema;
+            tde_schema.table_name = result_table;
+            tde_schema.page_size = tde_page_size_ > 0 ? tde_page_size_
+                                                       : static_cast<uint32_t>(page_size);
+            for (size_t ci = 0; ci < index_columns.size(); ci++) {
+                const auto& icol = index_columns[ci];
+                dbrecovery::catalog::ColumnInfo col_info;
+                col_info.name = icol.name;
+                col_info.ordinal = icol.ordinal_position;
+                col_info.physical_pos = icol.physical_pos;
+                col_info.mysql_type_id = icol.col_type;
+                col_info.is_nullable = icol.is_nullable;
+                col_info.is_signed = !icol.is_unsigned;
+                col_info.column_length = icol.col_length;
+                col_info.charset_id = icol.char_set_id;
+                col_info.numeric_precision = icol.precision;
+                col_info.numeric_scale = icol.scale;
+                col_info.datetime_precision = icol.datetime_precision;
+                col_info.enum_values = icol.enum_values;
+                col_info.set_values = icol.set_values;
+                tde_schema.columns[ci] = col_info;
+            }
+
+            dbrecovery::innodb::EncryptedTableRecovery enc_rec(tde_schema.page_size);
+            enc_rec.set_file_path(actual_ibd_path);
+            enc_rec.set_schema(tde_schema);
+            enc_rec.set_try_recovery_without_key(false);
+            if (!enc_rec.configure_keys(parsed_tde_keys)) {
+                std::cerr << "[ERROR] TDE key configuration failed: "
+                          << enc_rec.get_last_error() << "\n";
+                return 1;
+            }
+
+            auto scan_start = std::chrono::high_resolution_clock::now();
+            auto tde_records = enc_rec.recover();
+            auto scan_end = std::chrono::high_resolution_clock::now();
+            double scan_seconds = std::chrono::duration<double>(scan_end - scan_start).count();
+
+            const auto& tde_stats = enc_rec.get_stats();
+            std::cout << "\n=== TDE Encrypted Recovery Results ===\n";
+            std::cout << "  Total pages: " << tde_stats.total_pages << "\n";
+            std::cout << "  Encrypted pages: " << tde_stats.encrypted_pages << "\n";
+            std::cout << "  Decrypted pages: " << tde_stats.decrypted_pages << "\n";
+            std::cout << "  Failed pages: " << tde_stats.failed_pages << "\n";
+            std::cout << "  Records recovered: " << tde_records.size() << "\n";
+            std::cout << "  Recovery time: " << std::fixed << std::setprecision(2)
+                      << scan_seconds << "s\n";
+
+            // Export TDE recovered records
+            fs::create_directories(output_dir);
+            if (format == "csv" || format == "all") {
+                std::string csv_path = output_dir + "/" + result_table + "_tde.csv";
+                std::ofstream csv_file(csv_path);
+                if (csv_file) {
+                    if (!index_columns.empty()) {
+                        for (size_t i = 0; i < index_columns.size(); i++) {
+                            if (i > 0) csv_file << ",";
+                            csv_file << index_columns[i].name;
+                        }
+                        csv_file << "\n";
+                    }
+                    for (const auto& rec : tde_records) {
+                        bool first = true;
+                        for (const auto& [key, value] : rec) {
+                            if (!first) csv_file << ",";
+                            std::string escaped = value;
+                            if (escaped.find(',') != std::string::npos ||
+                                escaped.find('"') != std::string::npos) {
+                                size_t pos = 0;
+                                while ((pos = escaped.find('"', pos)) != std::string::npos) {
+                                    escaped.insert(pos, 1, '"');
+                                    pos += 2;
+                                }
+                                csv_file << "\"" << escaped << "\"";
+                            } else {
+                                csv_file << escaped;
+                            }
+                            first = false;
+                        }
+                        csv_file << "\n";
+                    }
+                    csv_file.close();
+                    std::cout << "[INFO] TDE recovery CSV exported: " << csv_path << "\n";
+                }
+            }
+            if (format == "sql" || format == "all") {
+                std::string sql_path = output_dir + "/" + result_table + "_tde.sql";
+                std::ofstream sql_file(sql_path);
+                if (sql_file) {
+                    sql_file << "-- TDE recovered data from: " << actual_ibd_path << "\n";
+                    sql_file << "-- Total records: " << tde_records.size() << "\n\n";
+                    for (const auto& rec : tde_records) {
+                        sql_file << "INSERT INTO `" << result_table << "` (";
+                        bool first = true;
+                        for (const auto& [key, value] : rec) {
+                            if (!first) sql_file << ", ";
+                            sql_file << "`" << key << "`";
+                            first = false;
+                        }
+                        sql_file << ") VALUES (";
+                        first = true;
+                        for (const auto& [key, value] : rec) {
+                            if (!first) sql_file << ", ";
+                            std::string escaped = value;
+                            size_t pos = 0;
+                            while ((pos = escaped.find("'", pos)) != std::string::npos) {
+                                escaped.insert(pos, 1, '\'');
+                                pos += 2;
+                            }
+                            sql_file << "'" << escaped << "'";
+                            first = false;
+                        }
+                        sql_file << ");\n";
+                    }
+                    sql_file.close();
+                    std::cout << "[INFO] TDE recovery SQL exported: " << sql_path << "\n";
+                }
+            }
+            return 0;
         }
 
         // Phase 1: Run InnoDBIndexParser

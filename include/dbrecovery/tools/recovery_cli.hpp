@@ -139,7 +139,8 @@ private:
     innodb::PageChainRebuilder rebuild_page_chain(const std::vector<innodb::ScannedPage>& pages);
 
     // 提取 SDI
-    std::vector<innodb::ExtractedSDI> extract_sdi_data(const std::string& ibd_path);
+    std::vector<innodb::ExtractedSDI> extract_sdi_data(
+        const std::string& ibd_path, dbrecovery::MySQLVersion version);
 
     // 重连记录链
     innodb::RecordChainRebuilder rebuild_record_chain(const std::vector<innodb::RecordInfo>& records, uint16_t heap_top);
@@ -355,11 +356,12 @@ inline innodb::PageChainRebuilder RecoveryCLI::rebuild_page_chain(const std::vec
     return rebuilder;
 }
 
-inline std::vector<innodb::ExtractedSDI> RecoveryCLI::extract_sdi_data(const std::string& ibd_path) {
+inline std::vector<innodb::ExtractedSDI> RecoveryCLI::extract_sdi_data(
+    const std::string& ibd_path, dbrecovery::MySQLVersion version) {
     auto start = std::chrono::high_resolution_clock::now();
 
     innodb::SDIExtractor extractor(16384);
-    auto results = extractor.extract_from_file(ibd_path);
+    auto results = extractor.extract_from_file_if_compatible(ibd_path, version);
 
     auto end = std::chrono::high_resolution_clock::now();
     stats_.elapsed_seconds += std::chrono::duration<double>(end - start).count();
@@ -558,6 +560,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // Non-sensitive paths (scan, basic recovery) use auto-detection from page data.
 
     // Index ID filtering options
+    dbrecovery::MySQLVersion sdi_version = dbrecovery::MySQLVersion::UNKNOWN;
+    if (mysql_version == "5.6") sdi_version = dbrecovery::MySQLVersion::MYSQL_56;
+    else if (mysql_version == "5.7") sdi_version = dbrecovery::MySQLVersion::MYSQL_57;
+    else if (mysql_version == "8.0") sdi_version = dbrecovery::MySQLVersion::MYSQL_80;
+    else if (mysql_version == "8.1") sdi_version = dbrecovery::MySQLVersion::MYSQL_81;
+    else if (mysql_version == "8.4") sdi_version = dbrecovery::MySQLVersion::MYSQL_84;
+    else if (mysql_version == "9.0") sdi_version = dbrecovery::MySQLVersion::MYSQL_90;
+
     std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
     bool exclude_system_tables = parser_.has_option("exclude-system-tables");
 
@@ -1648,14 +1658,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         if (!tde_password.empty()) {
             std::cout << "[INFO] Attempting encrypted keyring with password\n";
             loaded = keyring_parser.parse_encrypted_keyring(keyring_file, tde_password);
+            if (!loaded) {
+                std::cerr << "[ERROR] Failed to load encrypted keyring: "
+                          << keyring_parser.get_last_error() << "\n";
+                return 1;
+            }
         } else {
             loaded = keyring_parser.parse_keyring_file(keyring_file);
-        }
-
-        if (!loaded) {
-            // Try Vault format as fallback
-            std::cout << "[INFO] Trying Vault export format...\n";
-            loaded = keyring_parser.parse_vault_export(keyring_file);
+            if (!loaded) {
+                std::cout << "[INFO] Trying Vault export format...\n";
+                loaded = keyring_parser.parse_vault_export(keyring_file);
+            }
         }
 
         if (loaded) {
@@ -1667,48 +1680,41 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::cout << "  - " << name << "\n";
             }
 
-            // Set up TDEDecryptor with loaded keys
             auto& keys = keyring_parser.get_master_keys();
+            dbrecovery::innodb::EncryptedTableRecovery key_validator(page_size);
+            if (!key_validator.configure_keys(keys)) {
+                std::cerr << "[ERROR] Keyring contains unusable recovery keys: "
+                          << key_validator.get_last_error() << "\n";
+                return 1;
+            }
             parsed_tde_keys = keys;
-            if (!keys.empty()) {
-                dbrecovery::innodb::TDEDecryptor tde;
-                tde.set_primary_key(keys[0].key_data);
 
-                // Add all keys as table keys
-                for (const auto& mk : keys) {
-                    tde.add_table_key(mk.key_id, mk.key_data, mk.algorithm);
-                }
+            auto tde_stats = key_validator.get_decryptor().get_stats();
+            std::cout << "[INFO] TDE decryptor initialized with "
+                      << tde_stats.keys_loaded << " keys\n";
 
-                auto tde_stats = tde.get_stats();
-                std::cout << "[INFO] TDE decryptor initialized with "
-                          << tde_stats.keys_loaded << " keys\n";
-
-                if (!ibd_path.empty()) {
-                    std::cout << "[INFO] Testing TDE detection on: " << ibd_path << "\n";
-                    std::ifstream test_file(ibd_path, std::ios::binary);
-                    if (test_file) {
-                        std::vector<uint8_t> test_page(page_size);
-                        test_file.read(reinterpret_cast<char*>(test_page.data()), page_size);
-                        if (dbrecovery::innodb::TDEDecryptor::is_encrypted(test_page.data(), page_size)) {
-                            std::cout << "[INFO] TDE encryption DETECTED on input file\n";
-                            // Parse real page identity from FIL header instead of
-                            // hardcoding (0,0) — corrects the mismatch that would
-                            // reject pages with non-zero space_id.
-                            uint32_t real_page_no = dbrecovery::innodb::read_be<uint32_t>(
-                                test_page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET);
-                            uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
-                                test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
-                            auto decrypted = tde.decrypt_page(test_page.data(), page_size,
-                                                              real_space_id, real_page_no);
-                            if (!decrypted.empty()) {
-                                std::cout << "[INFO] Page decryption SUCCESS ("
-                                          << decrypted.size() << " bytes)\n";
-                            } else {
-                                std::cout << "[WARN] Page decryption FAILED — key may not match\n";
-                            }
+            if (!ibd_path.empty()) {
+                std::cout << "[INFO] Testing TDE detection on: " << ibd_path << "\n";
+                std::ifstream test_file(ibd_path, std::ios::binary);
+                if (test_file) {
+                    std::vector<uint8_t> test_page(page_size);
+                    test_file.read(reinterpret_cast<char*>(test_page.data()), page_size);
+                    if (dbrecovery::innodb::TDEDecryptor::is_encrypted(test_page.data(), page_size)) {
+                        std::cout << "[INFO] TDE encryption DETECTED on input file\n";
+                        uint32_t real_page_no = dbrecovery::innodb::read_be<uint32_t>(
+                            test_page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET);
+                        uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
+                            test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
+                        auto decrypted = key_validator.get_decryptor().decrypt_page(
+                            test_page.data(), page_size, real_space_id, real_page_no);
+                        if (!decrypted.empty()) {
+                            std::cout << "[INFO] Page decryption SUCCESS ("
+                                      << decrypted.size() << " bytes)\n";
                         } else {
-                            std::cout << "[INFO] Input file is NOT TDE-encrypted\n";
+                            std::cout << "[WARN] Page decryption FAILED — key may not match\n";
                         }
+                    } else {
+                        std::cout << "[INFO] Input file is NOT TDE-encrypted\n";
                     }
                 }
             }
@@ -2610,7 +2616,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // SDI 提取模式
     if (extract_sdi) {
         std::cout << "[INFO] Extracting SDI metadata...\n";
-        auto results = extract_sdi_data(ibd_path);
+        auto results = extract_sdi_data(ibd_path, sdi_version);
 
         std::cout << "[INFO] Extracted " << results.size() << " SDI records\n";
         for (const auto& sdi : results) {

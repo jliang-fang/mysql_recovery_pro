@@ -47,7 +47,7 @@ namespace innodb {
  * @brief Undo record field — old value of a single column
  */
 struct UndoFieldValue {
-    uint16_t field_no;              // 1-based field number within the table
+    uint16_t field_no = 0;              // 1-based field number within the table
     std::vector<uint8_t> old_value; // Raw bytes of the old value
     bool is_null   = false;         // Field was NULL
     bool is_extern = false;         // Externally stored (BLOB/off-page)
@@ -161,18 +161,6 @@ struct RowVersionHistory {
      * @brief Number of versions in the undo chain
      */
     size_t chain_length() const { return undo_chain.size(); }
-};
-
-/**
- * @brief Flashback SQL result
- */
-struct FlashbackResult {
-    std::string reverse_sql;                    // The generated SQL statement
-    uint64_t trx_id         = 0;                // Transaction that made the change
-    uint64_t undo_no        = 0;                // Undo number within transaction
-    std::optional<std::chrono::system_clock::time_point> timestamp;
-    double confidence       = 0.0;              // 0.0–1.0 data completeness
-    bool is_complete        = false;            // All columns recovered
 };
 
 /**
@@ -354,8 +342,7 @@ private:
  * Capabilities:
  *   1. trace_version_chain()  — Follow DB_ROLL_PTR through full undo chain
  *   2. rebuild_all_histories() — Scan all undo logs for a table's history
- *   3. flashback_deletes()    — Generate reverse INSERT for DELETE operations
- *   4. heuristic_reconstruct_chains() — Reassemble broken/corrupted chains
+ *   3. heuristic_reconstruct_chains() — Reassemble broken/corrupted chains
  *
  * Design:
  *   - Uses UndoPageManager for page I/O abstraction
@@ -375,6 +362,7 @@ public:
     void set_ibdata_path(const std::string& path) {
         ibdata_path_ = path;
         page_manager_.set_data_file(path);
+        timestamp_index_.reset();
     }
 
     /**
@@ -482,27 +470,6 @@ public:
         std::optional<std::pair<uint64_t, uint64_t>> lsn_range = std::nullopt);
 
     /**
-     * @brief Flashback DELETE operations — generate reverse INSERT SQL
-     *
-     * Algorithm:
-     *   1. Scan all undo logs for TRX_UNDO_DEL_REC records
-     *   2. For each DELETE record:
-     *      a. Parse old field values from undo record
-     *      b. Follow update undo chain to reconstruct full row
-     *      c. Generate INSERT INTO ... VALUES (...)
-     *   3. Order by transaction ID and timestamp
-     *
-     * @param space_id  Target tablespace ID
-     * @param schema    Table schema
-     * @param filter    Time/TRX_ID filter
-     * @return Flashback SQL results
-     */
-    std::vector<FlashbackResult> flashback_deletes(
-        uint32_t space_id,
-        const catalog::TableSchema& schema,
-        const FlashbackFilter& filter = {});
-
-    /**
      * @brief Heuristically reassemble broken undo chains
      *
      * When undo pages are partially damaged, chains may break.
@@ -526,7 +493,6 @@ public:
         uint64_t chains_traced         = 0;
         uint64_t total_undo_records    = 0;
         uint64_t broken_chains         = 0;
-        uint64_t flashback_statements  = 0;
         uint64_t pages_scanned         = 0;
         double   analysis_time_ms      = 0.0;
     };
@@ -572,7 +538,7 @@ public:
     /**
      * @brief Scan all undo pages and parse every undo record, applying a filter
      *
-     * Shared primitive used by flashback_deletes(), heuristic_reconstruct_chains(),
+     * Shared primitive used by heuristic_reconstruct_chains(),
      * and FlashbackGenerator. Encapsulates the undo-page iteration loop
      * (read TRX_UNDO_PAGE_* headers -> parse each record -> advance) so the
      * same logic is not reimplemented in every caller.
@@ -622,6 +588,15 @@ private:
     uint32_t target_tablespace_id_ = 0;          // Provenance enforcement (0 = off)
     bool index_built_ = false;
     AnalyzerStats stats_;
+
+    std::optional<UndoRecordV2> parse_verified_undo_record(
+        const std::vector<uint8_t>& page_data,
+        uint32_t undo_page_no,
+        size_t offset,
+        const catalog::TableSchema& schema,
+        size_t* consumed_size = nullptr);
+
+    void enrich_transaction_metadata(UndoRecordV2& record);
 
 };
 } // namespace innodb

@@ -59,45 +59,15 @@ std::optional<catalog::TableSchema> parse_schema_from_sdi(
                 (static_cast<uint16_t>(page_data[97]) << 8) |
                 static_cast<uint16_t>(page_data[98]));
 
-            uint32_t record_offset = static_cast<uint32_t>(slot_offset + 99);
+            const int64_t record_offset = static_cast<int64_t>(slot_offset) + 99;
 
             std::vector<std::pair<uint32_t, std::string>> sdi_payloads;
 
-            // Approach 1: Slot-based offset
-            if (record_offset > 0 && record_offset < page_size - 50) {
-                uint32_t offset1 = record_offset;
-                if (offset1 + 50 < page_size) {
-                    uint32_t uncompressed_len = innodb::read_be<uint32_t>(
-                        page_data.data(), offset1 + 25);
-                    uint32_t compressed_len = innodb::read_be<uint32_t>(
-                        page_data.data(), offset1 + 29);
-
-                    if (compressed_len > 0 && compressed_len < page_size &&
-                        offset1 + 33 + compressed_len <= page_size) {
-                        const uint8_t* compressed_data = page_data.data() + offset1 + 33;
-
-                        // Build synthetic SDI header (20 bytes LE) and reuse the shared
-                        // bounded SDIManager::extract_sdi_json boundary instead of a
-                        // second inflateInit path. This keeps raw-deflate window bits,
-                        // 16MB ceiling and 20:1 ratio policy in one place.
-                        std::vector<uint8_t> synthetic_header(20, 0);
-                        innodb::write_le<uint32_t>(synthetic_header.data(), 0, 7);  // type = SDI
-                        innodb::write_le<uint64_t>(synthetic_header.data(), 4, 0);  // id = 0
-                        innodb::write_le<uint32_t>(synthetic_header.data(), 12, uncompressed_len);
-                        innodb::write_le<uint32_t>(synthetic_header.data(), 16, compressed_len);
-
-                        std::vector<uint8_t> sdi_blob;
-                        sdi_blob.reserve(synthetic_header.size() + compressed_len);
-                        sdi_blob.insert(sdi_blob.end(), synthetic_header.begin(), synthetic_header.end());
-                        sdi_blob.insert(sdi_blob.end(), compressed_data, compressed_data + compressed_len);
-
-                        auto json_opt = innodb::SDIManager::extract_sdi_json(
-                            sdi_blob.data(), sdi_blob.size());
-
-                        if (json_opt.has_value()) {
-                            sdi_payloads.push_back({offset1, json_opt.value()});
-                        }
-                    }
+            if (page_type == innodb::FIL_PAGE_SDI_ZIP && record_offset >= 0) {
+                const auto extraction = innodb::SDIManager::extract_zip_record(
+                    page_data.data(), page_data.size(), static_cast<size_t>(record_offset));
+                if (extraction.success()) {
+                    sdi_payloads.push_back({static_cast<uint32_t>(record_offset), extraction.json});
                 }
             }
 

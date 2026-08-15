@@ -692,23 +692,11 @@ bool RecoveryEngine::load_tde_keyring(const std::string& keyring_path) {
         return false;
     }
 
-    std::cout << "[INFO] Loaded keyring with " << keyring.entries.size() << " keys" << std::endl;
-
-    // Store all keys from keyring
-    // Keys are stored by name (e.g., "INNODBKey-uuid-123")
-    for (const auto& entry : keyring.entries) {
-        // Store key by name for lookup during decryption
-        tde_decryptor_.add_table_key(
-            static_cast<uint32_t>(std::hash<std::string>{}(entry.key_name)),  // Hash name to numeric ID
-            entry.key_data,
-            entry.algorithm);
-
-        std::cout << "[INFO]   Key: " << entry.key_name
-                  << " (" << entry.key_data.size() << " bytes)" << std::endl;
-    }
-
-    keyring_loaded_ = true;
-    return true;
+    // Native binary keyrings identify entries by names, while encrypted pages
+    // require the exact numeric ID in their TDE header. Do not invent that ID.
+    std::cerr << "[ERROR] Native binary keyrings do not expose page-compatible numeric key IDs; "
+              << "use a JSON or Vault export containing master_key_id" << std::endl;
+    return false;
 }
 
 void RecoveryEngine::set_detect_encryption(bool detect) {
