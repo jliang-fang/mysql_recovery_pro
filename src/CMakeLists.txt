@@ -279,7 +279,6 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_definitions(dbrecovery_innodb PRIVATE
         ENV_DEBUG_BUILD=1
-        DEBUG=1
     )
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
         target_compile_options(dbrecovery_innodb PRIVATE

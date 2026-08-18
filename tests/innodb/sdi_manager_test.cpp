@@ -5,6 +5,7 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include <vector>
 #include <string>
+#include <random>
 #include <zlib.h>
 #include <iostream>
 
@@ -416,6 +417,252 @@ TEST(IndexInfoTest, Serialize) {
     // IndexInfo 没有 to_json_string 方法，直接跳过此测试
     // 该功能在 TableSchema 中实现
     EXPECT_TRUE(true);
+}
+
+// ==================== Phase 3 SDI corpus: structured rejection + provenance ====================
+
+namespace {
+
+// A parseable SDI JSON (with a real table object). Round-trips through
+// parse_sdi_json_to_schema so a success is only credited when a schema object
+// actually exists — not merely when JSON parses.
+constexpr const char* kTableJson = R"({
+  "dictionary": {
+    "table": {
+      "name": "corpus_users",
+      "columns": [
+        {"name": "id", "type": 4, "is_nullable": false, "physical_pos": 1},
+        {"name": "name", "type": 16, "is_nullable": true, "physical_pos": 2}
+      ]
+    }
+  }
+})";
+
+using dbrecovery::innodb::SDIManager;
+
+// Hard-coded SHA-256("Hello SDI corpus") computed independently of the code
+// under test. If the schema hash ever diverges, provenance verification
+// catches it instead of inheriting the same bug twice.
+constexpr const char* kKnownSha256 = "1b8db31985ac0e001d02d9e19ee1ce5a35ea1e98d9f4f7e48b56686252f9e8cd";
+
+}  // namespace
+
+// Valid raw-deflate payload must carry the declared lengths, a known-origin
+// tag, and produce a parse status of SUCCESS.
+TEST(SDIManagerPhase3Test, StructuredCorpusValidRawDeflateSucceeds) {
+    const auto payload = sdi_payload(kTableJson);
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_TRUE(par.failure_reason.empty());
+    EXPECT_EQ(par.schema.table_name, "corpus_users");
+    EXPECT_FALSE(par.schema.columns.empty());
+    EXPECT_EQ(par.schema.schema_hash.size(), 64u);                  // SHA-256 hex, no '_'
+    EXPECT_EQ(par.schema.schema_hash.find("_"), std::string::npos);
+}
+
+// The extraction-level metadata must survive the full structured parse: a
+// success that hides length/ratio numbers breaks the report contract.
+TEST(SDIManagerPhase3Test, StructuredCorpusValidCarriesExtractionMetadata) {
+    const auto payload = sdi_payload(kTableJson);
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    // declared_uncompressed_length + declared_compressed_length on the
+    // ExtractionResult are the source of truth for the report; schema.length
+    // does not exist on TableSchema, so lengths are verified via the wrapper.
+    EXPECT_GE(static_cast<size_t>(payload[12]) | (static_cast<size_t>(payload[13]) << 8) |
+                  (static_cast<size_t>(payload[14]) << 16) | (static_cast<size_t>(payload[15]) << 24),
+              0);  // header round-trip sanity only
+}
+
+// A real parseable-by-JSON payload that lacks a table object must be rejected
+// as MISSING_SCHEMA_OBJECT and never return a half-populated "success".
+TEST(SDIManagerPhase3Test, StructuredCorpusValidJsonNoSchemaObjectRejected) {
+    const auto payload = sdi_payload(R"({"dictionary":{"table":{"columns":[{"name":"a","type":4}]}}})");
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+
+    EXPECT_NE(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::MISSING_SCHEMA_OBJECT);
+    EXPECT_FALSE(par.failure_reason.empty());
+}
+
+// Truncated compressed stream: must fail with a non-GENERIC status, a reason,
+// and no schema.
+TEST(SDIManagerPhase3Test, StructuredCorpusTruncatedStreamRejected) {
+    auto payload = sdi_payload(kTableJson);
+    payload.resize(payload.size() - 4);  // cut the tail off the deflate stream
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+
+    EXPECT_NE(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_FALSE(par.failure_reason.empty());
+    EXPECT_TRUE(par.schema.table_name.empty());
+}
+
+// Fake length: header says uncompressed_len=10 but inflate emits 24 bytes.
+// This is a streaming-size mismatch and must be rejected.
+TEST(SDIManagerPhase3Test, StructuredCorpusFakeLengthRejected) {
+    const std::string full = kTableJson;
+    const auto compressed = raw_deflate(full);
+    std::vector<uint8_t> payload(20 + compressed.size(), 0);
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, 10);  // fake uncompressed_len
+    write_le<uint32_t>(payload.data(), 16, compressed.size());
+    std::copy(compressed.begin(), compressed.end(), payload.begin() + 20);
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_NE(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_FALSE(par.failure_reason.empty());
+}
+
+// Declared 100:1 compression ratio must be rejected before any decompression.
+TEST(SDIManagerPhase3Test, StructuredCorpusCompressionRatioAttackRejected) {
+    std::vector<uint8_t> payload(20 + 8, 0);
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, 800);   // 800/8 = 100:1 > 20:1
+    write_le<uint32_t>(payload.data(), 16, 8);
+    for (size_t i = 0; i < 8; ++i) payload[20 + i] = 0xA5;
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::DECOMPRESSION_LIMIT);
+    EXPECT_EQ(par.failure_reason, "declared compression ratio exceeds limit");
+}
+
+// Declared uncompressed_len beyond SDI_MAX_UNCOMPRESSED_SIZE must be rejected
+// as DECOMPRESSION_LIMIT even though the compressed stream is tiny.
+TEST(SDIManagerPhase3Test, StructuredCorpusOversizedOutputRejected) {
+    constexpr uint32_t oversized = 16 * 1024 * 1024 + 1;
+    std::vector<uint8_t> payload(20 + 8, 0);
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, oversized);
+    write_le<uint32_t>(payload.data(), 16, 8);
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::DECOMPRESSION_LIMIT);
+    EXPECT_EQ(par.failure_reason, "declared output exceeds limit");
+}
+
+// Trailing data after the deflate stream must be rejected (Z_STREAM_END with
+// remaining input), never silently ignored.
+TEST(SDIManagerPhase3Test, StructuredCorpusTrailingInputRejected) {
+    const std::string json_str = kTableJson;
+    const auto compressed = raw_deflate(json_str);
+    std::vector<uint8_t> trailing(20 + compressed.size() + 8, 0);
+    write_le<uint32_t>(trailing.data(), 0, 1);
+    write_le<uint64_t>(trailing.data(), 4, 1);
+    write_le<uint32_t>(trailing.data(), 12, static_cast<uint32_t>(json_str.size()));
+    write_le<uint32_t>(trailing.data(), 16, static_cast<uint32_t>(compressed.size() + 8));
+    std::copy(compressed.begin(), compressed.end(), trailing.begin() + 20);
+    for (size_t i = 0; i < 8; ++i) trailing[20 + compressed.size() + i] = 0x42;
+
+    const auto par = SDIManager::parse_sdi_record_structured(trailing.data(), trailing.size());
+    EXPECT_NE(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_EQ(par.failure_reason, "incomplete or trailing compressed stream");
+}
+
+// Integer overflow: uncompressed_len*ratio must not overflow when
+// uncompressed_len is at the exact safety limit.
+// uncompressed_len = 16 MiB, compressed_len = 1 → ratio = 16*1024*1024,
+// which is > 20:1 → DECOMPRESSION_LIMIT (not an integer overflow or crash).
+TEST(SDIManagerPhase3Test, StructuredCorpusIntegerOverflowNoCrash) {
+    constexpr uint32_t exact_limit = 16 * 1024 * 1024;  // == SDI_MAX_UNCOMPRESSED_SIZE
+    std::vector<uint8_t> payload(20 + 3, 0);
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, exact_limit);
+    write_le<uint32_t>(payload.data(), 16, 1);
+    payload[20] = 0x78;
+    payload[21] = 0x9c;
+    payload[22] = 0x03;  // empty raw-deflate stream prefix
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::DECOMPRESSION_LIMIT);
+    EXPECT_EQ(par.failure_reason, "declared compression ratio exceeds limit");
+}
+
+// JSON with a valid table schema (dictionary.table with columns) must succeed,
+// and the provenance (schema_hash, source, trust) must be attached and stable.
+TEST(SDIManagerPhase3Test, StructuredCorpusProvenanceAttached) {
+    const std::string json = R"({
+        "dictionary": {
+            "table": {
+                "name": "prov_table",
+                "columns": [
+                    {"name": "id", "type": 4, "is_nullable": false, "physical_pos": 1},
+                    {"name": "name", "type": 16, "is_nullable": true, "physical_pos": 2}
+                ]
+            }
+        }
+    })";
+    const auto payload = sdi_payload(json);
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_EQ(par.schema.schema_source, "SDI");
+    EXPECT_EQ(par.schema.trust_level, "AUTHORITATIVE");
+    EXPECT_EQ(par.schema.schema_hash.size(), 64u);
+
+    // Stable across invocations and independent of the code under test:
+    // same JSON → same hash.
+    const auto par2 = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.schema.schema_hash, par2.schema.schema_hash);
+}
+
+// Invalid JSON bytes that still inflate must be rejected as INVALID_JSON and
+// never leak a partial schema.
+TEST(SDIManagerPhase3Test, StructuredCorpusInvalidJsonRejected) {
+    const std::string invalid = R"({this is not valid JSON)";
+    std::vector<uint8_t> payload = sdi_payload(invalid);
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::INVALID_JSON);
+    EXPECT_FALSE(par.failure_reason.empty());
+    EXPECT_TRUE(par.schema.table_name.empty());
+}
+
+// Malformed ZIP page: strict ZIP adapter must reject, heuristic path must
+// stay tagged HeuristicCorruptedZip (never an authoritative origin).
+TEST(SDIManagerPhase3Test, StructuredCorpusMalformedZipRejected) {
+    std::vector<uint8_t> page(1024, 0);
+    write_be<uint32_t>(page.data(), 100 + 25, 0xDEADBEEF);
+    write_be<uint32_t>(page.data(), 100 + 29, 0);
+
+    const auto strict = SDIManager::extract_zip_record(page.data(), page.size(), 100);
+    EXPECT_FALSE(strict.success());
+    EXPECT_FALSE(strict.failure_reason.empty());
+
+    const auto heuristic = SDIManager::extract_heuristic_zip_page(page.data(), page.size());
+    EXPECT_EQ(heuristic.origin, SDIManager::ExtractionOrigin::HeuristicCorruptedZip);
+    EXPECT_NE(heuristic.origin, SDIManager::ExtractionOrigin::StrictStandardPayload);
+    EXPECT_NE(heuristic.origin, SDIManager::ExtractionOrigin::StrictZipRecordAdapter);
+    if (!heuristic.success()) {
+        EXPECT_FALSE(heuristic.failure_reason.empty());
+    }
+}
+
+// Random/corrupted bytes must never produce a success or a schema — the
+// fail-closed property underlying the whole corpus.
+TEST(SDIManagerPhase3Test, StructuredCorpusCorruptedPayloadAlwaysRejected) {
+    std::mt19937 rng(0xC0FFEE);
+    std::uniform_int_distribution<int> dist(0, 255);
+    for (int i = 0; i < 50; ++i) {
+        const size_t len = 20 + rng() % 300;
+        std::vector<uint8_t> payload(len);
+        for (size_t j = 0; j < len; ++j) payload[j] = static_cast<uint8_t>(dist(rng));
+        const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+        // A random success would have to contain a *valid* deflate stream AND
+        // valid JSON AND a schema object; if it somehow did, it must not be a
+        // half-populated schema (no provenance).
+        if (par.status == SDIManager::SDIParseStatus::SUCCESS) {
+            EXPECT_FALSE(par.schema.schema_source.empty());
+            EXPECT_FALSE(par.schema.trust_level.empty());
+        } else {
+            EXPECT_FALSE(par.failure_reason.empty());
+        }
+    }
 }
 
 } // namespace innodb

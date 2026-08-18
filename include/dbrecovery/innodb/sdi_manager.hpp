@@ -45,6 +45,42 @@ public:
         bool success() const { return json_valid; }
     };
 
+    // ==================== Structured error types for parse_sdi_record ====================
+
+    enum class SDIParseStatus {
+        SUCCESS,
+        EMPTY_INPUT,
+        DECOMPRESSION_LIMIT,
+        CORRUPTED_STREAM,
+        INVALID_JSON,
+        MISSING_SCHEMA_OBJECT,
+        UNSUPPORTED_LAYOUT,
+        CATCH_ALL_FAILURE,
+    };
+
+    /// Human-readable label for each SDIParseStatus value.
+    static const char* status_string(SDIParseStatus s) {
+        switch (s) {
+            case SDIParseStatus::SUCCESS:              return "SUCCESS";
+            case SDIParseStatus::EMPTY_INPUT:           return "EMPTY_INPUT";
+            case SDIParseStatus::DECOMPRESSION_LIMIT:   return "DECOMPRESSION_LIMIT";
+            case SDIParseStatus::CORRUPTED_STREAM:      return "CORRUPTED_STREAM";
+            case SDIParseStatus::INVALID_JSON:          return "INVALID_JSON";
+            case SDIParseStatus::MISSING_SCHEMA_OBJECT: return "MISSING_SCHEMA_OBJECT";
+            case SDIParseStatus::UNSUPPORTED_LAYOUT:    return "UNSUPPORTED_LAYOUT";
+            case SDIParseStatus::CATCH_ALL_FAILURE:     return "CATCH_ALL_FAILURE";
+        }
+        return "UNKNOWN";
+    }
+
+    struct SDISchemaParseResult {
+        catalog::TableSchema schema;
+        SDIParseStatus status = SDIParseStatus::EMPTY_INPUT;
+        std::string failure_reason;
+    };
+
+    static SDISchemaParseResult parse_sdi_record_structured(const uint8_t* payload, size_t payload_len);
+
     static ExtractionResult extract_standard_payload(
         const uint8_t* payload, size_t payload_len,
         ExtractionOrigin origin = ExtractionOrigin::StrictStandardPayload) {
@@ -83,14 +119,16 @@ public:
 
         std::vector<uint8_t> decompressed(header.uncompressed_len);
         z_stream stream{};
+        // MySQL SDI stores the compressed payload as raw DEFLATE without a
+        // zlib or gzip wrapper.
+        if (inflateInit2(&stream, -15) != Z_OK) {
+            result.failure_reason = "deflate initialization failed";
+            return result;
+        }
         stream.next_in = const_cast<Bytef*>(payload + 20);
         stream.avail_in = static_cast<uInt>(header.compressed_len);
         stream.next_out = decompressed.data();
         stream.avail_out = static_cast<uInt>(decompressed.size());
-        if (inflateInit2(&stream, -15) != Z_OK) {
-            result.failure_reason = "raw-deflate initialization failed";
-            return result;
-        }
         const int status = inflate(&stream, Z_FINISH);
         const size_t actual_length = stream.total_out;
         const size_t remaining_input = stream.avail_in;

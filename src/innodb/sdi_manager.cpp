@@ -1,10 +1,13 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "nlohmann/json.hpp"
+#include <openssl/sha.h>
 #include <stdexcept>
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#include <sstream>
+#include <iomanip>
 
 using json = nlohmann::json;
 
@@ -21,338 +24,333 @@ namespace innodb {
 // Global verbose flag definition
 bool g_verbose = false;
 
-catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t payload_len) {
+namespace {
+
+/// Compute SHA-256 hex digest of a string (lower-case hex).
+std::string sha256_hex(const std::string& value) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(value.data()), value.size(), hash);
+    std::ostringstream oss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(hash[i]);
+    }
+    return oss.str();
+}
+
+/// Shared JSON-to-schema parsing logic (no decompression, no exception swallowing).
+catalog::TableSchema parse_sdi_json_to_schema(const nlohmann::json& json_obj) {
     catalog::TableSchema schema;
 
-    if (g_verbose) 
-    std::cerr << "[DEBUG] parse_sdi_record called with payload_len=" << payload_len << "\n";
-
-    if (payload_len < 20) {
-        if (g_verbose)         std::cerr << "[DEBUG] payload_len < 20, returning empty schema\n";
-        return schema;
-    }
-
-    // Reuse the safe extraction path from the header
-    auto sdi_json = extract_sdi_json(payload, payload_len);
-    if (!sdi_json) {
-        if (g_verbose)         std::cerr << "[DEBUG] extract_sdi_json returned nullopt\n";
-        return schema;
-    }
-
-    if (g_verbose)     std::cerr << "[DEBUG SDI JSON] " << sdi_json->substr(0, std::min(sdi_json->length(), (size_t)5000)) << "\n";
-
-    // Parse JSON
-    try {
-        auto json_obj = nlohmann::json::parse(*sdi_json);
-
-        // MySQL 8.0+ SDI uses "dictionary" as root object
-        if (json_obj.contains("dictionary")) {
-            auto dict = json_obj["dictionary"];
-            if (dict.contains("table")) {
-                auto table_json = dict["table"];
-                schema.table_name = table_json.value("name", "");
-
-                // Parse columns
-                if (table_json.contains("columns")) {
-                    uint32_t ordinal = 1;
-                    if (g_verbose)                     std::cerr << "[DEBUG] Found " << table_json["columns"].size() << " columns in SDI\n";
-                    for (const auto& col : table_json["columns"]) {
-                        catalog::ColumnInfo column_info;
-                        column_info.name = col.value("name", "");
-
-                        // Handle type field - can be string or number
-                        if (col.contains("type")) {
-                            if (col["type"].is_string()) {
-                                // Type is string like "LONGLONG", "VARCHAR", etc.
-                                // Map to InnoDB internal type IDs
-                                std::string type_str = col["type"].get<std::string>();
-                                // CRITICAL: Use InnoDB internal type IDs, NOT MySQL server type IDs!
-                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type_str='" << type_str << "'\n";
-                                if (type_str == "DECIMAL") column_info.mysql_type_id = 1;   // InnoDB DECIMAL
-                                else if (type_str == "TINY") column_info.mysql_type_id = 2;   // InnoDB TINY (TINYINT)
-                                else if (type_str == "SHORT") column_info.mysql_type_id = 3;  // InnoDB SHORT (SMALLINT)
-                                else if (type_str == "LONG") column_info.mysql_type_id = 4;   // InnoDB LONG (INT)
-                                else if (type_str == "FLOAT") column_info.mysql_type_id = 5;  // InnoDB FLOAT
-                                else if (type_str == "DOUBLE") column_info.mysql_type_id = 6; // InnoDB DOUBLE
-                                else if (type_str == "TIMESTAMP") column_info.mysql_type_id = 8;  // InnoDB TIMESTAMP
-                                else if (type_str == "LONGLONG") column_info.mysql_type_id = 9;  // InnoDB LONGLONG (BIGINT)
-                                else if (type_str == "INT24") column_info.mysql_type_id = 10; // InnoDB INT24 (MEDIUMINT)
-                                else if (type_str == "DATE") column_info.mysql_type_id = 11; // InnoDB DATE
-                                else if (type_str == "TIME") column_info.mysql_type_id = 12; // InnoDB TIME
-                                else if (type_str == "DATETIME") column_info.mysql_type_id = 13;  // InnoDB DATETIME
-                                else if (type_str == "YEAR") column_info.mysql_type_id = 14; // InnoDB YEAR
-                                else if (type_str == "NEWDATE") column_info.mysql_type_id = 15;  // InnoDB NEWDATE
-                                else if (type_str == "VARCHAR") column_info.mysql_type_id = 16;  // InnoDB VARCHAR
-                                else if (type_str == "BIT") column_info.mysql_type_id = 17;  // InnoDB BIT
-                                else if (type_str == "TIMESTAMP2") column_info.mysql_type_id = 18;  // InnoDB TIMESTAMP2
-                                else if (type_str == "DATETIME2") column_info.mysql_type_id = 19;  // InnoDB DATETIME2
-                                else if (type_str == "TIME2") column_info.mysql_type_id = 20;  // InnoDB TIME2
-                                else if (type_str == "NEWDECIMAL") column_info.mysql_type_id = 21;  // InnoDB NEWDECIMAL
-                                else if (type_str == "ENUM") column_info.mysql_type_id = 22;  // InnoDB ENUM
-                                else if (type_str == "SET") column_info.mysql_type_id = 23;   // InnoDB SET
-                                else if (type_str == "TINY_BLOB") column_info.mysql_type_id = 24;  // InnoDB TINY_BLOB
-                                else if (type_str == "MEDIUM_BLOB") column_info.mysql_type_id = 25;  // InnoDB MEDIUM_BLOB
-                                else if (type_str == "LONG_BLOB") column_info.mysql_type_id = 26;  // InnoDB LONG_BLOB
-                                else if (type_str == "BLOB") column_info.mysql_type_id = 27;  // InnoDB BLOB (TEXT)
-                                else if (type_str == "VAR_STRING") column_info.mysql_type_id = 28;  // InnoDB VAR_STRING
-                                else if (type_str == "STRING") column_info.mysql_type_id = 29;  // InnoDB STRING (CHAR)
-                                else if (type_str == "GEOMETRY") column_info.mysql_type_id = 30;  // InnoDB GEOMETRY
-                                else if (type_str == "JSON") column_info.mysql_type_id = 31;  // InnoDB JSON
-                                else if (type_str == "VECTOR") column_info.mysql_type_id = 32;  // InnoDB VECTOR
-                                // Legacy MySQL server type names (fallback)
-                                else if (type_str == "TINYINT") column_info.mysql_type_id = 2;
-                                else if (type_str == "SMALLINT") column_info.mysql_type_id = 3;
-                                else if (type_str == "INT") column_info.mysql_type_id = 4;
-                                else if (type_str == "BIGINT") column_info.mysql_type_id = 9;
-                                else if (type_str == "CHAR") column_info.mysql_type_id = 29;
-                                else if (type_str == "TEXT") column_info.mysql_type_id = 27;
-                                else if (type_str == "LONGBLOB") column_info.mysql_type_id = 26;
-                                else column_info.mysql_type_id = 0;
-                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Mapped to mysql_type_id=" << static_cast<int>(column_info.mysql_type_id) << "\n";
-                            } else {
-                                column_info.mysql_type_id = col.value("type", 0);
-                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' numeric type=" << static_cast<int>(column_info.mysql_type_id) << "\n";
-                            }
-                        }
-                        
-                        column_info.is_nullable = col.value("is_nullable", true); // SDI stores true when nullable
-                        bool is_unsigned = col.value("is_unsigned", false);
-                        column_info.is_signed = !is_unsigned;
-
-                        if (col.contains("default_value")) {
-                            column_info.default_value = col["default_value"].get<std::string>();
-                        }
-
-                        if (col.contains("length")) {
-                            column_info.column_length = col["length"];
-                        }
-
-                        // CRITICAL FIX: Read charset_id and collation_id independently
-                        // collation_id=63 indicates BINARY charset (for BINARY, VARBINARY, BLOB)
-                        if (col.contains("charset_id")) {
-                            column_info.charset_id = col["charset_id"];
-                        }
-                        if (col.contains("collation_id")) {
-                            column_info.collation_id = col["collation_id"];
-                            // Debug output for binary columns
-                            if (column_info.collation_id == 63) {
-                                if (g_verbose)                                 std::cerr << "[DEBUG SDI] Binary column detected: " << column_info.name
-                                          << " collation_id=" << column_info.collation_id << "\n";
-                            }
-                        }
-
-                        // Parse numeric precision/scale for DECIMAL types
-                        // SDI uses "numeric_precision" and "numeric_scale"
-                        if (col.contains("numeric_precision")) {
-                            column_info.numeric_precision = col["numeric_precision"];
-                        }
-                        if (col.contains("numeric_scale")) {
-                            column_info.numeric_scale = col["numeric_scale"];
-                        }
-                        // Also check for "precision" and "scale" as fallback
-                        if (col.contains("precision") && column_info.numeric_precision == 0) {
-                            column_info.numeric_precision = col["precision"];
-                        }
-                        if (col.contains("scale") && column_info.numeric_scale == 0) {
-                            column_info.numeric_scale = col["scale"];
-                        }
-
-                        // Parse datetime_precision for temporal types (DATETIME2, TIMESTAMP2, TIME2)
-                        // ✅ 修复：检查多个可能的字段名
-                        // 注意: SDI JSON 中可能使用 datetime_precision 或其他名称
-
-                        if (col.contains("datetime_precision")) {
-                            if (!col["datetime_precision"].is_null()) {
-                                column_info.datetime_precision = col["datetime_precision"].get<int>();
-                            }
-                        } else if (col.contains("datetimePrec")) {
-                            column_info.datetime_precision = col["datetimePrec"].get<int>();
-                        } else if (col.contains("decimals")) {
-                            // Some MySQL versions use "decimals" for fractional seconds precision
-                            column_info.datetime_precision = col["decimals"].get<int>();
-                        }
-
-                        // 检查 datetime_precision_null 标志
-                        if (col.contains("datetime_precision_null")) {
-                            int null_flag = col["datetime_precision_null"].get<int>();
-                            if (null_flag == 1) {
-                                // 精度为空，使用默认值 0
-                                column_info.datetime_precision = 0;
-                            }
-                        }
-
-                        // Parse ENUM/SET elements (stored as base64 in SDI)
-                        // ✅ 修复：区分 ENUM 和 SET，将元素放入正确的列表
-                        if (col.contains("elements") && col["elements"].is_array()) {
-                            static const std::string base64_chars =
-                                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                            std::vector<std::string>* target_values =
-                                (column_info.mysql_type_id == 23) ? &column_info.set_values : &column_info.enum_values;
-                            for (const auto& elem : col["elements"]) {
-                                if (elem.contains("name")) {
-                                    std::string encoded = elem["name"].get<std::string>();
-                                    // Simple base64 decode
-                                    std::string decoded;
-                                    std::vector<int> T(256, -1);
-                                    for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
-                                    int val = 0, valb = -8;
-                                    for (unsigned char c : encoded) {
-                                        if (T[c] == -1) break;
-                                        val = (val << 6) + T[c];
-                                        valb += 6;
-                                        if (valb >= 0) {
-                                            decoded.push_back(char((val >> valb) & 0xFF));
-                                            valb -= 8;
-                                        }
-                                    }
-                                    target_values->push_back(decoded);
-                                }
-                            }
-                            if (g_verbose)                             std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
-                                      << target_values->size() << " elements (type="
-                                      << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")\n";
-                        }
-
-                        // Parse physical_pos - critical for column storage order
-                        // InnoDB stores column DATA by physical_pos
-                        // But variable-length SIZES are stored by ordinal_position (schema definition order)
-                        if (col.contains("physical_pos")) {
-                            column_info.physical_pos = col["physical_pos"].get<uint32_t>();
-                        }
-                        // Also read ordinal_position for variable-length size byte ordering
-                        // This is the schema definition order (CREATE TABLE column order)
-                        if (col.contains("ordinal_position")) {
-                            column_info.ordinal = col["ordinal_position"].get<uint32_t>();
-                        }
-                        // Fallback: if physical_pos not present, use ordinal_position
-                        if (column_info.physical_pos == 0 && col.contains("ordinal_position")) {
-                            column_info.physical_pos = col["ordinal_position"].get<uint32_t>();
-                        }
-
-                        // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
-                        // These are internal columns not part of user table schema
-                        if (column_info.name == "DB_TRX_ID" || column_info.name == "DB_ROLL_PTR" || column_info.name == "DB_ROW_ID") {
-                            continue;
-                        }
-
-                        // If ordinal wasn't set from SDI, use the iteration counter
-                        if (column_info.ordinal == 0) {
-                            column_info.ordinal = ordinal;
-                        }
-                        schema.columns[ordinal++] = column_info;
-                    }
-                }
-
-                // Sort columns by physical_pos (InnoDB storage order)
-                // CRITICAL: InnoDB stores columns by physical_pos, NOT by "fixed-first then variable"!
-                // The physical_pos field already reflects the actual storage order determined by InnoDB.
-                // We must NOT reorder fixed/variable columns - just sort by physical_pos.
-                if (!schema.columns.empty()) {
-                    std::vector<std::pair<uint32_t, catalog::ColumnInfo>> cols_vec;
-                    for (const auto& p : schema.columns) {
-                        cols_vec.push_back(p);
-                    }
-                    // Sort by physical_pos only (this is the actual InnoDB storage order)
-                    std::sort(cols_vec.begin(), cols_vec.end(),
-                        [](const auto& a, const auto& b) {
-                            return a.second.physical_pos < b.second.physical_pos;
-                        });
-                    schema.columns.clear();
-                    uint32_t new_ordinal = 1;
-                    for (const auto& p : cols_vec) {
-                        if (g_verbose)                         std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
-                                  << " physical_pos=" << p.second.physical_pos
-                                  << " ordinal=" << p.second.ordinal
-                                  << " type=" << p.second.mysql_type_id
-                                  << " is_fixed=" << catalog::TableSchema::is_fixed_length(p.second) << "\n";
-                        schema.columns[new_ordinal++] = p.second;
-                    }
-                }
-
-                // Parse indexes
-                if (table_json.contains("indexes")) {
-                    for (const auto& idx : table_json["indexes"]) {
-                        catalog::IndexInfo index_info;
-                        index_info.name = idx.value("name", "");
-                        index_info.is_primary = idx.value("is_primary", false);
-                        index_info.is_unique = idx.value("is_unique", false);
-
-                        if (idx.contains("columns")) {
-                            for (const auto& col : idx["columns"]) {
-                                index_info.columns.push_back(col.get<std::string>());
-                            }
-                        }
-
-                        schema.indexes.push_back(index_info);
-                    }
-                }
-            }
-        } else if (json_obj.contains("schema")) {
-            // Legacy format
-            schema.table_name = json_obj["schema"].value("name", "");
-        }
-        if (json_obj.contains("table")) {
-            // Fallback format
-            auto table_json = json_obj["table"];
-            schema.table_name = table_json.value("name", schema.table_name);
+    // MySQL 8.0+ SDI uses "dictionary" as root object
+    if (json_obj.contains("dictionary")) {
+        auto dict = json_obj["dictionary"];
+        if (dict.contains("table")) {
+            auto table_json = dict["table"];
+            schema.table_name = table_json.value("name", "");
 
             // Parse columns
             if (table_json.contains("columns")) {
                 uint32_t ordinal = 1;
+                if (g_verbose)                     std::cerr << "[DEBUG] Found " << table_json["columns"].size() << " columns in SDI\n";
                 for (const auto& col : table_json["columns"]) {
                     catalog::ColumnInfo column_info;
                     column_info.name = col.value("name", "");
-                    column_info.mysql_type_id = col.value("type", 0);
-                    column_info.is_nullable = col.value("is_nullable", true); // SDI stores true when nullable
-                        bool is_unsigned = col.value("is_unsigned", false);
-                        column_info.is_signed = !is_unsigned;
+
+                    // Handle type field - can be string or number
+                    if (col.contains("type")) {
+                        if (col["type"].is_string()) {
+                            std::string type_str = col["type"].get<std::string>();
+                            if (g_verbose)                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' type_str='" << type_str << "'\n";
+                            if (type_str == "DECIMAL") column_info.mysql_type_id = 1;
+                            else if (type_str == "TINY") column_info.mysql_type_id = 2;
+                            else if (type_str == "SHORT") column_info.mysql_type_id = 3;
+                            else if (type_str == "LONG") column_info.mysql_type_id = 4;
+                            else if (type_str == "FLOAT") column_info.mysql_type_id = 5;
+                            else if (type_str == "DOUBLE") column_info.mysql_type_id = 6;
+                            else if (type_str == "TIMESTAMP") column_info.mysql_type_id = 8;
+                            else if (type_str == "LONGLONG") column_info.mysql_type_id = 9;
+                            else if (type_str == "INT24") column_info.mysql_type_id = 10;
+                            else if (type_str == "DATE") column_info.mysql_type_id = 11;
+                            else if (type_str == "TIME") column_info.mysql_type_id = 12;
+                            else if (type_str == "DATETIME") column_info.mysql_type_id = 13;
+                            else if (type_str == "YEAR") column_info.mysql_type_id = 14;
+                            else if (type_str == "NEWDATE") column_info.mysql_type_id = 15;
+                            else if (type_str == "VARCHAR") column_info.mysql_type_id = 16;
+                            else if (type_str == "BIT") column_info.mysql_type_id = 17;
+                            else if (type_str == "TIMESTAMP2") column_info.mysql_type_id = 18;
+                            else if (type_str == "DATETIME2") column_info.mysql_type_id = 19;
+                            else if (type_str == "TIME2") column_info.mysql_type_id = 20;
+                            else if (type_str == "NEWDECIMAL") column_info.mysql_type_id = 21;
+                            else if (type_str == "ENUM") column_info.mysql_type_id = 22;
+                            else if (type_str == "SET") column_info.mysql_type_id = 23;
+                            else if (type_str == "TINY_BLOB") column_info.mysql_type_id = 24;
+                            else if (type_str == "MEDIUM_BLOB") column_info.mysql_type_id = 25;
+                            else if (type_str == "LONG_BLOB") column_info.mysql_type_id = 26;
+                            else if (type_str == "BLOB") column_info.mysql_type_id = 27;
+                            else if (type_str == "VAR_STRING") column_info.mysql_type_id = 28;
+                            else if (type_str == "STRING") column_info.mysql_type_id = 29;
+                            else if (type_str == "GEOMETRY") column_info.mysql_type_id = 30;
+                            else if (type_str == "JSON") column_info.mysql_type_id = 31;
+                            else if (type_str == "VECTOR") column_info.mysql_type_id = 32;
+                            else if (type_str == "TINYINT") column_info.mysql_type_id = 2;
+                            else if (type_str == "SMALLINT") column_info.mysql_type_id = 3;
+                            else if (type_str == "INT") column_info.mysql_type_id = 4;
+                            else if (type_str == "BIGINT") column_info.mysql_type_id = 9;
+                            else if (type_str == "CHAR") column_info.mysql_type_id = 29;
+                            else if (type_str == "TEXT") column_info.mysql_type_id = 27;
+                            else if (type_str == "LONGBLOB") column_info.mysql_type_id = 26;
+                            else column_info.mysql_type_id = 0;
+                            if (g_verbose)                                 std::cerr << "[DEBUG SDI] Mapped to mysql_type_id=" << static_cast<int>(column_info.mysql_type_id) << "\n";
+                        } else {
+                            column_info.mysql_type_id = col.value("type", 0);
+                            if (g_verbose)                                 std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' numeric type=" << static_cast<int>(column_info.mysql_type_id) << "\n";
+                        }
+                    }
+
+                    column_info.is_nullable = col.value("is_nullable", true);
+                    bool is_unsigned = col.value("is_unsigned", false);
+                    column_info.is_signed = !is_unsigned;
 
                     if (col.contains("default_value")) {
                         column_info.default_value = col["default_value"].get<std::string>();
                     }
-
                     if (col.contains("length")) {
                         column_info.column_length = col["length"];
                     }
-
                     if (col.contains("charset_id")) {
                         column_info.charset_id = col["charset_id"];
-                        column_info.collation_id = col.value("collation_id", 255);
                     }
-
-                    // Skip InnoDB system columns (DB_TRX_ID, DB_ROLL_PTR, DB_ROW_ID)
-                    // These are internal columns not part of user table schema
+                    if (col.contains("collation_id")) {
+                        column_info.collation_id = col["collation_id"];
+                        if (column_info.collation_id == 63 && g_verbose) {
+                            std::cerr << "[DEBUG SDI] Binary column detected: " << column_info.name
+                                      << " collation_id=" << column_info.collation_id << "\n";
+                        }
+                    }
+                    if (col.contains("numeric_precision")) {
+                        column_info.numeric_precision = col["numeric_precision"];
+                    }
+                    if (col.contains("numeric_scale")) {
+                        column_info.numeric_scale = col["numeric_scale"];
+                    }
+                    if (col.contains("precision") && column_info.numeric_precision == 0) {
+                        column_info.numeric_precision = col["precision"];
+                    }
+                    if (col.contains("scale") && column_info.numeric_scale == 0) {
+                        column_info.numeric_scale = col["scale"];
+                    }
+                    if (col.contains("datetime_precision")) {
+                        if (!col["datetime_precision"].is_null()) {
+                            column_info.datetime_precision = col["datetime_precision"].get<int>();
+                        }
+                    } else if (col.contains("datetimePrec")) {
+                        column_info.datetime_precision = col["datetimePrec"].get<int>();
+                    } else if (col.contains("decimals")) {
+                        column_info.datetime_precision = col["decimals"].get<int>();
+                    }
+                    if (col.contains("datetime_precision_null")) {
+                        if (col["datetime_precision_null"].get<int>() == 1) {
+                            column_info.datetime_precision = 0;
+                        }
+                    }
+                    if (col.contains("elements") && col["elements"].is_array()) {
+                        static const std::string base64_chars =
+                            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                        std::vector<std::string>* target_values =
+                            (column_info.mysql_type_id == 23) ? &column_info.set_values : &column_info.enum_values;
+                        for (const auto& elem : col["elements"]) {
+                            if (elem.contains("name")) {
+                                std::string encoded = elem["name"].get<std::string>();
+                                std::string decoded;
+                                std::vector<int> T(256, -1);
+                                for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+                                int val = 0, valb = -8;
+                                for (unsigned char c : encoded) {
+                                    if (T[c] == -1) break;
+                                    val = (val << 6) + T[c];
+                                    valb += 6;
+                                    if (valb >= 0) {
+                                        decoded.push_back(char((val >> valb) & 0xFF));
+                                        valb -= 8;
+                                    }
+                                }
+                                target_values->push_back(decoded);
+                            }
+                        }
+                        if (g_verbose)                             std::cerr << "[DEBUG SDI] Column '" << column_info.name << "' has "
+                                      << target_values->size() << " elements (type="
+                                      << (column_info.mysql_type_id == 23 ? "SET" : "ENUM") << ")\n";
+                    }
+                    if (col.contains("physical_pos")) {
+                        column_info.physical_pos = col["physical_pos"].get<uint32_t>();
+                    }
+                    if (col.contains("ordinal_position")) {
+                        column_info.ordinal = col["ordinal_position"].get<uint32_t>();
+                    }
+                    if (column_info.physical_pos == 0 && col.contains("ordinal_position")) {
+                        column_info.physical_pos = col["ordinal_position"].get<uint32_t>();
+                    }
                     if (column_info.name == "DB_TRX_ID" || column_info.name == "DB_ROLL_PTR" || column_info.name == "DB_ROW_ID") {
                         continue;
                     }
-
+                    if (column_info.ordinal == 0) {
+                        column_info.ordinal = ordinal;
+                    }
                     schema.columns[ordinal++] = column_info;
                 }
             }
 
-            // Parse indexes
+            if (!schema.columns.empty()) {
+                std::vector<std::pair<uint32_t, catalog::ColumnInfo>> cols_vec;
+                for (const auto& p : schema.columns) {
+                    cols_vec.push_back(p);
+                }
+                std::sort(cols_vec.begin(), cols_vec.end(),
+                    [](const auto& a, const auto& b) {
+                        return a.second.physical_pos < b.second.physical_pos;
+                    });
+                schema.columns.clear();
+                uint32_t new_ordinal = 1;
+                for (const auto& p : cols_vec) {
+                    if (g_verbose)                         std::cerr << "[DEBUG SDI SORT] Column '" << p.second.name << "' new_ordinal=" << new_ordinal
+                                  << " physical_pos=" << p.second.physical_pos
+                                  << " ordinal=" << p.second.ordinal
+                                  << " type=" << p.second.mysql_type_id << "\n";
+                    schema.columns[new_ordinal++] = p.second;
+                }
+            }
+
             if (table_json.contains("indexes")) {
                 for (const auto& idx : table_json["indexes"]) {
                     catalog::IndexInfo index_info;
                     index_info.name = idx.value("name", "");
                     index_info.is_primary = idx.value("is_primary", false);
                     index_info.is_unique = idx.value("is_unique", false);
-
                     if (idx.contains("columns")) {
                         for (const auto& col : idx["columns"]) {
                             index_info.columns.push_back(col.get<std::string>());
                         }
                     }
-
                     schema.indexes.push_back(index_info);
                 }
             }
         }
-    } catch (...) {
-        // SDI JSON 解析失败，返回空 schema
+    } else if (json_obj.contains("schema")) {
+        schema.table_name = json_obj["schema"].value("name", "");
+    }
+    if (json_obj.contains("table")) {
+        auto table_json = json_obj["table"];
+        schema.table_name = table_json.value("name", schema.table_name);
+        if (table_json.contains("columns")) {
+            uint32_t ordinal = 1;
+            for (const auto& col : table_json["columns"]) {
+                catalog::ColumnInfo column_info;
+                column_info.name = col.value("name", "");
+                column_info.mysql_type_id = col.value("type", 0);
+                column_info.is_nullable = col.value("is_nullable", true);
+                bool is_unsigned = col.value("is_unsigned", false);
+                column_info.is_signed = !is_unsigned;
+                if (col.contains("default_value")) {
+                    column_info.default_value = col["default_value"].get<std::string>();
+                }
+                if (col.contains("length")) {
+                    column_info.column_length = col["length"];
+                }
+                if (col.contains("charset_id")) {
+                    column_info.charset_id = col["charset_id"];
+                    column_info.collation_id = col.value("collation_id", 255);
+                }
+                if (column_info.name == "DB_TRX_ID" || column_info.name == "DB_ROLL_PTR" || column_info.name == "DB_ROW_ID") {
+                    continue;
+                }
+                schema.columns[ordinal++] = column_info;
+            }
+        }
+        if (table_json.contains("indexes")) {
+            for (const auto& idx : table_json["indexes"]) {
+                catalog::IndexInfo index_info;
+                index_info.name = idx.value("name", "");
+                index_info.is_primary = idx.value("is_primary", false);
+                index_info.is_unique = idx.value("is_unique", false);
+                if (idx.contains("columns")) {
+                    for (const auto& col : idx["columns"]) {
+                        index_info.columns.push_back(col.get<std::string>());
+                    }
+                }
+                schema.indexes.push_back(index_info);
+            }
+        }
     }
 
     return schema;
+}
+
+} // anonymous namespace
+
+catalog::TableSchema SDIManager::parse_sdi_record(const uint8_t* payload, size_t payload_len) {
+    return parse_sdi_record_structured(payload, payload_len).schema;
+}
+
+SDIManager::SDISchemaParseResult SDIManager::parse_sdi_record_structured(const uint8_t* payload, size_t payload_len) {
+    SDISchemaParseResult result;
+
+    if (g_verbose)
+        std::cerr << "[DEBUG] parse_sdi_record_structured called with payload_len=" << payload_len << "\n";
+
+    if (!payload || payload_len < 20) {
+        result.status = SDIParseStatus::EMPTY_INPUT;
+        result.failure_reason = "payload too small for SDI header";
+        return result;
+    }
+
+    // Use the standard extraction path for decompression and validation.
+    auto extraction = extract_standard_payload(payload, payload_len);
+    if (!extraction.success()) {
+        // Map the extraction failure_reason to a structured status.
+        if (extraction.failure_reason == "payload too small") {
+            result.status = SDIParseStatus::EMPTY_INPUT;
+        } else if (extraction.failure_reason == "declared output exceeds limit" ||
+                   extraction.failure_reason == "declared compression ratio exceeds limit") {
+            result.status = SDIParseStatus::DECOMPRESSION_LIMIT;
+        } else if (extraction.failure_reason == "invalid JSON") {
+            result.status = SDIParseStatus::INVALID_JSON;
+        } else {
+            result.status = SDIParseStatus::CORRUPTED_STREAM;
+        }
+        result.failure_reason = extraction.failure_reason;
+        return result;
+    }
+
+    // Parse JSON and extract the table schema.
+    try {
+        auto json_obj = nlohmann::json::parse(extraction.json);
+        result.schema = parse_sdi_json_to_schema(json_obj);
+        result.schema.schema_hash = sha256_hex(extraction.json);
+        result.schema.schema_source = "SDI";
+        result.schema.trust_level = "AUTHORITATIVE";
+
+        if (result.schema.table_name.empty() || result.schema.columns.empty()) {
+            result.status = SDIParseStatus::MISSING_SCHEMA_OBJECT;
+            result.failure_reason = "SDI JSON parsed but no table schema found";
+            return result;
+        }
+
+        result.status = SDIParseStatus::SUCCESS;
+        return result;
+    } catch (const nlohmann::json::exception& e) {
+        result.status = SDIParseStatus::INVALID_JSON;
+        result.failure_reason = std::string("JSON parse error: ") + e.what();
+        return result;
+    } catch (const std::exception& e) {
+        result.status = SDIParseStatus::CATCH_ALL_FAILURE;
+        result.failure_reason = std::string("unexpected error: ") + e.what();
+        return result;
+    } catch (...) {
+        result.status = SDIParseStatus::CATCH_ALL_FAILURE;
+        result.failure_reason = "unknown error during SDI JSON parsing";
+        return result;
+    }
 }
 
 } // namespace innodb
