@@ -434,9 +434,16 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::recover_from_u
             std::to_string(schema.table_id),
             schema.table_id);  // Use table_id for filtering
 
-        // Convert HeuristicRecord to map format
+        // Convert HeuristicRecord to map format with forensic provenance marker
         for (const auto& hr : heuristic_records) {
             std::map<std::string, std::string> record;
+
+            // Forensic provenance: these records come from heuristic undo log
+            // parsing, not from pointer-verified version chain recovery.
+            // They must never be treated as FLASHBACK_INSERT or authoritative
+            // row history by downstream consumers.
+            record["_undo_action"] = "FORENSIC_LEGACY_UNDO";
+            record["_provenance"] = "heuristic_undo";
 
             size_t col_idx = 0;
             for (const auto& field : hr.fields) {

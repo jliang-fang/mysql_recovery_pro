@@ -364,6 +364,9 @@ public:
     // SDI 解析
     std::optional<catalog::TableSchema> parse_sdi();
 
+    /// Structured parse with provenance metadata (schema_hash, schema_source, trust_level).
+    std::optional<catalog::TableSchema> parse_sdi_structured();
+
     // 加密支持
     bool is_encrypted() const { return is_encrypted_; }
 

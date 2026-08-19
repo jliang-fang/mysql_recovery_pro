@@ -70,6 +70,19 @@ enum class ScanStrategy : uint8_t {
     FRAGMENT     = 4
 };
 
+[[nodiscard]] constexpr bool is_structured_exportable(ScanStrategy strategy) {
+    switch (strategy) {
+        case ScanStrategy::BPLUS_TREE:
+        case ScanStrategy::PAGE_DIR:
+        case ScanStrategy::LINEAR_SCAN:
+            return true;
+        case ScanStrategy::BRUTE_FORCE:
+        case ScanStrategy::FRAGMENT:
+            return false;
+    }
+    return false;
+}
+
 // ==================== Data Structures ====================
 
 struct SalvagedRecord {

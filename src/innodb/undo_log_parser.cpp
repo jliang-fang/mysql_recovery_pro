@@ -687,11 +687,20 @@ std::vector<UndoLogEntry> UndoLogParser::parse_all_undo_tablespaces(
 std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
     const std::string& ibdata_path,
     uint32_t start_page_no,
-    uint32_t start_offset) {
+    uint32_t start_offset,
+    UndoFormatProfile profile) {
 
     constexpr size_t DEFAULT_PAGE_SIZE = 16384;
     std::vector<UndoLogEntry> chain;
     std::set<std::pair<uint32_t, uint32_t>> visited;
+
+    // Fail-closed: no resolved format evidence → refuse to guess widths.
+    if (profile == UndoFormatProfile::UNRESOLVED) {
+        return chain;
+    }
+
+    const size_t roll_ptr_width =
+        (profile == UndoFormatProfile::MYSQL8_7BYTE) ? 7 : 6;
 
     uint32_t current_page = start_page_no;
     uint32_t current_offset = start_offset;
@@ -789,14 +798,19 @@ std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
 
         if (header.type == TRX_UNDO_INSERT || header.type == TRX_UNDO_INS_REC) break;
 
-        // Follow the legacy six-byte previous-pointer representation used here.
+        // Follow the previous-pointer using the resolved profile width.
+        // The storage format is big-endian: 6 bytes (LEGACY) or 7 bytes (8.0+).
         const size_t prev_ptr_offset = current_offset + 6;
-        if (prev_ptr_offset > page_free || page_free - prev_ptr_offset < 6) break;
+        if (prev_ptr_offset > page_free || page_free - prev_ptr_offset < roll_ptr_width) break;
 
-        const uint32_t next_page = read_le<uint32_t>(
-            page_data.data(), prev_ptr_offset);
-        const uint32_t next_offset = read_le<uint16_t>(
-            page_data.data(), prev_ptr_offset + 4);
+        auto prev_ptr = RollPtrDecoder::decode_storage(
+            page_data.data() + prev_ptr_offset,
+            page_free - prev_ptr_offset,
+            profile);
+        if (!prev_ptr.is_valid()) break;
+
+        const uint32_t next_page = prev_ptr.page_no;
+        const uint32_t next_offset = prev_ptr.offset;
         if (next_page == 0 || next_page == FIL_NULL ||
             next_page >= page_count || next_offset >= DEFAULT_PAGE_SIZE) {
             break;

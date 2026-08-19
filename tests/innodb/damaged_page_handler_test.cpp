@@ -509,6 +509,136 @@ TEST(DamagedPageHandlerTest, RepairResultWorse) {
     EXPECT_FALSE(result.is_fully_repaired());
 }
 
+// ==================== Provenance Gating Tests ====================
+
+TEST(DamagedPageHandlerTest, ProvenanceIsStructuredExportablePredicate) {
+    // Structured-exportable strategies
+    EXPECT_TRUE(is_structured_exportable(ScanStrategy::BPLUS_TREE));
+    EXPECT_TRUE(is_structured_exportable(ScanStrategy::PAGE_DIR));
+    EXPECT_TRUE(is_structured_exportable(ScanStrategy::LINEAR_SCAN));
+
+    // Evidence-only strategies
+    EXPECT_FALSE(is_structured_exportable(ScanStrategy::BRUTE_FORCE));
+    EXPECT_FALSE(is_structured_exportable(ScanStrategy::FRAGMENT));
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceUnknownEnumFailClosed) {
+    // Unknown enum values must fail closed (not structured-exportable)
+    auto unknown = static_cast<ScanStrategy>(99);
+    EXPECT_FALSE(is_structured_exportable(unknown));
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceHealthyPageRecordsStructured) {
+    // LEVEL_0_HEALTHY → BPLUS_TREE → all records are structured-exportable
+    auto page = create_healthy_page();
+    DamagedPageHandler handler;
+    auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
+
+    const auto& stats = handler.get_stats();
+    // All records from BPLUS_TREE should be structured
+    EXPECT_EQ(stats.structured_exportable_records, stats.total_records_recovered);
+    // No evidence-only records from a healthy page
+    EXPECT_EQ(stats.evidence_only_records, 0u);
+    // High confidence should be a subset of structured
+    EXPECT_LE(stats.high_confidence_records, stats.structured_exportable_records);
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceCatastrophicPageEvidenceOnly) {
+    // LEVEL_4_CATASTROPHIC → FRAGMENT → all records are evidence-only
+    auto page = create_damaged_page(LEVEL_4_CATASTROPHIC);
+    DamagedPageHandler handler;
+    auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
+
+    const auto& stats = handler.get_stats();
+    // FRAGMENT records must not be counted as structured recovery
+    EXPECT_EQ(stats.structured_exportable_records, 0u);
+    // Any records found by fragment scan are evidence-only
+    // total_records_recovered should also be 0 since BRUTE_FORCE/FRAGMENT
+    // are not counted in total_records_recovered per the new gating
+    EXPECT_EQ(stats.total_records_recovered, 0u);
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceSeverePageNoRepair) {
+    // LEVEL_3_SEVERE with repair disabled → BRUTE_FORCE → evidence-only
+    auto page = create_damaged_page(LEVEL_3_SEVERE);
+    DamagedPageHandler handler;
+    handler.set_enable_repair(false);
+    auto [repair_result, salvage_result] = handler.handle_page(page.data(), 0, page.size());
+
+    const auto& stats = handler.get_stats();
+    // BRUTE_FORCE records must not be counted as structured recovery
+    EXPECT_EQ(stats.structured_exportable_records, 0u);
+    EXPECT_EQ(stats.total_records_recovered, 0u);
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceMixedPages) {
+    DamagedPageHandler handler;
+    handler.set_enable_repair(false);  // Prevent repair from changing strategies
+
+    auto healthy = create_healthy_page(0);
+    auto catastrophic = create_damaged_page(LEVEL_4_CATASTROPHIC);
+
+    handler.handle_page(healthy.data(), 0, healthy.size());
+    handler.handle_page(catastrophic.data(), 1, catastrophic.size());
+
+    const auto& stats = handler.get_stats();
+    EXPECT_EQ(stats.pages_handled, 2u);
+
+    // Structured records come only from the healthy page
+    // Evidence-only records come only from the catastrophic page
+    EXPECT_EQ(stats.total_records_recovered, stats.structured_exportable_records);
+    // At least one page should have evidence-only records (catastrophic)
+    // Note: healthy page may produce 0 records, so evidence could be >= 0
+    EXPECT_LE(stats.structured_exportable_records, stats.total_records_recovered + stats.evidence_only_records);
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceReportHasStructuredAndEvidence) {
+    DamagedPageHandler handler;
+    handler.set_enable_repair(false);
+
+    auto healthy = create_healthy_page(0);
+    auto catastrophic = create_damaged_page(LEVEL_4_CATASTROPHIC);
+
+    handler.handle_page(healthy.data(), 0, healthy.size());
+    handler.handle_page(catastrophic.data(), 1, catastrophic.size());
+
+    std::string report = handler.generate_report();
+    // Report must contain the structured/evidence breakdown
+    EXPECT_NE(report.find("Structured:"), std::string::npos);
+    EXPECT_NE(report.find("Evidence-only:"), std::string::npos);
+    EXPECT_NE(report.find("Low confidence:"), std::string::npos);
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceStatsReset) {
+    DamagedPageHandler handler;
+    handler.set_enable_repair(false);
+
+    auto catastrophic = create_damaged_page(LEVEL_4_CATASTROPHIC);
+    handler.handle_page(catastrophic.data(), 0, catastrophic.size());
+
+    handler.reset_stats();
+    const auto& stats = handler.get_stats();
+    EXPECT_EQ(stats.structured_exportable_records, 0u);
+    EXPECT_EQ(stats.evidence_only_records, 0u);
+    EXPECT_EQ(stats.low_confidence_records, 0u);
+    EXPECT_EQ(stats.total_records_recovered, 0u);
+    EXPECT_EQ(stats.high_confidence_records, 0u);
+}
+
+TEST(DamagedPageHandlerTest, ProvenanceNoRecordsAllCountsZero) {
+    // Empty buffer produces no records; all provenance counts must be zero
+    std::vector<uint8_t> empty;
+    DamagedPageHandler handler;
+    handler.handle_page(empty.data(), 0, empty.size());
+
+    const auto& stats = handler.get_stats();
+    EXPECT_EQ(stats.total_records_recovered, 0u);
+    EXPECT_EQ(stats.structured_exportable_records, 0u);
+    EXPECT_EQ(stats.evidence_only_records, 0u);
+    EXPECT_EQ(stats.high_confidence_records, 0u);
+    EXPECT_EQ(stats.low_confidence_records, 0u);
+}
+
 } // namespace salvage
 } // namespace dbrecovery
 

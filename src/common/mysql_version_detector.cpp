@@ -53,42 +53,78 @@ MySQLVersion MySQLVersionDetector::detect(const uint8_t* page_data, size_t page_
 
 MySQLVersion MySQLVersionDetector::detect_from_multiple_pages(
     const std::vector<const uint8_t*>& pages, size_t page_size) {
+    auto result = detect_pages_with_evidence(pages, page_size);
+    return result.version;
+}
+
+MultiPageDetectionResult MySQLVersionDetector::detect_pages_with_evidence(
+    const std::vector<const uint8_t*>& pages, size_t page_size) {
+    MultiPageDetectionResult result;
+    result.total_pages = pages.size();
+
     if (pages.empty()) {
-        return MySQLVersion::UNKNOWN;
+        result.evidence = MultiPageEvidence::INSUFFICIENT;
+        result.rejection_reasons.push_back("No pages provided");
+        return result;
     }
 
-    // 统计每个版本的票数（使用有序map保证确定性）
-    std::map<MySQLVersion, int> votes;
+    // Phase 1: Check every page for strong evidence (SDI signature).
+    // SDI on any typed and signed SDI page is the only authoritative
+    // automatic marker for the MySQL 8.0+ family.
+    for (size_t i = 0; i < pages.size(); ++i) {
+        if (!pages[i]) {
+            result.unknown_pages++;
+            continue;
+        }
 
-    for (auto page : pages) {
-        if (page) {
-            MySQLVersion v = detect(page, page_size);
-            if (v != MySQLVersion::UNKNOWN) {
-                votes[v]++;
+        int sdi_score = check_sdi_signature(pages[i], page_size);
+        if (sdi_score > 0) {
+            result.strong_evidence_pages++;
+            result.strong_evidence_details.push_back(
+                "Page " + std::to_string(i) + ": SDI signature found");
+        } else {
+            // Check for corroborating evidence (FSP flags, LSN, undo)
+            int fsp_score = check_fsp_flags(pages[i], page_size);
+            int lsn_score = check_lsn_extension(pages[i], page_size);
+            int undo_score = check_undo_log_format(pages[i], page_size);
+
+            if (fsp_score > 0 || lsn_score > 0 || undo_score > 0) {
+                result.corroborating_pages++;
+                std::string details = "Page " + std::to_string(i) + ":";
+                if (fsp_score > 0) details += " FSP_flags";
+                if (lsn_score > 0) details += " LSN_ext";
+                if (undo_score > 0) details += " undo";
+                result.corroborating_details.push_back(details);
+            } else {
+                result.unknown_pages++;
             }
         }
     }
 
-    // 找到票数最多的版本
-    // 并列时返回UNKNOWN——无法确定唯一版本
-    // 如果对并列选择较小版本，可能造成5.6/8.0混合场景的误判
-    MySQLVersion result = MySQLVersion::UNKNOWN;
-    int max_votes = 0;
-    bool tie = false;
-    for (const auto& [version, count] : votes) {
-        if (count > max_votes) {
-            max_votes = count;
-            result = version;
-            tie = false;
-        } else if (count == max_votes) {
-            tie = true;
-        }
+    // Phase 2: Decide version based on evidence.
+    // Only SDI is strong enough to uniquely identify MySQL 8.0+ family.
+    if (result.strong_evidence_pages > 0) {
+        result.version = MySQLVersion::MYSQL_80;
+        result.evidence = MultiPageEvidence::STRONG;
+        return result;
     }
 
-    if (tie) {
-        return MySQLVersion::UNKNOWN;
+    // Corroborating evidence alone (FSP flags, LSN extension) provides
+    // only a lower bound (5.7+), not a unique version. 8.0+ FSP_HDR pages
+    // also set POST_ANTELOPE/ATOMIC_BLOBS, so returning MYSQL_57 would be
+    // a false positive. Only UNKNOWN is safe.
+    if (result.corroborating_pages > 0) {
+        result.evidence = MultiPageEvidence::INSUFFICIENT;
+        result.rejection_reasons.push_back(
+            "Corroborating evidence found (FSP flags, LSN, undo) but no SDI. "
+            "FSP flags alone only provide a 5.7+ lower bound, not a unique version.");
+        return result;
     }
 
+    result.evidence = MultiPageEvidence::INSUFFICIENT;
+    result.rejection_reasons.push_back(
+        "No version-reliable markers found on any page. "
+        "SDI required for MySQL 8.0+ family detection.");
     return result;
 }
 
@@ -129,8 +165,11 @@ bool MySQLVersionDetector::matches_version(const uint8_t* page_data,
         return sdi_score > 0;
     }
 
+    // MYSQL_57 can no longer be confirmed by FSP flags alone: 8.0+ FSP_HDR
+    // pages also set POST_ANTELOPE/ATOMIC_BLOBS. Only positive SDI-absence in
+    // combination with the caller's explicit version context can match 5.7.
     if (version == MySQLVersion::MYSQL_57) {
-        return sdi_score <= 0 && check_fsp_flags(page_data, page_size) > 0;
+        return false;
     }
 
     return false;
@@ -215,18 +254,16 @@ int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_
     }
 
     // FSP Header (Page 0, offset 38): FSP_SPACE_ID at +0, FSP_SPACE_FLAGS at +4
-    uint32_t flags = endian::read_be32(page_data, innodb::FIL_HEADER_SIZE + 4);  // offset 42
+    uint32_t flags = endian::read_be32(page_data, innodb::FSP_SPACE_FLAGS_OFFSET);  // offset 42
 
     // POST_ANTELOPE位（bit 0）：MySQL 5.7+ 设置，5.6及更早版本清除
-    constexpr uint32_t FSP_FLAGS_POST_ANTELOPE = 0x1;
     // ATOMIC_BLOBS位（bit 5）：MySQL 5.7+ 设置
-    constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS  = 0x20;
 
     int score = 0;
-    if (flags & FSP_FLAGS_POST_ANTELOPE) {
+    if (flags & innodb::FSP_FLAGS_POST_ANTELOPE) {
         score += 8;  // MySQL 5.7+ 特征
     }
-    if (flags & FSP_FLAGS_ATOMIC_BLOBS) {
+    if (flags & innodb::FSP_FLAGS_ATOMIC_BLOBS) {
         score += 4;  // MySQL 5.7+ 原子BLOB
     }
 
@@ -252,7 +289,7 @@ int MySQLVersionDetector::check_undo_log_format(const uint8_t* page_data, size_t
         }
     }
 
-    return 5;  // Cannot determine
+    return 0;  // Not an undo log page or cannot determine
 }
 
 int MySQLVersionDetector::check_page_type_range(const uint8_t* page_data, size_t page_size) {
@@ -266,7 +303,8 @@ int MySQLVersionDetector::check_page_type_range(const uint8_t* page_data, size_t
     if (page_type == innodb::FIL_PAGE_TYPE_ALLOCATED || page_type == innodb::FIL_PAGE_INDEX ||
         page_type == innodb::FIL_PAGE_UNDO_LOG || page_type == innodb::FIL_PAGE_SDI ||
         page_type == innodb::FIL_PAGE_SDI_ZIP || page_type == innodb::FIL_PAGE_TYPE_FSP_HDR ||
-        page_type == innodb::FIL_PAGE_TYPE_XDES) {
+        page_type == innodb::FIL_PAGE_TYPE_XDES || page_type == innodb::FIL_PAGE_COMPRESSED ||
+        page_type == innodb::FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
         return 10;
     }
 
@@ -284,15 +322,16 @@ MySQLVersion MySQLVersionDetector::decide_version(int lsn_score, int sdi_score,
     (void)page_version_score;
     (void)checksum_score;
     (void)undo_score;
+    (void)fsp_score;
 
     if (sdi_score > 0) {
         return MySQLVersion::MYSQL_80;
     }
 
-    if (fsp_score > 0) {
-        return MySQLVersion::MYSQL_57;
-    }
-
+    // FSP flags alone only provide a lower bound (5.7+), not a unique version.
+    // 8.0+ FSP_HDR pages also set POST_ANTELOPE and ATOMIC_BLOBS so returning
+    // MYSQL_57 here would be a false positive. Callers must use SDI evidence
+    // or explicit operator override.
     return MySQLVersion::UNKNOWN;
 }
 
@@ -442,10 +481,11 @@ MySQLVersion DetailedVersionDetector::match_version(const std::vector<FeatureChe
         return MySQLVersion::MYSQL_80;
     }
 
-    if (has_fsp_flags) {
-        return MySQLVersion::MYSQL_57;
-    }
-
+    // FSP flags alone only provide a lower bound (5.7+), not a unique version.
+    // 8.0+ FSP_HDR pages also set POST_ANTELOPE and ATOMIC_BLOBS so returning
+    // MYSQL_57 here would be a false positive. SDI evidence is required for
+    // 8.0+ family; FSP-only evidence is insufficient.
+    (void)has_fsp_flags;
     return MySQLVersion::UNKNOWN;
 }
 
@@ -472,6 +512,11 @@ VersionDetectionResult VersionDetectionFactory::detect_version_detailed(const ui
 MySQLVersion VersionDetectionFactory::detect_version_from_pages(
     const std::vector<const uint8_t*>& pages, size_t page_size) {
     return detector_.detect_from_multiple_pages(pages, page_size);
+}
+
+MultiPageDetectionResult VersionDetectionFactory::detect_version_from_pages_with_evidence(
+    const std::vector<const uint8_t*>& pages, size_t page_size) {
+    return detector_.detect_pages_with_evidence(pages, page_size);
 }
 
 MySQLVersionDetector& VersionDetectionFactory::get_detector() {

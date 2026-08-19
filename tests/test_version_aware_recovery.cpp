@@ -183,11 +183,14 @@ TEST(VersionDetectionTest, TruncatedPageIsUnknown) {
               MySQLVersion::UNKNOWN);
 }
 
-TEST(VersionDetectionTest, FspFlagsIdentifyMySQL57) {
+TEST(VersionDetectionTest, FspFlagsAloneReturnUnknown) {
+    // FSP flags alone only provide a lower bound (5.7+), not a unique version.
+    // 8.0+ FSP_HDR pages also set POST_ANTELOPE/ATOMIC_BLOBS, so returning
+    // MYSQL_57 would be a false positive. Only UNKNOWN is safe.
     auto fsp = make_index_page(innodb::FIL_PAGE_TYPE_FSP_HDR, 0, 0);
     innodb::write_be<uint32_t>(fsp.data(), innodb::FIL_HEADER_SIZE + 4, 0x21);
     EXPECT_EQ(MySQLVersionDetector::detect(fsp.data(), fsp.size()),
-              MySQLVersion::MYSQL_57);
+              MySQLVersion::UNKNOWN);
 
     auto undo = make_index_page(innodb::FIL_PAGE_UNDO_LOG, 0, 0);
     innodb::write_be<uint16_t>(undo.data(), innodb::FIL_HEADER_SIZE, 1);

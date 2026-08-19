@@ -86,13 +86,16 @@ std::string SalvageEvidenceSerializer::to_json(
         entry["salvage_level"] = static_cast<int>(frag.salvage_level);
         entry["recovery_method"] = frag.recovery_method;
         entry["confidence"] = frag.confidence;
+        entry["source_page_no"] = frag.page_no;
         entry["source_page_offset"] = frag.page_offset;
         entry["source_record_offset"] = frag.record_offset;
+        entry["content_sha256"] = frag.content_hash;
 
         // Forensic evidence provenance
         entry["evidence"]["level"] =
             dbrecovery::common::damage_level_to_string(frag.evidence.level);
         entry["evidence"]["strategy"] = frag.evidence.strategy;
+        entry["evidence"]["source_page_no"] = frag.evidence.source_page_no;
         entry["evidence"]["source_offset"] = frag.evidence.source_offset;
         entry["evidence"]["confidence"] = frag.evidence.confidence;
         entry["evidence"]["tags"] = nlohmann::json::array();

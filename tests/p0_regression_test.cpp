@@ -433,6 +433,45 @@ TEST_F(RollPtrDecoderTest, DecodeStorageNullPointer) {
     EXPECT_TRUE(decoded.is_null());
 }
 
+TEST_F(RollPtrDecoderTest, DecodeStoragePinnedByProfile) {
+    // The profile-pinned overload must never infer width from remaining bytes.
+    // Width is chosen exclusively from the resolved profile.
+    uint64_t val6 = (0x1000ULL << 20) | 0x200ULL;
+    uint8_t data6[6];
+    for (int i = 5; i >= 0; i--) {
+        data6[i] = static_cast<uint8_t>(val6 & 0xFF);
+        val6 >>= 8;
+    }
+
+    // 6 bytes is the correct width for LEGACY_6BYTE, too short for MYSQL8_7BYTE.
+    auto d6 = RollPtrDecoder::decode_storage(data6, 6, UndoFormatProfile::LEGACY_6BYTE);
+    EXPECT_TRUE(d6.is_valid());
+    EXPECT_EQ(d6.page_no, 0x1000u);
+    EXPECT_EQ(d6.offset, 0x200u);
+    EXPECT_EQ(d6.flags, 0u) << "LEGACY_6BYTE profile must decode with no flags";
+
+    // Same buffer is NOT sufficient for the 7-byte profile: fail closed.
+    auto d7_short = RollPtrDecoder::decode_storage(data6, 6, UndoFormatProfile::MYSQL8_7BYTE);
+    EXPECT_FALSE(d7_short.is_valid()) << "7-byte profile must reject 6-byte input";
+
+    // UNRESOLVED must reject regardless of buffer length.
+    auto d_unresolved = RollPtrDecoder::decode_storage(data6, 6, UndoFormatProfile::UNRESOLVED);
+    EXPECT_FALSE(d_unresolved.is_valid()) << "UNRESOLVED profile must fail closed";
+    EXPECT_TRUE(d_unresolved.is_null());
+}
+
+TEST_F(RollPtrDecoderTest, DecodeStorageInternalNoOverlap) {
+    // Internal encode() lays out offset at bits [49:32] (18 bits) and flags
+    // at bits [55:50] (6 bits). The maximum offset 0x3FFFF must therefore
+    // round-trip regardless of non-zero flags — no overlap by construction.
+    uint64_t rp = RollPtrDecoder::encode(0x1000, 0x3FFFF, 0x3F);
+    auto decoded = RollPtrDecoder::decode(rp);
+    EXPECT_EQ(decoded.page_no, 0x1000u);
+    EXPECT_EQ(decoded.offset, 0x3FFFFu)
+        << "18-bit offset must be fully preserved with flags set";
+    EXPECT_EQ(decoded.flags, 0x3Fu);
+}
+
 // ======================================================================
 // P0.3: Deep Undo Analyzer Version Awareness
 // ======================================================================
@@ -511,18 +550,25 @@ TEST_F(DeepUndoAnalyzerVersionTest, ReadPrevUndoPtr7Byte) {
     EXPECT_EQ(decoded.offset, 0x1Fu) << "7-byte prev_undo_ptr must decode offset correctly";
     EXPECT_EQ(decoded.flags, 0x3u) << "7-byte format must extract flags from upper nibble";
 
-    // Verify decode_storage_to_internal -> decode round-trip with flags=0.
-    // When flags is non-zero, the internal encode() packs offset at bits [47:32]
-    // and flags at bits [55:48]. Since offset & 0x3FFFF can have bits 16-17 set,
-    // these overlap with the flags byte. This is a property of the InnoDB internal
-    // format, not a bug. Verify clean round-trip with flags=0:
-    auto rp_noflags = create_7byte_roll_ptr_page(0x5678, 0x1F, 0x0);
+    // Internal representation: offset at bits [49:32] (18 bits), flags at
+    // bits [55:50] (6 bits). The layouts never overlap, so a full 18-bit
+    // offset round-trips cleanly regardless of flags — including the max
+    // offset 0x3FFFF whose low 16 bits are all set.
+    auto rp_max = create_7byte_roll_ptr_page(0x5678, 0x3FFFF, 0x3);
+    uint64_t internal_max = RollPtrDecoder::decode_storage_to_internal(
+        rp_max.data.data() + rp_max.roll_ptr_offset, 7);
+    auto decoded_max = RollPtrDecoder::decode(internal_max);
+    EXPECT_EQ(decoded_max.page_no, 0x5678u);
+    EXPECT_EQ(decoded_max.offset, 0x3FFFFu) << "max 18-bit offset must not collide with flags";
+    EXPECT_EQ(decoded_max.flags, 0x3u) << "flags must survive decode/encode with max offset";
+
+    // Round-trip with non-zero flags must stay lossless at the internal layer.
     uint64_t internal = RollPtrDecoder::decode_storage_to_internal(
-        rp_noflags.data.data() + rp_noflags.roll_ptr_offset, 7);
+        rp.data.data() + rp.roll_ptr_offset, 7);
     auto decoded2 = RollPtrDecoder::decode(internal);
     EXPECT_EQ(decoded2.page_no, 0x5678u);
     EXPECT_EQ(decoded2.offset, 0x1Fu);
-    EXPECT_EQ(decoded2.flags, 0x0u);
+    EXPECT_EQ(decoded2.flags, 0x3u);
 }
 
 TEST_F(DeepUndoAnalyzerVersionTest, VersionAwareRollPtrSize) {
@@ -909,15 +955,16 @@ TEST_F(EncryptedPageSpaceIDTest, SpaceIDIsolation) {
     EXPECT_NE(space_id1, space_id2) << "Space IDs must differ";
 }
 
-TEST_F(EncryptedPageSpaceIDTest, TDEHeaderDetection) {
-    // Test that is_encrypted() correctly detects encrypted pages
+TEST_F(EncryptedPageSpaceIDTest, TDECandidateRoutingDetection) {
     auto encrypted = create_encrypted_page(42, 100);
     auto normal = create_normal_page(42, 100);
 
+    EXPECT_EQ(TDEDecryptor::probe_candidate(encrypted.data(), encrypted.size()),
+              TDECandidateProbe::RECOGNIZED_CANDIDATE);
     EXPECT_TRUE(TDEDecryptor::is_encrypted(encrypted.data(), encrypted.size()))
-        << "Encrypted page must be detected as encrypted";
-    EXPECT_FALSE(TDEDecryptor::is_encrypted(normal.data(), normal.size()))
-        << "Normal page must not be detected as encrypted";
+        << "Candidate page must be blocked from generic plaintext recovery";
+    EXPECT_EQ(TDEDecryptor::probe_candidate(normal.data(), normal.size()),
+              TDECandidateProbe::NOT_DETECTED);
 }
 
 // ======================================================================
@@ -1180,67 +1227,72 @@ protected:
         return validate::UnifiedValidator::validate_all(version);
     }
 
-    void assert_feature(const report::CapabilityReport& report,
-                        const std::string& name, bool expected) {
-        for (const auto& f : report.features) {
-            if (f.name == name) {
-                EXPECT_EQ(f.supported, expected)
-                    << "Feature '" << name << "' for " << report.mysql_version
-                    << " expected " << (expected ? "SUPPORTED" : "NOT SUPPORTED")
-                    << " but got " << (f.supported ? "SUPPORTED" : "NOT SUPPORTED")
-                    << (f.supported == expected ? "" : " (" + f.limitation + ")");
-                return;
-            }
-        }
-        FAIL() << "Feature '" << name << "' not found in capability report for "
-               << report.mysql_version;
+    const report::CapabilityReport::Feature* find_feature(
+        const report::CapabilityReport& report, const std::string& id) {
+        const auto* feature = report.find_feature(id);
+        EXPECT_NE(feature, nullptr) << "Feature '" << id << "' not found in capability report";
+        return feature;
+    }
+
+    void assert_status(const report::CapabilityReport& report, const std::string& id,
+                       report::CapabilityStatus expected) {
+        const auto* feature = find_feature(report, id);
+        ASSERT_NE(feature, nullptr);
+        EXPECT_EQ(feature->status, expected) << "Feature '" << id << "' status mismatch";
+    }
+
+    void assert_output_category(const report::CapabilityReport& report, const std::string& id,
+                                report::RecoveryOutputCategory expected) {
+        const auto* feature = find_feature(report, id);
+        ASSERT_NE(feature, nullptr);
+        EXPECT_EQ(feature->output_category, expected)
+            << "Feature '" << id << "' output category mismatch";
     }
 };
 
 TEST_F(CapabilityReportTest, MySQL56NoSDI) {
-    // MySQL 5.6 does not support SDI, encryption, or temporary pages
-    // Compression IS supported (ROW_FORMAT=COMPRESSED with KEY_BLOCK_SIZE)
     auto report = run_report(MySQLVersion::MYSQL_56);
-    assert_feature(report, "SDI extraction", false);
-    assert_feature(report, "TDE/page encryption", false);
-    assert_feature(report, "Page compression", true);
-    assert_feature(report, "Temporary pages", false);
+    assert_status(report, "sdi.extraction", report::CapabilityStatus::REJECTED);
+    assert_status(report, "tde.page_encryption", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
+    assert_status(report, "compression.page", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
+    assert_status(report, "temporary.pages", report::CapabilityStatus::REJECTED);
     EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_56);
 }
 
-TEST_F(CapabilityReportTest, MySQL80HasSDI) {
-    // MySQL 8.0 supports SDI, encryption, compression but not temporary pages
+TEST_F(CapabilityReportTest, MySQL80SDIRequiresValidation) {
     auto report = run_report(MySQLVersion::MYSQL_80);
-    assert_feature(report, "SDI extraction", true);
-    // MySQL 8.0 supports encryption and compression
-    assert_feature(report, "TDE/page encryption", true);
-    assert_feature(report, "Page compression", true);
-    // Temporary pages require MySQL 8.4+
-    assert_feature(report, "Temporary pages", false);
+    assert_status(report, "sdi.extraction", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report, "tde.page_encryption", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
+    assert_status(report, "compression.page", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
+    assert_status(report, "temporary.pages", report::CapabilityStatus::REJECTED);
     EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_80);
 }
 
-TEST_F(CapabilityReportTest, MySQL84HasTemporaryPages) {
-    // MySQL 8.4 supports all features including temporary pages
+TEST_F(CapabilityReportTest, MySQL84TemporaryPagesRemainUnsupported) {
     auto report = run_report(MySQLVersion::MYSQL_84);
-    assert_feature(report, "SDI extraction", true);
-    assert_feature(report, "Temporary pages", true);
+    assert_status(report, "sdi.extraction", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report, "temporary.pages", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
     EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_84);
 }
 
-TEST_F(CapabilityReportTest, MySQL90AllFeatures) {
-    // MySQL 9.0 supports all features
+TEST_F(CapabilityReportTest, MySQL90NoUnsupportedVersionWarning) {
     auto report = run_report(MySQLVersion::MYSQL_90);
-    assert_feature(report, "SDI extraction", true);
-    assert_feature(report, "Temporary pages", true);
+    assert_status(report, "sdi.extraction", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report, "temporary.pages", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
     EXPECT_TRUE(report.version_id == MySQLVersion::MYSQL_90);
-    // No warnings for supported version
     EXPECT_TRUE(report.warnings.empty() ||
                 report.warnings[0].find("outside the supported range") == std::string::npos);
 }
 
+TEST_F(CapabilityReportTest, UnknownVersionRejectsFormatSpecificRecovery) {
+    auto report = run_report(MySQLVersion::UNKNOWN);
+    assert_status(report, "sdi.extraction", report::CapabilityStatus::REJECTED);
+    assert_status(report, "page_type.FIL_PAGE_INDEX", report::CapabilityStatus::REJECTED);
+    assert_status(report, "salvage.l3", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_output_category(report, "salvage.l3", report::RecoveryOutputCategory::FORENSIC_EVIDENCE);
+}
+
 TEST_F(CapabilityReportTest, UnknownVersionWarning) {
-    // UNKNOWN version should produce a warning
     auto report = run_report(MySQLVersion::UNKNOWN);
     bool has_warning = false;
     for (const auto& w : report.warnings) {
@@ -1249,58 +1301,53 @@ TEST_F(CapabilityReportTest, UnknownVersionWarning) {
     EXPECT_TRUE(has_warning) << "UNKNOWN version must produce a warning";
 }
 
-TEST_F(CapabilityReportTest, SalvageLevelsAlwaysAvailable) {
-    // Salvage L1-L4 are build capabilities, available for all versions
+TEST_F(CapabilityReportTest, SalvageLevelsAreEvidenceOnly) {
     auto report = run_report(MySQLVersion::MYSQL_56);
-    assert_feature(report, "salvage L1 (header repair)", true);
-    assert_feature(report, "salvage L2 (signature scan)", true);
-    assert_feature(report, "salvage L3 (heuristic scan)", true);
-    assert_feature(report, "salvage L4 (fragment extract)", true);
+    assert_status(report, "salvage.l1", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report, "salvage.l2", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report, "salvage.l3", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report, "salvage.l4", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_output_category(report, "salvage.l1", report::RecoveryOutputCategory::PAGE_BUNDLE);
 }
 
 TEST_F(CapabilityReportTest, PageTypeCapabilities) {
-    // Verify page type capability matrix for MySQL 5.6 (SDI & encrypted unsupported)
     auto report_56 = run_report(MySQLVersion::MYSQL_56);
-    assert_feature(report_56, "page_type:FIL_PAGE_INDEX", true);
-    assert_feature(report_56, "page_type:FIL_PAGE_COMPRESSED", true);
-    assert_feature(report_56, "page_type:FIL_PAGE_SDI", false);
-    assert_feature(report_56, "page_type:FIL_PAGE_COMPRESSED_AND_ENCRYPTED", false);
+    assert_status(report_56, "page_type.FIL_PAGE_INDEX", report::CapabilityStatus::SUPPORTED);
+    assert_status(report_56, "page_type.FIL_PAGE_COMPRESSED", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report_56, "page_type.FIL_PAGE_SDI", report::CapabilityStatus::REJECTED);
+    assert_status(report_56, "page_type.FIL_PAGE_COMPRESSED_AND_ENCRYPTED",
+                  report::CapabilityStatus::REJECTED);
 
-    // MySQL 8.0 supports SDI, compressed, and encrypted page types
     auto report_80 = run_report(MySQLVersion::MYSQL_80);
-    assert_feature(report_80, "page_type:FIL_PAGE_COMPRESSED", true);
-    assert_feature(report_80, "page_type:FIL_PAGE_COMPRESSED_AND_ENCRYPTED", true);
-    assert_feature(report_80, "page_type:FIL_PAGE_SDI", true);
+    assert_status(report_80, "page_type.FIL_PAGE_COMPRESSED", report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report_80, "page_type.FIL_PAGE_COMPRESSED_AND_ENCRYPTED",
+                  report::CapabilityStatus::EVIDENCE_ONLY);
+    assert_status(report_80, "page_type.FIL_PAGE_SDI", report::CapabilityStatus::EVIDENCE_ONLY);
 }
 
-TEST_F(CapabilityReportTest, ReportToStringNotEmpty) {
-    // CapabilityReport::to_string() must produce non-empty output
+TEST_F(CapabilityReportTest, ReportSerializesStatusAndEvidence) {
     auto report = run_report(MySQLVersion::MYSQL_80);
-    std::string s = report.to_string();
-    EXPECT_FALSE(s.empty()) << "CapabilityReport::to_string() must not be empty";
-    EXPECT_NE(s.find("Capability Report"), std::string::npos)
-        << "Report must contain title";
-    EXPECT_NE(s.find("SUPPORTED"), std::string::npos)
-        << "Report must contain SUPPORTED features";
+    const std::string json = report.to_json();
+    EXPECT_NE(json.find("\"status\": \"EVIDENCE_ONLY\""), std::string::npos);
+    EXPECT_NE(json.find("\"output_category\": \"FORENSIC_EVIDENCE\""), std::string::npos);
+    EXPECT_NE(json.find("\"id\": \"sdi.extraction\""), std::string::npos);
 }
 
 TEST_F(CapabilityReportTest, FeatureLookupByName) {
-    // is_feature_supported() must work correctly
     auto report = run_report(MySQLVersion::MYSQL_80);
-    EXPECT_TRUE(report.is_feature_supported("SDI extraction"));
+    EXPECT_FALSE(report.is_feature_supported("SDI extraction"));
     EXPECT_FALSE(report.is_feature_supported("Temporary pages"));
     EXPECT_FALSE(report.is_feature_supported("nonexistent_feature"));
+    ASSERT_NE(report.find_feature("sdi.extraction"), nullptr);
 }
 
 TEST_F(CapabilityReportTest, MySQL57MidRange) {
-    // MySQL 5.7: no SDI, no encryption, compression supported, no temporary pages
     auto report = run_report(MySQLVersion::MYSQL_57);
-    assert_feature(report, "SDI extraction", false);
-    assert_feature(report, "TDE/page encryption", false);
-    assert_feature(report, "Page compression", true);
-    assert_feature(report, "Temporary pages", false);
-    // But salvage levels are always available
-    assert_feature(report, "salvage L1 (header repair)", true);
+    assert_status(report, "sdi.extraction", report::CapabilityStatus::REJECTED);
+    assert_status(report, "tde.page_encryption", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
+    assert_status(report, "compression.page", report::CapabilityStatus::RECOGNIZED_UNSUPPORTED);
+    assert_status(report, "temporary.pages", report::CapabilityStatus::REJECTED);
+    assert_status(report, "salvage.l1", report::CapabilityStatus::EVIDENCE_ONLY);
 }
 
 } // namespace

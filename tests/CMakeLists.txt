@@ -145,6 +145,11 @@ add_executable(test_version_aware_recovery test_version_aware_recovery.cpp)
 target_link_libraries(test_version_aware_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_version_aware_recovery)
 
+# Multi-page version evidence aggregation tests (Phase 2 P0)
+add_executable(test_version_evidence test_version_evidence.cpp)
+target_link_libraries(test_version_evidence PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_version_evidence)
+
 # B+Tree traversal tests (Phase 2 Week 3 - B+Tree Traversal + Chain Break Detection)
 add_executable(test_btree_traversal unit/btree_traversal_test.cpp)
 target_link_libraries(test_btree_traversal PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
@@ -298,7 +303,17 @@ add_executable(test_partition_table_recovery partition_table_recovery_test.cpp)
 target_link_libraries(test_partition_table_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_partition_table_recovery)
 
-# Compressed table recovery metadata tests
+# SharedTablespaceRecovery Phase 5e streaming scan, manifest, checksum, zero-page ban
+add_executable(test_shared_tablespace_recovery shared_tablespace_recovery_test.cpp)
+target_link_libraries(test_shared_tablespace_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_shared_tablespace_recovery)
+
+# Phase 5f: Redo log plan gate — inventory, patch-plan, pre-conditions, fail-closed
+add_executable(test_redo_plan_gate redo_plan_gate_test.cpp)
+target_link_libraries(test_redo_plan_gate PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_redo_plan_gate)
+
+	# Compressed table recovery metadata tests
 add_executable(test_compressed_table_recovery innodb/compressed_table_recovery_test.cpp)
 target_link_libraries(test_compressed_table_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_compressed_table_recovery)
@@ -307,3 +322,29 @@ gtest_discover_tests(test_compressed_table_recovery)
 add_executable(test_compressed_table_fixture compressed_table_fixture_test.cpp)
 target_link_libraries(test_compressed_table_fixture PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 add_test(NAME test_compressed_table_fixture COMMAND test_compressed_table_fixture)
+
+# Compressed table routing tests (fail-closed classification)
+add_executable(test_compressed_table_routing innodb/compressed_table_routing_test.cpp)
+target_link_libraries(test_compressed_table_routing PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_compressed_table_routing)
+
+# Phase 3f/g — combined pipeline, salvage accuracy, L3/L4 isolation, export rejection, idempotency
+add_executable(test_combined_recovery test_combined_recovery.cpp)
+target_link_libraries(test_combined_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_combined_recovery)
+
+add_executable(test_salvage_accuracy test_salvage_accuracy.cpp)
+target_link_libraries(test_salvage_accuracy PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_salvage_accuracy)
+
+add_executable(test_l3_l4_isolation test_l3_l4_isolation.cpp)
+target_link_libraries(test_l3_l4_isolation PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_l3_l4_isolation)
+
+add_executable(test_export_rejection test_export_rejection.cpp)
+target_link_libraries(test_export_rejection PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_export_rejection)
+
+add_executable(test_recovery_idempotency test_recovery_idempotency.cpp)
+target_link_libraries(test_recovery_idempotency PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_recovery_idempotency)

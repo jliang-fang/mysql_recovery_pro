@@ -347,9 +347,21 @@ private:
      */
     bool validate_record_bounds(size_t start, size_t end, size_t heap_top);
 
+    /**
+     * @brief Set MySQL version for version-dependent layout decisions
+     *
+     * Controls DB_ROLL_PTR width when skipping system columns:
+     * 6 bytes for 5.6/5.7, 7 bytes for 8.0+.
+     * Default (0 / unknown) uses 7 bytes as conservative choice.
+     *
+     * @param version MySQL version number (e.g. 50600, 50700, 80000)
+     */
+    void set_mysql_version(uint32_t version) { mysql_version_ = version; }
+
 private:
     Config config_;
     std::function<void(uint32_t, size_t)> progress_cb_;
+    uint32_t mysql_version_ = 0;  // Not set → conservative 7-byte DB_ROLL_PTR
 
     // Statistics
     size_t total_pages_scanned_ = 0;

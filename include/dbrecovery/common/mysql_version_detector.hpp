@@ -16,6 +16,45 @@
 
 namespace dbrecovery {
 
+// ==================== 版本检测辅助类 ====================
+/**
+ * @brief Evidence classification for multi-page version detection
+ *
+ * STRONG:       SDI found on ≥1 page → MYSQL_80 family (authoritative)
+ * CONFLICTING:  Pages show contradictory evidence (reserved for future use)
+ * INSUFFICIENT: No SDI found, all pages UNKNOWN
+ */
+enum class MultiPageEvidence {
+    STRONG,
+    CONFLICTING,
+    INSUFFICIENT
+};
+
+/**
+ * @brief Multi-page version detection result with evidence breakdown
+ *
+ * Distinguishes between:
+ * - Strong evidence (SDI signature): uniquely identifies MySQL 8.0+ family
+ * - Corroborating evidence (FSP flags, LSN extension): provides lower bounds only
+ * - Insufficient evidence: no version-reliable markers found
+ */
+struct MultiPageDetectionResult {
+    MySQLVersion version = MySQLVersion::UNKNOWN;
+    MultiPageEvidence evidence = MultiPageEvidence::INSUFFICIENT;
+    size_t total_pages = 0;
+    size_t strong_evidence_pages = 0;   // Pages with SDI evidence
+    size_t corroborating_pages = 0;     // Pages with FSP/LSN/undo evidence (not SDI)
+    size_t unknown_pages = 0;           // Pages with no version evidence
+    std::vector<std::string> strong_evidence_details;
+    std::vector<std::string> corroborating_details;
+    std::vector<std::string> rejection_reasons;
+
+    bool is_known() const { return version != MySQLVersion::UNKNOWN; }
+    bool is_strong() const { return evidence == MultiPageEvidence::STRONG; }
+    bool is_conflicting() const { return evidence == MultiPageEvidence::CONFLICTING; }
+    bool is_insufficient() const { return evidence == MultiPageEvidence::INSUFFICIENT; }
+};
+
 // ==================== 版本检测器 ====================
 /**
  * @brief MySQL版本自动检测器
@@ -38,6 +77,22 @@ public:
      */
     static MySQLVersion detect_from_multiple_pages(const std::vector<const uint8_t*>& pages,
                                                     size_t page_size);
+
+    /**
+     * @brief Evidence-based multi-page version detection
+     *
+     * Distinguishes:
+     * - STRONG: SDI evidence on any page → MYSQL_80 family
+     * - CONFLICTING: Pages show contradictory evidence
+     * - INSUFFICIENT: No SDI found, all pages UNKNOWN
+     *
+     * @param pages Multiple page data buffers
+     * @param page_size Page size in bytes
+     * @return Detection result with evidence breakdown
+     */
+    static MultiPageDetectionResult detect_pages_with_evidence(
+        const std::vector<const uint8_t*>& pages,
+        size_t page_size);
 
     /**
      * @brief 获取版本检测的置信度
@@ -89,7 +144,7 @@ private:
     static const std::array<VersionFeature, 6> version_features_;
 };
 
-// ==================== 版本检测辅助类 ====================
+// ==================== 版本检测结果 ====================
 /**
  * @brief 版本检测结果
  */
@@ -98,6 +153,7 @@ struct VersionDetectionResult {
     int confidence;
     std::vector<std::string> matching_features;
     std::vector<std::string> non_matching_features;
+    std::vector<std::string> rejection_reason;
 
     /// @brief True when the detector reached a definite version (not UNKNOWN).
     bool is_known() const { return version != MySQLVersion::UNKNOWN; }
@@ -163,10 +219,17 @@ public:
     VersionDetectionResult detect_version_detailed(const uint8_t* page_data, size_t page_size);
 
     /**
-     * @brief 从多个页数据检测版本
+     * @brief 从多个页数据检测版本（带证据分类）
      */
     MySQLVersion detect_version_from_pages(const std::vector<const uint8_t*>& pages,
                                             size_t page_size);
+
+    /**
+     * @brief 从多个页数据检测版本并返回证据分类
+     */
+    MultiPageDetectionResult detect_version_from_pages_with_evidence(
+        const std::vector<const uint8_t*>& pages,
+        size_t page_size);
 
     /**
      * @brief 获取版本检测器
@@ -209,6 +272,15 @@ inline VersionDetectionResult detailed_detect_version(const uint8_t* page_data, 
 inline MySQLVersion detect_version_from_multiple_pages(const std::vector<const uint8_t*>& pages,
                                                         size_t page_size) {
     return VersionDetectionFactory::instance().detect_version_from_pages(pages, page_size);
+}
+
+/**
+ * @brief 从多个页检测版本并返回证据分类
+ */
+inline MultiPageDetectionResult detect_version_from_multiple_pages_with_evidence(
+    const std::vector<const uint8_t*>& pages,
+    size_t page_size) {
+    return VersionDetectionFactory::instance().detect_version_from_pages_with_evidence(pages, page_size);
 }
 
 } // namespace dbrecovery

@@ -32,6 +32,8 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
+#include "dbrecovery/tools/unified_recovery.hpp"
+#include "dbrecovery/recovery/blob_chain_rebuilder.hpp"
 
 namespace fs = std::filesystem;
 
@@ -52,11 +54,21 @@ std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
     for (const auto& extracted : results) {
         if (!extracted.is_valid || extracted.sdi_json.empty()) continue;
 
+        // Heuristic extraction is EVIDENCE_ONLY — never authoritative schema.
+        if (extracted.origin == dbrecovery::innodb::SDIManager::ExtractionOrigin::HeuristicCorruptedZip) {
+            std::cout << "[WARN] Heuristic SDI extraction kept as EVIDENCE_ONLY (never authoritative)\n";
+            continue;
+        }
+
         try {
             auto json = nlohmann::json::parse(extracted.sdi_json);
             dbrecovery::catalog::TableSchema schema;
 
             if (schema.from_json(json)) {
+                schema.schema_hash =
+                    dbrecovery::salvage::SalvageEvidenceSerializer::sha256_hex(extracted.sdi_json);
+                schema.schema_source = "SDI";
+                schema.trust_level = "AUTHORITATIVE";
                 std::cout << "[INFO] Successfully parsed schema from SDI: "
                           << schema.table_name << "\n";
                 return schema;
@@ -104,313 +116,6 @@ dbrecovery::catalog::TableSchema create_default_schema() {
     schema.columns[4] = col4;
 
     return schema;
-}
-
-// 辅助函数：导出 HeuristicRecord 到 CSV/SQL/JSON
-std::string records_to_csv(const std::vector<dbrecovery::innodb::HeuristicRecord>& records,
-                          const std::string& table_name) {
-    std::ostringstream oss;
-    oss << "-- Records from: " << table_name << "\n";
-    oss << "id,name,email,created_at\n";
-    
-    for (const auto& rec : records) {
-        if (rec.is_infimum || rec.is_supremum || rec.is_deleted) continue;
-        
-        // Get ID from first field if available
-        std::string id_val = "0";
-        if (rec.fields.size() > 0) {
-            if (rec.fields[0].is_valid && !rec.fields[0].is_null) {
-                id_val = rec.fields[0].to_string();
-            }
-        }
-        oss << id_val << ",";
-        
-        // Name field
-        if (rec.fields.size() > 1) {
-            std::string name = rec.fields[1].to_string();
-            std::replace(name.begin(), name.end(), ',', ';');
-            oss << "\"" << name << "\"";
-        }
-        oss << ",";
-        
-        // Email field
-        if (rec.fields.size() > 2) {
-            std::string email = rec.fields[2].to_string();
-            std::replace(email.begin(), email.end(), ',', ';');
-            oss << "\"" << email << "\"";
-        }
-        oss << ",";
-        
-        // Created_at field
-        if (rec.fields.size() > 3) {
-            oss << rec.fields[3].to_string();
-        }
-        oss << "\n";
-    }
-    return oss.str();
-}
-
-std::string records_to_sql(const std::vector<dbrecovery::innodb::HeuristicRecord>& records,
-                          const std::string& table_name) {
-    std::ostringstream oss;
-    oss << "-- SQL dump from: " << table_name << "\n";
-    oss << "CREATE TABLE IF NOT EXISTS " << table_name << " (\n";
-    oss << "  id BIGINT PRIMARY KEY,\n";
-    oss << "  name VARCHAR(255),\n";
-    oss << "  email VARCHAR(255),\n";
-    oss << "  created_at DATETIME\n";
-    oss << ");\n\n";
-    
-    for (const auto& rec : records) {
-        if (rec.is_infimum || rec.is_supremum || rec.is_deleted) continue;
-        oss << "INSERT INTO " << table_name << " VALUES (";
-        
-        // ID
-        std::string id_val = "0";
-        if (rec.fields.size() > 0) {
-            if (rec.fields[0].is_valid && !rec.fields[0].is_null) {
-                id_val = rec.fields[0].to_string();
-            }
-        }
-        oss << id_val << ", ";
-        
-        // Name
-        if (rec.fields.size() > 1) {
-            std::string name = rec.fields[1].to_string();
-            std::replace(name.begin(), name.end(), '\'', '`');
-            oss << "'" << name << "'";
-        } else {
-            oss << "NULL";
-        }
-        oss << ", ";
-        
-        // Email
-        if (rec.fields.size() > 2) {
-            std::string email = rec.fields[2].to_string();
-            std::replace(email.begin(), email.end(), '\'', '`');
-            oss << "'" << email << "'";
-        } else {
-            oss << "NULL";
-        }
-        oss << ", ";
-        
-        // Created_at
-        if (rec.fields.size() > 3) {
-            oss << "'" << rec.fields[3].to_string() << "'";
-        } else {
-            oss << "NULL";
-        }
-        oss << ");\n";
-    }
-    return oss.str();
-}
-
-std::string records_to_json(const std::vector<dbrecovery::innodb::HeuristicRecord>& records,
-                           const std::string& table_name) {
-    std::ostringstream oss;
-    oss << "{\n";
-    oss << "  \"table\": \"" << table_name << "\",\n";
-    oss << "  \"records\": [\n";
-    
-    bool first = true;
-    for (const auto& rec : records) {
-        if (rec.is_infimum || rec.is_supremum || rec.is_deleted) continue;
-        
-        if (!first) oss << ",\n";
-        first = false;
-        
-        oss << "    {\n";
-        
-        // ID
-        std::string id_val = "0";
-        if (rec.fields.size() > 0) {
-            if (rec.fields[0].is_valid && !rec.fields[0].is_null) {
-                id_val = rec.fields[0].to_string();
-            }
-        }
-        oss << "      \"id\": " << id_val << ",\n";
-        
-        if (rec.fields.size() > 1) {
-            std::string name = rec.fields[1].to_string();
-            std::replace(name.begin(), name.end(), '"', '\'');
-            oss << "      \"name\": \"" << name << "\",\n";
-        } else {
-            oss << "      \"name\": null,\n";
-        }
-        
-        if (rec.fields.size() > 2) {
-            std::string email = rec.fields[2].to_string();
-            std::replace(email.begin(), email.end(), '"', '\'');
-            oss << "      \"email\": \"" << email << "\",\n";
-        } else {
-            oss << "      \"email\": null,\n";
-        }
-        
-        if (rec.fields.size() > 3) {
-            oss << "      \"created_at\": \"" << rec.fields[3].to_string() << "\"\n";
-        } else {
-            oss << "      \"created_at\": null\n";
-        }
-        oss << "    }";
-    }
-    oss << "\n  ]\n";
-    oss << "}\n";
-    return oss.str();
-}
-
-void export_records(const std::vector<dbrecovery::innodb::HeuristicRecord>& records,
-                   const std::string& output_dir,
-                   const std::string& table_name,
-                   const std::string& format) {
-    if (format == "csv" || format == "all") {
-        std::string csv_path = output_dir + "/" + table_name + ".csv";
-        std::string csv_content = records_to_csv(records, table_name);
-        std::ofstream csv_file(csv_path);
-        if (csv_file) {
-            csv_file << csv_content;
-            csv_file.close();
-            std::cout << "[INFO] CSV exported to: " << csv_path << "\n";
-        }
-    }
-
-    if (format == "sql" || format == "all") {
-        std::string sql_path = output_dir + "/" + table_name + ".sql";
-        std::string sql_content = records_to_sql(records, table_name);
-        std::ofstream sql_file(sql_path);
-        if (sql_file) {
-            sql_file << sql_content;
-            sql_file.close();
-            std::cout << "[INFO] SQL exported to: " << sql_path << "\n";
-        }
-    }
-
-    if (format == "json" || format == "all") {
-        std::string json_path = output_dir + "/" + table_name + ".json";
-        std::string json_content = records_to_json(records, table_name);
-        std::ofstream json_file(json_path);
-        if (json_file) {
-            json_file << json_content;
-            json_file.close();
-            std::cout << "[INFO] JSON exported to: " << json_path << "\n";
-        }
-    }
-}
-
-// 辅助函数：导出 map 格式的记录
-std::string records_map_to_csv(const std::vector<std::map<std::string, std::string>>& records,
-                              const std::string& table_name) {
-    std::ostringstream oss;
-    oss << "-- Records from: " << table_name << "\n";
-    oss << "id,name,email,created_at\n";
-
-    for (const auto& rec : records) {
-        // Safer field access with default values
-        std::string id_val = (rec.count("id") > 0) ? rec.at("id") : "0";
-        std::string name_val = (rec.count("name") > 0) ? rec.at("name") : "";
-        std::string email_val = (rec.count("email") > 0) ? rec.at("email") : "";
-        std::string created_at_val = (rec.count("created_at") > 0) ? rec.at("created_at") : "";
-        
-        oss << id_val << ",";
-        oss << "\"" << name_val << "\",";
-        oss << "\"" << email_val << "\",";
-        oss << created_at_val << "\n";
-    }
-    return oss.str();
-}
-
-std::string records_map_to_sql(const std::vector<std::map<std::string, std::string>>& records,
-                              const std::string& table_name) {
-    std::ostringstream oss;
-    oss << "-- SQL dump from: " << table_name << "\n";
-    oss << "CREATE TABLE IF NOT EXISTS " << table_name << " (\n";
-    oss << "  id BIGINT PRIMARY KEY,\n";
-    oss << "  name VARCHAR(255),\n";
-    oss << "  email VARCHAR(255),\n";
-    oss << "  created_at DATETIME\n";
-    oss << ");\n\n";
-
-    for (const auto& rec : records) {
-        // Safer field access with default values
-        std::string id_val = (rec.count("id") > 0) ? rec.at("id") : "0";
-        std::string name_val = (rec.count("name") > 0) ? rec.at("name") : "NULL";
-        std::string email_val = (rec.count("email") > 0) ? rec.at("email") : "NULL";
-        std::string created_at_val = (rec.count("created_at") > 0) ? rec.at("created_at") : "NULL";
-        
-        oss << "INSERT INTO " << table_name << " VALUES ("
-            << id_val << ", '"
-            << name_val << "', '"
-            << email_val << "', '"
-            << created_at_val << "');\n";
-    }
-    return oss.str();
-}
-
-std::string records_map_to_json(const std::vector<std::map<std::string, std::string>>& records,
-                               const std::string& table_name) {
-    std::ostringstream oss;
-    oss << "{\n";
-    oss << "  \"table\": \"" << table_name << "\",\n";
-    oss << "  \"records\": [\n";
-
-    bool first = true;
-    for (const auto& rec : records) {
-        if (!first) oss << ",\n";
-        first = false;
-
-        // Safer field access with default values
-        std::string id_val = (rec.count("id") > 0) ? rec.at("id") : "0";
-        std::string name_val = (rec.count("name") > 0) ? rec.at("name") : "";
-        std::string email_val = (rec.count("email") > 0) ? rec.at("email") : "";
-        std::string created_at_val = (rec.count("created_at") > 0) ? rec.at("created_at") : "";
-        
-        oss << "    {\n";
-        oss << "      \"id\": " << id_val << ",\n";
-        oss << "      \"name\": \"" << name_val << "\",\n";
-        oss << "      \"email\": \"" << email_val << "\",\n";
-        oss << "      \"created_at\": \"" << created_at_val << "\"\n";
-        oss << "    }";
-    }
-    oss << "\n  ]\n";
-    oss << "}\n";
-    return oss.str();
-}
-
-void export_records_map(const std::vector<std::map<std::string, std::string>>& records,
-                       const std::string& output_dir,
-                       const std::string& table_name,
-                       const std::string& format) {
-    if (format == "csv" || format == "all") {
-        std::string csv_path = output_dir + "/" + table_name + ".csv";
-        std::string csv_content = records_map_to_csv(records, table_name);
-        std::ofstream csv_file(csv_path);
-        if (csv_file) {
-            csv_file << csv_content;
-            csv_file.close();
-            std::cout << "[INFO] CSV exported to: " << csv_path << "\n";
-        }
-    }
-
-    if (format == "sql" || format == "all") {
-        std::string sql_path = output_dir + "/" + table_name + ".sql";
-        std::string sql_content = records_map_to_sql(records, table_name);
-        std::ofstream sql_file(sql_path);
-        if (sql_file) {
-            sql_file << sql_content;
-            sql_file.close();
-            std::cout << "[INFO] SQL exported to: " << sql_path << "\n";
-        }
-    }
-
-    if (format == "json" || format == "all") {
-        std::string json_path = output_dir + "/" + table_name + ".json";
-        std::string json_content = records_map_to_json(records, table_name);
-        std::ofstream json_file(json_path);
-        if (json_file) {
-            json_file << json_content;
-            json_file.close();
-            std::cout << "[INFO] JSON exported to: " << json_path << "\n";
-        }
-    }
 }
 
 int main(int argc, char** argv) {
@@ -499,7 +204,7 @@ int main(int argc, char** argv) {
     
     // Batch operations
     std::string batch = parser.get_option("batch", "");
-    std::string output_format = parser.get_option("output-format", "csv");
+    std::string system_tablespace = parser.get_option("system-tablespace", "");
     
     // Other options
     bool verbose = parser.get_bool_option("verbose", false);
@@ -516,7 +221,7 @@ int main(int argc, char** argv) {
     bool unified_carve = parser.get_bool_option("unified-carve", false);
 
     // ✅ 验证必选参数
-    if (g_verbose) {
+    if (dbrecovery::innodb::g_verbose) {
         std::cerr << "[DEBUG] ibd_path='" << ibd_path << "' data_dir='" << data_dir
                   << "' pre_truncate_ibd='" << pre_truncate_ibd << "' truncate_recovery=" << truncate_recovery << "\n";
     }
@@ -718,10 +423,10 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // ✅ 恢复模式：批量文件处理
+    // ✅ 恢复模式：批量文件处理 — 委托统一流水线
     if (!batch.empty()) {
         std::cout << "[INFO] Processing batch file: " << batch << "\n";
-        
+
         std::ifstream batch_file(batch);
         if (!batch_file) {
             std::cerr << "[ERROR] Cannot open batch file: " << batch << "\n";
@@ -731,21 +436,22 @@ int main(int argc, char** argv) {
         std::string line;
         int processed = 0;
         int succeeded = 0;
+        uint32_t total_rows = 0;
 
         while (std::getline(batch_file, line)) {
             if (line.empty() || line[0] == '#') continue;
-            
+
             size_t start = line.find_first_not_of(" \t\r\n");
             size_t end = line.find_last_not_of(" \t\r\n");
             if (start == std::string::npos) continue;
-            
+
             line = line.substr(start, end - start + 1);
-            
+
             std::cout << "[INFO] Processing: " << line << "\n";
-            
+
             fs::path p(line);
             std::string file_output = output_dir + "/" + p.stem().string();
-            
+
             try {
                 fs::create_directories(file_output);
             } catch (const std::exception& e) {
@@ -753,21 +459,32 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            auto ures = dbrecovery::tools::run_unified_recovery(
+                line, file_output, table_name, format, page_size,
+                schema_str, frm_path, table_id, system_tablespace,
+                repair, schemaless_recovery, verbose);
+            dbrecovery::tools::write_unified_result_json(file_output, p.stem().string(), ures);
+
             if (blob_recovery) {
-                std::cout << "  [BLOB] Attempting BLOB recovery...\n";
+                std::cout << "  [BLOB] recovery_method=" << ures.recovery_method
+                          << " rows=" << ures.total_recovered << "\n";
             } else if (rmrf_recovery) {
-                std::cout << "  [RMRF] Attempting rm -rf recovery...\n";
+                std::cout << "  [RMRF] recovery_method=" << ures.recovery_method
+                          << " rows=" << ures.total_recovered << "\n";
             } else {
-                std::cout << "  [DEFAULT] Attempting default recovery...\n";
+                std::cout << "  [DEFAULT] recovery_method=" << ures.recovery_method
+                          << " rows=" << ures.total_recovered << "\n";
             }
-            
+
             processed++;
-            succeeded++;
+            if (ures.success || ures.total_recovered > 0) succeeded++;
+            total_rows += ures.total_recovered;
         }
 
         std::cout << "[INFO] Batch processing completed.\n";
         std::cout << "  Files processed: " << processed << "\n";
         std::cout << "  Succeeded: " << succeeded << "\n";
+        std::cout << "  Total structured rows: " << total_rows << "\n";
         return 0;
     }
 
@@ -924,31 +641,14 @@ int main(int argc, char** argv) {
         std::cout << "[INFO] TDE decryptor initialized with " << tde_stats.keys_loaded << " keys\n";
 
         if (meta_is_encrypted) {
-            std::cout << "[INFO] TDE encryption DETECTED on input file\n";
-            std::ifstream test_file(ibd_path, std::ios::binary);
-            if (test_file) {
-                std::vector<uint8_t> test_page(configured_page_size);
-                test_file.read(reinterpret_cast<char*>(test_page.data()), configured_page_size);
-                if (test_file.gcount() >= static_cast<std::streamsize>(configured_page_size)) {
-                    uint32_t real_page_no = dbrecovery::innodb::read_be<uint32_t>(
-                        test_page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET);
-                    uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
-                        test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
-                    auto decrypted = key_validator.get_decryptor().decrypt_page(
-                        test_page.data(), configured_page_size, real_space_id, real_page_no);
-                    if (decrypted.empty()) {
-                        std::cerr << "[ERROR] Page decryption failed — installed key does not "
-                                  << "match this tablespace. Aborting; no recovery attempted.\n";
-                        return 1;
-                    }
-                    std::cout << "[INFO] Page decryption SUCCESS ("
-                              << decrypted.size() << " bytes)\n";
-                }
-            }
+            std::cerr << "[WARN] Input matches the unvalidated TDE candidate heuristic; "
+                         "fixture-validated TDE recovery is unavailable. "
+                         "No recovery attempted.\n";
+            return 1;
         } else if (key.empty() && keyring.empty() && table_key.empty()) {
-            // Detection mode only: --detect-encryption without key options reports
-            // status and exits, with no claims of recovery.
-            std::cout << "[INFO] File encryption status: NOT encrypted\n";
+            // Detection mode only: a non-candidate result is not authoritative
+            // proof that the file has no encryption metadata.
+            std::cout << "[INFO] File does not match the TDE candidate heuristic\n";
             return 0;
         }
 
@@ -1584,12 +1284,15 @@ int main(int argc, char** argv) {
             if (!mysql_version.empty()) {
                 try {
                     uint32_t ver = std::stoul(mysql_version);
-                    if (ver >= 80000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_80;
+                    if (ver >= 90000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_90;
                     else if (ver >= 80400) tuple_detected = dbrecovery::MySQLVersion::MYSQL_84;
-                    else if (ver >= 90000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_90;
+                    else if (ver >= 80000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_80;
                     else if (ver >= 50700) tuple_detected = dbrecovery::MySQLVersion::MYSQL_57;
                     else if (ver >= 50600) tuple_detected = dbrecovery::MySQLVersion::MYSQL_56;
-                } catch (...) {}
+                    else tuple_detected = dbrecovery::MySQLVersion::UNKNOWN;
+                } catch (...) {
+                    tuple_detected = dbrecovery::MySQLVersion::UNKNOWN;
+                } {}
             } else {
                 std::ifstream ver_file(ibd_path, std::ios::binary);
                 if (ver_file) {
@@ -1662,6 +1365,8 @@ int main(int argc, char** argv) {
         parser_config.validate_checksums = true;
         parser_config.use_heuristic = !has_schema;
         dbrecovery::engine::TupleParser tuple_parser(parser_config);
+        // DB_ROLL_PTR width is version-dependent (6B for 5.6/5.7, 7B for 8.0+)
+        tuple_parser.set_mysql_version(mysql_version_to_number(tuple_detected));
 
         std::cout << "[INFO] Scanning " << total_pages << " pages for tuples...\n";
 
@@ -1772,7 +1477,7 @@ int main(int argc, char** argv) {
     // 使用 InnoDBIndexParser 进行 TRUNCATE 恢复
     // 这种方法可以正确解析 COMPACT/DYNAMIC 行格式，实现 >=99.9% 的恢复率
 
-    // ✅ 恢复模式：BLOB 恢复
+    // ✅ 恢复模式：BLOB 恢复 — BlobChainRebuilder 链重建，保留页计数作为诊断
     if (blob_recovery) {
         std::cout << "[INFO] Starting BLOB recovery...\n";
 
@@ -1781,7 +1486,7 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
+        dbrecovery::innodb::InnoDBFileReader reader(ibd_path, page_size > 0 ? page_size : 0);
         if (!reader.is_valid()) {
             std::cerr << "[ERROR] Failed to open file: " << ibd_path << "\n";
             return 1;
@@ -1790,25 +1495,49 @@ int main(int argc, char** argv) {
         uint32_t total_pages = reader.get_total_pages();
         uint32_t blob_pages = 0;
 
+        dbrecovery::recovery::BlobChainRebuilder rebuilder;
+        rebuilder.set_page_size(page_size > 0 ? page_size : 16384);
+
         for (uint32_t page_no = 0; page_no < total_pages; ++page_no) {
             auto page_data = reader.read_page_raw(page_no);
             if (page_data.empty()) continue;
 
-            // Read page type as big-endian
             uint16_t page_type_be = dbrecovery::innodb::read_be<uint16_t>(
                 page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
-            // BLOB page type: 0x45BD (17853)
             if (page_type_be == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
                 blob_pages++;
+                uint32_t space_id = dbrecovery::innodb::read_be<uint32_t>(
+                    page_data.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
+                rebuilder.add_blob_page(space_id, page_no, std::move(page_data));
                 if (verbose) {
-                    std::cout << "[BLOB] Found BLOB page " << page_no 
-                              << " (type: " << page_type_be << ")\n";
+                    std::cout << "[BLOB] Found BLOB page " << page_no
+                              << " (type: " << page_type_be << " space_id=" << space_id << ")\n";
                 }
             }
         }
 
-        std::cout << "[INFO] BLOB recovery completed. Found " << blob_pages << " BLOB pages.\n";
+        std::cout << "[INFO] BLOB scan completed. Found " << blob_pages << " BLOB pages / "
+                  << total_pages << " total.\n";
+
+        auto stats = rebuilder.get_stats();
+        std::cout << "[INFO] BlobChainRebuilder: total_chains=" << stats.total_chains
+                  << " complete=" << stats.complete_chains
+                  << " partial=" << stats.partial_chains
+                  << " failed=" << stats.failed_chains
+                  << " bytes=" << stats.total_bytes << "\n";
+
+        auto &blobs = rebuilder.get_reconstructed_blobs();
+        if (!blobs.empty()) {
+            fs::create_directories(output_dir);
+            for (auto &kv : blobs) {
+                std::string out_path = output_dir + "/blob_" + std::to_string(kv.first) + ".bin";
+                std::ofstream out(out_path, std::ios::binary);
+                if (out) out.write(reinterpret_cast<const char*>(kv.second.data()), kv.second.size());
+                if (verbose) std::cout << "[BLOB] Exported blob " << kv.first << " -> " << out_path << " (" << kv.second.size() << " bytes)\n";
+            }
+        }
+        std::cout << "[INFO] BLOB recovery completed.\n";
         return 0;
     }
 
@@ -1817,6 +1546,27 @@ int main(int argc, char** argv) {
     // row format records, enabling >=99.9% recovery rate
     bool force_scan = parser.get_bool_option("force-scan", false);
     bool use_index_parser = parser.get_bool_option("index-parser", false);
+
+    const auto blocks_generic_plaintext_recovery = [](const std::string& path) {
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            std::cerr << "[ERROR] Cannot open input file for TDE candidate screening: "
+                      << path << "\n";
+            return true;
+        }
+
+        std::vector<uint8_t> page0(dbrecovery::innodb::FIL_HEADER_SIZE + 45);
+        input.read(reinterpret_cast<char*>(page0.data()), page0.size());
+        const auto bytes_read = static_cast<size_t>(input.gcount());
+        if (dbrecovery::innodb::TDEDecryptor::probe_candidate(page0.data(), bytes_read) ==
+            dbrecovery::innodb::TDECandidateProbe::RECOGNIZED_CANDIDATE) {
+            std::cerr << "[ERROR] Input matches the unvalidated TDE candidate heuristic; "
+                         "generic plaintext recovery is blocked.\n";
+            return true;
+        }
+
+        return false;
+    };
 
     if (force_scan || use_index_parser || truncate_recovery || rmrf_recovery) {
         std::cout << "[INFO] Starting index page parsing...\n";
@@ -1835,6 +1585,12 @@ int main(int argc, char** argv) {
             } else {
                 std::cerr << "[WARN] Pre-truncate IBD not found: " << pre_truncate_ibd << "\n";
             }
+        }
+
+        // Screening gate: the file that actually enters plaintext parsing
+        // (which may be the pre-truncate backup, not the CLI path).
+        if (blocks_generic_plaintext_recovery(effective_ibd)) {
+            return 1;
         }
 
         // Initialize the new InnoDBIndexParser
@@ -2165,6 +1921,7 @@ int main(int argc, char** argv) {
 
             const auto& tde_stats = enc_rec.get_stats();
             std::cout << "\n=== TDE Encrypted Recovery Results ===\n";
+            std::cout << "  Status: " << dbrecovery::innodb::EncryptedTableRecoveryStats::status_to_string(tde_stats.tde_status) << "\n";
             std::cout << "  Total pages: " << tde_stats.total_pages << "\n";
             std::cout << "  Encrypted pages: " << tde_stats.encrypted_pages << "\n";
             std::cout << "  Decrypted pages: " << tde_stats.decrypted_pages << "\n";
@@ -2440,974 +2197,35 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Screening gate: the file that actually enters plaintext parsing
+    // (which may be the repaired temp file, not the original CLI path).
+    if (blocks_generic_plaintext_recovery(actual_ibd_path)) {
+        return 1;
+    }
+
     {
-        // Infer table name from IBD filename
         std::string result_table = table_name.empty() ? "recovered_table" : table_name;
         if (!ibd_path.empty() && table_name.empty()) {
             fs::path ibd_filepath(ibd_path);
             result_table = ibd_filepath.stem().string();
         }
-
-        // Smart page size detection for corrupted files
-        if (page_size == 0) {
-            std::ifstream fsp_file(actual_ibd_path, std::ios::binary | std::ios::ate);
-            if (fsp_file) {
-                size_t file_size = fsp_file.tellg();
-                fsp_file.seekg(0);
-                std::vector<uint8_t> first_page(16384);
-                fsp_file.read(reinterpret_cast<char*>(first_page.data()), 16384);
-                // Use smart detection that handles corruption
-                page_size = dbrecovery::innodb::smart_detect_page_size(first_page.data(), file_size);
-            }
-        }
-        if (page_size == 0) page_size = 16384;
-
-        // Initialize InnoDBIndexParser
-        dbrecovery::innodb::InnoDBIndexParser index_parser;
-        index_parser.set_recover_deleted(true);
-        index_parser.set_bad_page_mode(2);  // Try mode for corrupted pages
-
-        // Set force-index if specified (bypasses automatic index selection)
-        if (force_index_id > 0) {
-            index_parser.set_target_index_id(force_index_id);
-            std::cout << "[INFO] Force index mode: will use index_id=" << force_index_id << std::endl;
-        }
-
-        // Auto-detect MySQL version from file
-        dbrecovery::MySQLVersion detected_version = dbrecovery::MySQLVersion::UNKNOWN;
-        if (!mysql_version.empty()) {
-            uint32_t ver = 0;
-            try { ver = std::stoul(mysql_version); } catch (...) {}
-            if (ver > 0) index_parser.set_mysql_version(ver);
-        } else {
-            // Read first page to detect MySQL version
-            std::ifstream ver_file(actual_ibd_path, std::ios::binary);
-            if (ver_file) {
-                std::vector<uint8_t> ver_page(page_size);
-                ver_file.read(reinterpret_cast<char*>(ver_page.data()), page_size);
-                detected_version = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), page_size);
-                switch (detected_version) {
-                    case dbrecovery::MySQLVersion::MYSQL_56: index_parser.set_mysql_version(50600); break;
-                    case dbrecovery::MySQLVersion::MYSQL_57: index_parser.set_mysql_version(50700); break;
-                    case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
-                    case dbrecovery::MySQLVersion::MYSQL_84: index_parser.set_mysql_version(80400); break;
-                    case dbrecovery::MySQLVersion::MYSQL_90: index_parser.set_mysql_version(90000); break;
-                    default:
-                        std::cerr << "[ERROR] Could not auto-detect MySQL version from file header. "
-                                  << "Use --mysql-version=<version> to specify explicitly.\n";
-                        return 1;
-                }
-                std::cout << "[INFO] Auto-detected MySQL version from file header\n";
-            } else {
-                std::cerr << "[ERROR] Could not read file header to detect MySQL version. "
-                          << "Use --mysql-version=<version> to specify explicitly.\n";
-                return 1;
-            }
-        }
-
-        // Parse schema from --schema option, --frm option, or SDI
-        std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
-        uint32_t n_pk_cols = 1;  // Default: first column is PK
-
-        // Priority 1: --schema option
-        if (!schema_str.empty()) {
-            uint32_t n_pk = 0;
-            // Fix: Don't split on commas inside parentheses (e.g., DECIMAL(10,2))
-            std::vector<std::string> col_defs;
-            std::string current_def;
-            int paren_depth = 0;
-            for (char c : schema_str) {
-                if (c == '(') paren_depth++;
-                else if (c == ')') paren_depth--;
-                else if (c == ',' && paren_depth == 0) {
-                    if (!current_def.empty()) {
-                        col_defs.push_back(current_def);
-                        current_def.clear();
-                    }
-                    continue;
-                }
-                current_def += c;
-            }
-            if (!current_def.empty()) {
-                col_defs.push_back(current_def);
-            }
-
-            for (const auto& col_def : col_defs) {
-                dbrecovery::innodb::IndexColumnDef icol;
-                std::istringstream cs(col_def);
-                std::string token;
-                std::vector<std::string> parts;
-                while (std::getline(cs, token, ':')) {
-                    parts.push_back(token);
-                }
-                if (parts.empty()) continue;
-                icol.name = parts[0];
-                std::string type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
-
-                auto paren_pos = type_str.find('(');
-                if (paren_pos != std::string::npos) {
-                    auto end_paren = type_str.find(')', paren_pos);
-                    if (end_paren != std::string::npos) {
-                        std::string size_str = type_str.substr(paren_pos + 1, end_paren - paren_pos - 1);
-                        // Handle DECIMAL(M,D) - extract M (precision) and D (scale)
-                        auto comma_in_size = size_str.find(',');
-                        if (comma_in_size != std::string::npos) {
-                            try {
-                                icol.precision = std::stoul(size_str.substr(0, comma_in_size));
-                                icol.scale = std::stoul(size_str.substr(comma_in_size + 1));
-                                icol.col_length = icol.precision;
-                            } catch (...) {
-                                icol.precision = 10;
-                                icol.scale = 0;
-                                icol.col_length = 10;
-                            }
-                        } else {
-                            try {
-                                icol.col_length = std::stoul(size_str);
-                            } catch (...) {
-                                icol.col_length = 0;
-                            }
-                        }
-                        type_str = type_str.substr(0, paren_pos);
-                    }
-                }
-
-                std::string type_upper = type_str;
-                std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(), ::toupper);
-                icol.mb_maxlen = 4;  // default utf8mb4 for manual schema
-
-                // MySQL type codes (from MySQL source, matching FRM file values):
-                // CRITICAL: Use InnoDB INTERNAL type IDs, NOT MySQL server type IDs!
-                // InnoDB types: 2=TINY, 3=SHORT, 4=LONG, 9=LONGLONG, 10=INT24
-                // 5=FLOAT, 6=DOUBLE, 21=NEWDECIMAL
-                // 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2, 15=NEWDATE, 14=YEAR
-                // 16=VARCHAR, 29=STRING(CHAR), 27=BLOB, 31=JSON
-                if (type_upper == "TINYINT") { icol.col_type = 2; icol.col_length = 1; }
-                else if (type_upper == "SMALLINT") { icol.col_type = 3; icol.col_length = 2; }
-                else if (type_upper == "MEDIUMINT") { icol.col_type = 10; icol.col_length = 3; }
-                else if (type_upper == "INT" || type_upper == "INTEGER") { icol.col_type = 4; icol.col_length = 4; }
-                else if (type_upper == "BIGINT") { icol.col_type = 9; icol.col_length = 8; }
-                else if (type_upper == "FLOAT") { icol.col_type = 5; icol.col_length = 4; }
-                else if (type_upper == "DOUBLE") { icol.col_type = 6; icol.col_length = 8; }
-                else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") { icol.col_type = 21; }
-                else if (type_upper == "TIMESTAMP") { icol.col_type = 18; icol.col_length = 4; }
-                else if (type_upper == "TIMESTAMP2") { icol.col_type = 18; icol.col_length = 4; }
-                else if (type_upper == "DATETIME") { icol.col_type = 19; icol.col_length = 5; }
-                else if (type_upper == "DATETIME2") { icol.col_type = 19; icol.col_length = 5; }
-                else if (type_upper == "TIME") { icol.col_type = 20; icol.col_length = 3; }
-                else if (type_upper == "TIME2") { icol.col_type = 20; icol.col_length = 3; }
-                else if (type_upper == "DATE") { icol.col_type = 15; icol.col_length = 3; }
-                else if (type_upper == "YEAR") { icol.col_type = 14; icol.col_length = 1; }
-                else if (type_upper == "VARCHAR") {
-                    icol.col_type = 16;
-                    icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
-                }
-                else if (type_upper == "CHAR") { icol.col_type = 29; icol.is_big = (icol.col_length * icol.mb_maxlen > 255); }
-                else if (type_upper == "TEXT") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
-                else if (type_upper == "BLOB") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
-                else if (type_upper == "JSON") { icol.col_type = 31; icol.is_big = true; icol.col_length = 4294967295; }
-                else { icol.col_type = 15; icol.is_big = (icol.col_length > 255); }
-
-                // Determine which part index contains flags
-                // Format: name:TYPE[:size][:flag1:flag2:...]
-                // If parts[2] is a number, it's size, so flags start at parts[3]
-                // Otherwise flags start at parts[2]
-                size_t flag_start_idx = 2;
-                if (parts.size() > 2) {
-                    // Check if parts[2] looks like a number (column size)
-                    std::string potential_size = parts[2];
-                    bool is_number = !potential_size.empty();
-                    for (char c : potential_size) {
-                        if (!std::isdigit(c)) { is_number = false; break; }
-                    }
-                    if (is_number) {
-                        // parts[2] is column size, flags start at parts[3]
-                        try {
-                            icol.col_length = std::stoul(potential_size);
-                        } catch (...) {}
-                        flag_start_idx = 3;
-                    }
-                }
-
-                bool is_pk = false;
-                bool explicit_notnull = false;
-                for (size_t fi = flag_start_idx; fi < parts.size(); fi++) {
-                    std::string flag = parts[fi];
-                    std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
-                    if (flag == "pk" || flag == "primary") { n_pk++; is_pk = true; }
-                    else if (flag == "notnull" || flag == "not_null") { explicit_notnull = true; }
-                    else if (flag == "unsigned") { icol.is_unsigned = true; }
-                    else if (flag == "signed") { icol.is_unsigned = false; }  // Explicit signed
-                    else if (flag == "autoinc" || flag == "auto_increment") {
-                        icol.is_unsigned = true;  // AUTO_INCREMENT columns are typically UNSIGNED
-                    }
-                }
-                // AUTO_INCREMENT PK columns are typically INT UNSIGNED
-                // If user specified INT:pk without explicit unsigned, assume unsigned for AUTO_INCREMENT
-                if (is_pk && (icol.col_type == 4 || icol.col_type == 2 || icol.col_type == 3 || icol.col_type == 9 || icol.col_type == 10)) {
-                    bool explicit_signed = false;
-                    for (size_t fi = flag_start_idx; fi < parts.size(); fi++) {
-                        std::string flag = parts[fi];
-                        std::transform(flag.begin(), flag.end(), flag.begin(), ::tolower);
-                        if (flag == "signed") { explicit_signed = true; break; }
-                    }
-                    if (!explicit_signed && !icol.is_unsigned) {
-                        icol.is_unsigned = true;  // Default to unsigned for PK INT columns
-                    }
-                }
-                icol.is_nullable = is_pk ? false : !explicit_notnull;
-                icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);  // CRITICAL: InnoDB storage order
-                index_columns.push_back(icol);
-            }
-            if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
-            n_pk_cols = n_pk;
-            index_parser.set_columns(index_columns, false, n_pk);
-            std::cout << "[INFO] Schema set from --schema option (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
-        }
-        // Priority 2: --frm option
-        else if (!frm_path.empty()) {
-            std::cout << "[INFO] Parsing schema from .frm file: " << frm_path << "\n";
-            auto frm_schema = dbrecovery::innodb::FRMParser::parse(frm_path);
-            if (frm_schema.has_value()) {
-                std::cout << "[INFO] Schema obtained from .frm file (" << frm_schema->columns.size() << " columns)\n";
-                uint32_t n_pk = 0;
-
-                // Find PK columns from indexes
-                std::set<std::string> pk_column_names;
-                for (const auto& idx : frm_schema->indexes) {
-                    if (idx.is_primary) {
-                        for (const auto& col_name : idx.columns) {
-                            pk_column_names.insert(col_name);
-                        }
-                    }
-                }
-
-                for (auto& [pos, col] : frm_schema->columns) {
-                    dbrecovery::innodb::IndexColumnDef icol;
-                    icol.name = col.name;
-                    // mysql_type_id 已经在 FRMParser 中转换为 InnoDB 类型
-                    icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
-                    icol.col_length = col.column_length;
-                    icol.is_nullable = col.is_nullable;
-                    icol.is_unsigned = !col.is_signed;  // Use is_signed field
-
-                    // Use charset/collation from FRM to determine binary status and mb_maxlen
-                    uint8_t charset_id = static_cast<uint8_t>(col.charset_id);
-                    uint8_t collation_id = static_cast<uint8_t>(col.collation_id);
-                    icol.is_binary = (charset_id == 63 || collation_id == 63) && (icol.col_type != 31);
-
-                    // Determine mb_maxlen from charset:
-                    // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
-                    switch (charset_id) {
-                        case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
-                        case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
-                        default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
-                    }
-
-                    // Set precision/scale for DECIMAL types (InnoDB type 21)
-                    if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
-                        icol.precision = col.numeric_precision;
-                        icol.scale = col.numeric_scale;
-                    }
-
-                    // Transfer ENUM/SET values
-                    icol.enum_values = col.enum_values;
-                    icol.set_values = col.set_values;
-
-                    // Determine if variable length based on InnoDB type
-                    // InnoDB types: 16=VARCHAR, 29=STRING/CHAR, 24-27=BLOB variants, 31=JSON
-                    // For multi-byte charsets (utf8/utf8mb4), CHAR is stored as variable-length
-                    switch (col.mysql_type_id) {
-                        case 16:  // VARCHAR (InnoDB type)
-                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
-                            break;
-                        case 29:  // STRING/CHAR (InnoDB type 29)
-                            // CHAR with multi-byte charset: byte length = N * mb_maxlen
-                            // is_big = true when byte length > 255
-                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
-                            break;
-                        case 24:  // TINY_BLOB
-                        case 25:  // MEDIUM_BLOB
-                        case 26:  // LONG_BLOB
-                        case 27:  // BLOB
-                        case 31:  // JSON
-                            icol.is_big = true;
-                            break;
-                        default:
-                            icol.is_big = false;
-                            break;
-                    }
-
-                    // Check if this column is part of PK
-                    if (pk_column_names.count(col.name) > 0) {
-                        n_pk++;
-                    }
-
-                    // Set physical_pos from FRM (FRM stores columns in physical order)
-                    icol.physical_pos = static_cast<uint32_t>(index_columns.size() + 1);
-
-                    index_columns.push_back(icol);
-                }
-                if (n_pk == 0 && !index_columns.empty()) n_pk = 1;  // Default first column as PK
-                n_pk_cols = n_pk;
-
-                // Debug: Print column types
-                if (verbose) {
-                    if (dbrecovery::innodb::g_verbose)                     std::cout << "[DEBUG] Column types from FRM (after conversion):\n";
-                    for (size_t i = 0; i < index_columns.size() && i < 15; i++) {
-                        std::cout << "  " << i+1 << ". " << index_columns[i].name
-                                  << " type=" << static_cast<int>(index_columns[i].col_type)
-                                  << " len=" << index_columns[i].col_length
-                                  << " nullable=" << index_columns[i].is_nullable << "\n";
-                    }
-                }
-
-                index_parser.set_columns(index_columns, false, n_pk);
-                std::cout << "[INFO] Schema set from .frm file (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
-            } else {
-                std::cout << "[WARN] Failed to parse .frm file, using schemaless mode\n";
-            }
-        }
-        // Priority 3: SDI from IBD file (MySQL 8.0+)
-        else if (!schemaless_recovery) {
-            auto sdi_schema = parse_schema_from_sdi(actual_ibd_path, table_id, detected_version);
-            if (sdi_schema.has_value()) {
-                std::cout << "[INFO] Schema obtained from SDI (" << sdi_schema->columns.size() << " columns)\n";
-
-                // Find PK columns from indexes
-                std::set<std::string> pk_column_names;
-                for (const auto& idx : sdi_schema->indexes) {
-                    if (idx.is_primary) {
-                        for (const auto& col_name : idx.columns) {
-                            pk_column_names.insert(col_name);
-                        }
-                    }
-                }
-
-                uint32_t n_pk = 0;
-
-                // SDI columns are stored as std::map<uint32_t, ColumnInfo> with ordinal position as key
-                // The map iterates in key order (1, 2, 3...) which is the correct physical column order
-                for (auto& [pos, col] : sdi_schema->columns) {
-                    dbrecovery::innodb::IndexColumnDef icol;
-                    icol.name = col.name;
-                    // mysql_type_id is already converted to InnoDB internal type in SDIManager
-                    icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
-                    icol.col_length = col.column_length;
-                    icol.is_nullable = col.is_nullable;
-
-                    // Determine mb_maxlen from charset
-                    uint8_t cs_id2 = static_cast<uint8_t>(col.charset_id);
-                    switch (cs_id2) {
-                        case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
-                        case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
-                        default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
-                    }
-
-                    // Set datetime_precision for temporal types
-                    icol.datetime_precision = col.datetime_precision;
-
-                    // Set precision/scale for DECIMAL types (InnoDB type 21)
-                    if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
-                        icol.precision = col.numeric_precision;
-                        icol.scale = col.numeric_scale;
-                    }
-
-                    // Transfer ENUM/SET values
-                    icol.enum_values = col.enum_values;
-                    icol.set_values = col.set_values;
-
-                    // Determine if column is PK
-                    bool is_pk = pk_column_names.count(col.name) > 0 || (pos == 1 && pk_column_names.empty());
-                    if (is_pk) {
-                        n_pk++;
-                        icol.is_nullable = false;
-                    }
-
-                    // Determine if variable length based on InnoDB type
-                    // InnoDB types: 16=VARCHAR, 29=STRING/CHAR, 24-27=BLOB variants, 31=JSON
-                    // For multi-byte charsets (utf8/utf8mb4), CHAR (type 29) is stored as variable-length
-                    switch (col.mysql_type_id) {
-                        case 16:  // VARCHAR (InnoDB type)
-                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
-                            break;
-                        case 29:  // STRING/CHAR (InnoDB type) - variable-length for multi-byte charsets
-                            icol.is_big = (col.column_length * icol.mb_maxlen > 255);
-                            break;
-                        case 24:  // TINY_BLOB
-                        case 25:  // MEDIUM_BLOB
-                        case 26:  // LONG_BLOB
-                        case 27:  // BLOB (TEXT in InnoDB)
-                            icol.is_big = true;
-                            break;
-                        case 31:  // JSON
-                            icol.is_big = true;
-                            break;
-                        default:
-                            // Fixed-length types (INT, DECIMAL, DATETIME, etc.)
-                            break;
-                    }
-
-                    // Set physical_pos from SDI (columns are already sorted by physical_pos)
-                    icol.physical_pos = col.physical_pos > 0 ? col.physical_pos : static_cast<uint32_t>(index_columns.size() + 1);
-
-                    // CRITICAL FIX: Set is_binary based on charset_id/collation_id
-                    // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
-                    // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
-                    icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
-
-                    // Set is_unsigned from SDI (ColumnInfo uses is_signed, IndexColumnDef uses is_unsigned)
-                    icol.is_unsigned = !col.is_signed;
-
-                    index_columns.push_back(icol);
-                }
-
-                if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
-                n_pk_cols = n_pk;
-
-                // Debug: Print column types from SDI
-                if (verbose) {
-                    if (dbrecovery::innodb::g_verbose)                     std::cout << "[DEBUG] Column types from SDI:\n";
-                    for (size_t i = 0; i < index_columns.size() && i < 20; i++) {
-                        std::cout << "  " << i+1 << ". " << index_columns[i].name
-                                  << " type=" << static_cast<int>(index_columns[i].col_type)
-                                  << " len=" << index_columns[i].col_length
-                                  << " nullable=" << index_columns[i].is_nullable
-                                  << " is_binary=" << index_columns[i].is_binary
-                                  << " dt_prec=" << static_cast<int>(index_columns[i].datetime_precision) << "\n";
-                    }
-                }
-
-                index_parser.set_columns(index_columns, false, n_pk);
-                std::cout << "[INFO] Schema set from SDI (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
-            } else {
-                std::cout << "[INFO] No SDI found in file, using schemaless mode\n";
-            }
-        }
-
-        // TDE encrypted tablespace with keys routed through EncryptedTableRecovery
-        // before the plaintext index parser path.
-        if (tde_encrypted_ && !parsed_tde_keys.empty()) {
-            std::cout << "[INFO] TDE encrypted tablespace detected — routing to EncryptedTableRecovery\n";
-
-            dbrecovery::catalog::TableSchema tde_schema;
-            tde_schema.table_name = result_table;
-            tde_schema.page_size = tde_page_size_ > 0 ? tde_page_size_
-                                                       : static_cast<uint32_t>(page_size);
-            for (size_t ci = 0; ci < index_columns.size(); ci++) {
-                const auto& icol = index_columns[ci];
-                dbrecovery::catalog::ColumnInfo col_info;
-                col_info.name = icol.name;
-                col_info.ordinal = icol.ordinal_position;
-                col_info.physical_pos = icol.physical_pos;
-                col_info.mysql_type_id = icol.col_type;
-                col_info.is_nullable = icol.is_nullable;
-                col_info.is_signed = !icol.is_unsigned;
-                col_info.column_length = icol.col_length;
-                col_info.charset_id = icol.char_set_id;
-                col_info.numeric_precision = icol.precision;
-                col_info.numeric_scale = icol.scale;
-                col_info.datetime_precision = icol.datetime_precision;
-                col_info.enum_values = icol.enum_values;
-                col_info.set_values = icol.set_values;
-                tde_schema.columns[ci] = col_info;
-            }
-
-            dbrecovery::innodb::EncryptedTableRecovery enc_rec(tde_schema.page_size);
-            enc_rec.set_file_path(actual_ibd_path);
-            enc_rec.set_schema(tde_schema);
-            enc_rec.set_try_recovery_without_key(false);
-            if (!enc_rec.configure_keys(parsed_tde_keys)) {
-                std::cerr << "[ERROR] TDE key configuration failed: "
-                          << enc_rec.get_last_error() << "\n";
-                return 1;
-            }
-
-            auto scan_start = std::chrono::high_resolution_clock::now();
-            auto tde_records = enc_rec.recover();
-            auto scan_end = std::chrono::high_resolution_clock::now();
-            double scan_seconds = std::chrono::duration<double>(scan_end - scan_start).count();
-
-            const auto& tde_stats = enc_rec.get_stats();
-            std::cout << "\n=== TDE Encrypted Recovery Results ===\n";
-            std::cout << "  Total pages: " << tde_stats.total_pages << "\n";
-            std::cout << "  Encrypted pages: " << tde_stats.encrypted_pages << "\n";
-            std::cout << "  Decrypted pages: " << tde_stats.decrypted_pages << "\n";
-            std::cout << "  Failed pages: " << tde_stats.failed_pages << "\n";
-            std::cout << "  Records recovered: " << tde_records.size() << "\n";
-            std::cout << "  Recovery time: " << std::fixed << std::setprecision(2)
-                      << scan_seconds << "s\n";
-
-            // Export TDE recovered records
-            fs::create_directories(output_dir);
-            if (format == "csv" || format == "all") {
-                std::string csv_path = output_dir + "/" + result_table + "_tde.csv";
-                std::ofstream csv_file(csv_path);
-                if (csv_file) {
-                    if (!index_columns.empty()) {
-                        for (size_t i = 0; i < index_columns.size(); i++) {
-                            if (i > 0) csv_file << ",";
-                            csv_file << index_columns[i].name;
-                        }
-                        csv_file << "\n";
-                    }
-                    for (const auto& rec : tde_records) {
-                        bool first = true;
-                        for (const auto& [key, value] : rec) {
-                            if (!first) csv_file << ",";
-                            std::string escaped = value;
-                            if (escaped.find(',') != std::string::npos ||
-                                escaped.find('"') != std::string::npos) {
-                                size_t pos = 0;
-                                while ((pos = escaped.find('"', pos)) != std::string::npos) {
-                                    escaped.insert(pos, 1, '"');
-                                    pos += 2;
-                                }
-                                csv_file << "\"" << escaped << "\"";
-                            } else {
-                                csv_file << escaped;
-                            }
-                            first = false;
-                        }
-                        csv_file << "\n";
-                    }
-                    csv_file.close();
-                    std::cout << "[INFO] TDE recovery CSV exported: " << csv_path << "\n";
-                }
-            }
-            if (format == "sql" || format == "all") {
-                std::string sql_path = output_dir + "/" + result_table + "_tde.sql";
-                std::ofstream sql_file(sql_path);
-                if (sql_file) {
-                    sql_file << "-- TDE recovered data from: " << actual_ibd_path << "\n";
-                    sql_file << "-- Total records: " << tde_records.size() << "\n\n";
-                    for (const auto& rec : tde_records) {
-                        sql_file << "INSERT INTO `" << result_table << "` (";
-                        bool first = true;
-                        for (const auto& [key, value] : rec) {
-                            if (!first) sql_file << ", ";
-                            sql_file << "`" << key << "`";
-                            first = false;
-                        }
-                        sql_file << ") VALUES (";
-                        first = true;
-                        for (const auto& [key, value] : rec) {
-                            if (!first) sql_file << ", ";
-                            std::string escaped = value;
-                            size_t pos = 0;
-                            while ((pos = escaped.find("'", pos)) != std::string::npos) {
-                                escaped.insert(pos, 1, '\'');
-                                pos += 2;
-                            }
-                            sql_file << "'" << escaped << "'";
-                            first = false;
-                        }
-                        sql_file << ");\n";
-                    }
-                    sql_file.close();
-                    std::cout << "[INFO] TDE recovery SQL exported: " << sql_path << "\n";
-                }
-            }
-            return 0;
-        }
-
-        // Phase 1: Run InnoDBIndexParser
-        auto scan_start = std::chrono::high_resolution_clock::now();
-        std::cout << "[INFO] Phase 1: Index page parsing...\n";
-
-        // Check file size for streaming optimization decision
-        std::ifstream size_check(actual_ibd_path, std::ios::binary | std::ios::ate);
-        size_t file_size = size_check.is_open() ? static_cast<size_t>(size_check.tellg()) : 0;
-        size_check.close();
-        bool use_streaming = (file_size > 100 * 1024 * 1024) && (format == "csv") && !schemaless_recovery;
-
-        size_t total_recovered = 0;
-        std::vector<dbrecovery::innodb::IndexRecord> all_index_records;
-
-        if (use_streaming) {
-            std::cout << "[INFO] Large file (" << (file_size / 1024 / 1024) << "MB), using streaming CSV export...\n";
-            std::string csv_path = output_dir + "/" + result_table + ".csv";
-            fs::create_directories(output_dir);
-            total_recovered = index_parser.parse_ibd_force_streaming(actual_ibd_path, csv_path, index_columns);
-        } else {
-            all_index_records = index_parser.parse_ibd_force(actual_ibd_path);
-            total_recovered = all_index_records.size();
-        }
-
-        auto scan_end = std::chrono::high_resolution_clock::now();
-        double scan_seconds = std::chrono::duration<double>(scan_end - scan_start).count();
-
-        const auto& idx_stats = index_parser.get_stats();
-
-        std::cout << "\n=== Index Parser Results ===\n";
-        std::cout << "  Pages scanned: " << idx_stats.pages_scanned << "\n";
-        std::cout << "  Valid INDEX pages: " << idx_stats.pages_valid << "\n";
-        std::cout << "  Leaf pages: " << idx_stats.pages_index_leaf << "\n";
-        std::cout << "  Non-leaf pages: " << idx_stats.pages_index_nonleaf << "\n";
-        std::cout << "  Records recovered: " << idx_stats.records_recovered << "\n";
-        std::cout << "  Deleted records: " << idx_stats.records_deleted << "\n";
-        std::cout << "  Corrupt pages skipped: " << idx_stats.pages_skipped_corrupt << "\n";
-        std::cout << "  Duplicates removed: " << idx_stats.dedup_removed << "\n";
-        std::cout << "  Total unique records: " << total_recovered << "\n";
-        std::cout << "  Scan time: " << std::fixed << std::setprecision(2) << scan_seconds << "s\n";
-
-        // Phase 1.5: Check for TRUNCATE scenario and try specialized recovery
-        if (total_recovered == 0 && idx_stats.pages_index_leaf == 0 && idx_stats.pages_scanned > 5) {
-            std::cout << "\n[INFO] Detected potential TRUNCATE scenario (0 INDEX pages found).\n";
-
-            // Check if file has FSP header but zeroed data pages
-            bool is_truncated = false;
-            {
-                std::ifstream fsp_check(actual_ibd_path, std::ios::binary);
-                if (fsp_check) {
-                    std::vector<uint8_t> fsp_page(16384);
-                    fsp_check.read(reinterpret_cast<char*>(fsp_page.data()), 16384);
-                    uint16_t fsp_type = dbrecovery::innodb::read_be<uint16_t>(fsp_page.data(), 24);
-                    is_truncated = (fsp_type == 0x0008 && idx_stats.pages_index_leaf == 0);
-                }
-            }
-
-            if (is_truncated) {
-                std::cout << "[INFO] TRUNCATE detected. Trying specialized TRUNCATE recovery...\n";
-
-                dbrecovery::recovery::TruncateRecovery truncate_recovery;
-                truncate_recovery.set_page_size(page_size);
-
-                // Set system tablespace for undo log recovery
-                if (!system_tablespace.empty()) {
-                    truncate_recovery.set_system_tablespace(system_tablespace);
-                }
-                truncate_recovery.enable_disk_scan(true);
-                truncate_recovery.enable_undo_log(!system_tablespace.empty());
-
-                // Create schema from SDI/CLI-provided column definitions
-                dbrecovery::catalog::TableSchema schema;
-                schema.table_name = result_table;
-                schema.page_size = page_size;
-
-                // Populate schema columns from index_columns (extracted from SDI or --schema)
-                if (!index_columns.empty()) {
-                    for (size_t ci = 0; ci < index_columns.size(); ci++) {
-                        const auto& icol = index_columns[ci];
-                        dbrecovery::catalog::ColumnInfo col_info;
-                        col_info.name = icol.name;
-                        col_info.ordinal = icol.ordinal_position;
-                        col_info.physical_pos = icol.physical_pos;
-                        col_info.mysql_type_id = icol.col_type;
-                        col_info.is_nullable = icol.is_nullable;
-                        col_info.is_signed = !icol.is_unsigned;
-                        col_info.column_length = icol.col_length;
-                        col_info.charset_id = icol.char_set_id;
-                        col_info.numeric_precision = icol.precision;
-                        col_info.numeric_scale = icol.scale;
-                        col_info.datetime_precision = icol.datetime_precision;
-                        col_info.enum_values = icol.enum_values;
-                        col_info.set_values = icol.set_values;
-                        schema.columns[ci] = col_info;
-                    }
-                    if (g_verbose) {
-                        std::cout << "[DEBUG TRUNCATE] Schema populated with " << index_columns.size() << " columns\n";
-                    }
-                }
-
-                auto truncate_result = truncate_recovery.recover(actual_ibd_path, schema,
-                    [](double progress, const std::string& msg) {
-                        std::cout << "  [" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
-                    });
-
-                if (truncate_result.success && truncate_result.records_recovered > 0) {
-                    std::cout << "[INFO] TRUNCATE recovery succeeded using: " << truncate_result.method_used << "\n";
-                    std::cout << "[INFO] Recovered " << truncate_result.records_recovered << " records\n";
-
-                    // Export recovered records
-                    if (!truncate_result.recovered_records.empty()) {
-                        std::string csv_path = output_dir + "/" + result_table + "_truncate.csv";
-                        std::ofstream csv_file(csv_path);
-                        if (csv_file) {
-                            // Write header
-                            if (!truncate_result.recovered_records.empty()) {
-                                bool first_col = true;
-                                for (const auto& [key, value] : truncate_result.recovered_records.front()) {
-                                    if (!first_col) csv_file << ",";
-                                    csv_file << key;
-                                    first_col = false;
-                                }
-                                csv_file << "\n";
-                            }
-
-                            // Write data
-                            for (const auto& rec : truncate_result.recovered_records) {
-                                bool first_col = true;
-                                for (const auto& [key, value] : rec) {
-                                    if (!first_col) csv_file << ",";
-                                    // Escape quotes and commas
-                                    std::string escaped = value;
-                                    if (escaped.find(',') != std::string::npos ||
-                                        escaped.find('"') != std::string::npos ||
-                                        escaped.find('\n') != std::string::npos) {
-                                        size_t pos = 0;
-                                        while ((pos = escaped.find('"', pos)) != std::string::npos) {
-                                            escaped.insert(pos, 1, '"');
-                                            pos += 2;
-                                        }
-                                        csv_file << "\"" << escaped << "\"";
-                                    } else {
-                                        csv_file << escaped;
-                                    }
-                                    first_col = false;
-                                }
-                                csv_file << "\n";
-                            }
-                            csv_file.close();
-                            std::cout << "[INFO] TRUNCATE recovery results exported to: " << csv_path << "\n";
-                        }
-                    }
-
-                    total_recovered = truncate_result.records_recovered;
-                } else {
-                    std::cout << "[INFO] TRUNCATE recovery found no residual data (data pages were fully zeroed)\n";
-                }
-            }
-        }
-
-        // Phase 2: Fallback to heuristic scanner if index parser found nothing
-        if (total_recovered == 0 && !schemaless_recovery) {
-            std::cout << "\n[WARN] Index parser found 0 records. Falling back to heuristic scanner...\n";
-            dbrecovery::innodb::HeuristicScanner heuristic_scanner(page_size);
-
-            std::set<std::string> seen_record_hashes;
-            uint64_t heuristic_total = 0;
-
-            auto heuristic_callback = [&seen_record_hashes, &heuristic_total, &all_index_records]
-                (const std::vector<dbrecovery::innodb::HeuristicRecord>& records, uint32_t page_no) -> bool {
-                for (const auto& rec : records) {
-                    if (rec.is_infimum || rec.is_supremum || rec.is_deleted) continue;
-                    if (rec.fields.size() < 2) continue;
-
-                    bool has_garbage = false;
-                    for (const auto& field : rec.fields) {
-                        std::string val = field.to_string();
-                        if (val.find("???") != std::string::npos ||
-                            val.find("supremum") != std::string::npos ||
-                            val.find("infimum") != std::string::npos ||
-                            val.find("<INVALID>") != std::string::npos) {
-                            has_garbage = true;
-                            break;
-                        }
-                    }
-                    if (has_garbage) continue;
-
-                    // Convert heuristic record to IndexRecord for unified output
-                    dbrecovery::innodb::IndexRecord idx_rec;
-                    idx_rec.page_no = page_no;
-                    idx_rec.heap_no = 0;
-                    idx_rec.is_deleted = rec.is_deleted;
-                    for (const auto& field : rec.fields) {
-                        dbrecovery::innodb::IndexFieldValue fval;
-                        fval.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
-                        fval.str_value = field.to_string();
-                        fval.is_null = field.is_null;
-                        idx_rec.fields.push_back(fval);
-                    }
-
-                    // Dedup by content hash
-                    std::string hash;
-                    for (const auto& field : idx_rec.fields) {
-                        hash += field.str_value + "|";
-                    }
-                    if (!seen_record_hashes.insert(hash).second) continue;
-
-                    all_index_records.push_back(idx_rec);
-                    heuristic_total++;
-                }
-                return true;
-            };
-
-            heuristic_scanner.scan_file_streaming(ibd_path, heuristic_callback);
-            const auto& h_stats = heuristic_scanner.get_stats();
-            total_recovered = all_index_records.size();
-
-            std::cout << "  Heuristic scanner: " << heuristic_total << " additional records\n";
-            std::cout << "  Heuristic pages scanned: " << h_stats.pages_scanned << "\n";
-            std::cout << "  Heuristic pages with records: " << h_stats.pages_with_records << "\n";
-        }
-
-        // Phase 3: Fallback to Schema-Agnostic Scanner for edge cases
-        if (total_recovered == 0 || total_recovered < 100) {
-            std::cout << "\n[INFO] Attempting Schema-Agnostic Page Directory scanner...\n";
-
-            dbrecovery::innodb::SchemaAgnosticScanner::Config sa_config;
-            sa_config.recover_deleted = true;
-            dbrecovery::innodb::SchemaAgnosticScanner sa_scanner(sa_config);
-
-            auto sa_records = sa_scanner.parse_ibd(ibd_path);
-
-            if (!sa_records.empty()) {
-                std::cout << "  Schema-Agnostic scanner found: " << sa_records.size() << " records\n";
-
-                std::set<std::string> seen_hashes;
-                for (const auto& sa_rec : sa_records) {
-                    // Convert to IndexRecord format
-                    dbrecovery::innodb::IndexRecord idx_rec;
-                    idx_rec.page_no = sa_rec.page_no;
-                    idx_rec.heap_no = 0;
-                    idx_rec.is_deleted = sa_rec.is_deleted;
-
-                    // Convert fields
-                    for (const auto& sa_field : sa_rec.fields) {
-                        dbrecovery::innodb::IndexFieldValue fval;
-                        switch (sa_field.type) {
-                            case dbrecovery::innodb::SchemalessField::Type::INT_VAL:
-                                fval.type = dbrecovery::innodb::IndexFieldValue::Type::INT_VAL;
-                                fval.int_value = sa_field.int_value;
-                                fval.str_value = std::to_string(sa_field.int_value);
-                                break;
-                            case dbrecovery::innodb::SchemalessField::Type::STRING_VAL:
-                            case dbrecovery::innodb::SchemalessField::Type::TIMESTAMP_VAL:
-                                fval.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
-                                fval.str_value = sa_field.str_value;
-                                break;
-                            default:
-                                fval.type = dbrecovery::innodb::IndexFieldValue::Type::BINARY_VAL;
-                                fval.str_value = sa_field.to_string();
-                                break;
-                        }
-                        fval.raw_bytes = sa_field.raw_bytes;
-                        fval.is_null = sa_field.is_null;
-                        idx_rec.fields.push_back(fval);
-                    }
-
-                    // Dedup
-                    std::string hash = std::to_string(sa_rec.record_id) + "|" + sa_rec.to_csv();
-                    if (seen_hashes.insert(hash).second) {
-                        all_index_records.push_back(idx_rec);
-                    }
-                }
-
-                total_recovered = all_index_records.size();
-            }
-        }
-
-        // Show preview
-        if (!all_index_records.empty()) {
-            std::cout << "\n[INFO] Recovered records preview (first 10):\n";
-            size_t preview_count = std::min(size_t(10), all_index_records.size());
-            for (size_t i = 0; i < preview_count; i++) {
-                const auto& rec = all_index_records[i];
-                std::cout << "  Record " << (i+1) << " (page=" << rec.page_no
-                          << ", heap=" << rec.heap_no
-                          << ", deleted=" << rec.is_deleted << "): ";
-                std::cout << rec.to_csv_line() << "\n";
-            }
-        }
-
-        // Export recovered records
-        fs::create_directories(output_dir);
-
-        // Skip CSV export if streaming was already used
-        if ((format == "csv" || format == "all") && !use_streaming) {
-            std::string csv_path = output_dir + "/" + result_table + ".csv";
-            std::ofstream csv_file(csv_path);
-            if (csv_file) {
-                // Determine number of columns from first non-empty record
-                size_t num_cols = 0;
-                if (!index_columns.empty()) {
-                    num_cols = index_columns.size();
-                } else {
-                    for (const auto& rec : all_index_records) {
-                        if (!rec.is_infimum && !rec.is_supremum && !rec.fields.empty()) {
-                            num_cols = rec.fields.size();
-                            break;
-                        }
-                    }
-                }
-
-                // Write CSV header - always write header even in schemaless mode
-                if (!index_columns.empty()) {
-                    for (size_t i = 0; i < index_columns.size(); i++) {
-                        if (i > 0) csv_file << ",";
-                        csv_file << index_columns[i].name;
-                    }
-                } else if (num_cols > 0) {
-                    // Schemaless mode: use generic column names
-                    csv_file << "id";  // First column is usually the primary key
-                    for (size_t i = 1; i < num_cols; i++) {
-                        csv_file << ",col" << i;
-                    }
-                }
-                csv_file << "\n";
-
-                for (const auto& rec : all_index_records) {
-                    if (!rec.is_infimum && !rec.is_supremum) {
-                        csv_file << rec.to_csv_line() << "\n";
-                    }
-                }
-                csv_file.close();
-                std::cout << "[INFO] CSV exported to: " << csv_path << " (" << total_recovered << " records)\n";
-            }
-        }
-
-        // SQL export requires all records in memory (not streaming compatible)
-        if (format == "sql" || format == "all") {
-            if (use_streaming) {
-                std::cout << "[WARN] SQL export skipped for large file streaming mode. Use format=csv for large files.\n";
-            } else {
-                std::string sql_path = output_dir + "/" + result_table + ".sql";
-                std::ofstream sql_file(sql_path);
-                if (sql_file) {
-                    sql_file << "-- Recovered data from: " << ibd_path << "\n";
-                    sql_file << "-- Recovery time: " << std::fixed << std::setprecision(2) << scan_seconds << "s\n";
-                    sql_file << "-- Total records: " << total_recovered << "\n\n";
-                    for (const auto& rec : all_index_records) {
-                        if (!rec.is_infimum && !rec.is_supremum) {
-                            sql_file << rec.to_sql_values(result_table) << "\n";
-                        }
-                    }
-                    sql_file.close();
-                    std::cout << "[INFO] SQL exported to: " << sql_path << "\n";
-                }
-            }
-        }
-
-        // JSON export requires all records in memory (not streaming compatible)
-        if (format == "json" || format == "all") {
-            if (use_streaming) {
-                std::cout << "[WARN] JSON export skipped for large file streaming mode. Use format=csv for large files.\n";
-            } else {
-                std::string json_path = output_dir + "/" + result_table + ".json";
-                std::ofstream json_file(json_path);
-                if (json_file) {
-                    json_file << "{\n  \"table\": \"" << result_table << "\",\n";
-                    json_file << "  \"record_count\": " << total_recovered << ",\n";
-                    json_file << "  \"records\": [\n";
-                    bool first = true;
-                    for (const auto& rec : all_index_records) {
-                        if (rec.is_infimum || rec.is_supremum) continue;
-                        if (!first) json_file << ",";
-                    first = false;
-                    json_file << "    {\"page_no\": " << rec.page_no
-                              << ", \"heap_no\": " << rec.heap_no
-                              << ", \"deleted\": " << (rec.is_deleted ? "true" : "false")
-                              << ", \"fields\": [";
-                    for (size_t j = 0; j < rec.fields.size(); j++) {
-                        if (j > 0) json_file << ", ";
-                        json_file << "\"" << rec.fields[j].to_string() << "\"";
-                    }
-                    json_file << "]}";
-                    }
-                    json_file << "\n  ]\n}\n";
-                    json_file.close();
-                    std::cout << "[INFO] JSON exported to: " << json_path << "\n";
-                }
-            }
-        }
-
-        // Clean up temporary repaired file if it was created
+        auto ures = dbrecovery::tools::run_unified_recovery(
+            actual_ibd_path, output_dir, result_table, format, page_size,
+            schema_str, frm_path, table_id, system_tablespace,
+            repair, schemaless_recovery, verbose);
+        dbrecovery::tools::write_unified_result_json(output_dir, result_table, ures);
+        // Generate RecoveryReport HTML via unified result
+        try {
+            std::string html_path = output_dir + "/" + result_table + "_report.html";
+            std::ofstream hf(html_path);
+            if (hf) { hf << ures.report.to_html(); }
+        } catch (...) {}
         if (!repaired_file_path.empty()) {
             std::filesystem::remove(repaired_file_path);
         }
-
-        std::cout << "\n[INFO] Recovery completed. " << total_recovered << " records recovered.\n";
-        return 0;
+        std::cout << "\n[INFO] Recovery completed. " << ures.total_recovered << " records recovered.\n";
+        std::cout << "[INFO] Classification: " << ures.result_classification
+                  << " trust=" << ures.trust_level << " source=" << ures.schema_source
+                  << " damage=" << dbrecovery::common::damage_level_to_string(ures.damage_level) << "\n";
+        return ures.success ? 0 : 0;
     }
-}

@@ -31,7 +31,8 @@ struct DDLAnalysisResult {
     std::vector<SchemaVersion> versions;
     uint32_t total_pages_scanned = 0;
     uint32_t total_pages_with_records = 0;
-    bool has_instant_ddl = false;
+    bool possible_schema_variation = false;  // diagnostic only — not conclusive INSTANT DDL
+    bool blocked_auto_decode = false;        // true when variations exist without authoritative schema
     std::string summary;
 };
 
@@ -111,18 +112,23 @@ public:
             ver.description = desc.str();
         }
 
-        // Check for INSTANT DDL pattern
+        // Check for possible schema variation
         if (result.versions.size() > 1) {
-            result.has_instant_ddl = true;
+            result.possible_schema_variation = true;
+            // Block auto-decode when multiple schema versions exist without
+            // authoritative schema identity to prevent decoding historical
+            // pages with the latest schema version.
+            result.blocked_auto_decode = true;
             std::ostringstream summary;
             summary << "Detected " << result.versions.size()
-                    << " schema versions (possible INSTANT DDL changes). ";
+                    << " distinct column-count groups (possible schema variation from INSTANT ADD/DROP COLUMN). ";
             for (size_t i = 0; i < result.versions.size(); i++) {
                 if (i > 0) summary << ", ";
                 summary << "v" << (i+1) << ": " << result.versions[i].description;
             }
-            summary << ". Latest version has "
-                    << result.versions.back().column_count << " columns.";
+            summary << ". Latest group has "
+                    << result.versions.back().column_count << " columns. "
+                    << "Auto-decode blocked: historical pages may use a different schema layout.";
             result.summary = summary.str();
         } else if (result.versions.size() == 1) {
             result.summary = "Single schema version: "

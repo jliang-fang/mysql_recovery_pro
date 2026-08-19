@@ -109,10 +109,20 @@ public:
 
     /**
      * @brief Construct a new TupleParser
-     * 
+     *
      * @param config Parsing configuration
      */
     explicit TupleParser(const Config& config);
+
+    /**
+     * @brief Set MySQL version for version-dependent layout decisions
+     *
+     * Controls DB_ROLL_PTR width: 6 bytes for 5.6/5.7, 7 bytes for 8.0+.
+     * Default (0 / unknown) uses 7 bytes as conservative choice.
+     *
+     * @param version MySQL version number (e.g. 50600, 50700, 80000)
+     */
+    void set_mysql_version(uint32_t version) { mysql_version_ = version; }
 
     /// @brief Destroy the TupleParser
     ~TupleParser();
@@ -223,6 +233,12 @@ public:
 
 private:
     Config config_;
+    uint32_t mysql_version_ = 0;  // Not set → conservative 7-byte DB_ROLL_PTR
+
+    /// @brief DB_ROLL_PTR width in bytes for resolved version
+    uint32_t roll_ptr_bytes() const {
+        return (mysql_version_ >= 80000 || mysql_version_ == 0) ? 7 : 6;
+    }
 
     /**
      * @brief Get fixed-size field byte length for a column type

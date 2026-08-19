@@ -10,6 +10,7 @@
 #include "dbrecovery/innodb/btree.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/roll_ptr_decoder.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/innodb/undo_log_parser.hpp"
 #include "dbrecovery/innodb/flashback_generator.hpp"
@@ -203,14 +204,16 @@ records,
     }
 
     /**
-     * @brief Recover deleted records from undo logs for a specific table
+     * @brief Forensic inventory of legacy undo log entries (NOT verified recovery)
      *
-     * Scans undo logs for TRX_UNDO_DEL_MARK records, reconstructs row data
-     * from undo chains, and returns records that can be INSERTed back.
+     * Uses the legacy UndoLogParser heuristic path to enumerate TRX_UNDO_DEL_MARK
+     * candidates for a table. Output records carry FORENSIC_LEGACY_UNDO provenance;
+     * they have NOT been validated against roll-pointer chains, so they must not be
+     * treated as verified row history or used to generate flashback SQL.
      *
      * @param table_name Target table name (used for SQL generation context)
      * @param schema Table schema for column naming
-     * @return Recovered records from undo logs
+     * @return Non-authoritative candidate records, tagged FORENSIC_LEGACY_UNDO.
      */
     std::vector<std::map<std::string, std::string>> recover_from_undo_logs(
         const std::string& table_name,
@@ -243,7 +246,8 @@ records,
      * @return Ordered undo entries (oldest first)
      */
     std::vector<innodb::UndoLogEntry> traverse_undo_chain(
-        uint32_t start_page_no, uint32_t start_offset);
+        uint32_t start_page_no, uint32_t start_offset,
+        innodb::UndoFormatProfile profile = innodb::UndoFormatProfile::UNRESOLVED);
 
     /**
      * @brief Get the UndoLogParser statistics

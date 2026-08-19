@@ -8,6 +8,8 @@
 #include <filesystem>
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
+#include "dbrecovery/innodb/compressed_table_recovery.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/recovery/engine.hpp"
 
 using namespace dbrecovery;
@@ -115,33 +117,26 @@ protected:
     }
 };
 
-TEST_F(TDEKeyringTest, LoadKeyringFile) {
+TEST_F(TDEKeyringTest, LoadKeyringFileRejected) {
     create_test_keyring();
 
     innodb::KeyringFile keyring;
-    ASSERT_TRUE(keyring.load(keyring_path_)) << "Failed to load keyring file";
-
-    EXPECT_EQ(keyring.entries.size(), 1) << "Should have 1 key entry";
-
-    if (!keyring.entries.empty()) {
-        const auto& entry = keyring.entries[0];
-        EXPECT_EQ(entry.key_name, "INNODBKey-test-uuid-1");
-        EXPECT_EQ(entry.key_data.size(), 32) << "Key should be 32 bytes";
-        EXPECT_EQ(entry.algorithm, innodb::TDEAlgorithm::AES_256_CBC);
-    }
+    // Native binary keyring loading is unsupported — always fails closed
+    ASSERT_FALSE(keyring.load(keyring_path_)) << "Native binary keyring must be rejected";
+    EXPECT_TRUE(keyring.entries.empty()) << "No entries should be loaded from native binary keyring";
 }
 
-TEST_F(TDEKeyringTest, FindKeyByName) {
+TEST_F(TDEKeyringTest, FindKeyByNameFailsOnLoadedKeyring) {
     create_test_keyring();
 
     innodb::KeyringFile keyring;
-    ASSERT_TRUE(keyring.load(keyring_path_));
+    // load() always fails closed for native binary keyrings
+    ASSERT_FALSE(keyring.load(keyring_path_));
+    EXPECT_TRUE(keyring.entries.empty());
 
-    auto entry = keyring.find_key("INNODBKey-test-uuid-1");
-    EXPECT_TRUE(entry.has_value()) << "Should find key by name";
-
-    auto not_found = keyring.find_key("nonexistent-key");
-    EXPECT_FALSE(not_found.has_value()) << "Should not find nonexistent key";
+    // With no entries, find_key must return empty
+    auto not_found = keyring.find_key("INNODBKey-test-uuid-1");
+    EXPECT_FALSE(not_found.has_value()) << "No key should be found on empty entries";
 }
 
 TEST_F(TDEKeyringTest, RecoveryEngineRejectsNativeKeyringWithoutNumericKeyIdentity) {
@@ -238,6 +233,28 @@ TEST_F(TDEKeyringTest, TDEPageHeaderParsing) {
     innodb::TDEPageHeader header;
     EXPECT_TRUE(header.parse(header_data.data(), header_data.size()));
     EXPECT_EQ(header.algorithm, 6);
+}
+
+TEST_F(TDEKeyringTest, TDECandidateProbeDistinguishesRecognitionFromConfirmation) {
+    std::vector<uint8_t> page(100, 0);
+    page[24] = 0x45;
+    page[25] = 0xBF;
+
+    EXPECT_EQ(innodb::TDEDecryptor::probe_candidate(page.data(), page.size()),
+              innodb::TDECandidateProbe::NOT_DETECTED);
+
+    page[38] = 6;
+    EXPECT_EQ(innodb::TDEDecryptor::probe_candidate(page.data(), page.size()),
+              innodb::TDECandidateProbe::RECOGNIZED_CANDIDATE);
+    EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(page.data(), page.size()));
+
+    page[38] = 0;
+    EXPECT_EQ(innodb::TDEDecryptor::probe_candidate(page.data(), page.size()),
+              innodb::TDECandidateProbe::NOT_DETECTED);
+
+    page[38] = 99;
+    EXPECT_EQ(innodb::TDEDecryptor::probe_candidate(page.data(), page.size()),
+              innodb::TDECandidateProbe::NOT_DETECTED);
 }
 
 TEST_F(TDEKeyringTest, IsEncryptedDetection) {
@@ -344,4 +361,155 @@ TEST_F(TDEKeyringTest, ConfigureKeysAcceptsAllSupportedKeyLengths) {
         EXPECT_TRUE(recovery.get_last_error().empty());
         EXPECT_EQ(recovery.get_decryptor().get_stats().keys_loaded, 1u);
     }
+}
+
+// ==================== TDE fail-closed behavior tests ====================
+
+// Helper to write a binary IBD file for testing
+void write_ibd_file(const std::string& path, const std::vector<uint8_t>& data) {
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(data.data()), data.size());
+}
+
+// Minimal FIL header with page type
+void write_fil_header(uint8_t* p, uint16_t page_type) {
+    // FIL_PAGE_TYPE at offset 24
+    p[24] = static_cast<uint8_t>(page_type >> 8);
+    p[25] = static_cast<uint8_t>(page_type);
+    // FIL_PAGE_SPACE_ID at offset 34
+    p[34] = 0; p[35] = 0; p[36] = 0; p[37] = 1;
+    // FIL_PAGE_OFFSET at offset 4
+    p[4] = 0; p[5] = 0; p[6] = 0; p[7] = 0;
+    // FIL_PAGE_PREV at offset 8
+    p[8] = 0xFF; p[9] = 0xFF; p[10] = 0xFF; p[11] = 0xFF;
+    // FIL_PAGE_NEXT at offset 12
+    p[12] = 0xFF; p[13] = 0xFF; p[14] = 0xFF; p[15] = 0xFF;
+    // FIL_PAGE_LSN at offset 16
+    p[16] = 0; p[17] = 0; p[18] = 0; p[19] = 0; p[20] = 0; p[21] = 0; p[22] = 0; p[23] = 0;
+}
+
+// Write TDE header at offset 38 (FIL_PAGE_DATA)
+void write_tde_header(uint8_t* p, uint8_t algo, uint32_t key_id) {
+    // Algorithm byte
+    p[38] = algo;
+    // Key ID (4 bytes, little-endian in TDE header)
+    p[39] = static_cast<uint8_t>(key_id & 0xFF);
+    p[40] = static_cast<uint8_t>((key_id >> 8) & 0xFF);
+    p[41] = static_cast<uint8_t>((key_id >> 16) & 0xFF);
+    p[42] = static_cast<uint8_t>((key_id >> 24) & 0xFF);
+    // IV (12 bytes)
+    for (int i = 0; i < 12; i++) p[43 + i] = static_cast<uint8_t>(i);
+    // Encrypted header (28 bytes): non-zero to pass all-zero check
+    for (int i = 0; i < 28; i++) p[55 + i] = static_cast<uint8_t>(0xAB);
+}
+
+TEST_F(TDEKeyringTest, DecryptorIsNotValidatedWithoutFixture) {
+    EXPECT_FALSE(innodb::EncryptedTableRecovery::decryptor_is_validated());
+}
+
+TEST_F(TDEKeyringTest, RecoverWithoutValidatedDecryptorEmitsZeroRows) {
+    const std::string path = test_dir_ + "/encrypted_recover.ibd";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> data(page_size * 4, 0);
+    // Page 0: FSP_HDR with encrypted TDE header
+    write_fil_header(data.data(), 0x0000); // FSP_HDR
+    write_tde_header(data.data(), 6, 1);
+    // Page 1: INDEX with encrypted header
+    write_fil_header(data.data() + page_size, 0x45BF);
+    write_tde_header(data.data() + page_size, 6, 1);
+    write_ibd_file(path, data);
+
+    innodb::EncryptedTableRecovery enc_rec(page_size);
+    enc_rec.set_file_path(path);
+
+    // Without validated decryptor, recover() must fail closed
+    auto records = enc_rec.recover();
+    EXPECT_TRUE(records.empty());
+    EXPECT_EQ(enc_rec.get_stats().tde_status, innodb::TDEStatus::ENCRYPTED_UNSUPPORTED);
+}
+
+TEST_F(TDEKeyringTest, ClassifyEncryptedFileReturnsUnsupported) {
+    const std::string path = test_dir_ + "/encrypted_classify.ibd";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> data(page_size, 0);
+    write_fil_header(data.data(), 0x45BF);
+    write_tde_header(data.data(), 6, 1);
+    write_ibd_file(path, data);
+
+    innodb::EncryptedTableRecovery enc_rec(page_size);
+    EXPECT_EQ(enc_rec.classify(path, page_size), innodb::TDEStatus::ENCRYPTED_UNSUPPORTED);
+}
+
+TEST_F(TDEKeyringTest, ClassifyNotEncryptedReturnsNotEncrypted) {
+    const std::string path = test_dir_ + "/not_encrypted.ibd";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> data(page_size, 0);
+    write_fil_header(data.data(), 0x45BF);
+    // No TDE header — page is not encrypted
+    write_ibd_file(path, data);
+
+    innodb::EncryptedTableRecovery enc_rec(page_size);
+    EXPECT_EQ(enc_rec.classify(path, page_size), innodb::TDEStatus::NOT_ENCRYPTED);
+}
+
+TEST_F(TDEKeyringTest, ClassifyMalformedFileReturnsMalformed) {
+    const std::string path = test_dir_ + "/malformed.ibd";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> data(50, 0); // Too small for FIL header + TDE header
+    write_ibd_file(path, data);
+
+    innodb::EncryptedTableRecovery enc_rec(page_size);
+    EXPECT_EQ(enc_rec.classify(path, page_size), innodb::TDEStatus::MALFORMED);
+}
+
+TEST_F(TDEKeyringTest, ClassifyUnknownAlgorithmReturnsNotEncrypted) {
+    const std::string path = test_dir_ + "/unknown_algo.ibd";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> data(page_size, 0);
+    write_fil_header(data.data(), 0x45BF);
+    // Algorithm byte 99 is outside the detectable range [1,9];
+    // is_encrypted() returns false → classify() returns NOT_ENCRYPTED
+    write_tde_header(data.data(), 99, 1);
+    write_ibd_file(path, data);
+
+    innodb::EncryptedTableRecovery enc_rec(page_size);
+    EXPECT_EQ(enc_rec.classify(path, page_size), innodb::TDEStatus::NOT_ENCRYPTED);
+}
+
+TEST_F(TDEKeyringTest, TDEStatusToStringRoundTrip) {
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::NOT_ENCRYPTED), "NOT_ENCRYPTED");
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::ENCRYPTED_UNSUPPORTED), "ENCRYPTED_UNSUPPORTED");
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::RECOVERED), "RECOVERED");
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::MALFORMED), "MALFORMED");
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::CORRUPTED_METADATA), "CORRUPTED_METADATA");
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::KEY_MISSING), "KEY_MISSING");
+}
+
+TEST_F(TDEKeyringTest, ClassifyKeyMissingStatusRoundTrip) {
+    // Verify KEY_MISSING is a valid enum value and round-trips through to_string
+    EXPECT_EQ(innodb::TDEStatus::KEY_MISSING, static_cast<innodb::TDEStatus>(5));
+    EXPECT_STREQ(innodb::EncryptedTableRecoveryStats::status_to_string(
+                     innodb::TDEStatus::KEY_MISSING), "KEY_MISSING");
+}
+
+TEST_F(TDEKeyringTest, ClassifyFileNotFoundReturnsMalformed) {
+    innodb::EncryptedTableRecovery enc_rec(16384);
+    EXPECT_EQ(enc_rec.classify("/nonexistent/path.ibd", 16384), innodb::TDEStatus::MALFORMED);
+}
+
+TEST_F(TDEKeyringTest, ClassifyTruncatedPageReturnsMalformed) {
+    const std::string path = test_dir_ + "/truncated.ibd";
+    const size_t page_size = 16384;
+    std::vector<uint8_t> data(80, 0); // 80 bytes < 83 minimum for TDE header
+    write_fil_header(data.data(), 0x45BF);
+    write_ibd_file(path, data);
+
+    innodb::EncryptedTableRecovery enc_rec(page_size);
+    EXPECT_EQ(enc_rec.classify(path, page_size), innodb::TDEStatus::MALFORMED);
 }

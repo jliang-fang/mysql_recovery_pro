@@ -617,7 +617,7 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
         // 6. visited.insert(current_roll_ptr)
         visited.insert(current_roll_ptr);
 
-        // 7. Parse roll_ptr: [47:32] undo_page_no | [31:0] undo_page_offset
+        // 7. Parse roll_ptr: [31:0] undo_page_no | [49:32] undo_offset (18 bits) | [55:50] flags (6 bits)
         auto [undo_page_no, undo_offset] = parse_roll_ptr(current_roll_ptr);
 
         // 8. Read undo page and validate provenance

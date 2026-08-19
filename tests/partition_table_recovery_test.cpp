@@ -35,7 +35,10 @@ std::string make_temp_file(const std::string& name, const std::vector<uint8_t>& 
 /// @brief Build an INDEX leaf page with one live user record.
 /// @param canonical_be true: FIL_PAGE_INDEX (0x45BF) big-endian at
 /// FIL_PAGE_TYPE_ABS; false: the same bytes in little-endian order.
-std::vector<uint8_t> build_index_page(bool canonical_be) {
+/// @param space_id page-0 space_id written (canonical big-endian) at
+/// FIL_PAGE_SPACE_ID when non-zero — identity gate requires the partition
+/// tablespace_id to match.
+std::vector<uint8_t> build_index_page(bool canonical_be, uint32_t space_id = 0) {
     std::vector<uint8_t> page(16384, 0);
 
     if (canonical_be) {
@@ -45,6 +48,10 @@ std::vector<uint8_t> build_index_page(bool canonical_be) {
         // yields 0xBF45, which is not a recognized FIL page type.
         page[FIL_PAGE_TYPE_ABS]     = static_cast<uint8_t>(FIL_PAGE_INDEX & 0xFF);
         page[FIL_PAGE_TYPE_ABS + 1] = static_cast<uint8_t>(FIL_PAGE_INDEX >> 8);
+    }
+
+    if (space_id != 0) {
+        write_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID, space_id);
     }
 
     // Page header (relative to FIL_HEADER_SIZE = 38): n_dir_slots at 38,
@@ -120,10 +127,13 @@ TEST(PartitionTableRecoveryTest, ConfiguredPartitionsSurviveRecover) {
 // ==================== P1: INDEX page recognized only in canonical byte order ====================
 
 TEST(PartitionTableRecoveryTest, IndexPageRecognizedOnlyInCanonicalByteOrder) {
+    // The canonical partition p0 has tablespace_id = 10; its page must carry
+    // FIL_PAGE_SPACE_ID = 10 (big-endian at offset 34) or the Phase 5d
+    // identity gate rejects it.
     std::string canonical_path =
-        make_temp_file("dbrec_part_canonical.ibd", build_index_page(true));
+        make_temp_file("dbrec_part_canonical.ibd", build_index_page(true, 10));
     std::string swapped_path =
-        make_temp_file("dbrec_part_swapped.ibd", build_index_page(false));
+        make_temp_file("dbrec_part_swapped.ibd", build_index_page(false, 11));
 
     PartitionTableRecovery engine;
     engine.set_schema(make_schema());
@@ -136,6 +146,27 @@ TEST(PartitionTableRecoveryTest, IndexPageRecognizedOnlyInCanonicalByteOrder) {
     // byte-order page must be skipped entirely.
     EXPECT_EQ(records.size(), 1);
     EXPECT_EQ(engine.get_stats().recovered_partitions, 1);
+    EXPECT_EQ(engine.get_stats().failed_partitions, 1);
+}
+
+// ==================== P1: identity gate rejects mismatched space_id ====================
+
+TEST(PartitionTableRecoveryTest, IdentityGateRejectsMismatchedSpaceId) {
+    // Page carries space_id 10 but the partition declares tablespace_id 20 —
+    // the index page belongs to a different tablespace and must be skipped.
+    std::string wrong_spid_path =
+        make_temp_file("dbrec_part_wrong_spid.ibd", build_index_page(true, 10));
+
+    PartitionInfo p = make_partition("wrong_spid", 0, wrong_spid_path);
+    p.tablespace_id = 20;  // override the id+10 default to create a mismatch
+
+    PartitionTableRecovery engine;
+    engine.set_schema(make_schema());
+    engine.add_partition(p);
+    auto records = engine.recover();
+
+    EXPECT_TRUE(records.empty());
+    EXPECT_EQ(engine.get_stats().recovered_partitions, 0);
     EXPECT_EQ(engine.get_stats().failed_partitions, 1);
 }
 

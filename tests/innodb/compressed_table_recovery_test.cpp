@@ -5,7 +5,6 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 
 namespace {
-
 void write_be16(uint8_t* data, uint16_t value) {
     data[0] = static_cast<uint8_t>(value >> 8);
     data[1] = static_cast<uint8_t>(value);

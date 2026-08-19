@@ -14,11 +14,39 @@
 #include <iomanip>
 #include <regex>
 #include <map>
+#include <openssl/sha.h>
 
 namespace dbrecovery {
 namespace recovery {
 
 // ==================== DamageReport ====================
+
+namespace {
+// Extract the logical page number from the FIL header (FIL_PAGE_OFFSET, big-endian)
+// when the buffer looks like a page with a valid header. 0 means unknown/unreadable.
+uint32_t extract_page_no(const uint8_t* data, size_t size) {
+    if (!data || size < 8) return 0;
+    return (static_cast<uint32_t>(data[4]) << 24) |
+           (static_cast<uint32_t>(data[5]) << 16) |
+           (static_cast<uint32_t>(data[6]) << 8) |
+           static_cast<uint32_t>(data[7]);
+}
+
+// SHA256 over the raw on-disk bytes of the salvaged region. Unlike the field-value
+// hashes in the evidence report, this covers the exact bytes a fragment came from,
+// making it a stable dedup key independent of how fields were later parsed.
+std::string sha256_hex_bytes(const uint8_t* data, size_t size) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    SHA256(data, size, hash);
+
+    std::ostringstream oss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+        oss << std::hex << std::setw(2) << std::setfill('0')
+            << static_cast<int>(hash[i]);
+    }
+    return oss.str();
+}
+} // namespace
 
 std::string DamageReport::to_string() const {
     std::ostringstream oss;
@@ -270,14 +298,21 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l1(
             SalvagedRow row;
             row.page_offset = 0;
             row.record_offset = rec_off;
+            row.page_no = extract_page_no(data, size);
             row.field_count = field_count;
             row.confidence = 0.7;
             row.recovery_method = "header_repair";
             row.evidence.level = DamageLevel::L1_MINOR;
             row.evidence.strategy = "header_repair";
+            row.evidence.source_page_no = row.page_no;
             row.evidence.source_offset = rec_off;
             row.evidence.confidence = 0.7f;
-            row.evidence.tags = {"verified"};
+            // L1 is "structure-derived": only the FIL header and an offset table
+            // were readable. There is no checksum, record-chain, or schema
+            // validation behind it, so it must not claim verified status.
+            row.evidence.tags = {"structure-derived"};
+            row.content_hash = sha256_hex_bytes(data + rec_off,
+                                                std::min(size_t(record_len), size - rec_off));
 
             // Extract field values as hex
             uint16_t data_start = rec_off + field_count * 2 + 1; // +1 for info_bits
@@ -336,14 +371,19 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l2(
             SalvagedRow row;
             row.page_offset = pos;
             row.record_offset = pos;
+            row.page_no = extract_page_no(data, size);
             row.field_count = field_count;
             row.confidence = 0.5;
             row.recovery_method = "signature_scan";
             row.evidence.level = DamageLevel::L2_MODERATE;
             row.evidence.strategy = "signature_scan";
+            row.evidence.source_page_no = row.page_no;
             row.evidence.source_offset = pos;
             row.evidence.confidence = 0.5f;
             row.evidence.tags = {"reconstructed"};
+            // Content hash over the raw record bytes for dedup
+            row.content_hash = sha256_hex_bytes(
+                data + pos, std::min(size_t(record_len), size - pos));
 
             // Re-read offset table entries
             std::vector<uint16_t> offsets;
@@ -401,6 +441,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l3(
         for (auto it = begin; it != end; ++it) {
             SalvagedRow row;
             row.page_offset = it->position();
+            row.page_no = extract_page_no(data, size);
             row.field_count = 1;
             row.salvage_level = SalvageLevel::FRAGMENT;
             row.fields.push_back(it->str());
@@ -408,9 +449,14 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l3(
             row.recovery_method = method;
             row.evidence.level = DamageLevel::L3_SEVERE;
             row.evidence.strategy = method;
+            row.evidence.source_page_no = row.page_no;
             row.evidence.source_offset = static_cast<uint64_t>(it->position());
             row.evidence.confidence = 0.4f;
             row.evidence.tags = {"heuristic", "partial"};
+            // Content hash for L3: SHA256 of the matched string itself
+            row.content_hash = sha256_hex_bytes(
+                reinterpret_cast<const uint8_t*>(it->str().data()),
+                it->str().size());
             rows.push_back(row);
         }
     };
@@ -445,6 +491,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
 
         SalvagedRow row;
         row.page_offset = start_pos;
+        row.page_no = extract_page_no(data, size);
         row.field_count = 1;
         row.salvage_level = SalvageLevel::STRING_ONLY;
         row.fields.push_back(std::move(current));
@@ -452,11 +499,18 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l4(
         row.recovery_method = "string_extract";
         row.evidence.level = DamageLevel::L4_CRITICAL;
         row.evidence.strategy = "string_extract";
+        row.evidence.source_page_no = row.page_no;
         row.evidence.source_offset = start_pos;
         row.evidence.confidence = 0.3f;
         row.evidence.tags = {"heuristic", "fragment"};
         if (continued) row.evidence.tags.push_back("continuation");
         if (truncated) row.evidence.tags.push_back("truncated");
+        // Content hash: SHA256 of the raw string bytes
+        if (!row.fields.empty()) {
+            row.content_hash = sha256_hex_bytes(
+                reinterpret_cast<const uint8_t*>(row.fields.back().data()),
+                row.fields.back().size());
+        }
         rows.push_back(std::move(row));
         current.clear();
     };
@@ -545,6 +599,13 @@ SalvageResult SalvageEngine::salvage_pages(
 
     DamageLevel worst_level = DamageLevel::NONE;
 
+    // Dedup by raw content hash: the same record can be surfaced by multiple
+    // salvage strategies (e.g. L1 offset-table walk and L2 signature scan) or
+    // appear in multiple scanned buffers. Emit each unique fragment once and
+    // count collisions in the report.
+    std::unordered_set<std::string> emitted_hashes;
+    uint32_t dedup_collisions = 0;
+
     for (const auto& [data, size] : pages) {
         auto damage = assess_damage(data, size);
 
@@ -558,6 +619,11 @@ SalvageResult SalvageEngine::salvage_pages(
             if (!page_rows.empty()) {
                 result.pages_with_data++;
                 for (auto& row : page_rows) {
+                    if (!row.content_hash.empty() &&
+                        !emitted_hashes.insert(row.content_hash).second) {
+                        ++dedup_collisions;
+                        continue;
+                    }
                     // Route L3/L4 heuristic fragments into evidence_fragments,
                     // STRUCTURED (L1/L2) rows into rows.
                     if (row.salvage_level == SalvageLevel::STRUCTURED) {
@@ -568,6 +634,12 @@ SalvageResult SalvageEngine::salvage_pages(
                 }
             }
         }
+    }
+
+    if (dedup_collisions > 0) {
+        result.warnings.push_back(
+            "Deduplicated " + std::to_string(dedup_collisions) +
+            " fragments sharing identical raw content");
     }
 
     if (result.rows.empty() && result.evidence_fragments.empty()) {

@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <vector>
 #include <cstring>
+#include <cassert>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
@@ -221,6 +222,19 @@ public:
 
     /**
      * @brief Encode components to storage format (big-endian, 7 bytes)
+     *
+     * MySQL 8.0+ on-disk format: 7 bytes big-endian.
+     *   bits [55:52] = flags (4 bits — MySQL only uses 4 bits on disk)
+     *   bits [51:48] = unused
+     *   bits [47:20] = page_no (28 bits)
+     *   bits [19:0]  = offset (18 bits, also stored as 2 bytes in UNDO field data)
+     *
+     * NOTE: Internal representation uses 6 flag bits (max 0x3F) for alignment
+     * and future-proofing, but the on-disk storage only preserves 4 bits
+     * (max 0x0F). The upper 2 flag bits are silently dropped during storage.
+     * Callers that need lossless round-trip through storage must ensure flags
+     * fit in 4 bits.
+     *
      * @param[out] out  Output buffer (must be at least 7 bytes)
      * @param rp        Decoded roll pointer
      */
@@ -232,7 +246,37 @@ public:
                        (rp.offset & 0x3FFFF) |
                        (static_cast<uint64_t>(rp.flags & 0x0F) << 52);
 
+        // Never silently truncate internal 6-bit flags to the 4-bit storage
+        // field; debug builds assert so callers dropping bits are caught.
+        assert(rp.flags <= 0x0F);
+
         for (int i = 6; i >= 0; i--) {
+            out[i] = static_cast<uint8_t>(val & 0xFF);
+            val >>= 8;
+        }
+    }
+
+    /**
+     * @brief Encode components to storage format (big-endian, 6 bytes)
+     *
+     * MySQL 5.6/5.7 on-disk format: 6 bytes big-endian.
+     *   bits [47:20] = page_no (28 bits)
+     *   bits [19:0]  = offset (18 bits)
+     *
+     * No flags byte — the 6-byte format predates the flags field.
+     * Flags are silently dropped; callers must ensure flags == 0 for
+     * lossless round-trip.
+     *
+     * @param[out] out  Output buffer (must be at least 6 bytes)
+     * @param rp        Decoded roll pointer
+     */
+    static void encode_storage_6byte(uint8_t* out, const DecodedRollPtr& rp) {
+        if (!out) return;
+
+        uint64_t val = (static_cast<uint64_t>(rp.page_no) << 20) |
+                       (rp.offset & 0x3FFFF);
+
+        for (int i = 5; i >= 0; i--) {
             out[i] = static_cast<uint8_t>(val & 0xFF);
             val >>= 8;
         }

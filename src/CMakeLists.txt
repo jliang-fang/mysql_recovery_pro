@@ -70,6 +70,7 @@ set(TOOLS_SOURCES
     tools/interactive_schema_builder.cpp
     tools/progress_cli.cpp
     tools/recovery_cli.cpp
+    tools/unified_recovery.cpp
 )
 
 # Add salvage module sources (Phase 2: Row-level salvage for damaged pages)

@@ -23,6 +23,11 @@ public:
     SalvageEvidenceSerializer() = default;
 
     /**
+     * @brief Compute SHA-256 hex digest of a string.
+     */
+    static std::string sha256_hex(const std::string& value);
+
+    /**
      * @brief Write the evidence report to a JSON file.
      *
      * @param path       Output file path (.json)
@@ -52,11 +57,6 @@ private:
      * MAX_PREVIEW_LENGTH with an explicit truncation marker.
      */
     static std::string bounded_preview(const std::string& value);
-
-    /**
-     * @brief Compute SHA-256 hex digest of the full fragment value.
-     */
-    static std::string sha256_hex(const std::string& value);
 };
 
 } // namespace salvage

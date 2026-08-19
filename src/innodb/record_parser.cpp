@@ -793,51 +793,71 @@ std::vector<ColumnData> RecordReconstructor::reconstruct_from_partial(
 
 RecordData RecordReconstructor::reconstruct_from_undo(
     const uint8_t* undo_data, size_t undo_size,
-    const std::vector<ColumnInfo>& columns) {
-    
+    const std::vector<ColumnInfo>& columns,
+    UndoFormatProfile profile) {
+
     RecordData record;
-    
-    // Undo Log 记录格式：
-    // - 1 byte: undo record type
-    // - 8 bytes: trx_id
-    // - 8 bytes: roll_ptr
-    // - 2 bytes: n_fields
-    // - 变长字段数据
-    
-    if (undo_size < 12) {
+
+    if (undo_data == nullptr || undo_size < 2 ||
+        profile == UndoFormatProfile::UNRESOLVED) {
         return record;
     }
-    
+
+    // Undo Log 记录格式：
+    // - 1 byte: undo record type
+    // - 1 byte: field_count (or the 6-byte trx_id starts here for UPDATE/DELETE)
+    // - trx_id + roll_ptr widths are pinned by the resolved profile
+    //
+    // Roll pointer storage width is version-dependent:
+    //   LEGACY_6BYTE (5.6/5.7): 6 bytes big-endian
+    //   MYSQL8_7BYTE (8.0+):    7 bytes big-endian
+    // UNRESOLVED rejects the record before any byte is interpreted.
+
     size_t pos = 1;  // 跳过类型字节
-    
-    // 读取 trx_id
-    if (pos + 8 <= undo_size) {
-        record.trx_id = read_le<uint64_t>(undo_data, pos);
-        pos += 8;
+
+    if (pos + 6 > undo_size) {
+        return record;
     }
-    
-    // 读取 roll_ptr
-    if (pos + 8 <= undo_size) {
-        record.roll_ptr = read_le<uint64_t>(undo_data, pos);
-        pos += 8;
+
+    // trx_id: 6 bytes little-endian (both profiles)
+    uint64_t trx_id = 0;
+    for (int i = 0; i < 6; ++i) {
+        trx_id |= static_cast<uint64_t>(undo_data[pos + i]) << (8 * i);
     }
-    
+    record.trx_id = trx_id;
+    pos += 6;
+
+    // roll_ptr: profile-pinned width, big-endian storage
+    const size_t roll_ptr_len =
+        (profile == UndoFormatProfile::MYSQL8_7BYTE) ? 7 : 6;
+    if (pos + roll_ptr_len > undo_size) {
+        return record;
+    }
+    auto decoded = RollPtrDecoder::decode_storage(
+        undo_data + pos, roll_ptr_len, profile);
+    if (!decoded.is_valid()) {
+        return record;
+    }
+    record.roll_ptr = RollPtrDecoder::encode(
+        decoded.page_no, decoded.offset, decoded.flags);
+    pos += roll_ptr_len;
+
     // 读取 n_fields
     uint16_t n_fields = 0;
     if (pos + 2 <= undo_size) {
         n_fields = read_le<uint16_t>(undo_data, pos);
         pos += 2;
     }
-    
+
     // 解析字段数据
     for (uint16_t i = 0; i < n_fields && i < columns.size(); ++i) {
         ColumnData col_data;
         col_data.info = columns[i];
-        
+
         if (pos >= undo_size) {
             break;
         }
-        
+
         // 读取变长字段长度
         uint8_t first_byte = undo_data[pos++];
         uint16_t len = first_byte;
@@ -846,11 +866,11 @@ RecordData RecordReconstructor::reconstruct_from_undo(
                 len = static_cast<uint16_t>((first_byte & 0x7F) << 8 | undo_data[pos++]);
             }
         }
-        
+
         if (pos + len > undo_size) {
             break;
         }
-        
+
         if (columns[i].is_binary) {
             col_data.value = std::vector<uint8_t>(
                 undo_data + pos, undo_data + pos + len);
@@ -858,11 +878,11 @@ RecordData RecordReconstructor::reconstruct_from_undo(
             col_data.value = std::string(
                 reinterpret_cast<const char*>(undo_data + pos), len);
         }
-        
+
         pos += len;
         record.columns.push_back(col_data);
     }
-    
+
     return record;
 }
 

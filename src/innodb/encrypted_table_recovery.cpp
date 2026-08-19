@@ -122,7 +122,7 @@ std::vector<ScannedPage> EncryptedTableRecovery::scan_pages() {
         const uint8_t* p = page_buf.data();
         ScannedPage page{};
         page.offset = static_cast<uint32_t>(page_no * page_size_);
-        page.page_no = static_cast<uint32_t>(page_no);
+        page.physical_page_index = static_cast<uint32_t>(page_no);
         page.space_id = read_be<uint32_t>(p, FIL_PAGE_SPACE_ID);
         page.page_no = read_be<uint32_t>(p, FIL_PAGE_OFFSET);
         page.prev_page = read_be<uint32_t>(p, FIL_PAGE_PREV_ABS);
@@ -131,6 +131,14 @@ std::vector<ScannedPage> EncryptedTableRecovery::scan_pages() {
         page.type = read_be<uint16_t>(p, FIL_PAGE_TYPE_ABS);
         page.page_type = page.type;
         page.is_valid = PageScanner::is_innodb_page(p, page_size_);
+
+        // Identity validation: the header page_no must match the physical
+        // position in the file.  A mismatch indicates page-level corruption,
+        // misaligned scan, or cross-file reassembly.  Reject such pages
+        // rather than feeding wrong-key decryption or incorrect parsing.
+        if (page.is_valid && page.page_no != page.physical_page_index) {
+            page.is_valid = false;
+        }
 
         if (is_page_encrypted(p, page_size_)) {
             page.is_encrypted = true;
@@ -186,7 +194,7 @@ std::vector<std::map<std::string, std::string>> EncryptedTableRecovery::parse_pa
         std::ifstream file(file_path_, std::ios::binary);
         if (!file) continue;
 
-        size_t offset = static_cast<size_t>(page.page_no) * page_size_;
+        size_t offset = static_cast<size_t>(page.physical_page_index) * page_size_;
         file.seekg(offset, std::ios::beg);
 
         std::vector<uint8_t> page_data(page_size_);
@@ -235,14 +243,54 @@ std::vector<std::map<std::string, std::string>> EncryptedTableRecovery::recover(
 
     clear();
 
+    // Without a fixture-validated TDE decryptor, report ENCRYPTED_UNSUPPORTED
+    // and emit zero records. This prevents claiming success on an empty result
+    // set or, worse, fabricating structured rows from unverified decryption.
+    if (!decryptor_is_validated()) {
+        stats_.tde_status = TDEStatus::ENCRYPTED_UNSUPPORTED;
+        auto total_end = std::chrono::high_resolution_clock::now();
+        stats_.total_time_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
+        return records_;
+    }
+
     auto all_pages = scan_pages();
 
     records_ = parse_page_records(all_pages);
+
+    stats_.tde_status = records_.empty()
+        ? TDEStatus::ENCRYPTED_UNSUPPORTED
+        : TDEStatus::RECOVERED;
 
     auto total_end = std::chrono::high_resolution_clock::now();
     stats_.total_time_ms = std::chrono::duration<double, std::milli>(total_end - total_start).count();
 
     return records_;
+}
+
+bool EncryptedTableRecovery::decryptor_is_validated() {
+    // No fixture-validated TDE decryptor exists yet.  Return false so that
+    // recover() for encrypted layout reports ENCRYPTED_UNSUPPORTED instead of
+    // claiming successful recovery.  Real MySQL encrypted fixtures (known-answer
+    // tests with ground-truth plaintext, key, IV, and page metadata) are required
+    // before this gate can be opened.
+    return false;
+}
+
+TDEStatus EncryptedTableRecovery::classify(const std::string& file_path, size_t page_size) const {
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file) return TDEStatus::MALFORMED;
+
+    std::vector<uint8_t> page0(page_size, 0);
+    file.read(reinterpret_cast<char*>(page0.data()), page0.size());
+    const size_t bytes_read = static_cast<size_t>(file.gcount());
+    if (bytes_read < 83) return TDEStatus::MALFORMED;  // FIL header (38) + TDE header (45) min
+
+    const auto probe = TDEDecryptor::probe_candidate(page0.data(), bytes_read);
+    if (probe == TDECandidateProbe::RECOGNIZED_CANDIDATE) {
+        return TDEStatus::ENCRYPTED_UNSUPPORTED;
+    }
+
+    return TDEStatus::NOT_ENCRYPTED;
 }
 
 // ==================== EncryptedTableRecoveryManager ====================
@@ -305,21 +353,9 @@ EncryptedTableRecoveryManager::parse_encryption_info(const std::string& ibd_path
     std::vector<uint8_t> page_data(16384);
     file.read(reinterpret_cast<char*>(page_data.data()), page_data.size());
 
-    // Use canonical TDE detection: validates FIL page type first, then the
-    // encryption algorithm byte at the TDE header (FIL_PAGE_DATA + 0).
-    if (page_data.size() >= 83 && TDEDecryptor::is_encrypted(page_data.data(), page_data.size())) {
-        TDEPageHeader header;
-        if (!header.parse(page_data.data() + 38, page_data.size() - 38)) {
-            return std::nullopt;
-        }
-        EncryptedTableInfo info;
-        info.key_id = header.key_id[0] | (header.key_id[1] << 8) |
-                      (header.key_id[2] << 16) | (header.key_id[3] << 24);
-        info.algorithm = static_cast<TDEAlgorithm>(header.algorithm);
-        info.has_key = false;
-        return info;
-    }
-
+    // Candidate recognition is only a routing safeguard. Without an authoritative,
+    // fixture-validated format parser, bytes at FIL_PAGE_DATA cannot become trusted
+    // encryption metadata.
     return std::nullopt;
 }
 

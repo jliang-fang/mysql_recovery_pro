@@ -65,10 +65,24 @@ std::pair<RepairAttemptResult, SalvagePageResult> DamagedPageHandler::handle_pag
     SalvagePageResult salvage_result = scanner_.salvage_scan_page(page_data, page_no, data_size);
 
     stats_.total_scan_time_ms += salvage_result.scan_time_ms;
-    stats_.total_records_recovered += salvage_result.records.size();
-    stats_.high_confidence_records += std::count_if(
-        salvage_result.records.begin(), salvage_result.records.end(),
-        [](const SalvagedRecord& r) { return r.confidence >= 0.7; });
+
+    // Provenance-gated counting: only records from structured-exportable
+    // strategies count toward recovery. BRUTE_FORCE and FRAGMENT are
+    // forensic evidence and never counted as recovered or high-confidence.
+    for (const auto& rec : salvage_result.records) {
+        if (is_structured_exportable(rec.source)) {
+            stats_.structured_exportable_records++;
+            stats_.total_records_recovered++;
+            if (rec.confidence >= 0.7) {
+                stats_.high_confidence_records++;
+            }
+        } else {
+            stats_.evidence_only_records++;
+            if (rec.confidence < 0.7) {
+                stats_.low_confidence_records++;
+            }
+        }
+    }
 
     if (repair_result.improved()) {
         stats_.pages_repaired++;
@@ -109,7 +123,10 @@ std::string DamagedPageHandler::generate_report() const {
         << "Pages repaired:     " << stats_.pages_repaired << "\n"
         << "Pages salvaged:     " << stats_.pages_salvaged << "\n"
         << "Records recovered:  " << stats_.total_records_recovered << "\n"
+        << "  Structured:      " << stats_.structured_exportable_records << "\n"
+        << "  Evidence-only:   " << stats_.evidence_only_records << "\n"
         << "High confidence:    " << stats_.high_confidence_records << "\n"
+        << "Low confidence:     " << stats_.low_confidence_records << "\n"
         << "Repair attempts:    " << stats_.repair_attempts << "\n"
         << "Repair successes:   " << stats_.repair_successes << "\n"
         << "Repair time:        " << std::fixed << std::setprecision(1)
@@ -206,6 +223,8 @@ RepairAttemptResult DamagedPageHandler::attempt_repair(
 void DamagedPageHandler::HandlerStats::reset() {
     pages_handled = 0; pages_repaired = 0; pages_salvaged = 0;
     total_records_recovered = 0; high_confidence_records = 0;
+    structured_exportable_records = 0; evidence_only_records = 0;
+    low_confidence_records = 0;
     total_repair_time_ms = 0.0; total_scan_time_ms = 0.0;
     repair_attempts = 0; repair_successes = 0;
     damage_distribution.clear(); repair_strategy_usage.clear();

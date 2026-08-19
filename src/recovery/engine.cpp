@@ -898,7 +898,7 @@ std::vector<std::map<std::string, std::string>> RecoveryEngine::recover_from_und
         if (entry.undo_type != 0x03) continue;  // TRX_UNDO_DEL_MARK
 
         std::map<std::string, std::string> row;
-        row["_undo_action"] = "FLASHBACK_INSERT";
+        row["_undo_action"] = "FORENSIC_LEGACY_UNDO";
         row["_undo_type"] = std::to_string(entry.undo_type);
 
         for (size_t i = 0; i < entry.fields.size(); ++i) {
@@ -974,14 +974,15 @@ std::vector<std::string> RecoveryEngine::flashback_deletes(
 }
 
 std::vector<innodb::UndoLogEntry> RecoveryEngine::traverse_undo_chain(
-    uint32_t start_page_no, uint32_t start_offset) {
+    uint32_t start_page_no, uint32_t start_offset,
+    innodb::UndoFormatProfile profile) {
 
     if (undo_data_path_.empty()) {
         std::cerr << "[ERROR] Undo data path not set\n";
         return {};
     }
 
-    return undo_parser_.traverse_undo_chain(undo_data_path_, start_page_no, start_offset);
+    return undo_parser_.traverse_undo_chain(undo_data_path_, start_page_no, start_offset, profile);
 }
 
 const innodb::UndoLogParser::UndoLogStats& RecoveryEngine::get_undo_stats() const {

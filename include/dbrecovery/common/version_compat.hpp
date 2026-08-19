@@ -62,6 +62,7 @@ enum class PageType {
 
 // ==================== 校验和类型 ====================
 enum class ChecksumType {
+    UNKNOWN = -1,       // Unknown/unsupported checksum type
     NONE = 0,           // No checksum
     CRC32 = 1,          // CRC32 (MySQL 5.6+ default)
     INNODB = 2,         // InnoDB checksum (old)
@@ -284,6 +285,31 @@ inline MySQLVersion detect_mysql_version(const uint8_t* page_data, size_t page_s
  */
 inline std::string get_mysql_version_string(MySQLVersion version) {
     return VersionCompatibilityFactory::instance().version_to_string(version);
+}
+
+/**
+ * @brief 将 MySQLVersion 枚举转换为版本号（如 80000）
+ *
+ * Used where layouts depend on the resolved version number (e.g. DB_ROLL_PTR
+ * width: 6 bytes for 5.6/5.7, 7 bytes for 8.0+). UNKNOWN maps to 0 so
+ * callers fall back to the conservative choice.
+ */
+inline uint32_t mysql_version_to_number(MySQLVersion version) {
+    switch (version) {
+        case MySQLVersion::MYSQL_50: return 50000;
+        case MySQLVersion::MYSQL_51: return 50100;
+        case MySQLVersion::MYSQL_55: return 50500;
+        case MySQLVersion::MYSQL_56: return 50600;
+        case MySQLVersion::MYSQL_57: return 50700;
+        case MySQLVersion::MYSQL_80: return 80000;
+        case MySQLVersion::MYSQL_81: return 80100;
+        case MySQLVersion::MYSQL_82: return 80200;
+        case MySQLVersion::MYSQL_83: return 80300;
+        case MySQLVersion::MYSQL_84: return 80400;
+        case MySQLVersion::MYSQL_90: return 90000;
+        case MySQLVersion::UNKNOWN:
+        default:                   return 0;
+    }
 }
 
 /**

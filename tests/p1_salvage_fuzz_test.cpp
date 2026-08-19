@@ -775,5 +775,183 @@ TEST(P1SalvageFuzzTest, L4StringExtractionUsesBoundedContinuationFragments) {
     EXPECT_FALSE(SalvageEngine::export_csv("/tmp/p1_l4_fragment_export.csv", rows));
 }
 
+// ==================== Page No Population ====================
+
+TEST(P1SalvageFuzzTest, SalvagePageNoPopulated) {
+    // Verify that salvage methods populate page_no from the FIL header
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    cfg.enable_signature_scan = true;
+    cfg.enable_pattern_match = true;
+    cfg.enable_string_extract = true;
+    SalvageEngine engine(cfg);
+
+    auto page = make_valid_index_page();
+    // page_no = 1 at offset 4
+    auto damage = SalvageEngine::assess_damage(page.data(), page.size());
+    auto rows = engine.salvage_page(page.data(), page.size(), damage);
+
+    for (const auto& row : rows) {
+        EXPECT_EQ(row.page_no, 1);
+        EXPECT_EQ(row.evidence.source_page_no, 1);
+    }
+}
+
+// ==================== Content Hash Population ====================
+
+TEST(P1SalvageFuzzTest, SalvageContentHashPopulated) {
+    // Verify that all salvage methods populate content_hash
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    cfg.enable_signature_scan = true;
+    cfg.enable_pattern_match = true;
+    cfg.enable_string_extract = true;
+    SalvageEngine engine(cfg);
+
+    // L1: valid index page
+    {
+        auto page = make_valid_index_page();
+        auto damage = SalvageEngine::assess_damage(page.data(), page.size());
+        auto rows = engine.salvage_page(page.data(), page.size(), damage);
+        for (const auto& row : rows) {
+            EXPECT_FALSE(row.content_hash.empty());
+            EXPECT_EQ(row.content_hash.size(), 64); // SHA256 hex
+        }
+    }
+
+    // L3: with email pattern
+    {
+        std::vector<uint8_t> page(16384, static_cast<uint8_t>(rand() % 256));
+        const std::string email = "user@example.com";
+        if (100 + email.size() <= page.size())
+            std::memcpy(page.data() + 100, email.data(), email.size());
+        auto damage = SalvageEngine::assess_damage(page.data(), page.size());
+        auto rows = engine.salvage_page(page.data(), page.size(), damage);
+        for (const auto& row : rows) {
+            if (row.salvage_level == SalvageLevel::FRAGMENT) {
+                EXPECT_FALSE(row.content_hash.empty());
+                EXPECT_EQ(row.content_hash.size(), 64);
+            }
+        }
+    }
+
+    // L4: string extraction
+    {
+        cfg.enable_signature_scan = false;
+        cfg.enable_pattern_match = false;
+        cfg.enable_string_extract = true;
+        cfg.min_string_len = 4;
+        SalvageEngine engine2(cfg);
+        std::vector<uint8_t> page(256, 0);
+        const char* str = "HelloWorldTest";
+        std::memcpy(page.data() + 50, str, strlen(str));
+        DamageReport damage;
+        damage.level = DamageLevel::L4_CRITICAL;
+        auto rows = engine2.salvage_page(page.data(), page.size(), damage);
+        for (const auto& row : rows) {
+            EXPECT_FALSE(row.content_hash.empty());
+            EXPECT_EQ(row.content_hash.size(), 64);
+        }
+    }
+}
+
+// ==================== Dedup by Content Hash ====================
+
+TEST(P1SalvageFuzzTest, SalvageDedupIdenticalContent) {
+    // Verify that salvage_pages deduplicates rows with identical content_hash
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    cfg.enable_signature_scan = true;
+    cfg.enable_pattern_match = false;
+    cfg.enable_string_extract = false;
+    SalvageEngine engine(cfg);
+
+    // Create two identical page buffers
+    auto page = make_valid_index_page();
+    std::vector<uint8_t> page_copy = page;
+
+    std::vector<std::pair<const uint8_t*, size_t>> pages;
+    pages.emplace_back(page.data(), page.size());
+    pages.emplace_back(page_copy.data(), page_copy.size());
+
+    auto result = engine.salvage_pages(pages);
+
+    // Count distinct content_hashes in rows
+    std::set<std::string> hashes;
+    for (const auto& row : result.rows) {
+        hashes.insert(row.content_hash);
+    }
+    // Each distinct record should appear only once despite being in 2 pages
+    EXPECT_LE(hashes.size(), result.rows.size());
+    // Total rows should not exceed unique content hashes
+    // (if every row had a unique hash, sizes would be equal)
+    EXPECT_LE(result.rows.size(), hashes.size() + 1); // +1 for empty hash rows
+}
+
+// ==================== L1 Tag Changed from "verified" to "structure-derived" ====================
+
+TEST(P1SalvageFuzzTest, L1TagIsStructureDerived) {
+    // Phase 5a: L1 salvage must use "structure-derived" not "verified"
+    SalvageEngine::Config cfg;
+    cfg.min_confidence = 0.0;
+    SalvageEngine engine(cfg);
+
+    auto page = make_valid_index_page();
+    auto damage = SalvageEngine::assess_damage(page.data(), page.size());
+    auto rows = engine.salvage_page(page.data(), page.size(), damage);
+
+    for (const auto& row : rows) {
+        if (row.recovery_method == "header_repair") {
+            bool has_verified = false;
+            bool has_structure_derived = false;
+            for (const auto& tag : row.evidence.tags) {
+                if (tag == "verified") has_verified = true;
+                if (tag == "structure-derived") has_structure_derived = true;
+            }
+            EXPECT_FALSE(has_verified) << "L1 tags must not contain 'verified'";
+            EXPECT_TRUE(has_structure_derived) << "L1 tags must contain 'structure-derived'";
+        }
+    }
+}
+
+// ==================== Evidence Serializer Includes Page No and Content Hash ====================
+
+TEST(P1SalvageFuzzTest, EvidenceSerializerIncludesPageNoAndContentHash) {
+    salvage::SalvageEvidenceSerializer serializer;
+
+    SalvagedRow frag;
+    frag.salvage_level = SalvageLevel::FRAGMENT;
+    frag.recovery_method = "pattern_match";
+    frag.confidence = 0.45;
+    frag.page_offset = 0x1000;
+    frag.page_no = 42;
+    frag.record_offset = 0x50;
+    frag.content_hash = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+    frag.evidence.level = common::DamageLevel::L3_SEVERE;
+    frag.evidence.strategy = "pattern_match";
+    frag.evidence.source_page_no = 42;
+    frag.evidence.source_offset = 0x1050;
+    frag.evidence.confidence = 0.45;
+    frag.evidence.tags = {"extracted", "partial"};
+    frag.fields = {"sensitive_data"};
+
+    std::string json = serializer.to_json({frag}, {});
+
+    // Must contain source_page_no
+    EXPECT_NE(json.find("source_page_no"), std::string::npos);
+
+    // Must contain content_sha256
+    EXPECT_NE(json.find("content_sha256"), std::string::npos);
+
+    // Must contain the specific page_no value
+    EXPECT_NE(json.find("\"source_page_no\": 42"), std::string::npos);
+
+    // Must contain the specific content hash
+    EXPECT_NE(json.find("abcdef0123456789abcdef0123456789"), std::string::npos);
+
+    // Must contain evidence.source_page_no
+    EXPECT_NE(json.find("evidence"), std::string::npos);
+}
+
 } // namespace test
 } // namespace dbrecovery

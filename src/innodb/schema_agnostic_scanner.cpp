@@ -35,11 +35,9 @@ constexpr size_t INFIMUM_OFFSET = 99;     // Infimum record origin
 constexpr size_t SUPREMUM_OFFSET = 112;   // Approximate supremum position
 constexpr size_t PAGE_HEADER_SIZE = 56;   // After FIL header
 
-// System column sizes for leaf pages
+// System column sizes for leaf pages (TRX_ID always 6; ROLL_PTR width varies by version)
 constexpr size_t DB_TRX_ID_SIZE = 6;
-constexpr size_t DB_ROLL_PTR_SIZE = 7;
 constexpr size_t DB_ROW_ID_SIZE = 6;
-constexpr size_t SYSTEM_COLS_SIZE = DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;  // 13 bytes
 
 // Record header sizes
 constexpr size_t REC_HEADER_COMPACT = 5;
@@ -514,10 +512,12 @@ std::optional<SchemalessRecord> SchemaAgnosticScanner::parse_record(
         remaining -= 8;
     }
 
-    // For leaf pages: skip TRX_ID (6 bytes) + ROLL_PTR (7 bytes) = 13 bytes
-    if (is_leaf && remaining >= 13) {
-        pos += SYSTEM_COLS_SIZE;
-        remaining -= 13;
+    // For leaf pages: skip TRX_ID (6 bytes) + ROLL_PTR (roll_ptr width)
+    const size_t roll_ptr_size = (mysql_version_ >= 80000 || mysql_version_ == 0) ? 7 : 6;
+    const size_t system_cols = DB_TRX_ID_SIZE + roll_ptr_size;
+    if (is_leaf && remaining >= system_cols) {
+        pos += system_cols;
+        remaining -= system_cols;
     }
 
     // Now parse the rest of the data
@@ -975,8 +975,8 @@ std::vector<SchemalessRecord> SchemaAgnosticScanner::parse_ibd(const std::string
     std::vector<size_t> page_sizes = {16384, 8192, 32768, 4096, 65536};
     size_t page_size = 16384;
 
-    for (uint16_t ps : page_sizes) {
-        if (file_size % ps == 0 && file_size >= ps * 10) {
+    for (size_t ps : page_sizes) {
+        if (ps != 0 && file_size % ps == 0 && file_size >= ps * 10) {
             page_size = ps;
             break;
         }

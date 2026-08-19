@@ -104,8 +104,15 @@ public:
         uint64_t pages_handled           = 0;
         uint64_t pages_repaired          = 0;
         uint64_t pages_salvaged          = 0;
+        // Counts only records whose provenance admits structured export
+        // (BPLUS_TREE / PAGE_DIR / LINEAR_SCAN). BRUTE_FORCE and FRAGMENT
+        // records are forensic evidence and never counted here.
         uint64_t total_records_recovered = 0;
         uint64_t high_confidence_records  = 0;
+        // Statistical foreground/evidence counters
+        uint64_t structured_exportable_records = 0;
+        uint64_t evidence_only_records         = 0;
+        uint64_t low_confidence_records        = 0;
         double   total_repair_time_ms    = 0.0;
         double   total_scan_time_ms      = 0.0;
         uint64_t repair_attempts         = 0;

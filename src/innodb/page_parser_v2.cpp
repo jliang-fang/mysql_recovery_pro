@@ -121,7 +121,7 @@ MySQLVersion PageParserFactory::detect_version_from_sdi(const uint8_t* data, siz
     // 通过 SDI payload 中的版本信息进一步判断
 
     if (size < 58) { // 38 (FIL header) + 20 (SDI header minimum)
-        return MySQLVersion::MYSQL_80; // 默认返回 8.0
+        return MySQLVersion::UNKNOWN; // 截断的 SDI 无法确认版本
     }
 
     // SDI payload 位于偏移 38
@@ -158,7 +158,7 @@ MySQLVersion PageParserFactory::detect_version_from_sdi(const uint8_t* data, siz
         }
     }
 
-    return MySQLVersion::MYSQL_80;
+    return MySQLVersion::UNKNOWN; // SDI 解析失败，无版本证据
 }
 
 // ==================== GenericPageParser 实现 ====================
@@ -335,7 +335,15 @@ std::optional<catalog::TableSchema> GenericPageParser::parse_sdi_metadata(
     }
 
     const uint8_t* sdi_payload = data + 38;
-    return SDIManager::parse_sdi_record(sdi_payload, size - 38);
+    auto parse_result = SDIManager::parse_sdi_record_structured(sdi_payload, size - 38);
+    if (parse_result.schema.columns.empty()) {
+        if (dbrecovery::innodb::g_verbose)
+            std::cerr << "[DEBUG] SDI parse failed: "
+                      << SDIManager::status_string(parse_result.status)
+                      << " — " << parse_result.failure_reason << std::endl;
+        return std::nullopt;
+    }
+    return parse_result.schema;
 }
 
 std::pair<uint32_t, uint32_t> GenericPageParser::get_page_chain() const {

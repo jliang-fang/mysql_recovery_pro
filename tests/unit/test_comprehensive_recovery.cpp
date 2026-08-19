@@ -235,12 +235,16 @@ TEST_F(ComprehensiveRecoveryTest, TDEDecryptorBasic) {
     auto stats = decryptor.get_stats();
     EXPECT_EQ(stats.keys_loaded, 1);
 
-    // Check encryption detection
+    // Check TDE candidate routing.
     std::vector<uint8_t> normal_page(100, 0);
-    EXPECT_FALSE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
+    EXPECT_EQ(innodb::TDEDecryptor::probe_candidate(normal_page.data(), normal_page.size()),
+              innodb::TDECandidateProbe::NOT_DETECTED);
 
-    normal_page[38] = 6;  // AES-256-CBC algorithm indicator at TDE header offset
-    EXPECT_TRUE(innodb::TDEDecryptor::is_encrypted(normal_page.data(), normal_page.size()));
+    normal_page[24] = 0x45;
+    normal_page[25] = 0xBF;
+    normal_page[38] = 6;
+    EXPECT_EQ(innodb::TDEDecryptor::probe_candidate(normal_page.data(), normal_page.size()),
+              innodb::TDECandidateProbe::RECOGNIZED_CANDIDATE);
 }
 
 // Test 7: Recovery engine basic operations

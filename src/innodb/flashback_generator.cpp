@@ -483,6 +483,7 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_updates(
     std::vector<FlashbackRecord> records;
 
     innodb::FlashbackFilter filter;
+    filter.trx_id = config_.trx_id;
     filter.start_lsn = config_.start_lsn;
     filter.end_lsn = config_.end_lsn;
     filter.start_time = config_.start_time;
@@ -569,7 +570,14 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_point_in_time(
     auto saved_config = config_;
     config_.end_time = point;
     config_.mode = FlashbackMode::POINT_IN_TIME;
-    auto results = flashback_deletes(schema);
+
+    auto deletes = flashback_deletes(schema);
+    auto updates = flashback_updates(schema);
+    auto results = std::move(deletes);
+    results.insert(results.end(),
+                   std::make_move_iterator(updates.begin()),
+                   std::make_move_iterator(updates.end()));
+
     config_ = saved_config;
     return results;
 }

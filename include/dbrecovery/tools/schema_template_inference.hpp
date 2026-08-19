@@ -34,7 +34,7 @@ namespace tools {
 struct SchemaTemplateInferenceConfig {
     size_t page_size = 16384;
     uint32_t max_pages_to_sample = 200;
-    bool detect_instant_ddl = true;
+    bool detect_schema_variation = true;  // diagnostic: detect column-count differences
     bool verbose = false;
 };
 
@@ -43,7 +43,7 @@ struct SchemaTemplateInferenceConfig {
 struct SchemaTemplateInferenceStats {
     uint32_t pages_scanned = 0;
     uint32_t columns_inferred = 0;
-    uint32_t instant_ddl_versions = 0;
+    uint32_t schema_variation_groups = 0;  // number of distinct column-count groups detected
     double total_ms = 0.0;
 };
 
@@ -85,15 +85,15 @@ public:
 
         tmpl.expected_column_count = sampling.detected_column_count;
 
-        // Step 2: Detect PAGE_INSTANT_COL (MySQL 8.0.23+)
-        uint16_t last_instant_col_count = 0;
+        // Step 2: Detect non-zero PAGE_INSTANT_COL signal (MySQL 8.0.23+).
+        // Diagnostic only — a non-zero value is a variation signal, not proof of
+        // INSTANT DDL without authoritative schema identity.
         bool found_instant_col = false;
 
-        if (cfg_.detect_instant_ddl) {
+        if (cfg_.detect_schema_variation) {
             std::ifstream file(ibd_path, std::ios::binary);
             if (file) {
                 std::vector<uint8_t> page_buf(cfg_.page_size);
-                uint32_t total_pages = 0;
                 uint32_t max_pg = cfg_.max_pages_to_sample > 0 ? cfg_.max_pages_to_sample : 200;
 
                 for (uint32_t pg = 0; pg < max_pg; pg++) {
@@ -104,21 +104,16 @@ public:
                     uint16_t page_type = innodb::read_be<uint16_t>(page_buf.data(), 24);
                     if (page_type != innodb::FIL_PAGE_INDEX) continue;
 
-                    // PAGE_INSTANT_COL at absolute offset 60 (2 bytes big-endian)
-                    // Only valid in MySQL 8.0.23+; a non-zero value indicates Instant DDL
                     uint16_t instant_col = innodb::read_be<uint16_t>(page_buf.data(), 60);
                     if (instant_col > 0 && instant_col <= sampling.detected_column_count) {
-                        if (instant_col > last_instant_col_count) {
-                            last_instant_col_count = instant_col;
-                        }
                         found_instant_col = true;
-                        total_pages++;
                     }
                 }
 
                 if (found_instant_col) {
-                    // Consensus: use the most common non-zero PAGE_INSTANT_COL value
-                    stats_.instant_ddl_versions = 1;
+                    // Diagnostic only: flag that a non-zero PAGE_INSTANT_COL signal exists.
+                    // Not proof of proven INSTANT DDL — no authoritative schema identity here.
+                    stats_.schema_variation_groups = (stats_.schema_variation_groups > 0) ? stats_.schema_variation_groups : 2;
                 }
             }
         }

@@ -313,6 +313,31 @@ inline std::vector<std::map<std::string, std::string>> PartitionTableRecovery::r
             continue;
         }
 
+        // Phase 5d: identity validation. Every INDEX page must carry the
+        // partition's tablespace_id (FIL_PAGE_SPACE_ID at offset 34, big-endian).
+        // When the schema declares an index_id, PAGE_INDEX_ID (offset 66) must
+        // also match. Non-matching pages are skipped — they belong to a different
+        // table or index within the same tablespace.
+        uint32_t page_spid = read_be<uint32_t>(page_data.data(), 34);
+        if (page_spid != partition.tablespace_id) {
+            continue;
+        }
+        if (!work_schema.indexes.empty()) {
+            uint64_t schema_idx_id = 0;
+            for (const auto& idx : work_schema.indexes) {
+                if (idx.is_primary && idx.index_id != 0) {
+                    schema_idx_id = idx.index_id;
+                    break;
+                }
+            }
+            if (schema_idx_id != 0) {
+                uint64_t page_ix = read_be<uint64_t>(page_data.data(), 66);
+                if (page_ix != 0 && page_ix != UINT64_MAX && page_ix != schema_idx_id) {
+                    continue;
+                }
+            }
+        }
+
         BPlusTreeParser parser(page_data);
         if (!parser.parse()) {
             continue;

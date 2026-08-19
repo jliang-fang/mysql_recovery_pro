@@ -105,22 +105,63 @@ struct TimingInfo {
 
 // ==================== Capability Report ====================
 
+enum class CapabilityStatus : uint8_t {
+    SUPPORTED,
+    EVIDENCE_ONLY,
+    RECOGNIZED_UNSUPPORTED,
+    MALFORMED,
+    REJECTED,
+};
+
+enum class RecoveryOutputCategory : uint8_t {
+    STRUCTURED_ROWS,
+    FORENSIC_EVIDENCE,
+    PAGE_BUNDLE,
+    PATCH_SET,
+};
+
+inline const char* to_string(CapabilityStatus status) {
+    switch (status) {
+        case CapabilityStatus::SUPPORTED: return "SUPPORTED";
+        case CapabilityStatus::EVIDENCE_ONLY: return "EVIDENCE_ONLY";
+        case CapabilityStatus::RECOGNIZED_UNSUPPORTED: return "RECOGNIZED_UNSUPPORTED";
+        case CapabilityStatus::MALFORMED: return "MALFORMED";
+        case CapabilityStatus::REJECTED: return "REJECTED";
+    }
+    return "REJECTED";
+}
+
+inline const char* to_string(RecoveryOutputCategory category) {
+    switch (category) {
+        case RecoveryOutputCategory::STRUCTURED_ROWS: return "STRUCTURED_ROWS";
+        case RecoveryOutputCategory::FORENSIC_EVIDENCE: return "FORENSIC_EVIDENCE";
+        case RecoveryOutputCategory::PAGE_BUNDLE: return "PAGE_BUNDLE";
+        case RecoveryOutputCategory::PATCH_SET: return "PATCH_SET";
+    }
+    return "FORENSIC_EVIDENCE";
+}
+
 /**
  * @brief CapabilityReport — what this build can/can't recover for a given version.
  *
- * Surfaces the recovery capability boundaries (SDI extraction, page type
- * recovery, salvage levels, encryption/compression) so users can see at a
- * glance which features are supported for the detected MySQL version.
+ * Status describes the verified recovery boundary, not merely whether a server
+ * version introduced a format. Output category constrains what may be exported.
  */
 struct CapabilityReport {
     struct Feature {
         std::string name;
-        bool supported;
+        bool supported = false;
         std::string limitation;
+        std::string id;
+        CapabilityStatus status = CapabilityStatus::REJECTED;
+        RecoveryOutputCategory output_category = RecoveryOutputCategory::FORENSIC_EVIDENCE;
+        std::vector<std::string> evidence;
 
         std::string to_string() const {
-            return name + ": " + (supported ? "SUPPORTED" : "NOT SUPPORTED")
-                + (limitation.empty() ? "" : " (" + limitation + ")");
+            std::string result = name + ": " + report::to_string(status)
+                + " -> " + report::to_string(output_category);
+            if (!limitation.empty()) result += " (" + limitation + ")";
+            return result;
         }
     };
 
@@ -131,10 +172,19 @@ struct CapabilityReport {
 
     bool is_feature_supported(const std::string& name) const {
         for (const auto& f : features) {
-            if (f.name == name) return f.supported;
+            if (f.name == name) return f.status == CapabilityStatus::SUPPORTED;
         }
         return false;
     }
+
+    const Feature* find_feature(const std::string& id_or_name) const {
+        for (const auto& f : features) {
+            if (f.id == id_or_name || f.name == id_or_name) return &f;
+        }
+        return nullptr;
+    }
+
+    std::string to_json() const;
 
     std::string to_string() const {
         std::ostringstream oss;

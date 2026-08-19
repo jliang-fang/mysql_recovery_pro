@@ -661,6 +661,11 @@ public:
     void set_mysql_version(uint32_t version) { mysql_version_ = version; }
 
     /**
+     * @brief Get current MySQL version
+     */
+    uint32_t get_mysql_version() const { return mysql_version_; }
+
+    /**
      * @brief Enable/disable debug output
      */
     void set_verbose(bool verbose) { verbose_ = verbose; }
@@ -938,7 +943,7 @@ private:
     bool recover_deleted_ = true;
     int bad_page_mode_ = 0;
     uint32_t off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
-    uint32_t mysql_version_ = 50600;  // Default: MySQL 5.6
+    uint32_t mysql_version_ = 0;      // 0 = not set; callers must set explicitly (e.g. 50600/50700/80000/80400/90000)
     uint64_t target_index_id_ = 0;     // 0 = accept all
     uint8_t row_format_hint_ = 0;      // 0 = auto-detect
 

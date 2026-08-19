@@ -75,6 +75,7 @@ struct IndexInfo {
     bool is_unique = false;
     uint32_t algorithm = 0;                 // BTREE(0), HASH(1) 等
     bool is_visible = true;                 // MySQL 8.0 新增：索引是否可见
+    uint64_t index_id = 0;                  // InnoDB internal index ID (from PAGE_INDEX_ID at offset 66)
 };
 
 // 分区信息（MySQL 8.0+ 常用 RANGE/LIST/KEY/HASH，参考 sql/dd/types/partition.h）
@@ -105,12 +106,18 @@ struct TableSchema {
     std::string engine = "InnoDB";
     
     uint64_t table_id = 0;                // InnoDB 内部表 ID（用于关联 SDI）
+    uint32_t space_id = 0;                // InnoDB tablespace ID from authoritative dictionary metadata
     uint32_t flags = 0;                   // FSP_FLAGS (页空间标志)
     uint32_t auto_inc_value = 0;          // AUTO_INCREMENT 当前值
 
     // ✅ 新增：Instant DDL 行版本支持 (MySQL 8.0.23+)
     uint16_t max_row_version = 0;         // 最大行版本号 (用于 instant ADD/DROP column)
     uint32_t mysql_version_id = 0;        // MySQL版本ID (80029=8.0.29, 用于判断 instant DDL 版本)
+
+    // Schema provenance fields (Phase 3)
+    std::string schema_hash;              // SHA-256 hex of the canonical SDI/FRM JSON payload
+    std::string schema_source;            // "SDI", "FRM", "USER", "EVIDENCE_ONLY"
+    std::string trust_level;              // "AUTHORITATIVE", "EVIDENCE_ONLY"
     
     void debug_print() const {
         std::cout << "Table: " << table_name << std::endl;
@@ -344,8 +351,13 @@ struct TableSchema {
         }
     }
     
-    // ✅ 新增：从 nlohmann/json 对象加载
+    // ✅ 新增：从 JSON 对象反序列化（用于 SDI 解析）。非 SDI 原始 SDI JSON 调用方负责设置
+    // schema_hash / schema_source / trust_level（本方法仅覆盖 user-schema JSON 中携带的字段）。
     bool from_json(const nlohmann::json& j) {
+        if (j.contains("schema_hash")) schema_hash = j["schema_hash"].get<std::string>();
+        if (j.contains("schema_source")) schema_source = j["schema_source"].get<std::string>();
+        if (j.contains("trust_level")) trust_level = j["trust_level"].get<std::string>();
+
         // 支持 "name" 和 "table_name" 两种字段名
         if (j.contains("table_name")) {
             table_name = j["table_name"].get<std::string>();

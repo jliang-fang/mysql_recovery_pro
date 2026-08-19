@@ -3,7 +3,7 @@ project(mysql_recovery_pro VERSION 2.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type")
 
 # 集成 nlohmann/json 库
 # ✅ P0-1 修复：使用系统安装的 nlohmann-json 库

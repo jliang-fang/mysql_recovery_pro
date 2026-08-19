@@ -70,6 +70,19 @@ public:
         bool is_valid = false;
     };
 
+    EnhancedSchemalessParser() = default;
+
+    /**
+     * @brief Set MySQL version for version-dependent layout decisions
+     *
+     * Controls DB_ROLL_PTR width when skipping system columns:
+     * 6 bytes for 5.6/5.7, 7 bytes for 8.0+.
+     * Default (0 / unknown) uses 7 bytes as conservative choice.
+     *
+     * @param version MySQL version number (e.g. 50600, 50700, 80000)
+     */
+    void set_mysql_version(uint32_t version) { mysql_version_ = version; }
+
     /**
      * @brief Parse a record from raw page data with enhanced heuristics
      *
@@ -90,6 +103,14 @@ public:
      * @brief Convert parsed record to CSV line
      */
     std::string to_csv_line(const ParsedRecord& record) const;
+
+private:
+    uint32_t mysql_version_ = 0;  // Not set → conservative 7-byte DB_ROLL_PTR
+
+    /// @brief DB_ROLL_PTR width in bytes; system columns = 6 (TRX_ID) + roll_ptr
+    uint32_t system_cols_bytes() const {
+        return 6 + ((mysql_version_ >= 80000 || mysql_version_ == 0) ? 7 : 6);
+    }
 };
 
 } // namespace innodb

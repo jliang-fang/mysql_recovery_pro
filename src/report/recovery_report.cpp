@@ -52,6 +52,36 @@ static std::string json_escape(const std::string& s) {
     return out;
 }
 
+std::string CapabilityReport::to_json() const {
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"mysql_version\": \"" << json_escape(mysql_version) << "\",\n";
+    oss << "  \"features\": [";
+    for (size_t i = 0; i < features.size(); ++i) {
+        const auto& feature = features[i];
+        if (i > 0) oss << ",";
+        oss << "\n    {\"id\": \"" << json_escape(feature.id)
+            << "\", \"name\": \"" << json_escape(feature.name)
+            << "\", \"status\": \"" << ::dbrecovery::report::to_string(feature.status)
+            << "\", \"output_category\": \""
+            << ::dbrecovery::report::to_string(feature.output_category)
+            << "\", \"limitation\": \"" << json_escape(feature.limitation)
+            << "\", \"evidence\": [";
+        for (size_t j = 0; j < feature.evidence.size(); ++j) {
+            if (j > 0) oss << ", ";
+            oss << "\"" << json_escape(feature.evidence[j]) << "\"";
+        }
+        oss << "]}";
+    }
+    oss << "\n  ],\n  \"warnings\": [";
+    for (size_t i = 0; i < warnings.size(); ++i) {
+        if (i > 0) oss << ", ";
+        oss << "\"" << json_escape(warnings[i]) << "\"";
+    }
+    oss << "]\n}\n";
+    return oss.str();
+}
+
 static std::string html_escape(const std::string& s) {
     std::string out;
     for (char c : s) {

@@ -15,6 +15,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/salvage/evidence_serializer.hpp"
 #include <nlohmann/json.hpp>
 
 namespace dbrecovery {
@@ -32,13 +33,24 @@ struct ExtractedSDI {
     bool is_valid;                 // 是否有效
     std::string error_message;     // 错误信息（如果无效）
     SDIManager::ExtractionOrigin origin = SDIManager::ExtractionOrigin::StrictStandardPayload;
+    uint32_t declared_uncompressed_length = 0;
+    uint32_t declared_compressed_length = 0;
+    size_t actual_uncompressed_length = 0;
 
     std::string to_string() const {
         std::ostringstream oss;
         oss << "ExtractedSDI{page_no=" << page_no
             << ", offset=" << offset
+            << ", origin=" << static_cast<int>(origin)
             << ", valid=" << std::boolalpha << is_valid << std::noboolalpha
-            << ", json_len=" << sdi_json.size() << "}";
+            << ", json_len=" << sdi_json.size()
+            << ", decl_uncompressed=" << declared_uncompressed_length
+            << ", decl_compressed=" << declared_compressed_length
+            << ", actual_uncompressed=" << actual_uncompressed_length;
+        if (!is_valid && !error_message.empty()) {
+            oss << ", error=\"" << error_message << "\"";
+        }
+        oss << "}";
         return oss.str();
     }
 };
@@ -187,6 +199,9 @@ inline std::optional<ExtractedSDI> SDIExtractor::extract_sdi_at_offset(
     extracted.is_valid = result.success();
     extracted.sdi_json = result.json;
     extracted.error_message = result.failure_reason;
+    extracted.declared_uncompressed_length = result.declared_uncompressed_length;
+    extracted.declared_compressed_length = result.declared_compressed_length;
+    extracted.actual_uncompressed_length = result.actual_uncompressed_length;
     return extracted;
 }
 
@@ -204,7 +219,9 @@ inline std::vector<ExtractedSDI> SDIExtractor::extract_from_page(const uint8_t* 
             const auto result = SDIManager::extract_zip_record(page_data, page_size, static_cast<size_t>(record_offset));
             if (result.success()) {
                 results.push_back({read_be<uint32_t>(page_data, FIL_PAGE_OFFSET),
-                                   static_cast<size_t>(record_offset), result.json, true, {}, result.origin});
+                                   static_cast<size_t>(record_offset), result.json, true, {}, result.origin,
+                                   result.declared_uncompressed_length, result.declared_compressed_length,
+                                   result.actual_uncompressed_length});
             }
         }
     } else {
@@ -316,9 +333,12 @@ inline std::optional<catalog::TableSchema> SDIExtractor::parse_sdi_json(const st
 
         // MySQL 8.0 SDI format: the dd_object contains table/column metadata
         catalog::TableSchema schema;
-        schema.from_json(j);
+        if (!schema.from_json(j)) return std::nullopt;
 
         if (schema.table_name.empty()) return std::nullopt;
+        schema.schema_hash = dbrecovery::salvage::SalvageEvidenceSerializer::sha256_hex(sdi_json);
+        schema.schema_source = "SDI";
+        schema.trust_level = "AUTHORITATIVE";
         return schema;
     } catch (const std::exception& e) {
         std::cerr << "[SDI] JSON parse error: " << e.what() << std::endl;

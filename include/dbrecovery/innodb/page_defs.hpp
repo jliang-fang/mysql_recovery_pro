@@ -29,6 +29,13 @@ struct FSPCompressionMetadata {
     bool is_compressed() const { return zip_ssize != 0; }
 };
 
+/// @brief FSP_SPACE_FLAGS bit definitions (from fil0fil.h)
+/// POST_ANTELOPE bit (bit 0): MySQL 5.7+ sets this, 5.6 and earlier clear it.
+/// Indicates COMPACT+ row format (ANTELOPE format not used).
+constexpr uint32_t FSP_FLAGS_POST_ANTELOPE = 0x1;
+/// @brief ATOMIC_BLOBS bit (bit 5): MySQL 5.7+ sets this for atomic BLOB pointers.
+constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS  = 0x20;
+
 /// @brief Offset of page type within FIL Header (relative to start of page)
 /// In InnoDB, FIL_PAGE_TYPE is at offset 24 (relative to page start)
 /// Per MySQL source code page0page.h: FIL_PAGE_TYPE = 24
@@ -192,6 +199,8 @@ constexpr uint16_t BTR_MAX_SIZE         = 50;       // maximum size of a record
 
 // ✅ 新增：绝对偏移常量（用于直接读取页数据）
 constexpr uint16_t BTR_N_LEVELS_ABS     = FIL_HEADER_SIZE + 4;   // absolute offset for page_level (38+4=42)
+constexpr uint16_t PAGE_LEVEL_ABS       = FIL_HEADER_SIZE + 26;  // 64 — PAGE_LEVEL within Page Header (2 bytes, big-endian)
+constexpr uint16_t PAGE_INDEX_ID_ABS    = FIL_HEADER_SIZE + 28;  // 66 — PAGE_INDEX_ID within Page Header (8 bytes, big-endian)
 constexpr uint16_t BTR_IND_PAGE_OFFSET_ABS = FIL_HEADER_SIZE + 6; // absolute offset for index id (38+6=44)
 
 // ✅ 新增：BTR Header 相对偏移（用于解析 B+Tree 头部）

@@ -622,21 +622,21 @@ PageType detectPageType(const uint8_t* page_data, size_t page_size) {
     uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
     switch (page_type) {
-        case 17855:  // FIL_PAGE_INDEX (0x45BF)
+        case innodb::FIL_PAGE_INDEX:  // 0x45BF
             return PageType::INDEX;
-        case 17854:  // FIL_PAGE_SDI (0x45BE)
+        case innodb::FIL_PAGE_SDI:  // 0x45BE
             return PageType::SDI;
-        case 17842:  // FIL_PAGE_UNDO_LOG (0x45B2)
+        case innodb::FIL_PAGE_UNDO_LOG:  // 0x45B2
             return PageType::UNDO_LOG;
-        case 17853:  // FIL_PAGE_BLOB / FIL_PAGE_SDI_ZIP (0x45BD)
+        case innodb::FIL_PAGE_SDI_ZIP:  // 0x45BD (also BLOB)
             return PageType::BLOB;
-        case 17845:  // FIL_PAGE_COMPRESSED (0x45B5)
+        case innodb::FIL_PAGE_COMPRESSED:  // 0x45B5
             return PageType::COMPRESSED;
-        case 17847:  // FIL_PAGE_COMPRESSED_AND_ENCRYPTED (0x45B7)
+        case innodb::FIL_PAGE_COMPRESSED_AND_ENCRYPTED:  // 0x45B7
             return PageType::COMPRESSED_AND_ENCRYPTED;
-        case 17848:  // FIL_PAGE_TYPE_FSP_HDR (0x45B8)
+        case innodb::FIL_PAGE_TYPE_FSP_HDR:  // 0x45B8
             return PageType::FSP_HDR;
-        case 17849:  // FIL_PAGE_TYPE_XDES (0x45B9)
+        case innodb::FIL_PAGE_TYPE_XDES:  // 0x45B9
             return PageType::XDES;
         default:
             return PageType::UNKNOWN;
@@ -679,18 +679,20 @@ ChecksumType detectChecksumType(const uint8_t* page_data, MySQLVersion version, 
         return ChecksumType::NONE;
     }
 
-    // MySQL 8.0+ uses BLOCK_CHECKSUM
-    if (version >= MySQLVersion::MYSQL_80) {
-        return ChecksumType::BLOCK_CHECKSUM;
+    switch (version) {
+        case MySQLVersion::MYSQL_80:
+        case MySQLVersion::MYSQL_81:
+        case MySQLVersion::MYSQL_84:
+        case MySQLVersion::MYSQL_90:
+            return ChecksumType::BLOCK_CHECKSUM;
+        case MySQLVersion::MYSQL_56:
+        case MySQLVersion::MYSQL_57:
+            return ChecksumType::CRC32;
+        case MySQLVersion::MYSQL_55:
+            return ChecksumType::INNODB;
+        default: // UNKNOWN and future versions
+            return ChecksumType::UNKNOWN;
     }
-
-    // MySQL 5.6+ uses CRC32
-    if (version >= MySQLVersion::MYSQL_56) {
-        return ChecksumType::CRC32;
-    }
-
-    // Older versions use INNODB
-    return ChecksumType::INNODB;
 }
 
 std::string checksumTypeToString(ChecksumType type) {

@@ -22,6 +22,7 @@
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_types_v2.hpp"
+#include "dbrecovery/innodb/roll_ptr_decoder.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -466,7 +467,8 @@ public:
     // 从Undo Log记录重建
     static RecordData reconstruct_from_undo(
         const uint8_t* undo_data, size_t undo_size,
-        const std::vector<ColumnInfo>& columns);
+        const std::vector<ColumnInfo>& columns,
+        UndoFormatProfile profile = UndoFormatProfile::UNRESOLVED);
 };
 
 // ==================== 工具函数 ====================

@@ -510,8 +510,9 @@ MySQLVersion PageFactoryExtended::detect_version_extended(
         }
     }
 
-    // Default to 5.6
-    return MySQLVersion::MYSQL_56;
+    // No unique version evidence — fail closed. None of the weak heuristics
+    // above uniquely identify a server version.
+    return MySQLVersion::UNKNOWN;
 }
 
 bool PageFactoryExtended::is_old_mysql_format(const uint8_t* page_data, size_t page_size) {

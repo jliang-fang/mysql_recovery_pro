@@ -462,8 +462,9 @@ mysql_recovery::MySQLVersion HeuristicInference::infer_version(const uint8_t* pa
         }
     }
 
-    // Default to 5.7
-    return mysql_recovery::MySQLVersion::MYSQL_57;
+    // No unique version evidence — fail closed. FSP flags and header heuristics
+    // only provide lower bounds and can misclassify 8.0+ pages as older.
+    return mysql_recovery::MySQLVersion::UNKNOWN;
 }
 
 std::vector<uint8_t> HeuristicInference::extract_column_metadata(const uint8_t* page_data, size_t page_size) {

@@ -11,6 +11,7 @@
 #include <string>
 #include <optional>
 #include "dbrecovery/innodb/heuristic_parser.hpp"
+#include "dbrecovery/innodb/roll_ptr_decoder.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -168,15 +169,22 @@ public:
      *     → prev_undo_ptr → undo_record#2
      *     → ... → TRX_UNDO_INSERT (chain end / oldest version)
      *
+     * The roll pointer storage width is pinned by the resolved UndoFormatProfile:
+     *   LEGACY_6BYTE (5.6/5.7): 6 bytes big-endian
+     *   MYSQL8_7BYTE (8.0+):    7 bytes big-endian
+     * UNRESOLVED rejects the entire chain — no implicit width guessing.
+     *
      * @param ibdata_path Path to ibdata1 or undo tablespace
-     * @param start_page_no Undo page number from DB_ROLL_PTR high 16 bits
-     * @param start_offset Offset within page from DB_ROLL_PTR low 32 bits
-     * @return Ordered undo entries (oldest first) or empty if chain broken
+     * @param start_page_no Undo page number from DB_ROLL_PTR
+     * @param start_offset Offset within undo page from DB_ROLL_PTR
+     * @param profile Resolved undo format profile (default: UNRESOLVED)
+     * @return Ordered undo entries (oldest first) or empty if chain broken or profile unresolved
      */
     std::vector<UndoLogEntry> traverse_undo_chain(
         const std::string& ibdata_path,
         uint32_t start_page_no,
-        uint32_t start_offset);
+        uint32_t start_offset,
+        UndoFormatProfile profile = UndoFormatProfile::UNRESOLVED);
 
     /**
      * @brief v2.0: DELETE flashback — generate reverse INSERT from undo logs

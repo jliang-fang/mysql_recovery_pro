@@ -333,9 +333,9 @@ EnhancedSchemalessParser::ParsedRecord EnhancedSchemalessParser::parse_record(
     result.id = raw_id;
     pos += 8;
 
-    // For leaf pages, skip TRX_ID (6 bytes) + ROLL_PTR (7 bytes) = 13 bytes
-    if (is_leaf && pos + 13 <= rec_end) {
-        pos += 13;
+    // For leaf pages, skip TRX_ID (6 bytes) + ROLL_PTR (roll_ptr width) = system_cols_bytes()
+    if (is_leaf && pos + system_cols_bytes() <= rec_end) {
+        pos += system_cols_bytes();
     }
 
     size_t remaining = rec_end - pos;

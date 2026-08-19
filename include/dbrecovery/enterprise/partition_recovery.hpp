@@ -18,14 +18,20 @@ struct PartitionInfo {
     std::vector<std::string> partition_values;
     uint32_t space_id = 0;
     std::string ibd_file_path;
+    // Identity validation fields (Phase 5d): populated from the partition's
+    // own page 0 (page 0 is the only page whose FIL space_id is guaranteed to
+    // match -- all other pages carry a per-page space_id that must also match).
+    uint64_t file_size = 0;
+    uint32_t page_size = 0;         // detected from page 0 (FSP header)
+    bool identity_verified = false; // page 0 readable and FIL space_id non-zero
 };
 
 struct PartitionRecoveryResult {
     std::string partition_name;
+    bool success = false;
     uint64_t records_recovered = 0;
     uint64_t records_failed = 0;
     double recovery_rate = 0.0;
-    bool success = false;
     std::string error;
 };
 
@@ -51,6 +57,10 @@ private:
     std::vector<std::filesystem::path> find_partition_files(
         const std::string& data_dir,
         const std::string& table_name);
+
+    // Read FSP_HEADER page-size field (page 0, absolute offset 45)
+    // and return the logical page size in bytes (0 if unreadable).
+    uint32_t infer_page_size(const std::filesystem::path& path);
 };
 
 struct SharedTableInfo {

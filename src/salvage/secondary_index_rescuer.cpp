@@ -184,6 +184,9 @@ void SecondaryIndexRescuer::clear() {
     if (!schema_.columns.empty()) {
         inner_.set_schema(schema_);
     }
+    if (target_name_.has_value()) {
+        inner_.set_target_secondary_index(*target_name_);
+    }
 }
 
 } // namespace salvage

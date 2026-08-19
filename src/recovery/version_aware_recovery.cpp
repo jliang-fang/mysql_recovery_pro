@@ -7,6 +7,7 @@
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/salvage/evidence_serializer.hpp"
 #include <fstream>
 #include <iostream>
 #include <chrono>
@@ -593,10 +594,19 @@ std::vector<std::map<std::string, std::string>> MySQL80Parser::parse_compressed(
 }
 
 std::optional<catalog::TableSchema> MySQL80Parser::parse_sdi() {
-    if (!data_ || size_ < 100) return std::nullopt;
+    // SDI payload starts after the 38-byte FIL header; a complete SDI header
+    // requires 20 more bytes, so 58 bytes of page data is the minimum.
+    if (!data_ || size_ < 58) return std::nullopt;
 
-    // 使用 SDIManager 解析
-    return innodb::SDIManager::parse_sdi_record(data_, size_);
+    // 使用 SDIManager 解析（payload，而非整页：避免将 FIL header 误读为 SDI header）
+    return innodb::SDIManager::parse_sdi_record(data_ + 38, size_ - 38);
+}
+
+std::optional<catalog::TableSchema> MySQL80Parser::parse_sdi_structured() {
+    if (!data_ || size_ < 58) return std::nullopt;
+    auto result = innodb::SDIManager::parse_sdi_record_structured(data_ + 38, size_ - 38);
+    if (result.schema.columns.empty()) return std::nullopt;
+    return result.schema;
 }
 
 // ==================== MySQL84Parser 实现 ====================

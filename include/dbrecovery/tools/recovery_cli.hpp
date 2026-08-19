@@ -12,6 +12,7 @@
 #include <chrono>
 #include <set>
 #include <map>
+#include <nlohmann/json.hpp>
 
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
@@ -43,6 +44,7 @@
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
 #include "dbrecovery/validate/unified_validator.hpp"
+#include "dbrecovery/tools/unified_recovery.hpp"
 #include "dbrecovery/innodb/partition_table_recovery.hpp"
 #include "dbrecovery/innodb/shared_tablespace_recovery.hpp"
 #include "dbrecovery/innodb/ddl_change_detector.hpp"
@@ -168,7 +170,8 @@ private:
 
     // v2.0: 并行导出
     bool export_parallel(const std::vector<std::map<std::string, std::string>>& records,
-                         const std::string& table_name, uint32_t num_workers);
+                         const std::string& table_name, uint32_t num_workers,
+                         std::vector<std::string>* output_files = nullptr);
 };
 
 // ==================== 实现 ====================
@@ -203,6 +206,7 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--schema=<def>\033[0m            Manual schema definition (format: col:type:size:pk,...)\n";
     std::cout << "  \033[1m--schema-file=<path>\033[0m       Path to JSON schema file for schema-aware recovery\n";
     std::cout << "  \033[1m--output=<dir>\033[0m             Output directory (default: /tmp/recovered)\n";
+    std::cout << "  \033[1m--result-json=<path>\033[0m        Write machine-readable execution result\n";
     std::cout << "  \033[1m--table-id=<id>\033[0m            Table ID for SDI lookup (default: 0)\n";
     std::cout << "  \033[1m--page-size=<size>\033[0m         Page size: 4096/8192/16384/32768/65536 (default: 16384)\n";
     std::cout << "  \033[1m--format=<csv|sql|json>\033[0m    Output format (default: csv)\n";
@@ -251,11 +255,12 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "                                 Requires --device-path for disk carving source pages\n";
     std::cout << "  \033[1m--infer-schema\033[0m             Infer table schema from raw page data (statistical)\n";
     std::cout << "                                 Uses StatisticalTypeClassifier with 20+ type detectors\n";
-    std::cout << "  \033[1m--undo-history\033[0m             Recover historical row versions from undo logs\n";
+    std::cout << "  \033[1m--undo-history\033[0m             Forensic undo inventory (evidence only, NOT verified flashback)\n";
     std::cout << "                                 Requires --system-tablespace or --undo-tablespace\n";
+    std::cout << "                                 Output is heuristic; do not use to reconstruct rows\n";
     std::cout << "  \033[1m--undo-tablespace=<path>\033[0m   Path to standalone undo tablespace (undo_001, etc.)\n";
-    std::cout << "  \033[1m--undo-reassemble\033[0m          Heuristic reassembly of broken undo chains\n";
-    std::cout << "                                 Reconnects fragments by table_id + PK matching\n";
+    std::cout << "  \033[1m--undo-reassemble\033[0m          Heuristic candidate grouping of broken undo chains\n";
+    std::cout << "                                 Forensic evidence only; NOT point-verified or flashback-capable\n";
     std::cout << "  \033[1m--flashback-delete\033[0m         Generate INSERT statements to reverse DELETE operations\n";
     std::cout << "                                 Requires --system-tablespace and --schema-file\n";
     std::cout << "  \033[1m--flashback-update\033[0m         Generate UPDATE statements to recover old values\n";
@@ -288,12 +293,19 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--secondary-rescue\033[0m         Recover data from secondary indexes when clustered index is damaged\n";
     std::cout << "                                 Requires --secondary-index=<paths> and --schema-file\n";
     std::cout << "  \033[1m--secondary-index=<paths>\033[0m  Comma-separated paths to secondary index .ibd files\n";
-    std::cout << "  \033[1m--redo-replay\033[0m               Replay redo log records against pages for recovery\n";
-    std::cout << "                                 Requires --redo-log=<path> and --schema-file\n";
+    std::cout << "  \033[1m--secondary-index-name=<name>\033[0m  Target secondary index name (required for structured rescue)\n";
+    std::cout << "  \033[1m--redo-replay\033[0m               Phase 5f: build read-only redo inventory + patch plan\n";
+    std::cout << "                                 Requires --redo-log=<path> (safe default; never writes pages)\n";
     std::cout << "  \033[1m--redo-log=<path>\033[0m           Path to InnoDB redo log file (ib_logfile0)\n";
     std::cout << "  \033[1m--redo-space-id=<id>\033[0m        Filter redo records by tablespace ID (default: auto)\n";
-    std::cout << "  \033[1m--keyring-file=<path>\033[0m      Path to keyring file for TDE decryption\n";
-    std::cout << "                                 Supports keyring_file (JSON), encrypted keyring, Vault export\n";
+    std::cout << "  \033[1m--redo-apply\033[0m                Phase 5f: attempt write replay, gated by pre-conditions\n";
+    std::cout << "                                 Default OFF. Replay only when LSN order, MLOG whitelist,\n";
+    std::cout << "                                 base-page identity, checkpoint, and checksum conditions all\n";
+    std::cout << "                                 pass; otherwise fails closed with no page writes.\n";
+    std::cout << "  \033[1m--keyring-file=<path>\033[0m      Path to custom keyring import file for TDE\n";
+    std::cout << "                                 Supports custom JSON keyring_file, encrypted\n";
+    std::cout << "                                 JSON (--tde-password), and HashiCorp Vault export\n";
+    std::cout << "                                 Note: MySQL native binary keyring is NOT supported\n";
     std::cout << "  \033[1m--tde-password=<pwd>\033[0m       Password for encrypted keyring file\n";
     std::cout << "  \033[1m--parallel-export\033[0m          Export recovered records using multiple threads\n";
     std::cout << "                                 Uses --num-workers for thread count (default: 4)\n";
@@ -464,6 +476,35 @@ inline bool RecoveryCLI::export_data(const std::string& output_path, const std::
 }
 
 inline int RecoveryCLI::run(int argc, char** argv) {
+    const std::string result_json_path = parser_.get_option("result-json", "");
+    auto write_result_json = [&](nlohmann::json result) {
+        if (result_json_path.empty()) {
+            return true;
+        }
+
+        result["format_version"] = 1;
+        try {
+            const fs::path path(result_json_path);
+            if (!path.parent_path().empty()) {
+                fs::create_directories(path.parent_path());
+            }
+            std::ofstream file(result_json_path, std::ios::trunc);
+            if (!file) {
+                std::cerr << "[ERROR] Cannot write result JSON: " << result_json_path << "\n";
+                return false;
+            }
+            file << result.dump(2) << "\n";
+            if (!file) {
+                std::cerr << "[ERROR] Failed to write result JSON: " << result_json_path << "\n";
+                return false;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[ERROR] Cannot write result JSON: " << e.what() << "\n";
+            return false;
+        }
+        return true;
+    };
+
     // 解析参数
     bool show_version_only = parser_.get_bool_option("version", false);
     bool show_help_only = parser_.get_bool_option("help", false);
@@ -480,19 +521,34 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // Phase 7: --capability-report — print and exit
     if (parser_.has_option("capability-report")) {
-        std::string ver_str = parser_.get_option("mysql-version", "8.0");
+        std::string ver_str = parser_.get_option("mysql-version", "");
         MySQLVersion version = MySQLVersion::UNKNOWN;
         // Map version string to enum
         if (ver_str == "5.6") version = MySQLVersion::MYSQL_56;
         else if (ver_str == "5.7") version = MySQLVersion::MYSQL_57;
         else if (ver_str == "8.0") version = MySQLVersion::MYSQL_80;
         else if (ver_str == "8.1") version = MySQLVersion::MYSQL_81;
+        else if (ver_str == "8.2") version = MySQLVersion::MYSQL_82;
+        else if (ver_str == "8.3") version = MySQLVersion::MYSQL_83;
         else if (ver_str == "8.4") version = MySQLVersion::MYSQL_84;
         else if (ver_str == "9.0") version = MySQLVersion::MYSQL_90;
-        else std::cerr << "[WARN] Unknown version '" << ver_str << "', using UNKNOWN\n";
+        if (version == MySQLVersion::UNKNOWN && !ver_str.empty()) {
+            std::cerr << "[WARN] Unknown version '" << ver_str << "', using UNKNOWN\n";
+        }
 
         auto report = validate::UnifiedValidator::validate_all(version);
         std::cout << report.to_string() << "\n";
+        if (!write_result_json({
+                {"mode", "capability_report"},
+                {"classification", "recognized_unsupported"},
+                {"structured_rows", 0},
+                {"evidence_fragments", 0},
+                {"importable", false},
+                {"reason", "capability report only; no recovery was performed"},
+                {"source_inputs", nlohmann::json::object()},
+                {"mysql_version", ver_str}})) {
+            return 1;
+        }
         return 0;
     }
 
@@ -565,6 +621,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     else if (mysql_version == "5.7") sdi_version = dbrecovery::MySQLVersion::MYSQL_57;
     else if (mysql_version == "8.0") sdi_version = dbrecovery::MySQLVersion::MYSQL_80;
     else if (mysql_version == "8.1") sdi_version = dbrecovery::MySQLVersion::MYSQL_81;
+    else if (mysql_version == "8.2") sdi_version = dbrecovery::MySQLVersion::MYSQL_82;
+    else if (mysql_version == "8.3") sdi_version = dbrecovery::MySQLVersion::MYSQL_83;
     else if (mysql_version == "8.4") sdi_version = dbrecovery::MySQLVersion::MYSQL_84;
     else if (mysql_version == "9.0") sdi_version = dbrecovery::MySQLVersion::MYSQL_90;
 
@@ -609,11 +667,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // Secondary index rescue
     bool secondary_rescue = parser_.get_bool_option("secondary-rescue", false);
     std::string secondary_index_paths = parser_.get_option("secondary-index", "");
+    std::string secondary_index_name = parser_.get_option("secondary-index-name", "");
 
     // Redo log replay
     bool redo_replay_mode = parser_.get_bool_option("redo-replay", false);
     std::string redo_log_path = parser_.get_option("redo-log", "");
     std::string redo_space_id_str = parser_.get_option("redo-space-id", "");
+    // Phase 5f: write replay is OFF by default — inventory/patch-plan (read-only) only
+    bool redo_apply = parser_.get_bool_option("redo-apply", false);
 
     // Enhanced keyring support
     std::string keyring_file = parser_.get_option("keyring-file", "");
@@ -666,7 +727,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // v2.0: Page reassembly mode
     if (reassemble_mode) {
         if (device_path.empty()) {
-            std::cerr << "[ERROR] --reassemble requires --device-path for raw disk carving source\n";
+            const std::string reason = "--reassemble requires --device-path for raw disk carving source";
+            std::cerr << "[ERROR] " << reason << "\n";
+            if (!write_result_json({
+                    {"mode", "reassemble"},
+                    {"classification", "expected_reject"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason}})) {
+                return 1;
+            }
             return 1;
         }
 
@@ -702,6 +773,29 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Gaps: " << reassembly_stats.total_gaps
                   << " (critical: " << reassembly_stats.critical_gaps << ")\n";
 
+        nlohmann::json reassembly_artifacts = nlohmann::json::array();
+        if (fs::exists(output_dir)) {
+            reassembly_artifacts.push_back(output_dir);
+        }
+        if (!write_result_json({
+                {"mode", "reassemble"},
+                {"classification", "forensic_evidence"},
+                {"structured_rows", 0},
+                {"evidence_fragments", reassembly_stats.total_pages_used},
+                {"importable", false},
+                {"reason", "reassembled page bundles require independent validation before import"},
+                {"source_inputs", {{"device_path", device_path}}},
+                {"artifacts", reassembly_artifacts},
+                {"reassembly", {
+                    {"spaces_reconstructed", reassembly_stats.spaces_reconstructed},
+                    {"total_pages_found", reassembly_stats.total_pages_found},
+                    {"total_pages_used", reassembly_stats.total_pages_used},
+                    {"synthetic_pages_written", reassembly_stats.synthetic_pages_written},
+                    {"total_gaps", reassembly_stats.total_gaps},
+                    {"critical_gaps", reassembly_stats.critical_gaps},
+                    {"completeness_pct", reassembly_stats.completeness_pct}}}})) {
+            return 1;
+        }
         return 0;
     }
 
@@ -791,13 +885,26 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return 0;
     }
 
-    // v2.0: Undo history mode
+    // v2.0: Undo history mode — forensic inventory only
     if (undo_history_mode) {
-        std::cout << "[INFO] v2.0 Undo History Recovery Mode\n";
+        std::cout << "[INFO] Forensic Undo Inventory Mode\n";
+        std::cout << "[INFO] NOTE: This output is heuristic evidence only. It is NOT pointer-verified\n";
+        std::cout << "[INFO] row history and must NOT be used for flashback or row reconstruction.\n";
+        std::cout << "[INFO] Use --flashback-delete / --flashback-update for verified flashback.\n";
 
         std::string sys_ts = system_tablespace;
         if (sys_ts.empty() && undo_tablespace.empty()) {
-            std::cerr << "[ERROR] --undo-history requires --system-tablespace or --undo-tablespace\n";
+            const std::string reason = "--undo-history requires --system-tablespace or --undo-tablespace";
+            std::cerr << "[ERROR] " << reason << "\n";
+            if (!write_result_json({
+                    {"mode", "undo_history"},
+                    {"classification", "expected_reject"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason}})) {
+                return 1;
+            }
             return 1;
         }
 
@@ -829,28 +936,88 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                   << ", recoverable: " << stats.recoverable_records
                   << ", transactions: " << stats.transactions_found << "\n";
 
+        std::string history_artifact;
         if (!all_entries.empty()) {
             fs::create_directories(output_dir);
             std::string hist_path = output_dir + "/undo_history.csv";
             std::ofstream hist_file(hist_path);
+            if (!hist_file) {
+                std::cerr << "[ERROR] Failed to write history: " << hist_path << "\n";
+                if (!write_result_json({
+                        {"mode", "undo_history"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", all_entries.size()},
+                        {"importable", false},
+                        {"reason", "failed to create undo history evidence artifact"}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            hist_file << "# FORENSIC INVENTORY ONLY - heuristic undo log entries, not verified row history\n";
+            hist_file << "# provenance=none, flashback=not-supported, pointer_verified=false\n";
             hist_file << "undo_type,page_no,page_offset,field_count\n";
             for (const auto& entry : all_entries) {
                 hist_file << static_cast<int>(entry.undo_type) << ","
                           << entry.page_no << "," << entry.page_offset << ","
                           << static_cast<int>(entry.field_count) << "\n";
             }
+            if (!hist_file) {
+                std::cerr << "[ERROR] Failed to write history: " << hist_path << "\n";
+                if (!write_result_json({
+                        {"mode", "undo_history"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", all_entries.size()},
+                        {"importable", false},
+                        {"reason", "failed to write undo history evidence artifact"}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            history_artifact = hist_path;
             std::cout << "[INFO] History written to: " << hist_path << "\n";
+        }
+        nlohmann::json undo_sources = nlohmann::json::object();
+        if (!sys_ts.empty()) undo_sources["system_tablespace"] = sys_ts;
+        if (!undo_tablespace.empty()) undo_sources["undo_tablespace"] = undo_tablespace;
+        nlohmann::json undo_artifacts = nlohmann::json::array();
+        if (!history_artifact.empty()) undo_artifacts.push_back(history_artifact);
+        if (!write_result_json({
+                {"mode", "undo_history"},
+                {"classification", "forensic_evidence"},
+                {"structured_rows", 0},
+                {"evidence_fragments", all_entries.size()},
+                {"importable", false},
+                {"reason", all_entries.empty() ? "evidence-empty: no undo entries found" : "heuristic undo inventory; not pointer-verified"},
+                {"source_inputs", undo_sources},
+                {"artifacts", undo_artifacts},
+                {"evidence_empty", all_entries.empty()}})) {
+            return 1;
         }
         return 0;
     }
 
-    // v2.0: Heuristic undo chain reassembly
+    // v2.0: Heuristic undo chain reassembly — candidate grouping only
     if (undo_reassemble) {
-        std::cout << "[INFO] v2.0 Heuristic Undo Chain Reassembly\n";
+        std::cout << "[INFO] Heuristic Undo Chain Candidate Grouping\n";
+        std::cout << "[INFO] NOTE: Chains in this output are heuristic candidates grouped by\n";
+        std::cout << "[INFO] table_id + PK. They are NOT roll-pointer verified and are NOT\n";
+        std::cout << "[INFO] flashback-capable. For verified history use --flashback-delete/update.\n";
 
         std::string sys_ts = system_tablespace;
         if (sys_ts.empty()) {
-            std::cerr << "[ERROR] --undo-reassemble requires --system-tablespace\n";
+            const std::string reason = "--undo-reassemble requires --system-tablespace";
+            std::cerr << "[ERROR] " << reason << "\n";
+            if (!write_result_json({
+                    {"mode", "undo_reassemble"},
+                    {"classification", "expected_reject"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason}})) {
+                return 1;
+            }
             return 1;
         }
 
@@ -870,10 +1037,26 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                   << ", medium: " << med_conf
                   << ", low: " << low_conf << "\n";
 
+        nlohmann::json undo_reassembly_artifacts = nlohmann::json::array();
         if (!chains.empty()) {
             fs::create_directories(output_dir);
             std::string chain_path = output_dir + "/reassembled_chains.csv";
             std::ofstream chain_file(chain_path);
+            if (!chain_file) {
+                std::cerr << "[ERROR] Failed to write chain summary: " << chain_path << "\n";
+                if (!write_result_json({
+                        {"mode", "undo_reassemble"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", chains.size()},
+                        {"importable", false},
+                        {"reason", "failed to create undo chain evidence artifact"}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            chain_file << "# FORENSIC INVENTORY ONLY - heuristic candidate groupings, not verified chains\n";
+            chain_file << "# provenance=none, flashback=not-supported, pointer_verified=false\n";
             chain_file << "chain_id,table_id,pk_hex,confidence,num_entries,has_insert,has_delete\n";
             for (size_t i = 0; i < chains.size(); i++) {
                 const auto& ch = chains[i];
@@ -887,11 +1070,38 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                            << ch.confidence << "," << ch.entries.size() << ","
                            << (has_ins ? "Y" : "N") << "," << (has_del ? "Y" : "N") << "\n";
             }
+            if (!chain_file) {
+                std::cerr << "[ERROR] Failed to write chain summary: " << chain_path << "\n";
+                if (!write_result_json({
+                        {"mode", "undo_reassemble"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", chains.size()},
+                        {"importable", false},
+                        {"reason", "failed to write undo chain evidence artifact"}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            undo_reassembly_artifacts.push_back(chain_path);
             std::cout << "[INFO] Chain summary written to: " << chain_path << "\n";
 
-            // Also write detailed entry listing
             std::string detail_path = output_dir + "/reassembled_entries.csv";
             std::ofstream detail_file(detail_path);
+            if (!detail_file) {
+                std::cerr << "[ERROR] Failed to write chain entries: " << detail_path << "\n";
+                if (!write_result_json({
+                        {"mode", "undo_reassemble"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", chains.size()},
+                        {"importable", false},
+                        {"reason", "failed to create undo entry evidence artifact"}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            detail_file << "# FORENSIC INVENTORY ONLY - heuristic entries, not verified\n";
             detail_file << "chain_id,undo_type,page_no,page_offset,field_count\n";
             for (size_t i = 0; i < chains.size(); i++) {
                 for (const auto& e : chains[i].entries) {
@@ -900,7 +1110,34 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                                 << static_cast<int>(e.field_count) << "\n";
                 }
             }
+            if (!detail_file) {
+                std::cerr << "[ERROR] Failed to write chain entries: " << detail_path << "\n";
+                if (!write_result_json({
+                        {"mode", "undo_reassemble"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", chains.size()},
+                        {"importable", false},
+                        {"reason", "failed to write undo entry evidence artifact"}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            undo_reassembly_artifacts.push_back(detail_path);
             std::cout << "[INFO] Entry details written to: " << detail_path << "\n";
+        }
+        if (!write_result_json({
+                {"mode", "undo_reassemble"},
+                {"classification", "forensic_evidence"},
+                {"structured_rows", 0},
+                {"evidence_fragments", chains.size()},
+                {"importable", false},
+                {"reason", chains.empty() ? "evidence-empty: no undo chains found" : "heuristic chain candidates; not roll-pointer verified"},
+                {"source_inputs", {{"system_tablespace", sys_ts}}},
+                {"artifacts", undo_reassembly_artifacts},
+                {"evidence_empty", chains.empty()},
+                {"confidence", {{"high", high_conf}, {"medium", med_conf}, {"low", low_conf}}}})) {
+            return 1;
         }
         return 0;
     }
@@ -1109,8 +1346,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     if (salvage_mode) {
         std::cout << "[INFO] v2.0 Emergency Salvage Mode\n";
 
-        if (ibd_path.empty() && device_path.empty()) {
-            std::cerr << "[ERROR] --salvage-mode requires --ibd or --device-path\n";
+        if (ibd_path.empty()) {
+            const std::string reason = device_path.empty()
+                ? "--salvage-mode requires --ibd"
+                : "--salvage-mode currently supports --ibd only; device-page loading is unavailable";
+            std::cerr << "[ERROR] " << reason << "\n";
+            if (!write_result_json({
+                    {"mode", "salvage"},
+                    {"classification", "expected_reject"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason}})) {
+                return 1;
+            }
             return 1;
         }
 
@@ -1139,7 +1388,18 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         if (raw_pages.empty()) {
+            const std::string reason = "no readable pages available for salvage";
             std::cerr << "[ERROR] No pages to salvage\n";
+            if (!write_result_json({
+                    {"mode", "salvage"},
+                    {"classification", "operational_error"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason},
+                    {"source_inputs", {{"ibd", ibd_path}}}})) {
+                return 1;
+            }
             return 1;
         }
 
@@ -1159,17 +1419,33 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << result.to_report() << "\n";
 
         fs::create_directories(output_dir);
+        nlohmann::json salvage_artifacts = nlohmann::json::array();
 
         // Structured rows (L1/L2) are always exportable to CSV.
         if (!result.rows.empty()) {
             std::string csv_path = output_dir + "/salvaged_data.csv";
 
-            if (dbrecovery::recovery::SalvageEngine::export_csv(csv_path, result.rows)) {
-                std::cout << "[INFO] Recovered structured rows written to: " << csv_path << "\n";
-                std::cout << "[INFO] Total structured rows exported: " << result.rows.size() << "\n";
-            } else {
-                std::cerr << "[ERROR] Failed to export structured rows to: " << csv_path << "\n";
+            if (!dbrecovery::recovery::SalvageEngine::export_csv(csv_path, result.rows)) {
+                const std::string reason = "failed to export structured salvage rows";
+                std::cerr << "[ERROR] " << reason << ": " << csv_path << "\n";
+                if (!write_result_json({
+                        {"mode", "salvage"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", result.rows.size()},
+                        {"evidence_fragments", result.evidence_fragments.size()},
+                        {"importable", false},
+                        {"reason", reason},
+                        {"source_inputs", {{"ibd", ibd_path}}}})) {
+                    return 1;
+                }
+                return 1;
             }
+            std::cout << "[INFO] Recovered structured rows written to: " << csv_path << "\n";
+            std::cout << "[INFO] Total structured rows exported: " << result.rows.size() << "\n";
+            salvage_artifacts.push_back({
+                {"path", csv_path},
+                {"kind", "structured_rows"},
+                {"importable", false}});
         } else {
             std::cout << "[WARN] No structured rows to export\n";
         }
@@ -1186,21 +1462,34 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::string evidence_path = output_dir + "/salvage_evidence.json";
                 dbrecovery::salvage::SalvageEvidenceSerializer serializer;
                 std::map<std::string, std::string> metadata;
-                if (!ibd_path.empty()) {
-                    metadata["source_file"] = ibd_path;
-                }
+                metadata["source_file"] = ibd_path;
                 metadata["page_size"] = std::to_string(page_size);
                 metadata["recovery_mode"] = "salvage";
 
-                if (serializer.write_evidence(evidence_path, result.evidence_fragments, metadata)) {
-                    std::cout << "[INFO] Evidence report written to: " << evidence_path << "\n";
-                    std::cout << "[WARN] Evidence fragments are forensic-only and CANNOT be\n";
-                    std::cout << "       imported into a database. Use --include-fragments to\n";
-                    std::cout << "       include this report in the output.\n";
-                } else {
-                    std::cerr << "[ERROR] Failed to write evidence report to: "
-                              << evidence_path << "\n";
+                if (!serializer.write_evidence(evidence_path, result.evidence_fragments, metadata)) {
+                    const std::string reason = "failed to write salvage evidence report";
+                    std::cerr << "[ERROR] " << reason << ": " << evidence_path << "\n";
+                    if (!write_result_json({
+                            {"mode", "salvage"},
+                            {"classification", "operational_error"},
+                            {"structured_rows", result.rows.size()},
+                            {"evidence_fragments", result.evidence_fragments.size()},
+                            {"importable", false},
+                            {"reason", reason},
+                            {"source_inputs", {{"ibd", ibd_path}}},
+                            {"artifacts", salvage_artifacts}})) {
+                        return 1;
+                    }
+                    return 1;
                 }
+                std::cout << "[INFO] Evidence report written to: " << evidence_path << "\n";
+                std::cout << "[WARN] Evidence fragments are forensic-only and CANNOT be\n";
+                std::cout << "       imported into a database. Use --include-fragments to\n";
+                std::cout << "       include this report in the output.\n";
+                salvage_artifacts.push_back({
+                    {"path", evidence_path},
+                    {"kind", "forensic_evidence"},
+                    {"importable", false}});
             } else {
                 std::cout << "[INFO] Evidence fragments omitted from output. Enable\n";
                 std::cout << "       --include-fragments to write salvage_evidence.json\n";
@@ -1215,6 +1504,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Salvage summary: " << result.rows.size()
                   << " structured rows, " << result.evidence_fragments.size()
                   << " evidence fragments\n";
+        if (!write_result_json({
+                {"mode", "salvage"},
+                {"classification", result.rows.empty() ? "forensic_evidence" : "structured_recovery"},
+                {"structured_rows", result.rows.size()},
+                {"evidence_fragments", result.evidence_fragments.size()},
+                {"importable", false},
+                {"reason", result.rows.empty()
+                    ? "evidence-empty: no structured salvage rows recovered"
+                    : "structured salvage rows recovered; evidence fragments remain non-importable"},
+                {"source_inputs", {{"ibd", ibd_path}}},
+                {"artifacts", salvage_artifacts},
+                {"evidence_empty", result.evidence_fragments.empty()}})) {
+            return 1;
+        }
         return 0;
     }
 
@@ -1303,9 +1606,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 out << "\n";
                 for (const auto& row : records) {
                     first_col = true;
-                    for (const auto& col : first_row) {
+                    for (const auto& col : row) {
                         if (!first_col) out << ",";
-                        out << col.second;
+                        out << escape_csv_field(col.second);
                         first_col = false;
                     }
                     out << "\n";
@@ -1328,6 +1631,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::SharedTablespaceRecovery ts_recovery(page_size);
         ts_recovery.set_tablespace_path(ts_path);
         ts_recovery.set_output_dir(output_dir);
+        using dbrecovery::innodb::ImportabilityVerdict;
 
         if (list_ts_tables) {
             std::cout << "[INFO] Listing tables in: " << ts_path << "\n";
@@ -1368,11 +1672,43 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         fs::create_directories(output_dir);
         std::string out_ibd = output_dir + "/" + extract_table_name + "_extracted.ibd";
 
+        // Phase 5e: streaming scan produces manifest with importability verdict
+        auto manifest = ts_recovery.scan_pages(target_space_id);
+        std::cout << "[INFO] Scan manifest:\n";
+        std::cout << "  Pages scanned: " << manifest.pages_scanned
+                  << " / " << manifest.total_file_pages << "\n";
+        std::cout << "  Checksum: " << manifest.pages_with_valid_checksum
+                  << " valid, " << manifest.pages_with_invalid_checksum << " invalid\n";
+        std::cout << "  Identity: " << manifest.pages_identity_matched
+                  << " matched, " << manifest.pages_identity_mismatched << " mismatched\n";
+        std::cout << "  Holes: " << manifest.holes_found << "\n";
+        std::cout << "  Verdict: " << manifest.verdict_string() << "\n";
+
+        if (manifest.pages_with_invalid_checksum > 0) {
+            std::cerr << "[WARN] " << manifest.pages_with_invalid_checksum
+                      << " page(s) have invalid checksums\n";
+        }
+        if (manifest.pages_identity_mismatched > 0) {
+            std::cerr << "[WARN] " << manifest.pages_identity_mismatched
+                      << " page(s) have space_id mismatches\n";
+        }
+        if (manifest.holes_found > 0) {
+            std::cerr << "[INFO] " << manifest.holes_found
+                      << " hole(s) in page sequence (expected for shared tablespace)\n";
+        }
+
+        if (manifest.verdict == ImportabilityVerdict::IDENTITY_MISMATCH ||
+            manifest.verdict == ImportabilityVerdict::CHECKSUM_FAILURES) {
+            std::cerr << "[ERROR] Manifest verdict " << manifest.verdict_string()
+                      << " — extraction aborted\n";
+            return 1;
+        }
+
         if (ts_recovery.extract_table(target_space_id, out_ibd)) {
             auto& ts_stats = ts_recovery.get_stats();
             std::cout << "[INFO] Extracted to: " << out_ibd << "\n";
-            std::cout << "[INFO] Pages scanned: " << ts_stats.total_pages_scanned
-                      << ", data pages: " << ts_stats.data_pages_found
+            std::cout << "[INFO] Manifest written to: " << out_ibd << ".manifest.json\n";
+            std::cout << "[INFO] Data pages: " << ts_stats.data_pages_found
                       << ", SDI pages: " << ts_stats.sdi_pages_found << "\n";
             std::cout << "[INFO] Time: " << std::fixed << std::setprecision(2)
                       << ts_stats.recovery_time_ms << "ms\n";
@@ -1400,12 +1736,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "Pages scanned: " << analysis.total_pages_scanned
                   << ", with records: " << analysis.total_pages_with_records << "\n";
 
-        if (analysis.has_instant_ddl) {
-            std::cout << "\n[WARN] INSTANT DDL detected! Multiple column counts found.\n";
-            std::cout << "Schema versions found:\n";
+        if (analysis.possible_schema_variation) {
+            std::cout << "[WARN] Possible schema variation: multiple column-count groups found.\n";
+            std::cout << "NOTE: This is a diagnostic signal, not proven INSTANT DDL. Validation\n";
+            std::cout << "requires authoritative schema identity (SDI/FRM + page type + index).\n";
+            std::cout << "Column-count groups found:\n";
             for (size_t i = 0; i < analysis.versions.size(); i++) {
                 const auto& ver = analysis.versions[i];
-                std::cout << "  Version " << (i+1) << ": " << ver.column_count
+                std::cout << "  Group " << (i+1) << ": " << ver.column_count
                           << " columns (" << ver.page_count << " pages";
                 if (!ver.page_numbers.empty()) {
                     std::cout << ", pages " << ver.page_numbers.front()
@@ -1413,9 +1751,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
                 std::cout << ")\n";
             }
-            std::cout << "\n[INFO] To recover all versions:\n";
-            std::cout << "  1. Recover with the LATEST column count for most data\n";
-            std::cout << "  2. Use --infer-schema on older version pages for historical schema\n";
+            if (analysis.blocked_auto_decode) {
+                std::cout << "[ERROR] Auto-decode is BLOCKED for this table: historical pages\n";
+                std::cout << "may use a different schema layout. Supply an authoritative SDI/FRM\n";
+                std::cout << "schema or explicitly select a per-version layout before recovery.\n";
+            }
+            std::cout << "[INFO] To recover by column-count group:\n";
+            std::cout << "  1. Provide authoritative schema identity (SDI/FRM) for the target version\n";
+            std::cout << "  2. Or recover page ranges belonging to a single column-count group\n";
         } else if (!analysis.versions.empty()) {
             std::cout << "Column count: " << analysis.versions[0].column_count << "\n";
         }
@@ -1423,19 +1766,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return 0;
     }
 
-    // v2.0: Redo log replay mode
+    // Phase 5f: Redo log — read-only inventory/patch-plan by default.
+    // Write replay (--redo-apply) is gated by pre-conditions and fails closed.
     if (redo_replay_mode) {
-        std::cout << "[INFO] v2.0 Redo Log Replay Mode\n";
+        std::cout << "[INFO] Phase 5f Redo Log Mode\n";
 
         if (redo_log_path.empty()) {
             std::cerr << "[ERROR] --redo-replay requires --redo-log=<path>\n";
             return 1;
-        }
-
-        // Load schema
-        auto replay_schema = load_schema_from_file(schema_file_path);
-        if (!replay_schema.has_value()) {
-            std::cout << "[WARN] No schema file provided; records will be raw bytes.\n";
         }
 
         // Parse redo log
@@ -1453,8 +1791,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         uint32_t space_id_filter = 0;
         bool has_space_filter = false;
         if (!redo_space_id_str.empty()) {
-            space_id_filter = static_cast<uint32_t>(std::stoul(redo_space_id_str));
-            has_space_filter = true;
+            try {
+                space_id_filter = static_cast<uint32_t>(std::stoul(redo_space_id_str));
+                has_space_filter = true;
+            } catch (const std::exception&) {
+                std::cerr << "[ERROR] Invalid --redo-space-id value: " << redo_space_id_str << "\n";
+                return 1;
+            }
         }
 
         // Populate replayer with records
@@ -1477,6 +1820,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     }
                 }
                 std::cout << "[INFO] Pre-loaded " << num_pages << " pages from: " << ibd_path << "\n";
+            } else {
+                std::cerr << "[WARN] Cannot open IBD, will replay without base pages: "
+                          << ibd_path << "\n";
             }
         }
 
@@ -1494,11 +1840,128 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return 1;
         }
 
-        // Replay
-        auto replay_result = replayer.replay();
+        // === Phase 5f: read-only inventory + patch plan (always shown) ===
+        auto pre_conditions = replayer.validate_conditions();
+        auto inventory = replayer.generate_inventory();
+        auto plan = replayer.generate_patch_plan(false);
+
+        std::cout << "\n[INVENTORY] Redo log inventory\n";
+        std::cout << "  Total records: " << inventory.total_records << "\n";
+        std::cout << "  Whitelisted: " << inventory.whitelisted_records << "\n";
+        std::cout << "  Non-whitelisted: " << inventory.non_whitelisted_records << "\n";
+        std::cout << "  Unique space IDs: " << inventory.unique_space_ids << "\n";
+        std::cout << "  Unique page numbers: " << inventory.unique_page_numbers << "\n";
+        if (inventory.start_lsn <= inventory.end_lsn) {
+            std::cout << "  LSN range: [" << inventory.start_lsn << ", "
+                      << inventory.end_lsn << "]\n";
+        }
+        std::cout << "  Pages: " << inventory.page_entries.size() << "\n";
+
+        std::cout << "\n[PRECONDITIONS]\n" << pre_conditions.to_string() << "\n";
+
+        std::cout << "\n[PATCH PLAN]\n";
+        std::cout << "  Entries: " << plan.entries.size() << "\n";
+        std::cout << "  Records sorted by LSN: " << (plan.records_sorted_by_lsn ? "yes" : "no") << "\n";
+        std::cout << "  All whitelisted: " << (plan.all_whitelisted ? "yes" : "no") << "\n";
+        std::cout << "  All pages have identity match: "
+                  << (plan.all_pages_have_identity_match ? "yes" : "no") << "\n";
+        std::cout << "  LSN gap count: " << plan.lsn_gap_count << "\n";
+        std::cout << "  Unknown MLOG types: " << plan.unknown_mlog_count << "\n";
+        for (const auto& warn : plan.warnings) {
+            std::cout << "  [WARN] " << warn << "\n";
+        }
+
+        // Types distribution
+        std::cout << "\n[MLOG TYPE DISTRIBUTION]\n";
+        if (inventory.global_type_distribution.empty()) {
+            std::cout << "  (none)\n";
+        }
+        for (const auto& [type, count] : inventory.global_type_distribution) {
+            std::cout << "  " << dbrecovery::innodb::mlog_type_name_static(type)
+                      << " (" << unsigned(type) << "): " << count << "\n";
+        }
+
+        if (!output_dir.empty()) {
+            fs::create_directories(output_dir);
+            // Inventory + patch plan + pre-conditions as JSON artifacts
+            nlohmann::json out;
+
+            nlohmann::json inv;
+            inv["total_records"] = inventory.total_records;
+            inv["whitelisted_records"] = inventory.whitelisted_records;
+            inv["non_whitelisted_records"] = inventory.non_whitelisted_records;
+            inv["unique_space_ids"] = inventory.unique_space_ids;
+            inv["unique_page_numbers"] = inventory.unique_page_numbers;
+            inv["start_lsn"] = inventory.start_lsn;
+            inv["end_lsn"] = inventory.end_lsn;
+            nlohmann::json inv_types = nlohmann::json::object();
+            for (const auto& [type, count] : inventory.global_type_distribution) {
+                inv_types[std::to_string(type)] = count;
+            }
+            inv["global_type_distribution"] = inv_types;
+            out["inventory"] = inv;
+
+            nlohmann::json pc;
+            pc["log_format_valid"] = pre_conditions.log_format_valid;
+            pc["lsn_monotonic"] = pre_conditions.lsn_monotonic;
+            pc["has_checkpoint"] = pre_conditions.has_checkpoint;
+            pc["all_whitelisted"] = pre_conditions.all_whitelisted;
+            pc["base_pages_identity_match"] = pre_conditions.base_pages_identity_match;
+            pc["checksum_available"] = pre_conditions.checksum_available;
+            pc["pages_available"] = pre_conditions.pages_available;
+            pc["all_passed"] = pre_conditions.all_passed();
+            out["pre_conditions"] = pc;
+
+            nlohmann::json pl = nlohmann::json::array();
+            for (const auto& entry : plan.entries) {
+                nlohmann::json e;
+                e["sequence"] = entry.sequence;
+                e["space_id"] = entry.space_id;
+                e["page_no"] = entry.page_no;
+                e["lsn"] = entry.lsn;
+                e["mlog_type"] = entry.mlog_type;
+                e["mlog_name"] = entry.mlog_name;
+                e["data_size"] = entry.data_size;
+                e["whitelisted"] = entry.whitelisted;
+                e["has_base_page"] = entry.has_base_page;
+                e["base_page_identity_match"] = entry.base_page_identity_match;
+                e["provenance"] = entry.provenance;
+                pl.push_back(e);
+            }
+            out["patch_plan"] = pl;
+
+            std::string out_path = output_dir + "/redo_inventory.json";
+            std::ofstream ofs(out_path);
+            if (ofs) {
+                ofs << out.dump(2) << "\n";
+                std::cout << "[INFO] Inventory JSON written to: " << out_path << "\n";
+            }
+        }
+
+        // === Phase 5f: write replay is OPT-IN via --redo-apply ===
+        if (!redo_apply) {
+            std::cout << "\n[READ-ONLY] No pages written. Use --redo-apply to request write "
+                         "replay after pre-condition review.\n";
+            return 0;
+        }
+
+        if (!pre_conditions.all_passed()) {
+            std::cerr << "[ERROR] Pre-conditions failed; refusing to write recovery pages.\n"
+                      << "  " << pre_conditions.to_string() << "\n"
+                      << "  No pages were modified. Investigate the report above before --redo-apply.\n";
+            return 1;
+        }
+
+        // All pre-conditions passed — run gated replay
+        std::cout << "\n[INFO] All pre-conditions passed; applying redo records.\n";
+        auto replay_result = replayer.replay_safe();
+        if (!replay_result.success) {
+            std::cerr << "[ERROR] Replay failed although pre-conditions passed: "
+                      << replay_result.message << "\n";
+        }
 
         // Report results
-        std::cout << "\n[RESULT] Redo Log Replay Complete\n";
+        std::cout << "\n[RESULT] Redo Log Replay\n";
         std::cout << "  Success: " << (replay_result.success ? "yes" : "no") << "\n";
         std::cout << "  Records processed: " << replay_result.records_processed << "\n";
         std::cout << "  Records applied: " << replay_result.records_applied << "\n";
@@ -1583,6 +2046,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::SecondaryIndexRescuer rescuer(page_size);
         rescuer.set_schema(rescue_schema.value());
 
+        if (secondary_index_name.empty()) {
+            std::cerr << "[ERROR] --secondary-rescue requires --secondary-index-name=<index> "
+                         "for authoritative structured recovery. Set the target index "
+                         "explicitly; without it no secondary index be trusted.\n";
+            return 1;
+        }
+        if (!rescuer.set_target_secondary_index(secondary_index_name)) {
+            std::cerr << "[ERROR] Target secondary index '" << secondary_index_name
+                      << "' not found or not authoritative in schema "
+                         "(requires space_id != 0, AUTHORITATIVE trust, index_id > 0, "
+                         "non-empty columns). Structured recovery refused.\n";
+            return 1;
+        }
+
         auto rows = rescuer.rescue_from_indexes(sec_paths);
         auto& rstats = rescuer.get_stats();
 
@@ -1641,14 +2118,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     std::vector<dbrecovery::innodb::MasterKey> parsed_tde_keys;
 
-    // v2.0: Keyring file parsing for TDE support
-    // NOTE: XOR diagnostic format is intentionally unsupported. The offline keyring
-    // parser handles JSON, encrypted-JSON (password), and HashiCorp Vault export
-    // formats only. MySQL's native binary keyring format (xor-encoded) is not a
-    // supported backend — it exists only as an internal diagnostic encoding and
-    // will be rejected by the parser. This is fail-closed: unsupported keyring
-    // formats return error, no decryption is attempted, and no ciphertext reaches
-    // the B+Tree parser. See encrypted_table_recovery.cpp:188-193.
+    // v2.0: Custom keyring import file parsing for TDE support
+    // NOTE: This is a CUSTOM import format, NOT a MySQL native binary keyring
+    // parser. The OfflineKeyringParser handles three custom import formats:
+    //   - JSON keyring file (unencrypted custom format)
+    //   - Encrypted JSON (AES-256-CBC with --tde-password)
+    //   - HashiCorp Vault export (offline format)
+    // MySQL's native binary keyring format (xor-encoded) is explicitly
+    // UNSUPPORTED and will be rejected. This is fail-closed: unsupported
+    // keyring formats return error, no decryption is attempted, and no
+    // ciphertext reaches the B+Tree parser. See KeyringFile::load() in
+    // tde_decryptor.hpp and encrypted_table_recovery.cpp:188-193.
     if (!keyring_file.empty()) {
         std::cout << "[INFO] Loading keyring: " << keyring_file << "\n";
 
@@ -1700,21 +2180,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     std::vector<uint8_t> test_page(page_size);
                     test_file.read(reinterpret_cast<char*>(test_page.data()), page_size);
                     if (dbrecovery::innodb::TDEDecryptor::is_encrypted(test_page.data(), page_size)) {
-                        std::cout << "[INFO] TDE encryption DETECTED on input file\n";
-                        uint32_t real_page_no = dbrecovery::innodb::read_be<uint32_t>(
-                            test_page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET);
-                        uint32_t real_space_id = dbrecovery::innodb::read_be<uint32_t>(
-                            test_page.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
-                        auto decrypted = key_validator.get_decryptor().decrypt_page(
-                            test_page.data(), page_size, real_space_id, real_page_no);
-                        if (!decrypted.empty()) {
-                            std::cout << "[INFO] Page decryption SUCCESS ("
-                                      << decrypted.size() << " bytes)\n";
-                        } else {
-                            std::cout << "[WARN] Page decryption FAILED — key may not match\n";
-                        }
+                        std::cerr << "[WARN] Input matches the unvalidated TDE candidate heuristic; "
+                                     "fixture-validated TDE recovery is unavailable.\n";
+                        return 1;
                     } else {
-                        std::cout << "[INFO] Input file is NOT TDE-encrypted\n";
+                        std::cout << "[INFO] Input file does not match the TDE candidate heuristic\n";
                     }
                 }
             }
@@ -2692,19 +3162,36 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         const size_t bytes_read = static_cast<size_t>(f.gcount());
         if (bytes_read < dbrecovery::innodb::FIL_HEADER_SIZE) return {};
 
-        const auto compression = dbrecovery::innodb::parse_fsp_compression_metadata(
-            page0.data(), bytes_read, page_sz);
-        const bool compressed = compression && compression->is_compressed();
-        const bool encrypted = dbrecovery::innodb::TDEDecryptor::is_encrypted(
-            page0.data(), bytes_read);
+        // Use CompressedTableRecovery::classify() for fail-closed compression status
+        dbrecovery::innodb::CompressedTableRecovery tmp_comp(page_sz);
+        const auto comp_status = tmp_comp.classify(path, page_sz);
 
-        if (compressed && encrypted) return {"compressed+encrypted", compression};
-        if (compressed) return {"compressed", compression};
-        if (encrypted) return {"encrypted", std::nullopt};
-        return {};
+        // Use EncryptedTableRecovery::classify() for fail-closed TDE status
+        // (ENCRYPTED_UNSUPPORTED, CORRUPTED_METADATA, KEY_MISSING, etc.)
+        dbrecovery::innodb::EncryptedTableRecovery tmp_enc(page_sz);
+        const auto enc_status = tmp_enc.classify(path, page_sz);
+
+        PhysicalFormat result;
+        if (comp_status == dbrecovery::innodb::CompressionStatus::RECOGNIZED_UNSUPPORTED) {
+            result.compression = dbrecovery::innodb::parse_fsp_compression_metadata(
+                page0.data(), bytes_read, page_sz);
+            result.kind = enc_status == dbrecovery::innodb::TDEStatus::ENCRYPTED_UNSUPPORTED
+                ? "compressed+encrypted" : "compressed";
+        } else if (comp_status == dbrecovery::innodb::CompressionStatus::CORRUPTED_METADATA) {
+            result.kind = "corrupted_metadata";
+        } else if (comp_status == dbrecovery::innodb::CompressionStatus::PHYSICAL_LENGTH_MISMATCH) {
+            result.kind = "physical_length_mismatch";
+        } else if (enc_status == dbrecovery::innodb::TDEStatus::ENCRYPTED_UNSUPPORTED) {
+            result.kind = "encrypted";
+        } else if (enc_status == dbrecovery::innodb::TDEStatus::CORRUPTED_METADATA) {
+            result.kind = "corrupted_metadata";
+        }
+        return result;
     };
 
     // 辅助函数：从 SDI 页解析表结构
+    // 统一走 SDIExtractor 受限路径（版本门控 + 结构化提取结果），避免 CLI
+    // 绕过 sdi_manager 的受限解压。heuristic 提取永不进入权威 schema。
     auto parse_schema_from_sdi = [&](const std::string& ibd_path, uint64_t table_id) -> std::optional<dbrecovery::catalog::TableSchema> {
         dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
         if (!reader.is_valid()) {
@@ -2713,65 +3200,44 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         uint32_t total_pages = reader.get_total_pages();
-        uint32_t page_size = reader.get_page_size();
 
         // MySQL 8.0+ SDI pages are typically at pages 3 and 4
         for (uint32_t page_no = 0; page_no < std::min(total_pages, static_cast<uint32_t>(10)); ++page_no) {
             auto page_data = reader.read_page_raw(page_no);
             if (page_data.empty()) continue;
 
-            // InnoDB FIL header fields are stored in BIG-ENDIAN format
-            uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
-                page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+            dbrecovery::innodb::SDIExtractor extractor(reader.get_page_size());
+            const auto extractions = extractor.extract_from_page(page_data.data(), page_data.size());
+            for (const auto& extracted : extractions) {
+                if (!extracted.is_valid || extracted.sdi_json.empty()) continue;
 
-            // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
-            if (dbrecovery::innodb::is_sdi_page_type(page_type)) {
-                if (page_type == dbrecovery::innodb::FIL_PAGE_SDI_ZIP && page_size >= 100) {
-                    const int16_t slot_offset = static_cast<int16_t>(
-                        (static_cast<uint16_t>(page_data[97]) << 8) |
-                        static_cast<uint16_t>(page_data[98]));
-                    const int64_t record_offset = static_cast<int64_t>(slot_offset) + 99;
-                    if (record_offset >= 0) {
-                        const auto extraction = dbrecovery::innodb::SDIManager::extract_zip_record(
-                            page_data.data(), page_data.size(), static_cast<size_t>(record_offset));
-                        if (extraction.success()) {
-                            try {
-                                const auto json = nlohmann::json::parse(extraction.json);
-                                dbrecovery::catalog::TableSchema schema;
-                                const bool parsed = json.contains("dd_object")
-                                    ? schema.from_json(json["dd_object"])
-                                    : schema.from_json(json);
-                                if (parsed) {
-                                    std::cout << "[INFO] Successfully parsed schema from compressed SDI: "
-                                              << schema.table_name << " (" << schema.columns.size() << " columns)\n";
-                                    return schema;
-                                }
-                            } catch (const nlohmann::json::parse_error&) {
-                            }
-                        }
-                    }
+                // ZIP-记录/严格解压结果携带非 heuristic 来源才可作权威 schema；
+                // heuristic 提取仅产生取证证据，永不进入恢复 schema。
+                if (extracted.origin == dbrecovery::innodb::SDIManager::ExtractionOrigin::HeuristicCorruptedZip) {
+                    std::cout << "[WARN] Heuristic SDI extraction on page " << page_no
+                              << " kept as EVIDENCE_ONLY (never authoritative)\n";
+                    continue;
                 }
 
-                // For uncompressed SDI (0x45BE), use simple offset
-                const uint8_t* sdi_payload = page_data.data() + 38;
-                if (page_data.size() >= 38 + 20) {
-                    auto json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
-                        sdi_payload, page_data.size() - 38);
-
-                    if (json_opt.has_value()) {
-                        try {
-                            auto json = nlohmann::json::parse(json_opt.value());
-                            dbrecovery::catalog::TableSchema schema;
-
-                            if (schema.from_json(json)) {
-                                std::cout << "[INFO] Successfully parsed schema from SDI: "
-                                          << schema.table_name << "\n";
-                                return schema;
-                            }
-                        } catch (const nlohmann::json::parse_error& e) {
-                            std::cerr << "[WARN] Failed to parse SDI JSON: " << e.what() << "\n";
-                        }
+                try {
+                    const auto json = nlohmann::json::parse(extracted.sdi_json);
+                    dbrecovery::catalog::TableSchema schema;
+                    const bool parsed = json.contains("dd_object")
+                        ? schema.from_json(json["dd_object"])
+                        : schema.from_json(json);
+                    if (parsed) {
+                        schema.schema_hash =
+                            dbrecovery::salvage::SalvageEvidenceSerializer::sha256_hex(extracted.sdi_json);
+                        schema.schema_source = "SDI";
+                        schema.trust_level = "AUTHORITATIVE";
+                        std::cout << "[INFO] Successfully parsed schema from SDI page "
+                                  << extracted.page_no << " (origin=" << static_cast<int>(extracted.origin)
+                                  << ", " << schema.columns.size() << " columns)\n";
+                        return schema;
                     }
+                } catch (const nlohmann::json::parse_error& e) {
+                    std::cerr << "[WARN] SDI JSON parse error on page " << page_no
+                              << ": " << e.what() << "\n";
                 }
             }
         }
@@ -2805,26 +3271,30 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return schema;
     };
 
-    // Phase 6: 压缩表专用恢复 — 复用 CompressedTableRecovery
+    // Phase 6: 压缩表专用恢复 — 复用 CompressedTableRecovery。
+    // 无 fixture 验证的解码器 → 识别到压缩布局时报告 RECOGNIZED_UNSUPPORTED，
+    // 输出零结构化行，绝不假装成功。
     auto run_compressed_recovery = [&](const std::string& ibd,
                                        const dbrecovery::innodb::FSPCompressionMetadata& compression) -> bool {
-        std::cout << "[INFO] Compressed tablespace detected — routing to CompressedTableRecovery\n";
         dbrecovery::innodb::CompressedTableRecovery comp_rec(compression.logical_page_size);
         comp_rec.set_compressed_page_size(compression.physical_page_size);
         comp_rec.set_file_path(ibd);
         comp_rec.set_schema(resolve_table_schema(ibd, table_id, compression.logical_page_size));
         if (!comp_rec.auto_detect_compression(ibd)) {
-            std::cout << "[WARN] Compression auto-detection failed — no records recovered\n";
+            std::cout << "[WARN] Compressed tablespace recognized but physical metadata unreadable — "
+                      << "emitting zero structured rows\n";
             return false;
         }
         auto recs = comp_rec.recover();
-        if (!recs.empty()) {
+        if (comp_rec.get_stats().status == dbrecovery::innodb::CompressionStatus::RECOVERED) {
             recovered_records = recs;
             std::cout << "[INFO] CompressedTableRecovery recovered " << recs.size() << " records\n";
-        } else {
-            std::cout << "[INFO] CompressedTableRecovery found no records\n";
+            return true;
         }
-        return true;
+        std::cout << "[WARN] Compressed tablespace recognized (" << compression.physical_page_size
+                  << "B pages) but no fixture-validated decoder — emitting zero structured rows. "
+                  << "Recovery of this layout is not yet supported\n";
+        return false;
     };
 
     // Phase 6: 加密表专用恢复 — 复用 EncryptedTableRecovery。
@@ -2847,12 +3317,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return false;
         }
 
+        // Without a fixture-validated TDE decryptor, recover() reports
+        // ENCRYPTED_UNSUPPORTED and emits zero rows. Never claim success on
+        // an empty result set.
         auto recs = enc_rec.recover();
+        const auto tde_status = enc_rec.get_stats().tde_status;
         if (!recs.empty()) {
             recovered_records = recs;
             std::cout << "[INFO] EncryptedTableRecovery recovered " << recs.size() << " records\n";
         } else {
-            std::cout << "[INFO] EncryptedTableRecovery found no records (fail-closed)\n";
+            std::cout << "[INFO] EncryptedTableRecovery found no records (fail-closed, status="
+                      << dbrecovery::innodb::EncryptedTableRecoveryStats::status_to_string(tde_status) << ")\n";
         }
         return true;
     };
@@ -3499,6 +3974,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 run_compressed_recovery(ibd_path, *format.compression);
             } else if (format.kind == "encrypted") {
                 run_encrypted_recovery(ibd_path, page_size);
+            } else if (format.kind == "corrupted_metadata") {
+                std::cout << "[WARN] Corrupted/unreadable FSP compression metadata on page 0 — "
+                          << "emitting zero structured rows\n";
+            } else if (format.kind == "physical_length_mismatch") {
+                std::cout << "[WARN] Physical page size declared in FSP flags does not match "
+                          << "on-disk page stride — emitting zero structured rows\n";
             }
             if (format.kind != "none") {
                 shared_specialized_handled = true;
@@ -3507,186 +3988,40 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         if (shared_specialized_handled) {
             /* 路由完成，跳过通用 InnoDBIndexParser 路径 */
         } else {
-        // Use InnoDBIndexParser for recovery
-        dbrecovery::innodb::InnoDBIndexParser index_parser;
-        index_parser.set_recover_deleted(true);
-        index_parser.set_bad_page_mode(2);
-        index_parser.set_verbose(verbose);
-        dbrecovery::innodb::g_verbose = verbose;
-
-        // Priority 1: Try --schema option first
-        bool has_schema = parse_schema_from_string(schema_str, index_parser, verbose);
-
-        // Priority 2: Try FRM schema
-        bool has_frm_schema = false;
-        if (!has_schema) {
-            has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
-        }
-
-        // Priority 3: If no schema, try SDI schema (MySQL 8.0+)
-        if (!has_schema && !has_frm_schema) {
-            auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id);
-            if (sdi_schema_opt.has_value()) {
-                std::cout << "[INFO] Using SDI schema: " << sdi_schema_opt->table_name
-                          << " (" << sdi_schema_opt->columns.size() << " columns)\n";
-                // Apply SDI schema to index_parser
-                std::vector<dbrecovery::innodb::IndexColumnDef> sdi_columns;
-                uint32_t n_pk = 0;
-                std::set<std::string> pk_col_names;
-                // Find PK columns from indexes
-                for (const auto& idx : sdi_schema_opt->indexes) {
-                    if (idx.is_primary) {
-                        for (const auto& col_name : idx.columns) {
-                            pk_col_names.insert(col_name);
-                        }
-                    }
+        // 统一流水线委托 — 保留 Phase6 路由门，通用解析由 unified_recovery 接管
+        {
+            std::string unified_table = "recovered_table";
+            try { auto pp = fs::path(ibd_path); auto st = pp.stem().string(); if (!st.empty()) unified_table = st; } catch (...) {}
+            bool repair_flag = parser_.get_bool_option("header-repair", false);
+            auto ures = dbrecovery::tools::run_unified_recovery(
+                ibd_path, output_dir, unified_table, format, page_size,
+                schema_str, frm_path, table_id, system_tablespace,
+                repair_flag, false, verbose);
+            recovered_records.clear();
+            recovered_column_order.clear();
+            for (auto &r : ures.records) {
+                std::map<std::string,std::string> m;
+                for (size_t k = 0; k < r.fields.size(); ++k) {
+                    m["col" + std::to_string(k)] = r.fields[k];
                 }
-                for (const auto& [idx, col] : sdi_schema_opt->columns) {
-                    // Skip InnoDB system columns - these are handled internally
-                    // and should not be part of the user schema
-                    if (col.name == "DB_TRX_ID" || col.name == "DB_ROLL_PTR" || col.name == "DB_ROW_ID") {
-                        continue;
-                    }
-
-                    dbrecovery::innodb::IndexColumnDef col_def;
-                    col_def.name = col.name;
-
-                    // ✅ 关键：保存原始 ordinal (schema定义顺序) 和 physical_pos (存储顺序)
-                    // InnoDB 按 physical_pos 顺序存储 NULL 位图和变长大小字节
-                    // 数据也按 physical_pos 顺序存储
-                    col_def.ordinal_position = col.ordinal;  // Schema definition order
-                    col_def.physical_pos = col.physical_pos; // InnoDB storage order
-
-                    // Debug: show ordinal/physical_pos values being passed
-                    static bool ordinal_debug_printed = false;
-                    if (!ordinal_debug_printed) {
-                        if (dbrecovery::innodb::g_verbose)                         std::cerr << "[DEBUG SDI PASS] Column '" << col.name << "' ordinal=" << col.ordinal
-                                  << " physical_pos=" << col.physical_pos << "\n";
-                        ordinal_debug_printed = true;
-                    }
-
-                    // SDI already stores InnoDB internal types (not MySQL server types)
-                    // No conversion needed - use directly
-                    col_def.col_type = static_cast<uint8_t>(col.mysql_type_id);
-
-                    col_def.is_nullable = col.is_nullable;
-                    col_def.is_unsigned = !col.is_signed;  // InnoDB: is_signed=false means unsigned
-                    col_def.char_set_id = col.charset_id;
-                    col_def.col_length = col.column_length;
-                    col_def.mb_maxlen = 4;  // utf8mb4 default
-
-                    // Set precision/scale for DECIMAL types (InnoDB type 21)
-                    if (col.mysql_type_id == 21) {
-                        // DEBUG: Print DECIMAL column info
-                        static bool decimal_debug_printed = false;
-                        if (!decimal_debug_printed) {
-                            if (dbrecovery::innodb::g_verbose)                             std::cout << "[DEBUG DECIMAL] Column '" << col.name
-                                      << "' mysql_type_id=" << col.mysql_type_id
-                                      << " numeric_precision=" << col.numeric_precision
-                                      << " numeric_scale=" << col.numeric_scale << "\n";
-                            decimal_debug_printed = true;
-                        }
-                        if (col.numeric_precision > 0) {
-                            col_def.precision = col.numeric_precision;
-                            col_def.scale = col.numeric_scale;
-                        }
-                    }
-
-                    // Set datetime_precision for temporal types (DATETIME2=19, TIMESTAMP2=18, TIME2=20)
-                    // The datetime_precision is the fractional seconds precision (0-6)
-                    // ✅ 修复：正确传递 datetime_precision 到 IndexColumnDef
-                    if (col.mysql_type_id == 19 || col.mysql_type_id == 18 || col.mysql_type_id == 20) {
-                        // Always set datetime_precision, even if 0
-                        col_def.datetime_precision = col.datetime_precision;
-                        col_def.scale = col.datetime_precision;  // 同时设置 scale 用于显示
-                        // Debug
-                        static bool dt_debug = false;
-                        if (!dt_debug) {
-                            if (dbrecovery::innodb::g_verbose)                             std::cerr << "[DEBUG DT] Column '" << col.name << "' datetime_precision="
-                                      << (int)col.datetime_precision << " -> col_def.datetime_precision="
-                                      << (int)col_def.datetime_precision << "\n";
-                            dt_debug = true;
-                        }
-                    }
-
-                    // Handle ENUM/SET elements
-                    for (const auto& val : col.enum_values) {
-                        col_def.enum_values.push_back(val);
-                    }
-                    for (const auto& val : col.set_values) {
-                        col_def.set_values.push_back(val);
-                    }
-
-                    // Determine if variable length and is_big
-                    // InnoDB types: 16=VARCHAR, 24-27=BLOB variants, 28=VAR_STRING, 29=STRING, 31=JSON
-                    if (col_def.is_variable_length()) {
-                        col_def.is_big = (col_def.col_length * col_def.mb_maxlen > 255);
-                    }
-
-                    // CRITICAL FIX: Set is_binary based on charset_id/collation_id
-                    // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
-                    // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
-                    col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (col_def.col_type != 31);
-
-                    // Check if PK column
-                    if (pk_col_names.count(col.name) > 0) {
-                        n_pk++;
-                    }
-
-                    sdi_columns.push_back(col_def);
-                }
-                if (n_pk == 0 && !sdi_columns.empty()) {
-                    n_pk = 1;  // Default: first column is PK
-                }
-                index_parser.set_columns(sdi_columns, false, n_pk);
-                has_frm_schema = true;
-            } else {
-                std::cout << "[INFO] No schema found, using schemaless recovery\n";
+                recovered_records.push_back(std::move(m));
             }
-        }
-
-        auto records = index_parser.parse_ibd_force(ibd_path);
-
-        if (!records.empty()) {
-            std::cout << "[INFO] InnoDBIndexParser recovered " << records.size() << " records\n";
-            auto [recs, cols] = convert_records_to_map(records, index_parser);
-            recovered_records = recs;
-            recovered_column_order = cols;
-            std::cout << "[INFO] Default recovery completed. Found "
-                      << recovered_records.size() << " records.\n";
-        } else {
-            // Fallback to TruncateRecovery for specialized TRUNCATE handling
-            std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying TRUNCATE recovery...\n";
-            auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
-            dbrecovery::catalog::TableSchema schema;
-            if (schema_opt.has_value()) {
-                schema = schema_opt.value();
-            } else {
-                schema = create_empty_schema();
+            if (!recovered_records.empty()) {
+                for (auto &kv : recovered_records.front()) recovered_column_order.push_back(kv.first);
             }
-            schema.page_size = page_size;
-
-            // Use TruncateRecovery for PhotoRec-style residual data detection
-            dbrecovery::recovery::TruncateRecovery truncate_rec;
-            truncate_rec.set_page_size(page_size);
-            truncate_rec.enable_disk_scan(true);
-            if (!system_tablespace.empty()) {
-                truncate_rec.set_system_tablespace(system_tablespace);
-                truncate_rec.enable_undo_log(true);
+            if (!ures.evidence_fragments.empty() && verbose) {
+                std::cout << "[INFO] Unified salvage: " << ures.evidence_fragments.size()
+                          << " evidence fragments (not exported to CSV/SQL)\n";
             }
-
-            auto result = truncate_rec.recover(ibd_path, schema,
-                [](double progress, const std::string& msg) {
-                    std::cout << "  [" << static_cast<int>(progress * 100) << "%] " << msg << "\n";
-                });
-
-            if (result.success && result.records_recovered > 0) {
-                recovered_records = result.recovered_records;
-                std::cout << "[INFO] TRUNCATE recovery succeeded using: " << result.method_used << "\n";
-                std::cout << "[INFO] Recovered " << result.records_recovered << " records\n";
-            } else {
-                std::cout << "[INFO] TRUNCATE recovery found no records.\n";
-            }
+            dbrecovery::tools::write_unified_result_json(output_dir, unified_table, ures);
+            try {
+                std::string hp = output_dir + "/" + unified_table + "_report.html";
+                std::ofstream hf(hp);
+                if (hf) hf << ures.report.to_html();
+            } catch (...) {}
+            std::cout << "[INFO] Unified recovery: " << ures.total_recovered
+                      << " structured rows classification=" << ures.result_classification
+                      << " trust=" << ures.trust_level << " source=" << ures.schema_source << "\n";
         }
         } // end else (shared_specialized_handled)
     } // if (default_recovery)
@@ -3723,6 +4058,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 run_compressed_recovery(ibd_path, *format.compression);
             } else if (format.kind == "encrypted") {
                 run_encrypted_recovery(ibd_path, page_size);
+            } else if (format.kind == "corrupted_metadata") {
+                std::cout << "[WARN] Corrupted/unreadable FSP compression metadata on page 0 — "
+                          << "emitting zero structured rows\n";
+            } else if (format.kind == "physical_length_mismatch") {
+                std::cout << "[WARN] Physical page size declared in FSP flags does not match "
+                          << "on-disk page stride — emitting zero structured rows\n";
             }
             if (format.kind != "none") {
                 shared_specialized_handled = true;
@@ -3820,6 +4161,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 run_compressed_recovery(ibd_path, *format.compression);
             } else if (format.kind == "encrypted") {
                 run_encrypted_recovery(ibd_path, page_size);
+            } else if (format.kind == "corrupted_metadata") {
+                std::cout << "[WARN] Corrupted/unreadable FSP compression metadata on page 0 — "
+                          << "emitting zero structured rows\n";
+            } else if (format.kind == "physical_length_mismatch") {
+                std::cout << "[WARN] Physical page size declared in FSP flags does not match "
+                          << "on-disk page stride — emitting zero structured rows\n";
             }
             if (format.kind != "none") {
                 shared_specialized_handled = true;
@@ -3947,26 +4294,45 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Scan undo logs for additional deleted records
         auto undo_records = engine.recover_from_undo_logs(tbl_name, undoSchema);
         if (!undo_records.empty()) {
-            std::cout << "[INFO] Undo log analysis found " << undo_records.size()
-                      << " additional deleted records\n";
-
-            // Merge undo-recovered records, deduplicating by first field value
-            std::set<std::string> existing_keys;
-            for (const auto& rec : recovered_records) {
-                if (!rec.empty()) {
-                    existing_keys.insert(rec.begin()->first + "=" + rec.begin()->second);
+            // Filter out forensic-only legacy undo entries — they carry
+            // FORENSIC_LEGACY_UNDO provenance and must not be promoted to
+            // structured recovery output.
+            std::vector<std::map<std::string, std::string>> filtered;
+            size_t forensic = 0;
+            for (auto& rec : undo_records) {
+                auto it = rec.find("_undo_action");
+                if (it != rec.end() && it->second == "FORENSIC_LEGACY_UNDO") {
+                    ++forensic;
+                } else {
+                    filtered.push_back(std::move(rec));
                 }
             }
-            for (const auto& rec : undo_records) {
-                if (!rec.empty()) {
-                    std::string key = rec.begin()->first + "=" + rec.begin()->second;
-                    if (existing_keys.find(key) == existing_keys.end()) {
-                        existing_keys.insert(key);
-                        recovered_records.push_back(rec);
+            if (forensic > 0) {
+                std::cout << "[INFO] " << forensic << " forensic undo entries "
+                          << "retained as evidence only (not merged into output).\n";
+            }
+            if (!filtered.empty()) {
+                std::cout << "[INFO] Undo log analysis found " << filtered.size()
+                          << " additional deleted records\n";
+
+                // Merge undo-recovered records, deduplicating by first field value
+                std::set<std::string> existing_keys;
+                for (const auto& rec : recovered_records) {
+                    if (!rec.empty()) {
+                        existing_keys.insert(rec.begin()->first + "=" + rec.begin()->second);
                     }
                 }
+                for (const auto& rec : filtered) {
+                    if (!rec.empty()) {
+                        std::string key = rec.begin()->first + "=" + rec.begin()->second;
+                        if (existing_keys.find(key) == existing_keys.end()) {
+                            existing_keys.insert(key);
+                            recovered_records.push_back(rec);
+                        }
+                    }
+                }
+                std::cout << "[INFO] After undo merge: " << recovered_records.size() << " total records\n";
             }
-            std::cout << "[INFO] After undo merge: " << recovered_records.size() << " total records\n";
         }
 
         auto& undo_stats = engine.get_undo_stats();
@@ -3990,85 +4356,93 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         if (!sec_paths.empty()) {
             auto sec_schema = load_schema_from_file(schema_file_path);
-            if (sec_schema.has_value()) {
+            if (!sec_schema.has_value()) {
+                std::cerr << "[WARN] Secondary index enrichment requires --schema-file, skipping\n";
+            } else if (secondary_index_name.empty()) {
+                std::cout << "[WARN] No --secondary-index-name provided; secondary enrichment "
+                             "requires an explicit target index. Skipping.\n";
+            } else {
                 dbrecovery::innodb::SecondaryIndexRescuer rescuer(page_size);
                 rescuer.set_schema(sec_schema.value());
+                if (!rescuer.set_target_secondary_index(secondary_index_name)) {
+                    std::cout << "[WARN] Target secondary index '" << secondary_index_name
+                              << "' not found or not authoritative in schema. Enrichment disabled.\n";
+                } else {
+                    auto rows = rescuer.rescue_from_indexes(sec_paths);
+                    auto& rstats = rescuer.get_stats();
+                    std::cout << "[INFO] Secondary pages scanned: " << rstats.secondary_pages_scanned
+                              << ", leaf: " << rstats.secondary_leaf_pages
+                              << ", records: " << rstats.secondary_records << "\n";
+                    std::cout << "[INFO] Rows rescued: " << rstats.rescued_rows
+                              << ", merged: " << rstats.merged_rows << "\n";
 
-                auto rows = rescuer.rescue_from_indexes(sec_paths);
-                auto& rstats = rescuer.get_stats();
-
-                std::cout << "[INFO] Secondary pages scanned: " << rstats.secondary_pages_scanned
-                          << ", leaf: " << rstats.secondary_leaf_pages
-                          << ", records: " << rstats.secondary_records << "\n";
-                std::cout << "[INFO] Rows rescued: " << rstats.rescued_rows
-                          << ", merged: " << rstats.merged_rows << "\n";
-
-                if (!rows.empty()) {
-                    // Deduplicate using first field value (same approach as undo enrichment)
-                    std::set<std::string> existing_keys;
-                    for (const auto& rec : recovered_records) {
-                        if (!rec.empty()) {
-                            existing_keys.insert(rec.begin()->first + "=" + rec.begin()->second);
+                    if (!rows.empty()) {
+                        // Deduplicate using first field value (same approach as undo enrichment)
+                        std::set<std::string> existing_keys;
+                        for (const auto& rec : recovered_records) {
+                            if (!rec.empty()) {
+                                existing_keys.insert(rec.begin()->first + "=" + rec.begin()->second);
+                            }
                         }
-                    }
 
-                    size_t merged = 0, added = 0;
-                    for (const auto& row : rows) {
-                        if (row.fields.empty()) continue;
+                        size_t merged = 0, added = 0;
+                        for (const auto& row : rows) {
+                            if (row.fields.empty()) continue;
 
-                        std::string key = row.fields.begin()->first + "=" + row.fields.begin()->second;
+                            std::string key = row.fields.begin()->first + "=" + row.fields.begin()->second;
 
-                        if (existing_keys.find(key) != existing_keys.end()) {
-                            // Merge into existing record — fill in missing columns
-                            for (auto& rec : recovered_records) {
-                                if (!rec.empty()) {
-                                    std::string rec_key = rec.begin()->first + "=" + rec.begin()->second;
-                                    if (rec_key == key) {
-                                        for (const auto& [col_name, value] : row.fields) {
-                                            auto existing_col = rec.find(col_name);
-                                            if (existing_col == rec.end() ||
-                                                existing_col->second == "NULL" ||
-                                                existing_col->second == "?") {
-                                                rec[col_name] = value;
+                            if (existing_keys.find(key) != existing_keys.end()) {
+                                // Merge into existing record — fill in missing columns
+                                for (auto& rec : recovered_records) {
+                                    if (!rec.empty()) {
+                                        std::string rec_key = rec.begin()->first + "=" + rec.begin()->second;
+                                        if (rec_key == key) {
+                                            for (const auto& [col_name, value] : row.fields) {
+                                                auto existing_col = rec.find(col_name);
+                                                if (existing_col == rec.end() ||
+                                                    existing_col->second == "NULL" ||
+                                                    existing_col->second == "?") {
+                                                    rec[col_name] = value;
+                                                }
                                             }
+                                            merged++;
+                                            break;
                                         }
-                                        merged++;
-                                        break;
                                     }
                                 }
+                            } else {
+                                // New record from secondary index
+                                std::map<std::string, std::string> rec_map;
+                                for (const auto& [col_name, value] : row.fields) {
+                                    rec_map[col_name] = value;
+                                }
+                                recovered_records.push_back(rec_map);
+                                existing_keys.insert(key);
+                                added++;
                             }
-                        } else {
-                            // New record from secondary index
-                            std::map<std::string, std::string> rec_map;
-                            for (const auto& [col_name, value] : row.fields) {
-                                rec_map[col_name] = value;
+                        }
+
+                        std::cout << "[INFO] Secondary index merge: " << merged << " merged, "
+                                  << added << " new records (total: " << recovered_records.size() << ")\n";
+
+                        // Update column order if needed
+                        if (recovered_column_order.empty() && !rows.empty()) {
+                            for (const auto& [col_name, val] : rows[0].fields) {
+                                recovered_column_order.push_back(col_name);
                             }
-                            recovered_records.push_back(rec_map);
-                            existing_keys.insert(key);
-                            added++;
                         }
+                    } else {
+                        std::cout << "[WARN] No data could be rescued from secondary indexes\n";
                     }
-
-                    std::cout << "[INFO] Secondary index merge: " << merged << " merged, "
-                              << added << " new records (total: " << recovered_records.size() << ")\n";
-
-                    // Update column order if needed
-                    if (recovered_column_order.empty() && !rows.empty()) {
-                        for (const auto& [col_name, val] : rows[0].fields) {
-                            recovered_column_order.push_back(col_name);
-                        }
-                    }
-                } else {
-                    std::cout << "[WARN] No data could be rescued from secondary indexes\n";
                 }
-            } else {
-                std::cerr << "[WARN] Secondary index enrichment requires --schema-file for column mapping, skipping\n";
             }
         }
     }
 
     // 导出结果
     std::string output_path;
+    bool export_succeeded = true;
+    nlohmann::json recovery_artifacts = nlohmann::json::array();
 
     // v2.0: --parallel-export routes CSV/SQL export through the multi-threaded
     // exporter instead of the single-threaded Exporter.
@@ -4080,11 +4454,19 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 recovered_column_order.push_back(key);
             }
         }
-        if (export_parallel(recovered_records, export_table_name, pw)) {
+        std::vector<std::string> parallel_output_files;
+        if (export_parallel(recovered_records, export_table_name, pw, &parallel_output_files)) {
             std::cout << "[INFO] Parallel export of " << recovered_records.size()
                       << " records completed.\n";
+            for (const auto& path : parallel_output_files) {
+                recovery_artifacts.push_back({
+                    {"path", path},
+                    {"kind", "structured_rows"},
+                    {"importable", false}});
+            }
         } else {
-            std::cerr << "[WARN] Parallel export failed; falling back to sequential export.\n";
+            export_succeeded = false;
+            std::cerr << "[ERROR] Parallel export failed.\n";
         }
     } else if (format == "csv") {
         output_path = output_dir + "/recovered.csv";
@@ -4099,8 +4481,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         if (dbrecovery::exporter::Exporter::export_to_csv(recovered_records, recovered_column_order, output_path)) {
             std::cout << "[INFO] Exported " << recovered_records.size() << " records to CSV: " << output_path << "\n";
+            recovery_artifacts.push_back({
+                {"path", output_path},
+                {"kind", "structured_rows"},
+                {"importable", false}});
         } else {
-            std::cerr << "[WARN] Failed to export to CSV.\n";
+            export_succeeded = false;
+            std::cerr << "[ERROR] Failed to export to CSV.\n";
         }
     } else if (format == "sql") {
         output_path = output_dir + "/recovered.sql";
@@ -4115,19 +4502,40 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         if (dbrecovery::exporter::Exporter::export_to_sql(recovered_records, "recovered_table", recovered_column_order, output_path)) {
             std::cout << "[INFO] Exported " << recovered_records.size() << " records to SQL: " << output_path << "\n";
+            recovery_artifacts.push_back({
+                {"path", output_path},
+                {"kind", "structured_rows"},
+                {"importable", false}});
         } else {
-            std::cerr << "[WARN] Failed to export to SQL.\n";
+            export_succeeded = false;
+            std::cerr << "[ERROR] Failed to export to SQL.\n";
         }
     } else if (format == "ibd") {
         output_path = output_dir + "/repaired.ibd";
         if (engine.repair_header(output_path)) {
             std::cout << "[INFO] Repaired file saved to: " << output_path << "\n";
+            recovery_artifacts.push_back({
+                {"path", output_path},
+                {"kind", "repaired_ibd"},
+                {"importable", false}});
         } else {
-            std::cerr << "[WARN] Failed to repair header.\n";
+            export_succeeded = false;
+            std::cerr << "[ERROR] Failed to repair header.\n";
         }
     } else {
-        std::cerr << "[ERROR] Unknown format: " << format << "\n";
+        const std::string reason = "unknown output format: " + format;
+        std::cerr << "[ERROR] " << reason << "\n";
         engine.close();
+        if (!write_result_json({
+                {"mode", "recovery"},
+                {"classification", "expected_reject"},
+                {"structured_rows", 0},
+                {"evidence_fragments", 0},
+                {"importable", false},
+                {"reason", reason},
+                {"source_inputs", {{"ibd", ibd_path}}}})) {
+            return 1;
+        }
         return 1;
     }
 
@@ -4138,9 +4546,44 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     auto total_end = std::chrono::high_resolution_clock::now();
     stats_.elapsed_seconds = std::chrono::duration<double>(total_end - total_start).count();
 
+    if (!export_succeeded) {
+        const std::string reason = "failed to write requested recovery output";
+        if (!write_result_json({
+                {"mode", "recovery"},
+                {"classification", "operational_error"},
+                {"structured_rows", recovered_records.size()},
+                {"evidence_fragments", 0},
+                {"importable", false},
+                {"reason", reason},
+                {"source_inputs", {{"ibd", ibd_path}}},
+                {"artifacts", recovery_artifacts},
+                {"recovery_type", recovery_type},
+                {"mysql_version", mysql_version}})) {
+            return 1;
+        }
+        return 1;
+    }
+
     show_stats(stats_);
     std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
     generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+
+    if (!write_result_json({
+            {"mode", "recovery"},
+            {"classification", recovered_records.empty() ? "forensic_evidence" : "structured_recovery"},
+            {"structured_rows", recovered_records.size()},
+            {"evidence_fragments", 0},
+            {"importable", false},
+            {"reason", recovered_records.empty()
+                ? "evidence-empty: no structured rows recovered"
+                : "structured rows recovered; independent validation is required before import"},
+            {"source_inputs", {{"ibd", ibd_path}}},
+            {"artifacts", recovery_artifacts},
+            {"recovery_type", recovery_type},
+            {"mysql_version", mysql_version},
+            {"output_format", format}})) {
+        return 1;
+    }
 
     return 0;
 }
@@ -4443,7 +4886,8 @@ inline void RecoveryCLI::generate_recovery_report(
  */
 inline bool RecoveryCLI::export_parallel(
     const std::vector<std::map<std::string, std::string>>& records,
-    const std::string& table_name, uint32_t num_workers) {
+    const std::string& table_name, uint32_t num_workers,
+    std::vector<std::string>* output_files) {
 
     dbrecovery::recovery::ParallelExporter::Config pconfig;
     pconfig.num_workers = num_workers;
@@ -4458,6 +4902,9 @@ inline bool RecoveryCLI::export_parallel(
 
     if (ok) {
         auto& pstats = exporter.get_stats();
+        if (output_files != nullptr) {
+            *output_files = pstats.output_files;
+        }
         std::cout << "[ParallelExport] " << pstats.total_records << " records in "
                   << pstats.chunks_exported << " files ("
                   << std::fixed << std::setprecision(2)

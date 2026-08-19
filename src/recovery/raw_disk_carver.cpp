@@ -6,7 +6,9 @@
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
+#include "dbrecovery/salvage/evidence_serializer.hpp"
 #include "nlohmann/json.hpp"
+#include <openssl/sha.h>
 
 #include <chrono>
 #include <cstring>
@@ -1629,6 +1631,9 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
                     catalog::TableSchema schema;
                     schema = parse_sdi_json_to_schema(json_obj);
                     if (!schema.columns.empty()) {
+                        schema.schema_hash = dbrecovery::salvage::SalvageEvidenceSerializer::sha256_hex(result.json);
+                        schema.schema_source = "SDI";
+                        schema.trust_level = "AUTHORITATIVE";
                         std::cerr << "[INFO] Successfully extracted schema from strict ZIP SDI record: "
                                   << schema.columns.size() << " columns" << std::endl;
                         return schema;
@@ -1644,18 +1649,22 @@ std::optional<catalog::TableSchema> RawDiskCarver::extract_schema_from_sdi(
         return std::nullopt;
     }
 
-    // 对于未压缩的 SDI 页，直接解析
+    // 对于未压缩的 SDI 页，直接解析（使用结构化 API 保留失败原因）
     std::cerr << "[INFO] SDI page is uncompressed (0x45BE)" << std::endl;
 
-    auto schema = innodb::SDIManager::parse_sdi_record(data + sdi_payload_start, sdi_payload_len);
+    auto parse_result = innodb::SDIManager::parse_sdi_record_structured(data + sdi_payload_start, sdi_payload_len);
 
-    if (schema.columns.empty()) {
-        std::cerr << "[WARN] No columns extracted from SDI" << std::endl;
+    if (parse_result.schema.columns.empty()) {
+        std::cerr << "[WARN] No columns extracted from SDI: "
+                  << innodb::SDIManager::status_string(parse_result.status)
+                  << " — " << parse_result.failure_reason << std::endl;
         return std::nullopt;
     }
 
-    std::cerr << "[INFO] Successfully extracted schema with " << schema.columns.size() << " columns from SDI" << std::endl;
-    return schema;
+    std::cerr << "[INFO] Successfully extracted schema with " << parse_result.schema.columns.size()
+              << " columns from SDI" << std::endl;
+    // Provenance already set by parse_sdi_record_structured
+    return parse_result.schema;
 }
 
 } // namespace recovery

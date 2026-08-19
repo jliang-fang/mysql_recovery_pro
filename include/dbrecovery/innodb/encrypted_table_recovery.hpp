@@ -24,6 +24,34 @@ namespace dbrecovery {
 namespace innodb {
 
 /**
+ * @brief TDE encrypted table recovery outcome classification
+ *
+ * Fail-closed status for encrypted tablespace recovery. A zero-row result
+ * must never alone indicate success — the status distinguishes between
+ * "not encrypted", "encrypted but unsupported", "recovered",
+ * "corrupted metadata", "key missing", and "malformed input".
+ *
+ * Distinguished states (Phase 4c):
+ *  - NOT_ENCRYPTED:         No TDE candidate recognized; this is not proof that
+ *                            encryption metadata is absent.
+ *  - ENCRYPTED_UNSUPPORTED: A TDE candidate was recognized, but no
+ *                            fixture-validated decryptor is available.
+ *  - RECOVERED:             Successfully decrypted and parsed records.
+ *  - MALFORMED:             File cannot be opened or read.
+ *  - CORRUPTED_METADATA:    Reserved for future authoritative, version-specific
+ *                            TDE metadata validation.
+ *  - KEY_MISSING:           Encryption detected but no matching key available.
+ */
+enum class TDEStatus : uint8_t {
+    NOT_ENCRYPTED           = 0,
+    ENCRYPTED_UNSUPPORTED   = 1,
+    RECOVERED               = 2,
+    MALFORMED               = 3,
+    CORRUPTED_METADATA      = 4,
+    KEY_MISSING             = 5
+};
+
+/**
  * @brief Encrypted table recovery statistics
  */
 struct EncryptedTableRecoveryStats {
@@ -35,6 +63,7 @@ struct EncryptedTableRecoveryStats {
     double decrypt_time_ms = 0.0;
     double recovery_time_ms = 0.0;
     double total_time_ms = 0.0;
+    TDEStatus tde_status = TDEStatus::NOT_ENCRYPTED;
 
     std::string to_string() const {
         std::ostringstream oss;
@@ -43,9 +72,22 @@ struct EncryptedTableRecoveryStats {
             << ", decrypted=" << decrypted_pages
             << ", records=" << recovered_records
             << ", failed=" << failed_pages
+            << ", status=" << status_to_string(tde_status)
             << ", time=" << std::fixed << std::setprecision(2) << total_time_ms << "ms"
             << "}";
         return oss.str();
+    }
+
+    static const char* status_to_string(TDEStatus s) {
+        switch (s) {
+            case TDEStatus::NOT_ENCRYPTED:           return "NOT_ENCRYPTED";
+            case TDEStatus::ENCRYPTED_UNSUPPORTED:   return "ENCRYPTED_UNSUPPORTED";
+            case TDEStatus::RECOVERED:               return "RECOVERED";
+            case TDEStatus::MALFORMED:               return "MALFORMED";
+            case TDEStatus::CORRUPTED_METADATA:      return "CORRUPTED_METADATA";
+            case TDEStatus::KEY_MISSING:             return "KEY_MISSING";
+        }
+        return "UNKNOWN";
     }
 };
 
@@ -72,6 +114,30 @@ public:
     const std::vector<uint32_t>& get_encrypted_pages() const { return encrypted_pages_; }
     const std::vector<uint32_t>& get_failed_pages() const { return failed_pages_; }
     void clear();
+
+    /**
+     * @brief Has a fixture-validated TDE decryptor been verified?
+     *
+     * Returns false until a real encrypted fixture validates page
+     * interpretation plus ground-truth record recovery. While false,
+     * recover() for encrypted layout reports ENCRYPTED_UNSUPPORTED
+     * instead of claiming successful recovery.
+     */
+    static bool decryptor_is_validated();
+
+    /**
+     * @brief Classify the tablespace encryption status (fail-closed)
+     *
+     * Candidate TDE routing classification of an .ibd page 0. A recognized
+     * candidate reports ENCRYPTED_UNSUPPORTED; a non-candidate result does not
+     * prove encryption is absent. Metadata corruption is reserved for a future
+     * authoritative, fixture-validated format parser.
+     *
+     * @param file_path Path to the .ibd file
+     * @param page_size Logical page size used to locate TDE header
+     * @return Classification result; NOT_ENCRYPTED when the tablespace is not encrypted
+     */
+    TDEStatus classify(const std::string& file_path, size_t page_size = 16384) const;
 
 private:
     size_t page_size_;

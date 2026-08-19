@@ -16,22 +16,24 @@ namespace innodb {
 
 // 扫描结果
 struct ScannedPage {
-    uint32_t offset;        // 页在文件中的偏移
-    uint16_t type;          // 页类型
-    uint16_t level;         // 页级别（B+Tree层数）
-    uint32_t page_no;       // 页号
-    uint32_t prev_page;     // 前一个页
-    uint32_t next_page;     // 后一个页
-    bool is_valid;          // 是否有效页
-    uint64_t lsn;           // LSN
-    uint32_t space_id;      // 空间ID
+    uint32_t offset;                    // 页在文件中的偏移 (byte offset)
+    uint32_t physical_page_index = 0;   // 物理页在文件中的序号 (0-based)
+    uint16_t type;                      // 页类型
+    uint16_t level;                     // 页级别（B+Tree层数）
+    uint32_t page_no;                   // 页号 (from FIL_PAGE_OFFSET header)
+    uint32_t prev_page;                 // 前一个页
+    uint32_t next_page;                 // 后一个页
+    bool is_valid;                      // 是否有效页
+    uint64_t lsn;                       // LSN
+    uint32_t space_id;                  // 空间ID
     bool is_compressed = false;
     bool is_encrypted = false;
     uint16_t page_type = 0;
 
     std::string to_string() const {
         std::ostringstream oss;
-        oss << "ScannedPage{offset=" << offset
+        oss << "ScannedPage{phys_idx=" << physical_page_index
+            << ", offset=" << offset
             << ", type=0x" << std::hex << type << std::dec
             << ", level=" << level
             << ", page_no=" << page_no
@@ -119,7 +121,8 @@ private:
     ScanStats stats_;
     
     // 扫描单个页
-    std::optional<ScannedPage> scan_single_page(const uint8_t* data, size_t file_offset);
+    std::optional<ScannedPage> scan_single_page(const uint8_t* data, size_t file_offset,
+                                                 uint32_t physical_page_index = 0);
 
     // 跳过非 InnoDB 页
     size_t skip_non_innodb_pages(const uint8_t* data, size_t size);
@@ -164,13 +167,14 @@ inline bool PageScanner::is_innodb_page(const uint8_t* data, size_t page_size) {
     return is_valid_page_type(type);
 }
 
-inline std::optional<ScannedPage> PageScanner::scan_single_page(const uint8_t* data, size_t file_offset = 0) {
+inline std::optional<ScannedPage> PageScanner::scan_single_page(const uint8_t* data, size_t file_offset, uint32_t physical_page_index) {
     if (!data || page_size_ < 38) {
         return std::nullopt;
     }
 
     ScannedPage page{};
     page.offset = static_cast<uint32_t>(file_offset);  // 文件中的绝对偏移
+    page.physical_page_index = physical_page_index;
     page.is_valid = false;
 
     // 读取 FIL Header - 偏移量参考 page_defs.hpp
@@ -225,8 +229,9 @@ inline std::vector<ScannedPage> PageScanner::scan_buffer(const uint8_t* data, si
     stats_.total_size = size;
     
     // 扫描每个页
+    uint32_t page_index = 0;
     for (size_t offset = 0; offset + page_size_ <= size; offset += page_size_) {
-        auto page_opt = scan_single_page(data + offset);
+        auto page_opt = scan_single_page(data + offset, offset, page_index++);
 
         if (page_opt.has_value()) {
             auto& page = page_opt.value();
@@ -291,8 +296,9 @@ inline std::vector<ScannedPage> PageScanner::scan_file(const std::filesystem::pa
 
     // 扫描
     size_t offset = 0;
+    uint32_t page_index = 0;
     while (offset + page_size_ <= actual_read) {
-        auto page_opt = scan_single_page(buffer.data() + offset, offset);
+        auto page_opt = scan_single_page(buffer.data() + offset, offset, page_index++);
 
         if (page_opt.has_value()) {
             auto& page = page_opt.value();
@@ -363,14 +369,16 @@ inline std::vector<ScannedPage> PageScanner::scan_buffer_if_compatible(
     }
     stats_.total_size = size;
 
+    uint32_t page_index = 0;
     for (size_t offset = 0; offset + page_size_ <= size; offset += page_size_) {
         // 读取原始 FIL 页类型并判定当前版本是否可恢复
         uint16_t raw_type = read_be<uint16_t>(data + offset, FIL_PAGE_TYPE_ABS);
         if (!dbrecovery::can_recover_page_type(to_compat_page_type(raw_type), version)) {
+            ++page_index;
             continue;  // 当前版本不支持，跳过该页
         }
 
-        auto page_opt = scan_single_page(data + offset, offset);
+        auto page_opt = scan_single_page(data + offset, offset, page_index++);
         if (page_opt.has_value()) {
             auto& page = page_opt.value();
             pages.push_back(page);

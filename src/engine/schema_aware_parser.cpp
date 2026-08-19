@@ -732,10 +732,10 @@ uint32_t TupleParser::parse_page(
                         }
                         recovered.transaction_id = trx_id;
                     }
-                    // Read DB_ROLL_PTR (7 bytes, big-endian)
-                    if (fwd_offset + 7 <= page_size) {
+                    // Read DB_ROLL_PTR (roll_ptr_bytes() bytes, big-endian)
+                    if (fwd_offset + roll_ptr_bytes() <= page_size) {
                         uint64_t roll_ptr = 0;
-                        for (int i = 0; i < 7; i++) {
+                        for (uint32_t i = 0; i < roll_ptr_bytes(); i++) {
                             roll_ptr = (roll_ptr << 8) | data[fwd_offset++];
                         }
                         recovered.roll_ptr = roll_ptr;
@@ -828,9 +828,9 @@ uint32_t TupleParser::parse_page(
                     }
                     recovered.transaction_id = trx_id;
                 }
-                if (fwd_offset + 7 <= page_size) {
+                if (fwd_offset + roll_ptr_bytes() <= page_size) {
                     uint64_t roll_ptr = 0;
-                    for (int i = 0; i < 7; i++) {
+                    for (uint32_t i = 0; i < roll_ptr_bytes(); i++) {
                         roll_ptr = (roll_ptr << 8) | data[fwd_offset++];
                     }
                     recovered.roll_ptr = roll_ptr;

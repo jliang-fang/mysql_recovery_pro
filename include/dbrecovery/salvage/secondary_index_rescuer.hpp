@@ -39,7 +39,19 @@ public:
     explicit SecondaryIndexRescuer(size_t page_size = 16384);
 
     // ---- Schema ----
-    void set_schema(const catalog::TableSchema& schema) { inner_.set_schema(schema); }
+    void set_schema(const catalog::TableSchema& schema) {
+        schema_ = schema;
+        target_name_.reset();
+        inner_.set_schema(schema);
+    }
+
+    // ---- Target secondary index selection (Phase 5b.1) ----
+    // Fails closed: without an explicit authoritative target, no structured
+    // secondary-index recovery is possible.
+    bool set_target_secondary_index(const std::string& name) {
+        target_name_ = name;
+        return inner_.set_target_secondary_index(name);
+    }
 
     // ---- Core extraction (delegates to innodb) ----
     std::map<std::string, std::map<std::string, std::string>>
@@ -107,6 +119,7 @@ private:
     innodb::SecondaryIndexRescuer inner_;
     size_t page_size_;
     catalog::TableSchema schema_;
+    std::optional<std::string> target_name_;
 };
 
 } // namespace salvage

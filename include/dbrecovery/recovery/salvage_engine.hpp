@@ -16,6 +16,7 @@
 #include <string>
 #include <map>
 #include <set>
+#include <unordered_set>
 #include <sstream>
 #include <fstream>
 #include <iomanip>
@@ -57,9 +58,11 @@ enum class SalvageLevel : uint8_t {
 struct SalvagedRow {
     uint64_t page_offset = 0;
     uint64_t record_offset = 0;
+    uint32_t page_no = 0;          // page number from FIL header (FIL_PAGE_OFFSET)
     uint16_t field_count = 0;
     SalvageLevel salvage_level = SalvageLevel::STRUCTURED;
     std::vector<std::string> fields;
+    std::string content_hash;      // SHA256 of raw record bytes (for dedup)
     double confidence = 0.0;
     std::string recovery_method;
     ForensicEvidence evidence;  // provenance metadata for L3/L4 heuristic results
