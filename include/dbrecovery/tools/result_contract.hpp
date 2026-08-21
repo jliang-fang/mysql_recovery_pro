@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "dbrecovery/common/damage_level.hpp"
 
 namespace dbrecovery::tools {
@@ -36,6 +38,11 @@ ResultContract result_contract_from_unified(const UnifiedRecoveryResult& result,
                                              const std::string& table_name,
                                              const std::string& source_ibd = "");
 
+ResultContract result_contract_from_legacy(const nlohmann::json& legacy,
+                                           const std::string& fallback_table_name,
+                                           const std::string& fallback_source_ibd = "");
+
+nlohmann::json result_contract_object(const ResultContract& result);
 std::string result_contract_json(const ResultContract& result, int indent = 2);
 bool write_result_contract_json(const std::string& path,
                                 const ResultContract& result);

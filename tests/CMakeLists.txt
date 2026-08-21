@@ -328,6 +328,11 @@ add_executable(test_compressed_table_routing innodb/compressed_table_routing_tes
 target_link_libraries(test_compressed_table_routing PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_compressed_table_routing)
 
+# Exporter canonical value and escaping tests
+add_executable(test_export_optimization test_export_optimization.cpp)
+target_link_libraries(test_export_optimization PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_export_optimization)
+
 # Phase 3f/g — combined pipeline, salvage accuracy, L3/L4 isolation, export rejection, idempotency
 add_executable(test_combined_recovery test_combined_recovery.cpp)
 target_link_libraries(test_combined_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)

@@ -22,6 +22,8 @@ struct PageDamageEvidence {
 };
 
 struct UnifiedRecoveryResult {
+    std::string table_name;
+    std::string source_ibd;
     bool success = false;
     std::vector<recovery::SalvagedRow> records;
     uint32_t total_recovered = 0;

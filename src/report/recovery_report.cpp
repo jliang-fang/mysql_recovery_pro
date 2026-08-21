@@ -12,6 +12,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <nlohmann/json.hpp>
 #include <sstream>
 
 namespace dbrecovery {
@@ -39,6 +40,7 @@ std::string RecoveryReport::format_time(const std::chrono::system_clock::time_po
 
 static std::string json_escape(const std::string& s) {
     std::string out;
+    out.reserve(s.size());
     for (char c : s) {
         switch (c) {
             case '"': out += "\\\""; break;
@@ -46,7 +48,15 @@ static std::string json_escape(const std::string& s) {
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
-            default: out += c;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    static constexpr char hex[] = "0123456789abcdef";
+                    out += "\\u00";
+                    out += hex[(static_cast<unsigned char>(c) >> 4) & 0x0f];
+                    out += hex[static_cast<unsigned char>(c) & 0x0f];
+                } else {
+                    out += c;
+                }
         }
     }
     return out;
@@ -118,146 +128,87 @@ static std::string fmt_num(uint64_t n) {
 }
 
 std::string RecoveryReport::to_json() const {
-    std::ostringstream oss;
-    oss << "{\n";
+    nlohmann::json report = nlohmann::json::object();
     if (result_contract.has_value()) {
-        oss << "  \"format_version\": 2,\n";
-        oss << "  \"table_name\": \"" << json_escape(result_contract->table_name) << "\",\n";
-        oss << "  \"success\": " << (result_contract->success ? "true" : "false") << ",\n";
-        oss << "  \"classification\": \"" << json_escape(result_contract->classification) << "\",\n";
-        oss << "  \"structured_rows\": " << result_contract->structured_rows << ",\n";
-        oss << "  \"evidence_fragments\": " << result_contract->evidence_fragments << ",\n";
-        oss << "  \"schema_source\": \"" << json_escape(result_contract->schema_source) << "\",\n";
-        oss << "  \"schema_trust_level\": \"" << json_escape(result_contract->schema_trust_level) << "\",\n";
-        oss << "  \"damage_level\": \"" << json_escape(common::damage_level_to_string(result_contract->damage_level)) << "\",\n";
-        oss << "  \"recovery_method\": \"" << json_escape(result_contract->recovery_method) << "\",\n";
-        oss << "  \"ddl_variation_detected\": " << (result_contract->ddl_variation_detected ? "true" : "false") << ",\n";
-        oss << "  \"export_success\": " << (result_contract->export_success ? "true" : "false") << ",\n";
-        oss << "  \"export_rejection_reason\": \"" << json_escape(result_contract->export_rejection_reason) << "\",\n";
-        oss << "  \"total_pages_scanned\": " << result_contract->total_pages_scanned << ",\n";
-        oss << "  \"damaged_pages\": " << result_contract->damaged_pages << ",\n";
-        oss << "  \"checksum_mismatches\": " << result_contract->checksum_mismatches << ",\n";
-        oss << "  \"header_damage_pages\": " << result_contract->header_damage_pages << ",\n";
-        oss << "  \"importable\": false,\n";
-        oss << "  \"reason\": \"" << json_escape(result_contract->reason) << "\",\n";
-        oss << "  \"source_ibd\": \"" << json_escape(result_contract->source_ibd) << "\",\n";
+        report = tools::result_contract_object(*result_contract);
     }
-    oss << "  \"report_id\": \"" << json_escape(report_id) << "\",\n";
-    oss << "  \"report_time\": \"" << json_escape(report_time) << "\",\n";
-    oss << "  \"recovery_type\": \"" << json_escape(recovery_type) << "\",\n";
-    oss << "  \"mysql_version\": \"" << json_escape(mysql_version) << "\",\n";
-    oss << "  \"overall_status\": \"" << json_escape(overall_status) << "\",\n";
 
-    oss << "  \"input\": {\n";
-    oss << "    \"source_type\": \"" << json_escape(input.source_type) << "\",\n";
-    oss << "    \"source_path\": \"" << json_escape(input.source_path) << "\",\n";
-    oss << "    \"source_size_bytes\": " << input.source_size_bytes << ",\n";
-    oss << "    \"has_schema\": " << (input.has_schema ? "true" : "false") << ",\n";
-    oss << "    \"schema_source\": \"" << json_escape(input.schema_source) << "\",\n";
-    oss << "    \"has_undo_logs\": " << (input.has_undo_logs ? "true" : "false") << ",\n";
-    oss << "    \"has_redo_logs\": " << (input.has_redo_logs ? "true" : "false") << ",\n";
-    oss << "    \"files_processed\": [";
-    for (size_t i = 0; i < input.files_processed.size(); i++) {
-        if (i > 0) oss << ", ";
-        oss << "\"" << json_escape(input.files_processed[i]) << "\"";
+    report["report_id"] = report_id;
+    report["report_time"] = report_time;
+    report["recovery_type"] = recovery_type;
+    report["mysql_version"] = mysql_version;
+    report["overall_status"] = overall_status;
+    report["input"] = {
+        {"source_type", input.source_type},
+        {"source_path", input.source_path},
+        {"source_size_bytes", input.source_size_bytes},
+        {"has_schema", input.has_schema},
+        {"schema_source", input.schema_source},
+        {"has_undo_logs", input.has_undo_logs},
+        {"has_redo_logs", input.has_redo_logs},
+        {"files_processed", input.files_processed}
+    };
+    report["strategy"] = {
+        {"primary", strategy.primary_strategy},
+        {"attempted", strategy.strategies_attempted},
+        {"fallbacks", strategy.fallback_strategies},
+        {"parameters", strategy.parameters}
+    };
+    report["data"] = {
+        {"total_pages_scanned", data.total_pages_scanned},
+        {"index_pages_found", data.index_pages_found},
+        {"blob_pages_found", data.blob_pages_found},
+        {"corrupted_pages", data.corrupted_pages},
+        {"skipped_pages", data.skipped_pages},
+        {"total_records_attempted", data.total_records_attempted},
+        {"records_fully_recovered", data.records_fully_recovered},
+        {"records_partially_recovered", data.records_partially_recovered},
+        {"records_failed", data.records_failed},
+        {"recovery_rate_percent", data.recovery_rate_percent},
+        {"blob_records_recovered", data.blob_records_recovered},
+        {"history_versions_recovered", data.history_versions_recovered},
+        {"flashback_statements_generated", data.flashback_statements_generated},
+        {"records_by_type", data.records_by_type}
+    };
+    report["damage"] = {
+        {"pages_with_header_damage", damage.pages_with_header_damage},
+        {"pages_with_checksum_mismatch", damage.pages_with_checksum_mismatch},
+        {"pages_with_record_corruption", damage.pages_with_record_corruption},
+        {"pages_with_blob_corruption", damage.pages_with_blob_corruption},
+        {"details", nlohmann::json::array()}
+    };
+    for (const auto& detail : damage.details) {
+        report["damage"]["details"].push_back({
+            {"page_no", detail.page_no},
+            {"type", detail.damage_type},
+            {"description", detail.description}
+        });
     }
-    oss << "]\n  },\n";
-
-    oss << "  \"strategy\": {\n";
-    oss << "    \"primary\": \"" << json_escape(strategy.primary_strategy) << "\",\n";
-    oss << "    \"attempted\": [";
-    for (size_t i = 0; i < strategy.strategies_attempted.size(); i++) {
-        if (i > 0) oss << ", ";
-        oss << "\"" << json_escape(strategy.strategies_attempted[i]) << "\"";
+    report["failures"] = { {"categories", nlohmann::json::array()} };
+    for (const auto& category : failures.categories) {
+        report["failures"]["categories"].push_back({
+            {"category", category.category},
+            {"count", category.count},
+            {"percentage", category.percentage},
+            {"recommendation", category.recommendation}
+        });
     }
-    oss << "],\n";
-    oss << "    \"fallbacks\": [";
-    for (size_t i = 0; i < strategy.fallback_strategies.size(); i++) {
-        if (i > 0) oss << ", ";
-        oss << "\"" << json_escape(strategy.fallback_strategies[i]) << "\"";
-    }
-    oss << "],\n";
-    oss << "    \"parameters\": {";
-    bool first_param = true;
-    for (const auto& [k, v] : strategy.parameters) {
-        if (!first_param) oss << ", ";
-        oss << "\"" << json_escape(k) << "\": \"" << json_escape(v) << "\"";
-        first_param = false;
-    }
-    oss << "}\n  },\n";
-
-    oss << "  \"data\": {\n";
-    oss << "    \"total_pages_scanned\": " << data.total_pages_scanned << ",\n";
-    oss << "    \"index_pages_found\": " << data.index_pages_found << ",\n";
-    oss << "    \"blob_pages_found\": " << data.blob_pages_found << ",\n";
-    oss << "    \"corrupted_pages\": " << data.corrupted_pages << ",\n";
-    oss << "    \"skipped_pages\": " << data.skipped_pages << ",\n";
-    oss << "    \"total_records_attempted\": " << data.total_records_attempted << ",\n";
-    oss << "    \"records_fully_recovered\": " << data.records_fully_recovered << ",\n";
-    oss << "    \"records_partially_recovered\": " << data.records_partially_recovered << ",\n";
-    oss << "    \"records_failed\": " << data.records_failed << ",\n";
-    oss << "    \"recovery_rate_percent\": " << std::fixed << std::setprecision(2)
-        << data.recovery_rate_percent << ",\n";
-    oss << "    \"blob_records_recovered\": " << data.blob_records_recovered << ",\n";
-    oss << "    \"history_versions_recovered\": " << data.history_versions_recovered << ",\n";
-    oss << "    \"flashback_statements_generated\": " << data.flashback_statements_generated << "\n";
-    oss << "  },\n";
-
-    oss << "  \"damage\": {\n";
-    oss << "    \"pages_with_header_damage\": " << damage.pages_with_header_damage << ",\n";
-    oss << "    \"pages_with_checksum_mismatch\": " << damage.pages_with_checksum_mismatch << ",\n";
-    oss << "    \"pages_with_record_corruption\": " << damage.pages_with_record_corruption << ",\n";
-    oss << "    \"pages_with_blob_corruption\": " << damage.pages_with_blob_corruption << ",\n";
-    oss << "    \"details\": [";
-    for (size_t i = 0; i < damage.details.size(); i++) {
-        if (i > 0) oss << ",";
-        oss << "\n      {\"page_no\": " << damage.details[i].page_no
-            << ", \"type\": \"" << json_escape(damage.details[i].damage_type)
-            << "\", \"description\": \"" << json_escape(damage.details[i].description) << "\"}";
-    }
-    oss << "\n    ]\n  },\n";
-
-    oss << "  \"failures\": {\n";
-    oss << "    \"categories\": [";
-    for (size_t i = 0; i < failures.categories.size(); i++) {
-        if (i > 0) oss << ",";
-        oss << "\n      {\"category\": \"" << json_escape(failures.categories[i].category)
-            << "\", \"count\": " << failures.categories[i].count
-            << ", \"percentage\": " << std::fixed << std::setprecision(1)
-            << failures.categories[i].percentage
-            << ", \"recommendation\": \"" << json_escape(failures.categories[i].recommendation)
-            << "\"}";
-    }
-    oss << "\n    ]\n  },\n";
-
-    oss << "  \"reconstructed_ddl\": [";
-    for (size_t i = 0; i < reconstructed_ddl.size(); i++) {
-        if (i > 0) oss << ",";
-        oss << "\n    \"" << json_escape(reconstructed_ddl[i]) << "\"";
-    }
-    oss << "\n  ],\n";
-
-    oss << "  \"output\": {\n";
-    oss << "    \"directory\": \"" << json_escape(output.output_directory) << "\",\n";
-    oss << "    \"files\": [";
-    for (size_t i = 0; i < output.output_files.size(); i++) {
-        if (i > 0) oss << ", ";
-        oss << "\"" << json_escape(output.output_files[i]) << "\"";
-    }
-    oss << "],\n";
-    oss << "    \"total_size_bytes\": " << output.total_output_size_bytes << ",\n";
-    oss << "    \"format\": \"" << json_escape(output.format) << "\"\n";
-    oss << "  },\n";
-
-    oss << "  \"timing\": {\n";
-    oss << "    \"scan_seconds\": " << std::fixed << std::setprecision(3) << timing.scan_time_seconds << ",\n";
-    oss << "    \"parse_seconds\": " << timing.parse_time_seconds << ",\n";
-    oss << "    \"export_seconds\": " << timing.export_time_seconds << ",\n";
-    oss << "    \"total_seconds\": " << timing.total_time_seconds << "\n";
-    oss << "  }\n";
-    oss << "}\n";
-    return oss.str();
+    report["reconstructed_ddl"] = reconstructed_ddl;
+    report["output"] = {
+        {"directory", output.output_directory},
+        {"files", output.output_files},
+        {"total_size_bytes", output.total_output_size_bytes},
+        {"format", output.format}
+    };
+    report["timing"] = {
+        {"scan_seconds", timing.scan_time_seconds},
+        {"parse_seconds", timing.parse_time_seconds},
+        {"export_seconds", timing.export_time_seconds},
+        {"total_seconds", timing.total_time_seconds}
+    };
+    return report.dump(2) + "\n";
 }
+
 
 std::string RecoveryReport::to_text() const {
     std::ostringstream oss;

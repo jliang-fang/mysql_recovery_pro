@@ -6,6 +6,7 @@
 #include "dbrecovery/common/damage_level.hpp"
 #include <filesystem>
 #include <fstream>
+#include <nlohmann/json.hpp>
 
 using namespace dbrecovery;
 
@@ -71,6 +72,114 @@ TEST(CombinedRecovery, StrategyRecommendationInformational) {
     EXPECT_FALSE(txt.empty());
 }
 
+TEST(CombinedRecovery, LegacyResultIsCanonicalV2AndNonImportable) {
+    const nlohmann::json legacy = {
+        {"format_version", 1},
+        {"table_name", "legacy_table"},
+        {"success", true},
+        {"classification", "structured_recovery"},
+        {"structured_rows", 7},
+        {"damage_level", "L2_MODERATE"},
+        {"importable", true},
+        {"mode", "undo_history"},
+        {"mysql_version", "8.4"},
+        {"source_inputs", {"system_tablespace", "/tmp/ibdata1"}}
+    };
+
+    const auto contract = tools::result_contract_from_legacy(
+        legacy, "fallback_table", "/tmp/source.ibd");
+    const auto output = tools::result_contract_object(contract);
+
+    EXPECT_EQ(output.at("format_version"), 2);
+    EXPECT_FALSE(output.at("importable").get<bool>());
+    EXPECT_EQ(output.at("table_name"), "legacy_table");
+    EXPECT_EQ(output.at("structured_rows"), 7);
+    EXPECT_EQ(output.at("damage_level"), "L2_MODERATE");
+    EXPECT_FALSE(output.contains("mode"));
+    EXPECT_FALSE(output.contains("mysql_version"));
+    EXPECT_FALSE(output.contains("source_inputs"));
+}
+
+TEST(CombinedRecovery, LegacyResultRejectsNegativeCounters) {
+    const nlohmann::json legacy = {
+        {"structured_rows", -1},
+        {"total_pages_scanned", -2},
+        {"damaged_pages", -3},
+        {"checksum_mismatches", -4},
+        {"header_damage_pages", -5}
+    };
+
+    const auto contract = tools::result_contract_from_legacy(
+        legacy, "fallback_table", "/tmp/source.ibd");
+
+    EXPECT_EQ(contract.structured_rows, 0u);
+    EXPECT_EQ(contract.total_pages_scanned, 0u);
+    EXPECT_EQ(contract.damaged_pages, 0u);
+    EXPECT_EQ(contract.checksum_mismatches, 0u);
+    EXPECT_EQ(contract.header_damage_pages, 0u);
+}
+
+TEST(CombinedRecovery, EmptyLegacyResultHasAllCanonicalFields) {
+    const auto output = tools::result_contract_object(
+        tools::result_contract_from_legacy(
+            nlohmann::json::object(), "fallback_table", "/tmp/source.ibd"));
+    const std::vector<std::string> keys = {
+        "format_version", "table_name", "success", "classification",
+        "structured_rows", "evidence_fragments", "schema_source",
+        "schema_trust_level", "damage_level", "recovery_method",
+        "ddl_variation_detected", "export_success",
+        "export_rejection_reason", "total_pages_scanned", "damaged_pages",
+        "checksum_mismatches", "header_damage_pages", "importable", "reason",
+        "source_ibd"
+    };
+
+    for (const auto& key : keys) {
+        EXPECT_TRUE(output.contains(key)) << key;
+    }
+    EXPECT_EQ(output.size(), keys.size());
+    EXPECT_EQ(output.at("format_version"), 2);
+    EXPECT_FALSE(output.at("importable").get<bool>());
+    EXPECT_EQ(output.at("table_name"), "fallback_table");
+    EXPECT_EQ(output.at("source_ibd"), "/tmp/source.ibd");
+}
+
+TEST(CombinedRecovery, RecoveryReportCanonicalFieldsMatchUnifiedResult) {
+    tools::UnifiedRecoveryResult result;
+    result.table_name = "report_table";
+    result.source_ibd = "/tmp/report_table.ibd";
+    result.success = true;
+    result.result_classification = "structured_recovery";
+    result.total_recovered = 3;
+    result.schema_source = "SDI";
+    result.trust_level = "TRUSTED";
+    result.damage_level = common::DamageLevel::L1_MINOR;
+    result.recovery_method = "index_parser";
+    result.ddl_variation_detected = true;
+    result.export_success = false;
+    result.export_rejection_reason = "checksum mismatch";
+
+    tools::PageDamageEvidence page;
+    page.damage_level = common::DamageLevel::L1_MINOR;
+    page.checksum_valid = false;
+    page.fil_header_valid = true;
+    page.page_header_valid = false;
+    result.page_damage.push_back(page);
+
+    result.report.result_contract = tools::result_contract_from_unified(
+        result, result.table_name, result.source_ibd);
+    const auto report = nlohmann::json::parse(result.report.to_json());
+    const auto contract = tools::result_contract_object(
+        tools::result_contract_from_unified(
+            result, result.table_name, result.source_ibd));
+
+    for (const auto& item : contract.items()) {
+        ASSERT_TRUE(report.contains(item.key())) << item.key();
+        EXPECT_EQ(report.at(item.key()), item.value()) << item.key();
+    }
+    EXPECT_EQ(report.at("format_version"), 2);
+    EXPECT_FALSE(report.at("importable").get<bool>());
+}
+
 TEST(CombinedRecovery, ProvenanceFieldsPresent) {
     std::string tmp = "/tmp/combined_prov_test.ibd";
     {
@@ -83,15 +192,30 @@ TEST(CombinedRecovery, ProvenanceFieldsPresent) {
     EXPECT_FALSE(r.trust_level.empty());
     EXPECT_FALSE(r.recovery_method.empty());
     EXPECT_FALSE(r.result_classification.empty());
+    EXPECT_EQ(r.table_name, "prov_tbl");
+    EXPECT_EQ(r.source_ibd, tmp);
     bool ok = tools::write_unified_result_json("/tmp/combined_out3", "prov_tbl", r);
     EXPECT_TRUE(ok);
     std::ifstream jf("/tmp/combined_out3/prov_tbl_result.json");
     ASSERT_TRUE(jf.good());
-    std::string content((std::istreambuf_iterator<char>(jf)), std::istreambuf_iterator<char>());
-    EXPECT_NE(content.find("schema_source"), std::string::npos);
-    EXPECT_NE(content.find("schema_trust_level"), std::string::npos);
-    EXPECT_NE(content.find("damage_level"), std::string::npos);
-    EXPECT_NE(content.find("recovery_method"), std::string::npos);
-    EXPECT_NE(content.find("ddl_variation_detected"), std::string::npos);
+    nlohmann::json output;
+    jf >> output;
+    EXPECT_EQ(output.at("format_version"), 2);
+    EXPECT_EQ(output.at("table_name"), "prov_tbl");
+    EXPECT_EQ(output.at("source_ibd"), tmp);
+    EXPECT_EQ(output.at("structured_rows"), r.total_recovered);
+    EXPECT_EQ(output.at("evidence_fragments"), r.evidence_fragments.size());
+    EXPECT_EQ(output.at("schema_source"), r.schema_source);
+    EXPECT_EQ(output.at("schema_trust_level"), r.trust_level);
+    EXPECT_EQ(output.at("damage_level"), common::damage_level_to_string(r.damage_level));
+    EXPECT_EQ(output.at("recovery_method"), r.recovery_method);
+    EXPECT_EQ(output.at("ddl_variation_detected"), r.ddl_variation_detected);
+    EXPECT_EQ(output.at("export_success"), r.export_success);
+    EXPECT_EQ(output.at("importable"), false);
+    const auto report_json = nlohmann::json::parse(r.report.to_json());
+    for (const auto& item : output.items()) {
+        ASSERT_TRUE(report_json.contains(item.key())) << item.key();
+        EXPECT_EQ(report_json.at(item.key()), item.value()) << item.key();
+    }
     std::filesystem::remove(tmp);
 }

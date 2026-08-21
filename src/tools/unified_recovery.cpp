@@ -340,6 +340,8 @@ UnifiedRecoveryResult run_unified_recovery(
     bool verbose,
     const std::string& schema_file_path) {
     UnifiedRecoveryResult result;
+    result.table_name = table_name.empty() ? "recovered_table" : table_name;
+    result.source_ibd = ibd_path;
     (void)repair;
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -543,6 +545,7 @@ UnifiedRecoveryResult run_unified_recovery(
                             if (it!=m.end() && it->second=="FORENSIC_LEGACY_UNDO") continue;
                             recovery::SalvagedRow sr; sr.salvage_level=recovery::SalvageLevel::STRUCTURED; sr.confidence=1.0; sr.recovery_method="truncate_recovery";
                             for (auto &kv: m) sr.fields.push_back(kv.second);
+                            sr.field_nulls.assign(sr.fields.size(), false);
                             result.records.push_back(std::move(sr));
                         }
                         total_recovered = result.records.size();
@@ -572,7 +575,10 @@ UnifiedRecoveryResult run_unified_recovery(
             if (!extra.empty()) {
                 for (auto &ir: extra) {
                     recovery::SalvagedRow sr; sr.salvage_level=recovery::SalvageLevel::STRUCTURED; sr.confidence=0.6; sr.recovery_method="heuristic_scanner";
-                    for (auto &f: ir.fields) sr.fields.push_back(f.str_value);
+                    for (auto &f: ir.fields) {
+                        sr.fields.push_back(f.str_value);
+                        sr.field_nulls.push_back(f.is_null);
+                    }
                     sr.page_no = ir.page_no;
                     result.records.push_back(std::move(sr));
                 }
@@ -594,7 +600,10 @@ UnifiedRecoveryResult run_unified_recovery(
             auto sa_recs = sa.parse_ibd(ibd_path);
             for (auto &sr2: sa_recs) {
                 recovery::SalvagedRow sr; sr.salvage_level=recovery::SalvageLevel::STRUCTURED; sr.confidence=0.5; sr.recovery_method="schema_agnostic";
-                for (auto &f: sr2.fields) sr.fields.push_back(f.to_string());
+                for (auto &f: sr2.fields) {
+                    sr.fields.push_back(f.to_string());
+                    sr.field_nulls.push_back(f.is_null);
+                }
                 sr.page_no = sr2.page_no;
                 result.records.push_back(std::move(sr));
             }
@@ -609,7 +618,10 @@ UnifiedRecoveryResult run_unified_recovery(
             for (auto &ir: all_recs) {
                 recovery::SalvagedRow sr; sr.salvage_level=recovery::SalvageLevel::STRUCTURED; sr.confidence=0.95; sr.recovery_method="index_parser";
                 sr.page_no = ir.page_no; sr.field_count = static_cast<uint16_t>(ir.fields.size());
-                for (auto &f: ir.fields) sr.fields.push_back(f.str_value);
+                for (auto &f: ir.fields) {
+                    sr.fields.push_back(f.str_value);
+                    sr.field_nulls.push_back(f.is_null);
+                }
                 result.records.push_back(std::move(sr));
             }
             total_recovered = result.records.size();
@@ -665,6 +677,27 @@ UnifiedRecoveryResult run_unified_recovery(
             }
         }
 
+        const bool page_integrity_failure = std::any_of(
+            result.page_damage.begin(), result.page_damage.end(),
+            [](const PageDamageEvidence& page) {
+                return !page.checksum_valid ||
+                       !page.fil_header_valid ||
+                       !page.page_header_valid;
+            });
+        if (page_integrity_failure && !result.records.empty()) {
+            for (auto& row : result.records) {
+                row.salvage_level = recovery::SalvageLevel::FRAGMENT;
+                if (row.evidence.strategy.empty()) {
+                    row.evidence.strategy = "page_integrity_gate";
+                }
+                row.evidence.level = std::max(
+                    row.evidence.level, common::DamageLevel::L1_MINOR);
+                row.evidence.tags.push_back("page-integrity-failure");
+                result.evidence_fragments.push_back(std::move(row));
+            }
+            result.records.clear();
+        }
+
         result.total_recovered = static_cast<uint32_t>(result.records.size());
         // Deduplicate by content_hash
         {
@@ -699,27 +732,30 @@ UnifiedRecoveryResult run_unified_recovery(
             if (verbose) { auto rr = rec.recommend("CORRUPTION"); (void)rr.to_text(); }
         } catch (...) {}
 
-        // Step 9: Export — only authoritative structured rows may be exported.
+        // Step 9: Export — only authoritative structured rows from fully valid pages may be exported.
         if (result.total_recovered == 0) {
             result.export_rejection_reason = "no_structured_rows";
         } else if (result.trust_level != "AUTHORITATIVE" &&
                    result.trust_level != "USER" && result.trust_level != "FRM") {
             result.export_rejection_reason = "schema_trust_insufficient";
+        } else if (page_integrity_failure) {
+            result.export_rejection_reason = "page_integrity_failure";
         } else if (result.damage_level >= common::DamageLevel::L3_SEVERE) {
             result.export_rejection_reason = "severe_or_critical_page_damage";
         } else if (result.ddl_variation_detected) {
             result.export_rejection_reason = "ddl_variation_detected";
         } else if (!output_dir.empty()) {
             fs::create_directories(output_dir);
-            std::vector<std::map<std::string, std::string>> maps;
+            std::vector<std::map<std::string, exporter::ExportValue>> maps;
             maps.reserve(result.records.size());
             for (const auto& r : result.records) {
-                std::map<std::string, std::string> m;
+                std::map<std::string, exporter::ExportValue> m;
                 for (size_t i = 0; i < r.fields.size(); ++i) {
                     const std::string key = i < result.column_names.size()
                         ? result.column_names[i]
                         : "field_" + std::to_string(i);
-                    m[key] = r.fields[i];
+                    const bool is_null = i < r.field_nulls.size() && r.field_nulls[i];
+                    m[key] = exporter::ExportValue{r.fields[i], is_null};
                 }
                 maps.push_back(std::move(m));
             }
@@ -737,9 +773,17 @@ UnifiedRecoveryResult run_unified_recovery(
     const bool trusted_schema = result.trust_level == "AUTHORITATIVE" ||
                                 result.trust_level == "USER" ||
                                 result.trust_level == "FRM";
+    const bool page_integrity_failure = std::any_of(
+        result.page_damage.begin(), result.page_damage.end(),
+        [](const PageDamageEvidence& page) {
+            return !page.checksum_valid ||
+                   !page.fil_header_valid ||
+                   !page.page_header_valid;
+        });
     const bool structured_ready = result.total_recovered > 0 &&
                                   trusted_schema &&
                                   !result.ddl_variation_detected &&
+                                  !page_integrity_failure &&
                                   result.damage_level < common::DamageLevel::L3_SEVERE;
     if (structured_ready && result.export_rejection_reason.empty() && output_dir.empty()) {
         result.export_success = true;
@@ -749,6 +793,8 @@ UnifiedRecoveryResult run_unified_recovery(
             result.export_rejection_reason = "no_structured_rows";
         } else if (!trusted_schema) {
             result.export_rejection_reason = "schema_trust_insufficient";
+        } else if (page_integrity_failure) {
+            result.export_rejection_reason = "page_integrity_failure";
         } else if (result.damage_level >= common::DamageLevel::L3_SEVERE) {
             result.export_rejection_reason = "severe_or_critical_page_damage";
         } else if (result.ddl_variation_detected) {
@@ -780,8 +826,8 @@ UnifiedRecoveryResult run_unified_recovery(
         report::ReportBuilder rb;
         rb.set_recovery_type("unified_recovery")
           .set_status(result.success ? "SUCCESS" : "FORENSIC_EVIDENCE")
-          .set_input(report::InputInfo{ "ibd", ibd_path, 0, trusted_schema,
-                                        result.schema_source, false, false, {ibd_path}})
+          .set_input(report::InputInfo{ "ibd", result.source_ibd, 0, trusted_schema,
+                                        result.schema_source, false, false, {result.source_ibd}})
           .set_strategy(report::StrategyInfo{ {result.recovery_method}, result.recovery_method, {}, {} })
           .set_data(data)
           .set_timing(report::TimingInfo{ 0, 0, 0, secs });
@@ -793,9 +839,15 @@ UnifiedRecoveryResult run_unified_recovery(
             rb.add_damage(report::DamageDetail{0, "header_damage",
                                                std::to_string(header_damage) + " pages"});
         }
-        if (!table_name.empty()) rb.add_ddl("TABLE " + table_name);
+        if (!table_name.empty()) rb.add_ddl("TABLE " + result.table_name);
         report::RecoveryReport built_report = rb.build();
-        built_report.result_contract = result_contract_from_unified(result, table_name, ibd_path);
+        built_report.data.total_pages_scanned = result.page_damage.size();
+        built_report.data.corrupted_pages = damaged_pages;
+        built_report.data.skipped_pages = header_damage;
+        built_report.damage.pages_with_header_damage = header_damage;
+        built_report.damage.pages_with_checksum_mismatch = checksum_mismatches;
+        built_report.result_contract = result_contract_from_unified(
+            result, result.table_name, result.source_ibd);
         result.report = std::move(built_report);
     } catch (...) {}
     return result;
@@ -806,10 +858,12 @@ bool write_unified_result_json(const std::string& output_dir,
                                const UnifiedRecoveryResult& result) {
     try {
         fs::create_directories(output_dir);
-        std::string name = table_name.empty() ? "recovered_table" : table_name;
+        const std::string name = result.table_name.empty()
+            ? (table_name.empty() ? "recovered_table" : table_name)
+            : result.table_name;
         const std::string path = output_dir + "/" + name + "_result.json";
         return write_result_contract_json(
-            path, result_contract_from_unified(result, name));
+            path, result_contract_from_unified(result, name, result.source_ibd));
     } catch (...) { return false; }
 }
 

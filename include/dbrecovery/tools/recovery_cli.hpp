@@ -134,6 +134,7 @@ public:
 private:
     dbrecovery::utils::CliParser parser_;
     RecoveryStats stats_;
+    std::optional<dbrecovery::tools::UnifiedRecoveryResult> unified_result_;
 
     // 扫描页
     std::vector<innodb::ScannedPage> scan_pages(const std::string& ibd_path);
@@ -426,52 +427,19 @@ inline std::string RecoveryCLI::escape_csv_field(const std::string& value) {
 
 inline bool RecoveryCLI::export_data(const std::string& output_path, const std::string& format,
                                      const std::vector<std::map<std::string, std::string>>& records) {
+    std::vector<std::string> headers;
+    if (!records.empty()) {
+        headers.reserve(records.front().size());
+        for (const auto& [key, value] : records.front()) {
+            (void)value;
+            headers.push_back(key);
+        }
+    }
     if (format == "csv") {
-        std::ofstream file(output_path);
-        if (!file) return false;
-
-        // 写入表头
-        if (!records.empty()) {
-            bool first = true;
-            for (const auto& kv : records[0]) {
-                if (!first) file << ",";
-                file << kv.first;
-                first = false;
-            }
-            file << "\n";
-
-            // 写入数据 - 使用CSV转义
-            for (const auto& record : records) {
-                first = true;
-                for (const auto& kv : record) {
-                    if (!first) file << ",";
-                    file << escape_csv_field(kv.second);
-                    first = false;
-                }
-                file << "\n";
-            }
-        }
-        return true;
-    } else if (format == "json") {
-        std::ofstream file(output_path);
-        if (!file) return false;
-
-        file << "[\n";
-        for (size_t i = 0; i < records.size(); ++i) {
-            const auto& record = records[i];
-            file << "  {";
-            bool first = true;
-            for (const auto& kv : record) {
-                if (!first) file << ", ";
-                file << "\"" << kv.first << "\": \"" << kv.second << "\"";
-                first = false;
-            }
-            file << "}";
-            if (i < records.size() - 1) file << ",";
-            file << "\n";
-        }
-        file << "]\n";
-        return true;
+        return exporter::Exporter::export_to_csv(records, headers, output_path);
+    }
+    if (format == "json") {
+        return exporter::Exporter::export_to_json(records, output_path);
     }
     return false;
 }
@@ -480,27 +448,44 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     const std::string result_json_path = parser_.get_option("result-json", "");
     std::optional<dbrecovery::tools::UnifiedRecoveryResult> unified_result;
     auto write_result_json = [&](nlohmann::json result) {
-        if (unified_result.has_value()) {
-            const auto& unified = unified_result.value();
-            const auto contract = result_contract_from_unified(unified, "recovered_table");
-            const auto canonical = nlohmann::json::parse(result_contract_json(contract));
-            for (const auto& item : canonical.items()) {
-                result[item.key()] = item.value();
-            }
-        }
         if (result_json_path.empty()) {
             return true;
         }
 
-        result["format_version"] = 2;
-        if (!result.contains("success")) result["success"] = false;
-        if (!result.contains("schema_source")) result["schema_source"] = "EVIDENCE_ONLY";
-        if (!result.contains("schema_trust_level")) result["schema_trust_level"] = "EVIDENCE_ONLY";
-        if (!result.contains("damage_level")) result["damage_level"] = "NONE";
-        if (!result.contains("recovery_method")) result["recovery_method"] = "legacy";
-        if (!result.contains("ddl_variation_detected")) result["ddl_variation_detected"] = false;
-        if (!result.contains("export_success")) result["export_success"] = false;
-        if (!result.contains("export_rejection_reason")) result["export_rejection_reason"] = "";
+        const std::string explicit_table = parser_.get_option("table-name", "");
+        const std::string input_ibd = parser_.get_option("ibd", "");
+        const std::string input_source = !input_ibd.empty()
+            ? input_ibd : parser_.get_option("device-path", "");
+        std::string fallback_table = explicit_table;
+        if (fallback_table.empty() && !input_ibd.empty()) {
+            try {
+                fallback_table = fs::path(input_ibd).stem().string();
+            } catch (...) {
+            }
+        }
+        if (fallback_table.empty()) fallback_table = "recovered_table";
+
+        const ResultContract contract = unified_result.has_value()
+            ? result_contract_from_unified(
+                  *unified_result, fallback_table, input_source)
+            : result_contract_from_legacy(result, fallback_table, input_source);
+        nlohmann::json output = result_contract_object(contract);
+
+        static const std::set<std::string> canonical_keys = {
+            "format_version", "table_name", "success", "classification",
+            "structured_rows", "evidence_fragments", "schema_source",
+            "schema_trust_level", "damage_level", "recovery_method",
+            "ddl_variation_detected", "export_success",
+            "export_rejection_reason", "total_pages_scanned", "damaged_pages",
+            "checksum_mismatches", "header_damage_pages", "importable", "reason",
+            "source_ibd"
+        };
+        nlohmann::json details = nlohmann::json::object();
+        for (const auto& [key, value] : result.items()) {
+            if (!canonical_keys.contains(key)) details[key] = value;
+        }
+        if (!details.empty()) output["details"] = std::move(details);
+
         try {
             const fs::path path(result_json_path);
             if (!path.parent_path().empty()) {
@@ -511,7 +496,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::cerr << "[ERROR] Cannot write result JSON: " << result_json_path << "\n";
                 return false;
             }
-            file << result.dump(2) << "\n";
+            file << output.dump(2) << "\n";
             if (!file) {
                 std::cerr << "[ERROR] Failed to write result JSON: " << result_json_path << "\n";
                 return false;
@@ -2157,8 +2142,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cout << "[INFO] Attempting encrypted keyring with password\n";
             loaded = keyring_parser.parse_encrypted_keyring(keyring_file, tde_password);
             if (!loaded) {
-                std::cerr << "[ERROR] Failed to load encrypted keyring: "
-                          << keyring_parser.get_last_error() << "\n";
+                const std::string reason = "failed to load encrypted keyring: " +
+                    keyring_parser.get_last_error();
+                std::cerr << "[ERROR] " << reason << "\n";
+                if (!write_result_json({
+                        {"mode", "tde_keyring"},
+                        {"classification", "operational_error"},
+                        {"structured_rows", 0},
+                        {"evidence_fragments", 0},
+                        {"reason", reason}})) {
+                    return 1;
+                }
                 return 1;
             }
         } else {
@@ -2207,8 +2201,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
             }
         } else {
-            std::cerr << "[ERROR] Failed to load keyring: "
-                      << keyring_parser.get_last_error() << "\n";
+            const std::string reason = "failed to load keyring: " +
+                keyring_parser.get_last_error();
+            std::cerr << "[ERROR] " << reason << "\n";
+            if (!write_result_json({
+                    {"mode", "tde_keyring"},
+                    {"classification", "operational_error"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"reason", reason}})) {
+                return 1;
+            }
             return 1;
         }
     }
@@ -3043,18 +3046,31 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
     }
 
-    if (ibd_path.empty()) {
-        show_help(argv[0]);
+    if (ibd_path.empty() || !fs::is_regular_file(ibd_path)) {
+        const std::string reason = ibd_path.empty()
+            ? "--ibd is required"
+            : "cannot open input IBD file";
+        const std::string explicit_table = parser_.get_option("table-name", "");
+        std::string derived_table = explicit_table;
+        if (derived_table.empty() && !ibd_path.empty()) {
+            try { derived_table = fs::path(ibd_path).stem().string(); } catch (...) {}
+        }
+        dbrecovery::tools::UnifiedRecoveryResult failure;
+        failure.table_name = derived_table.empty() ? "recovered_table" : derived_table;
+        failure.source_ibd = ibd_path;
+        failure.damage_level = common::DamageLevel::L4_CRITICAL;
+        failure.recovery_method = "none";
+        failure.result_classification = "operational_error";
+        failure.export_rejection_reason = reason;
+        failure.schema_source = "EVIDENCE_ONLY";
+        failure.trust_level = "EVIDENCE_ONLY";
+        unified_result = std::move(failure);
+        std::cerr << "[ERROR] " << reason;
+        if (!ibd_path.empty()) std::cerr << ": " << ibd_path;
+        std::cerr << "\n";
+        if (!write_result_json({})) return 1;
         return 1;
     }
-
-    // 检查文件是否存在
-    std::ifstream f(ibd_path);
-    if (!f.good()) {
-        std::cerr << "[ERROR] Cannot open file: " << ibd_path << "\n";
-        return 1;
-    }
-    f.close();
 
     // 创建输出目录
     try {
@@ -4014,6 +4030,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 schema_str, frm_path, table_id, system_tablespace,
                 repair_flag, false, verbose, schema_file_path);
             unified_result = ures;
+            unified_result_ = ures;
             recovered_records.clear();
             recovered_column_order.clear();
             for (auto &r : ures.records) {
@@ -4891,6 +4908,43 @@ inline void RecoveryCLI::generate_recovery_report(
     builder.set_output(output);
 
     auto report = builder.build();
+
+    std::string report_table = parser_.get_option("table-name", "");
+    const std::string report_source = parser_.get_option(
+        "ibd", parser_.get_option("device-path", ""));
+    if (report_table.empty() && !report_source.empty()) {
+        try {
+            report_table = fs::path(report_source).stem().string();
+        } catch (...) {
+        }
+    }
+    if (report_table.empty()) report_table = "recovered_table";
+
+    if (unified_result_.has_value()) {
+        report.result_contract = result_contract_from_unified(
+            *unified_result_, report_table, report_source);
+    } else {
+        nlohmann::json contract_input = {
+            {"table_name", report_table},
+            {"success", stats_.records_recovered > 0},
+            {"classification", stats_.records_recovered > 0
+                ? "structured_recovery" : "forensic_evidence"},
+            {"structured_rows", stats_.records_recovered},
+            {"evidence_fragments", stats_.orphan_pages},
+            {"schema_source", input.schema_source.empty() ? "EVIDENCE_ONLY" : input.schema_source},
+            {"schema_trust_level", input.has_schema ? "TRUSTED" : "EVIDENCE_ONLY"},
+            {"recovery_method", recovery_type},
+            {"export_success", stats_.records_recovered > 0},
+            {"total_pages_scanned", stats_.total_pages_scanned},
+            {"damaged_pages", stats_.orphan_pages},
+            {"reason", stats_.records_recovered > 0
+                ? "structured rows recovered; independent validation is required before import"
+                : "evidence-empty: no structured rows recovered"},
+            {"source_ibd", report_source}
+        };
+        report.result_contract = result_contract_from_legacy(
+            contract_input, report_table, report_source);
+    }
 
     std::string base_path = report_p.empty() ? output_dir + "/recovery_report" : report_p;
     auto written = report.write_files(base_path, report_fmt);
