@@ -45,6 +45,7 @@
 #include "dbrecovery/report/recovery_report.hpp"
 #include "dbrecovery/validate/unified_validator.hpp"
 #include "dbrecovery/tools/unified_recovery.hpp"
+#include "dbrecovery/tools/result_contract.hpp"
 #include "dbrecovery/innodb/partition_table_recovery.hpp"
 #include "dbrecovery/innodb/shared_tablespace_recovery.hpp"
 #include "dbrecovery/innodb/ddl_change_detector.hpp"
@@ -477,12 +478,29 @@ inline bool RecoveryCLI::export_data(const std::string& output_path, const std::
 
 inline int RecoveryCLI::run(int argc, char** argv) {
     const std::string result_json_path = parser_.get_option("result-json", "");
+    std::optional<dbrecovery::tools::UnifiedRecoveryResult> unified_result;
     auto write_result_json = [&](nlohmann::json result) {
+        if (unified_result.has_value()) {
+            const auto& unified = unified_result.value();
+            const auto contract = result_contract_from_unified(unified, "recovered_table");
+            const auto canonical = nlohmann::json::parse(result_contract_json(contract));
+            for (const auto& item : canonical.items()) {
+                result[item.key()] = item.value();
+            }
+        }
         if (result_json_path.empty()) {
             return true;
         }
 
-        result["format_version"] = 1;
+        result["format_version"] = 2;
+        if (!result.contains("success")) result["success"] = false;
+        if (!result.contains("schema_source")) result["schema_source"] = "EVIDENCE_ONLY";
+        if (!result.contains("schema_trust_level")) result["schema_trust_level"] = "EVIDENCE_ONLY";
+        if (!result.contains("damage_level")) result["damage_level"] = "NONE";
+        if (!result.contains("recovery_method")) result["recovery_method"] = "legacy";
+        if (!result.contains("ddl_variation_detected")) result["ddl_variation_detected"] = false;
+        if (!result.contains("export_success")) result["export_success"] = false;
+        if (!result.contains("export_rejection_reason")) result["export_rejection_reason"] = "";
         try {
             const fs::path path(result_json_path);
             if (!path.parent_path().empty()) {
@@ -3912,7 +3930,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 if (field.type == dbrecovery::innodb::IndexFieldValue::Type::NULL_VAL) {
                     record_map[field_name] = "NULL";
                 } else if (!field.str_value.empty()) {
-                    // str_value contains the decoded value (text, UNHEX format, etc.)
+                    // str_value contains the decoded canonical value.
                     record_map[field_name] = field.str_value;
                 } else if (field.type == dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL) {
                     // STRING_VAL with empty str_value = empty string (e.g. empty SET)
@@ -3920,11 +3938,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 } else if (!field.raw_bytes.empty()) {
                     // raw_bytes fallback for non-string types
                     std::ostringstream hex_ss;
-                    hex_ss << "UNHEX('";
-                    for (uint8_t b : field.raw_bytes) {
+                                        for (uint8_t b : field.raw_bytes) {
                         hex_ss << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(b);
                     }
-                    hex_ss << "')";
                     record_map[field_name] = hex_ss.str();
                 } else {
                     // Numeric types - use to_string()
@@ -3996,18 +4012,25 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             auto ures = dbrecovery::tools::run_unified_recovery(
                 ibd_path, output_dir, unified_table, format, page_size,
                 schema_str, frm_path, table_id, system_tablespace,
-                repair_flag, false, verbose);
+                repair_flag, false, verbose, schema_file_path);
+            unified_result = ures;
             recovered_records.clear();
             recovered_column_order.clear();
             for (auto &r : ures.records) {
                 std::map<std::string,std::string> m;
                 for (size_t k = 0; k < r.fields.size(); ++k) {
-                    m["col" + std::to_string(k)] = r.fields[k];
+                    const std::string field_name = k < ures.column_names.size()
+                        ? ures.column_names[k]
+                        : (std::string("field_") + (k < 10 ? "000" : k < 100 ? "00" : k < 1000 ? "0" : "") + std::to_string(k));
+                    m[field_name] = r.fields[k];
                 }
                 recovered_records.push_back(std::move(m));
             }
-            if (!recovered_records.empty()) {
-                for (auto &kv : recovered_records.front()) recovered_column_order.push_back(kv.first);
+            if (!ures.column_names.empty()) {
+                recovered_column_order = ures.column_names;
+            } else if (!recovered_records.empty()) {
+                for (const auto &kv : recovered_records.front())
+                    recovered_column_order.push_back(kv.first);
             }
             if (!ures.evidence_fragments.empty() && verbose) {
                 std::cout << "[INFO] Unified salvage: " << ures.evidence_fragments.size()
@@ -4550,6 +4573,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         const std::string reason = "failed to write requested recovery output";
         if (!write_result_json({
                 {"mode", "recovery"},
+                {"success", false},
                 {"classification", "operational_error"},
                 {"structured_rows", recovered_records.size()},
                 {"evidence_fragments", 0},

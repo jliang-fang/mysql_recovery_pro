@@ -1,7 +1,9 @@
 #include "dbrecovery/tools/unified_recovery.hpp"
+#include "dbrecovery/tools/result_contract.hpp"
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/recovery/strategy_recommender.hpp"
 #include "dbrecovery/recovery/parallel_exporter.hpp"
+#include "dbrecovery/export/data_exporter.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
 #include "dbrecovery/common/damage_level.hpp"
 #include "dbrecovery/innodb/ddl_change_detector.hpp"
@@ -15,6 +17,7 @@
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 #include "dbrecovery/innodb/offline_keyring_parser.hpp"
 #include "dbrecovery/common/mysql_version_detector.hpp"
+#include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/salvage/secondary_index_rescuer.hpp"
 #include "dbrecovery/innodb.h"
 #include <filesystem>
@@ -23,10 +26,304 @@
 #include <chrono>
 #include <set>
 #include <unordered_set>
+#include <algorithm>
+#include <cctype>
+#include <iomanip>
+#include <limits>
 
 namespace fs = std::filesystem;
 namespace dbrecovery {
 namespace tools {
+namespace {
+
+std::string trim_schema_token(std::string value) {
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) value.erase(value.begin());
+    while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) value.pop_back();
+    return value;
+}
+
+std::vector<std::string> split_schema_columns(const std::string& schema) {
+    std::vector<std::string> columns;
+    std::string current;
+    int depth = 0;
+    for (char c : schema) {
+        if (c == '(') ++depth;
+        else if (c == ')') --depth;
+        if (c == ',' && depth == 0) {
+            if (!trim_schema_token(current).empty()) columns.push_back(trim_schema_token(current));
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!trim_schema_token(current).empty()) columns.push_back(trim_schema_token(current));
+    return columns;
+}
+
+std::string json_escape(const std::string& value) {
+    std::ostringstream out;
+    for (unsigned char c : value) {
+        switch (c) {
+            case '"': out << "\\\""; break;
+            case '\\': out << "\\\\"; break;
+            case '\b': out << "\\b"; break;
+            case '\f': out << "\\f"; break;
+            case '\n': out << "\\n"; break;
+            case '\r': out << "\\r"; break;
+            case '\t': out << "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    out << "\\u" << std::hex << std::setw(4)
+                        << std::setfill('0') << static_cast<unsigned>(c)
+                        << std::dec;
+                } else {
+                    out << static_cast<char>(c);
+                }
+        }
+    }
+    return out.str();
+}
+
+std::vector<std::string> parse_enum_values(const std::string& value) {
+    std::vector<std::string> values;
+    std::string current;
+    char quote = 0;
+    for (char c : value) {
+        if ((c == '\'' || c == '"') && (quote == 0 || quote == c)) {
+            if (quote == 0) quote = c;
+            else quote = 0;
+        } else if (c == ',' && quote == 0) {
+            values.push_back(trim_schema_token(current));
+            current.clear();
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!trim_schema_token(current).empty()) values.push_back(trim_schema_token(current));
+    for (auto& item : values) {
+        item = trim_schema_token(item);
+        if (item.size() >= 2 && ((item.front() == '\'' && item.back() == '\'') ||
+                                 (item.front() == '"' && item.back() == '"'))) {
+            item = item.substr(1, item.size() - 2);
+        }
+    }
+    return values;
+}
+
+bool parse_user_schema(const std::string& schema,
+                       std::vector<innodb::IndexColumnDef>& columns,
+                       uint32_t& primary_key_columns) {
+    if (schema.empty()) return false;
+    for (const auto& definition : split_schema_columns(schema)) {
+        std::vector<std::string> parts;
+        if (definition.find(':') != std::string::npos) {
+            std::istringstream stream(definition);
+            std::string part;
+            while (std::getline(stream, part, ':')) parts.push_back(trim_schema_token(part));
+        } else {
+            std::istringstream stream(definition);
+            std::string part;
+            while (stream >> part) parts.push_back(part);
+        }
+        if (parts.size() < 2) continue;
+
+        innodb::IndexColumnDef column;
+        column.name = trim_schema_token(parts[0]);
+        std::string type = parts[1];
+        std::string type_upper = type;
+        std::transform(type_upper.begin(), type_upper.end(), type_upper.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        const auto open = type_upper.find('(');
+        std::string args;
+        if (open != std::string::npos) {
+            const auto close = type_upper.rfind(')');
+            if (close != std::string::npos && close > open) args = type.substr(open + 1, close - open - 1);
+            type_upper = trim_schema_token(type_upper.substr(0, open));
+        }
+        column.mb_minlen = 1;
+        column.mb_maxlen = 1;
+        if (type_upper == "TINYINT") { column.col_type = 2; column.col_length = 1; }
+        else if (type_upper == "SMALLINT") { column.col_type = 3; column.col_length = 2; }
+        else if (type_upper == "MEDIUMINT") { column.col_type = 10; column.col_length = 3; }
+        else if (type_upper == "INT" || type_upper == "INTEGER") { column.col_type = 4; column.col_length = 4; }
+        else if (type_upper == "BIGINT") { column.col_type = 9; column.col_length = 8; }
+        else if (type_upper == "FLOAT") { column.col_type = 5; column.col_length = 4; }
+        else if (type_upper == "DOUBLE") { column.col_type = 6; column.col_length = 8; }
+        else if (type_upper == "DECIMAL" || type_upper == "NUMERIC") {
+            column.col_type = 21;
+            const auto comma = args.find(',');
+            try {
+                column.precision = static_cast<uint16_t>(std::stoul(args.substr(0, comma)));
+                column.col_length = column.decimal_storage_size();
+                if (comma != std::string::npos) column.scale = static_cast<uint16_t>(std::stoul(args.substr(comma + 1)));
+                column.col_length = column.decimal_storage_size();
+            } catch (...) {}
+        } else if (type_upper == "DATETIME" || type_upper == "DATETIME2") {
+            column.col_type = 19; column.col_length = 5;
+            if (!args.empty()) { try { column.datetime_precision = static_cast<uint8_t>(std::stoul(args)); } catch (...) {} }
+        } else if (type_upper == "TIMESTAMP" || type_upper == "TIMESTAMP2") {
+            column.col_type = 18; column.col_length = 4;
+            if (!args.empty()) { try { column.datetime_precision = static_cast<uint8_t>(std::stoul(args)); } catch (...) {} }
+        } else if (type_upper == "TIME" || type_upper == "TIME2") {
+            column.col_type = 20; column.col_length = 3;
+            if (!args.empty()) { try { column.datetime_precision = static_cast<uint8_t>(std::stoul(args)); } catch (...) {} }
+        } else if (type_upper == "DATE") { column.col_type = 15; column.col_length = 3; }
+        else if (type_upper == "YEAR") { column.col_type = 14; column.col_length = 1; }
+        else if (type_upper == "VARCHAR") {
+            column.col_type = 16; column.col_length = args.empty() ? 255 : static_cast<uint32_t>(std::stoul(args));
+            column.is_big = column.col_length * column.mb_maxlen > 255;
+        } else if (type_upper == "CHAR") {
+            column.col_type = 29; column.col_length = args.empty() ? 1 : static_cast<uint32_t>(std::stoul(args));
+            column.is_big = column.col_length * column.mb_maxlen > 255;
+        } else if (type_upper == "VARBINARY") {
+            column.col_type = 16; column.col_length = args.empty() ? 255 : static_cast<uint32_t>(std::stoul(args));
+            column.is_binary = true; column.mb_maxlen = 1; column.is_big = column.col_length > 255;
+        } else if (type_upper == "BINARY") {
+            column.col_type = 29; column.col_length = args.empty() ? 1 : static_cast<uint32_t>(std::stoul(args));
+            column.is_binary = true; column.mb_maxlen = 1; column.is_big = column.col_length > 255;
+        } else if (type_upper == "TINYTEXT" || type_upper == "TEXT" || type_upper == "MEDIUMTEXT" || type_upper == "LONGTEXT" || type_upper == "BLOB") {
+            column.col_type = 27; column.col_length = 65535; column.is_big = true;
+            column.is_binary = type_upper == "BLOB";
+        } else if (type_upper == "JSON") {
+            column.col_type = 31; column.col_length = 0xffffffffU; column.is_big = true;
+        } else if (type_upper == "ENUM") {
+            column.col_type = 22; column.col_length = 1; column.enum_values = parse_enum_values(args);
+        } else if (type_upper == "SET") {
+            column.col_type = 23; column.col_length = 1; column.set_values = parse_enum_values(args);
+        } else {
+            return false;
+        }
+
+        column.is_nullable = true;
+        for (size_t i = 2; i < parts.size(); ++i) {
+            std::string flag = parts[i];
+            std::transform(flag.begin(), flag.end(), flag.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (flag == "pk" || flag == "key" || flag.find("primary key") != std::string::npos) {
+                column.is_nullable = false; ++primary_key_columns;
+            } else if (flag == "notnull" || flag == "not_null" || flag.find("not null") != std::string::npos) {
+                column.is_nullable = false;
+            } else if (flag == "unsigned" || flag.find(" unsigned") != std::string::npos) {
+                column.is_unsigned = true;
+            }
+        }
+        std::string definition_lower = definition;
+        std::transform(definition_lower.begin(), definition_lower.end(), definition_lower.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (definition_lower.find("utf8mb4") != std::string::npos) {
+            column.mb_minlen = 1;
+            column.mb_maxlen = 4;
+        } else if (definition_lower.find("utf8mb3") != std::string::npos ||
+                   definition_lower.find("utf8") != std::string::npos) {
+            column.mb_minlen = 1;
+            column.mb_maxlen = 3;
+        } else if (definition_lower.find("ucs2") != std::string::npos) {
+            column.mb_minlen = 2;
+            column.mb_maxlen = 2;
+        } else if (definition_lower.find("utf16") != std::string::npos) {
+            column.mb_minlen = 2;
+            column.mb_maxlen = 4;
+        } else if (definition_lower.find("utf32") != std::string::npos) {
+            column.mb_minlen = 4;
+            column.mb_maxlen = 4;
+        } else if (definition_lower.find("binary") != std::string::npos) {
+            column.mb_minlen = 1;
+            column.mb_maxlen = 1;
+            column.is_binary = true;
+        }
+        if (definition_lower.find("primary key") != std::string::npos) {
+            if (column.is_nullable) ++primary_key_columns;
+            column.is_nullable = false;
+        }
+        if (definition_lower.find("not null") != std::string::npos) column.is_nullable = false;
+        if (definition_lower.find("unsigned") != std::string::npos) column.is_unsigned = true;
+        column.physical_pos = static_cast<uint32_t>(columns.size() + 1);
+        column.ordinal_position = static_cast<uint32_t>(columns.size());
+        columns.push_back(std::move(column));
+    }
+    if (primary_key_columns == 0 && !columns.empty()) {
+        primary_key_columns = 1;
+        columns.front().is_nullable = false;
+    }
+    return !columns.empty();
+}
+
+bool load_schema_file(const std::string& path, catalog::TableSchema& schema) {
+    if (path.empty()) return false;
+    std::ifstream file(path);
+    if (!file) return false;
+    try {
+        std::string content((std::istreambuf_iterator<char>(file)),
+                            std::istreambuf_iterator<char>());
+        schema = catalog::TableSchema{};
+        return schema.from_json(nlohmann::json::parse(content));
+    } catch (...) {
+        return false;
+    }
+}
+
+uint32_t charset_max_length(uint32_t charset_id) {
+    switch (charset_id) {
+        case 33: case 83: case 224: return 3;
+        case 45: case 46: case 94: case 255: return 4;
+        default: return 1;
+    }
+}
+
+bool convert_schema(const catalog::TableSchema& schema,
+                    std::vector<innodb::IndexColumnDef>& columns,
+                    uint32_t& primary_key_columns) {
+    columns.clear();
+    primary_key_columns = 0;
+    for (const auto& entry : schema.columns) {
+        const auto& source = entry.second;
+        if (source.name == "DB_TRX_ID" || source.name == "DB_ROLL_PTR" ||
+            source.name == "DB_ROW_ID") continue;
+        innodb::IndexColumnDef column;
+        column.name = source.name;
+        column.col_type = static_cast<uint8_t>(source.mysql_type_id);
+        column.col_length = source.column_length;
+        column.is_nullable = source.is_nullable;
+        column.is_unsigned = !source.is_signed;
+        column.char_set_id = source.charset_id;
+        column.is_binary = source.charset_id == 63 || source.collation_id == 63;
+        column.precision = source.numeric_precision > 0
+            ? static_cast<uint16_t>(source.numeric_precision) : 0;
+        column.scale = source.numeric_scale > 0
+            ? static_cast<uint16_t>(source.numeric_scale) : 0;
+        column.datetime_precision = source.datetime_precision >= 0
+            ? static_cast<uint8_t>(source.datetime_precision) : 0;
+        column.mb_minlen = 1;
+        column.mb_maxlen = charset_max_length(source.charset_id);
+        column.is_big = column.col_length * column.mb_maxlen > 255;
+        column.enum_values = source.enum_values;
+        column.set_values = source.set_values;
+        column.ordinal_position = source.ordinal ? source.ordinal : entry.first;
+        column.physical_pos = source.physical_pos ? source.physical_pos : entry.first;
+        columns.push_back(std::move(column));
+    }
+    if (columns.empty()) return false;
+    std::sort(columns.begin(), columns.end(), [](const auto& left, const auto& right) {
+        return left.physical_pos < right.physical_pos;
+    });
+    for (const auto& index : schema.indexes) {
+        if (!index.is_primary) continue;
+        for (const auto& name : index.columns) {
+            if (std::any_of(columns.begin(), columns.end(), [&](const auto& column) {
+                    return column.name == name;
+                })) {
+                ++primary_key_columns;
+            }
+        }
+    }
+    if (primary_key_columns == 0) {
+        primary_key_columns = 1;
+        columns.front().is_nullable = false;
+    }
+    return true;
+}
+
+} // namespace
 
 UnifiedRecoveryResult run_unified_recovery(
     const std::string& ibd_path,
@@ -40,7 +337,8 @@ UnifiedRecoveryResult run_unified_recovery(
     const std::string& system_tablespace,
     bool repair,
     bool schemaless_recovery,
-    bool verbose) {
+    bool verbose,
+    const std::string& schema_file_path) {
     UnifiedRecoveryResult result;
     (void)repair;
     auto start = std::chrono::high_resolution_clock::now();
@@ -57,14 +355,15 @@ UnifiedRecoveryResult run_unified_recovery(
         }
     } catch (...) {}
 
+    bool pipeline_allowed = true;
     if (ibd_path.empty() || !fs::exists(ibd_path)) {
         result.damage_level = common::DamageLevel::L4_CRITICAL;
         result.recovery_method = "none";
-        goto build_report;
+        pipeline_allowed = false;
     }
 
     // TDE candidate gate — keep plaintext parse blocked for candidate inputs
-    {
+    if (pipeline_allowed) {
         std::ifstream in(ibd_path, std::ios::binary);
         if (in) {
             std::vector<uint8_t> p0(innodb::FIL_HEADER_SIZE + 45);
@@ -75,13 +374,13 @@ UnifiedRecoveryResult run_unified_recovery(
                 result.trust_level = "EVIDENCE_ONLY";
                 result.schema_source = "EVIDENCE_ONLY";
                 result.result_classification = "forensic_evidence";
-                goto build_report;
+                pipeline_allowed = false;
             }
         }
     }
 
     // Steps 2-6: Unified pipeline via InnoDBIndexParser + salvage fallbacks
-    {
+    if (pipeline_allowed) {
         uint32_t psize = page_size;
         if (psize == 0) {
             std::ifstream f(ibd_path, std::ios::binary);
@@ -93,6 +392,37 @@ UnifiedRecoveryResult run_unified_recovery(
             if (psize == 0) psize = 16384;
         }
         page_size = psize;
+
+        // Record damage evidence for every complete page before parsing rows.
+        {
+            std::ifstream df(ibd_path, std::ios::binary | std::ios::ate);
+            if (df) {
+                const auto file_size = static_cast<uint64_t>(df.tellg());
+                const uint64_t page_count = file_size / page_size;
+                df.seekg(0);
+                result.page_damage.reserve(static_cast<size_t>(std::min<uint64_t>(page_count, 1000000)));
+                for (uint64_t page_index = 0; page_index < page_count; ++page_index) {
+                    std::vector<uint8_t> page(psize);
+                    df.read(reinterpret_cast<char*>(page.data()), static_cast<std::streamsize>(page.size()));
+                    if (df.gcount() != static_cast<std::streamsize>(page.size())) break;
+                    const auto damage = recovery::SalvageEngine::assess_damage(page.data(), page.size());
+                    PageDamageEvidence evidence;
+                    evidence.page_no = damage.detected_page_no;
+                    evidence.page_offset = page_index * static_cast<uint64_t>(page_size);
+                    evidence.page_type = damage.detected_page_type;
+                    evidence.space_id = damage.detected_space_id;
+                    evidence.fil_header_valid = damage.fil_header_valid;
+                    evidence.page_header_valid = damage.page_header_valid;
+                    evidence.checksum_valid = damage.checksum_valid;
+                    evidence.damage_level = damage.level;
+                    evidence.diagnosis = damage.diagnosis;
+                    result.page_damage.push_back(std::move(evidence));
+                    if (static_cast<uint8_t>(damage.level) > static_cast<uint8_t>(result.damage_level)) {
+                        result.damage_level = damage.level;
+                    }
+                }
+            }
+        }
 
         // Version detection for schema gates
         MySQLVersion detected_version = MySQLVersion::UNKNOWN;
@@ -117,9 +447,23 @@ UnifiedRecoveryResult run_unified_recovery(
 
         // Priority: --schema string
         if (!schema_str.empty()) {
-            // Reuse FRM-style parsing via schema_defs if schema_str is JSON-like; otherwise treat as CSV col list
-            // Minimal: try to parse as provided elsewhere — caller already validated
-            have_schema = false;
+            uint32_t n_pk = 0;
+            have_schema = parse_user_schema(schema_str, index_columns, n_pk);
+            if (have_schema) {
+                parser.set_columns(index_columns, false, n_pk);
+                schema_source = "USER";
+            }
+        }
+        // JSON schema file
+        if (!have_schema && !schema_file_path.empty()) {
+            catalog::TableSchema schema;
+            uint32_t n_pk = 0;
+            if (load_schema_file(schema_file_path, schema) &&
+                convert_schema(schema, index_columns, n_pk)) {
+                parser.set_columns(index_columns, false, n_pk);
+                schema_source = "USER";
+                have_schema = true;
+            }
         }
         // FRM
         if (!have_schema && !frm_path.empty()) {
@@ -157,25 +501,22 @@ UnifiedRecoveryResult run_unified_recovery(
             (void)detected_version; (void)table_id;
         }
 
-        // Phase 1: IndexParser
-        bool use_streaming = false;
-        {
-            std::ifstream sf(ibd_path, std::ios::binary | std::ios::ate);
-            size_t fsz = sf.is_open() ? static_cast<size_t>(sf.tellg()) : 0;
-            use_streaming = (fsz > 100*1024*1024) && (format=="csv") && !schemaless_recovery;
+        result.column_names.clear();
+        if (!index_columns.empty()) {
+            result.column_names.reserve(index_columns.size());
+            for (size_t i = 0; i < index_columns.size(); ++i) {
+                result.column_names.push_back(index_columns[i].name.empty()
+                    ? "field_" + std::string(i < 10 ? "000" : i < 100 ? "00" : i < 1000 ? "0" : "") + std::to_string(i)
+                    : index_columns[i].name);
+            }
         }
+
+        // Phase 1: IndexParser
         std::vector<innodb::IndexRecord> all_recs;
         size_t total_recovered = 0;
-        if (use_streaming) {
-            fs::create_directories(output_dir);
-            std::string csv_path = output_dir + "/" + (table_name.empty()?"recovered_table":table_name) + ".csv";
-            total_recovered = parser.parse_ibd_force_streaming(ibd_path, csv_path, index_columns);
-            result.recovery_method = "index_parser_streaming";
-        } else {
-            all_recs = parser.parse_ibd_force(ibd_path);
-            total_recovered = all_recs.size();
-            result.recovery_method = "index_parser";
-        }
+        all_recs = parser.parse_ibd_force(ibd_path);
+        total_recovered = all_recs.size();
+        result.recovery_method = "index_parser";
 
         // Phase 1.5: TRUNCATE fallback
         if (total_recovered==0) {
@@ -276,7 +617,7 @@ UnifiedRecoveryResult run_unified_recovery(
 
         // Phase 4: Salvage for damaged pages — L1/L2 -> rows, L3/L4 -> evidence_fragments
         {
-            bool need_salvage = (total_recovered==0);
+            bool need_salvage = (total_recovered==0 || result.damage_level >= common::DamageLevel::L3_SEVERE);
             if (!need_salvage) {
                 // also probe damage level
                 std::ifstream f(ibd_path, std::ios::binary);
@@ -358,84 +699,105 @@ UnifiedRecoveryResult run_unified_recovery(
             if (verbose) { auto rr = rec.recommend("CORRUPTION"); (void)rr.to_text(); }
         } catch (...) {}
 
-        // Step 9: Export — ParallelExporter when large
-        if (!output_dir.empty() && result.total_recovered>0 && !use_streaming) {
+        // Step 9: Export — only authoritative structured rows may be exported.
+        if (result.total_recovered == 0) {
+            result.export_rejection_reason = "no_structured_rows";
+        } else if (result.trust_level != "AUTHORITATIVE" &&
+                   result.trust_level != "USER" && result.trust_level != "FRM") {
+            result.export_rejection_reason = "schema_trust_insufficient";
+        } else if (result.damage_level >= common::DamageLevel::L3_SEVERE) {
+            result.export_rejection_reason = "severe_or_critical_page_damage";
+        } else if (result.ddl_variation_detected) {
+            result.export_rejection_reason = "ddl_variation_detected";
+        } else if (!output_dir.empty()) {
             fs::create_directories(output_dir);
-            std::string tbl = table_name.empty() ? "recovered_table" : table_name;
-            bool use_parallel = (result.total_recovered > 50000);
-            // Write via SalvageEngine::export_csv or manual; keep simple manual here
-            // ParallelExporter path: if large, use exporter, else direct write
-            if (use_parallel) {
-                recovery::ParallelExporter::Config pc; pc.num_workers = 4;
-                recovery::ParallelExporter ex(pc);
-                std::vector<std::map<std::string,std::string>> maps;
-                maps.reserve(result.records.size());
-                for (auto &r: result.records) {
-                    std::map<std::string,std::string> m;
-                    for (size_t i=0;i<r.fields.size();++i) m["col"+std::to_string(i)] = r.fields[i];
-                    maps.push_back(std::move(m));
+            std::vector<std::map<std::string, std::string>> maps;
+            maps.reserve(result.records.size());
+            for (const auto& r : result.records) {
+                std::map<std::string, std::string> m;
+                for (size_t i = 0; i < r.fields.size(); ++i) {
+                    const std::string key = i < result.column_names.size()
+                        ? result.column_names[i]
+                        : "field_" + std::to_string(i);
+                    m[key] = r.fields[i];
                 }
-                // Derive cols from first record
-                std::vector<std::string> cols;
-                if (!maps.empty()) for (auto &kv: maps.front()) cols.push_back(kv.first);
-                std::string csv_path = output_dir + "/" + tbl + ".csv";
-                (void)ex; (void)cols; (void)csv_path;
-                // Fallback to simple export if ParallelExporter API mismatch — still produce CSV below
+                maps.push_back(std::move(m));
             }
-            // Simple CSV export (rows only)
-            {
-                std::string csv_path = output_dir + "/" + tbl + ".csv";
-                std::ofstream out(csv_path);
-                if (out) {
-                    // header
-                    if (!result.records.empty() && !result.records.front().fields.empty()) {
-                        for (size_t i=0;i<result.records.front().fields.size();++i) {
-                            if (i) out << ",";
-                            out << "col" << i;
-                        }
-                        out << "\n";
-                    }
-                    for (auto &r: result.records) {
-                        for (size_t i=0;i<r.fields.size();++i) {
-                            if (i) out << ",";
-                            std::string v=r.fields[i];
-                            if (v.find(',')!=std::string::npos || v.find('"')!=std::string::npos) {
-                                std::string e; e.reserve(v.size()+2);
-                                e.push_back('"');
-                                for (char c: v) { if (c=='"') e.push_back('"'); e.push_back(c); }
-                                e.push_back('"');
-                                out << e;
-                            } else out << v;
-                        }
-                        out << "\n";
-                    }
-                }
-            }
+            const std::string csv_path = output_dir + "/recovered.csv";
+            result.export_success = exporter::Exporter::export_to_csv(
+                maps, result.column_names, csv_path);
+            if (!result.export_success) result.export_rejection_reason = "csv_export_failed";
         }
     }
 
-build_report:
-    auto end = std::chrono::high_resolution_clock::now();
-    double secs = std::chrono::duration<double>(end - start).count();
-    try {
-        report::ReportBuilder rb;
-        rb.set_recovery_type("unified_recovery")
-          .set_status(result.success ? "SUCCESS" : "FORENSIC_EVIDENCE")
-          .set_input(report::InputInfo{ "ibd", ibd_path, 0, false, result.schema_source, false, false, {ibd_path}})
-          .set_strategy(report::StrategyInfo{ {result.recovery_method}, result.recovery_method, {}, {} })
-          .set_data(report::DataStats{ 0, 0, 0, 0, 0, 0, result.total_recovered, 0, 0, 0.0, 0, 0, 0, {}})
-          .set_timing(report::TimingInfo{ 0, 0, 0, secs });
-        if (!table_name.empty()) rb.add_ddl("TABLE " + table_name);
-        result.report = rb.build();
-    } catch (...) {}
     if (result.trust_level.empty()) result.trust_level = "EVIDENCE_ONLY";
     if (result.schema_source.empty()) result.schema_source = "EVIDENCE_ONLY";
     if (result.recovery_method.empty()) result.recovery_method = "none";
-    if (result.result_classification.empty()) result.result_classification = result.total_recovered>0 ? "structured_rows" : "forensic_evidence";
-    result.success = result.total_recovered > 0;
-    if (result.damage_level==common::DamageLevel::NONE && result.total_recovered==0) {
-        // keep as set, otherwise NONE is fine for success
+
+    const bool trusted_schema = result.trust_level == "AUTHORITATIVE" ||
+                                result.trust_level == "USER" ||
+                                result.trust_level == "FRM";
+    const bool structured_ready = result.total_recovered > 0 &&
+                                  trusted_schema &&
+                                  !result.ddl_variation_detected &&
+                                  result.damage_level < common::DamageLevel::L3_SEVERE;
+    if (structured_ready && result.export_rejection_reason.empty() && output_dir.empty()) {
+        result.export_success = true;
     }
+    if (!structured_ready && result.export_rejection_reason.empty()) {
+        if (result.total_recovered == 0) {
+            result.export_rejection_reason = "no_structured_rows";
+        } else if (!trusted_schema) {
+            result.export_rejection_reason = "schema_trust_insufficient";
+        } else if (result.damage_level >= common::DamageLevel::L3_SEVERE) {
+            result.export_rejection_reason = "severe_or_critical_page_damage";
+        } else if (result.ddl_variation_detected) {
+            result.export_rejection_reason = "ddl_variation_detected";
+        }
+    }
+    result.result_classification = structured_ready
+        ? "structured_recovery" : "forensic_evidence";
+    result.success = structured_ready && (output_dir.empty() || result.export_success);
+
+    auto end = std::chrono::high_resolution_clock::now();
+    double secs = std::chrono::duration<double>(end - start).count();
+    try {
+        uint32_t damaged_pages = 0;
+        uint32_t checksum_mismatches = 0;
+        uint32_t header_damage = 0;
+        for (const auto& page : result.page_damage) {
+            if (page.damage_level != common::DamageLevel::NONE) ++damaged_pages;
+            if (!page.checksum_valid) ++checksum_mismatches;
+            if (!page.fil_header_valid || !page.page_header_valid) ++header_damage;
+        }
+        report::DataStats data;
+        data.total_pages_scanned = result.page_damage.size();
+        data.corrupted_pages = damaged_pages;
+        data.skipped_pages = header_damage;
+        data.records_fully_recovered = result.total_recovered;
+        data.records_partially_recovered = result.evidence_fragments.size();
+        data.recovery_rate_percent = result.total_recovered > 0 ? 100.0 : 0.0;
+        report::ReportBuilder rb;
+        rb.set_recovery_type("unified_recovery")
+          .set_status(result.success ? "SUCCESS" : "FORENSIC_EVIDENCE")
+          .set_input(report::InputInfo{ "ibd", ibd_path, 0, trusted_schema,
+                                        result.schema_source, false, false, {ibd_path}})
+          .set_strategy(report::StrategyInfo{ {result.recovery_method}, result.recovery_method, {}, {} })
+          .set_data(data)
+          .set_timing(report::TimingInfo{ 0, 0, 0, secs });
+        if (checksum_mismatches > 0) {
+            rb.add_damage(report::DamageDetail{0, "checksum_mismatch",
+                                               std::to_string(checksum_mismatches) + " pages"});
+        }
+        if (header_damage > 0) {
+            rb.add_damage(report::DamageDetail{0, "header_damage",
+                                               std::to_string(header_damage) + " pages"});
+        }
+        if (!table_name.empty()) rb.add_ddl("TABLE " + table_name);
+        report::RecoveryReport built_report = rb.build();
+        built_report.result_contract = result_contract_from_unified(result, table_name, ibd_path);
+        result.report = std::move(built_report);
+    } catch (...) {}
     return result;
 }
 
@@ -445,24 +807,9 @@ bool write_unified_result_json(const std::string& output_dir,
     try {
         fs::create_directories(output_dir);
         std::string name = table_name.empty() ? "recovered_table" : table_name;
-        std::string path = output_dir + "/" + name + "_result.json";
-        std::ofstream out(path);
-        if (!out) return false;
-        out << "{\n";
-        out << "  \"format_version\": 1,\n";
-        out << "  \"table_name\": \"" << name << "\",\n";
-        out << "  \"success\": " << (result.success ? "true" : "false") << ",\n";
-        out << "  \"classification\": \"" << result.result_classification << "\",\n";
-        out << "  \"structured_rows\": " << result.total_recovered << ",\n";
-        out << "  \"evidence_fragments\": " << result.evidence_fragments.size() << ",\n";
-        out << "  \"schema_source\": \"" << result.schema_source << "\",\n";
-        out << "  \"schema_trust_level\": \"" << result.trust_level << "\",\n";
-        out << "  \"damage_level\": \"" << common::damage_level_to_string(result.damage_level) << "\",\n";
-        out << "  \"recovery_method\": \"" << result.recovery_method << "\",\n";
-        out << "  \"ddl_variation_detected\": " << (result.ddl_variation_detected ? "true" : "false") << ",\n";
-        out << "  \"importable\": " << (result.total_recovered > 0 ? "true" : "false") << "\n";
-        out << "}\n";
-        return true;
+        const std::string path = output_dir + "/" + name + "_result.json";
+        return write_result_contract_json(
+            path, result_contract_from_unified(result, name));
     } catch (...) { return false; }
 }
 

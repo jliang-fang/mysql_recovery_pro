@@ -120,6 +120,28 @@ static std::string fmt_num(uint64_t n) {
 std::string RecoveryReport::to_json() const {
     std::ostringstream oss;
     oss << "{\n";
+    if (result_contract.has_value()) {
+        oss << "  \"format_version\": 2,\n";
+        oss << "  \"table_name\": \"" << json_escape(result_contract->table_name) << "\",\n";
+        oss << "  \"success\": " << (result_contract->success ? "true" : "false") << ",\n";
+        oss << "  \"classification\": \"" << json_escape(result_contract->classification) << "\",\n";
+        oss << "  \"structured_rows\": " << result_contract->structured_rows << ",\n";
+        oss << "  \"evidence_fragments\": " << result_contract->evidence_fragments << ",\n";
+        oss << "  \"schema_source\": \"" << json_escape(result_contract->schema_source) << "\",\n";
+        oss << "  \"schema_trust_level\": \"" << json_escape(result_contract->schema_trust_level) << "\",\n";
+        oss << "  \"damage_level\": \"" << json_escape(common::damage_level_to_string(result_contract->damage_level)) << "\",\n";
+        oss << "  \"recovery_method\": \"" << json_escape(result_contract->recovery_method) << "\",\n";
+        oss << "  \"ddl_variation_detected\": " << (result_contract->ddl_variation_detected ? "true" : "false") << ",\n";
+        oss << "  \"export_success\": " << (result_contract->export_success ? "true" : "false") << ",\n";
+        oss << "  \"export_rejection_reason\": \"" << json_escape(result_contract->export_rejection_reason) << "\",\n";
+        oss << "  \"total_pages_scanned\": " << result_contract->total_pages_scanned << ",\n";
+        oss << "  \"damaged_pages\": " << result_contract->damaged_pages << ",\n";
+        oss << "  \"checksum_mismatches\": " << result_contract->checksum_mismatches << ",\n";
+        oss << "  \"header_damage_pages\": " << result_contract->header_damage_pages << ",\n";
+        oss << "  \"importable\": false,\n";
+        oss << "  \"reason\": \"" << json_escape(result_contract->reason) << "\",\n";
+        oss << "  \"source_ibd\": \"" << json_escape(result_contract->source_ibd) << "\",\n";
+    }
     oss << "  \"report_id\": \"" << json_escape(report_id) << "\",\n";
     oss << "  \"report_time\": \"" << json_escape(report_time) << "\",\n";
     oss << "  \"recovery_type\": \"" << json_escape(recovery_type) << "\",\n";

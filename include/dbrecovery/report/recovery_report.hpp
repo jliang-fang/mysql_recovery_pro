@@ -21,8 +21,10 @@
 #include <iomanip>
 #include <fstream>
 #include <filesystem>
+#include <optional>
 
 #include "dbrecovery/common/version_compat.hpp"
+#include "dbrecovery/tools/result_contract.hpp"
 
 namespace dbrecovery {
 namespace report {
@@ -219,6 +221,7 @@ struct RecoveryReport {
     std::vector<std::string> reconstructed_ddl;
     OutputInfo output;
     TimingInfo timing;
+    std::optional<tools::ResultContract> result_contract;
 
     static std::string generate_report_id();
     static std::string format_time(const std::chrono::system_clock::time_point& tp);

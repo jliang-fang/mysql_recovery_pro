@@ -27,9 +27,6 @@ bool CSVExporter::export_record(const std::map<std::string, std::string>& record
         if (it != record.end()) {
             // 处理 NULL 值
             std::string value = it->second;
-            // CRITICAL FIX: Remove NUL bytes from value to prevent CSV corruption
-            value.erase(std::remove(value.begin(), value.end(), '\0'), value.end());
-
             if (value == "NULL") {
                 oss << "";  // CSV 中 NULL 表示为空字符串
             } else {

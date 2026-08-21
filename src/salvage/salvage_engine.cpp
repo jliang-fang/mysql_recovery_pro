@@ -6,6 +6,7 @@
  */
 
 #include "dbrecovery/recovery/salvage_engine.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -181,7 +182,8 @@ DamageReport SalvageEngine::assess_damage(const uint8_t* data, size_t size) {
                          static_cast<uint32_t>(data[size - 5]);
     }
 
-    report.checksum_valid = (stored_checksum == trailing_cksum && stored_checksum != 0);
+    // Validate both legacy and algorithm-tagged InnoDB page checksums.
+    report.checksum_valid = innodb::validate_page_checksum(data, size, false).is_valid;
 
     // Check LSN validity at trailing position
     uint64_t trailing_lsn = 0;

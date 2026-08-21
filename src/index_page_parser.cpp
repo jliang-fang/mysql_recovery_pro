@@ -1522,7 +1522,8 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
 
         auto field_meta = read_null_and_varsizes(
             page_data, page_size, reverse_start, data_end,
-            n_nullable_, n_variable_, columns_);
+            n_nullable_, n_variable_, columns_,
+            row_format_hint_);
 
         // Data starts at record origin (rec_offset + 5)
         size_t actual_data_start = rec_origin;
@@ -1548,12 +1549,11 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         }
         // Use the calculated data_end for bounds checking
         size_t calculated_data_end = actual_data_start + expected_total_size;
-        // Use calculated_data_end when data_end seems incorrect (smaller than actual_data_start + reasonable_size)
-        // The passed data_end might be based on next record offset which could be wrong
-        // We trust the calculated size from variable_sizes more
-        size_t safe_data_end = std::max(calculated_data_end, data_end);
-        // But don't read past the page
-        safe_data_end = std::min(safe_data_end, page_size - 8);
+        if (calculated_data_end > data_end) {
+            return std::nullopt;
+        }
+
+        size_t safe_data_end = data_end;
 
         record.fields = extract_fields_with_schema(
             page_data, page_size, actual_data_start, safe_data_end,
@@ -2506,12 +2506,10 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 }
                 val.type = IndexFieldValue::Type::BINARY_VAL;
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 val.str_value = oss.str();
             } else {
                 val.type = IndexFieldValue::Type::STRING_VAL;
@@ -2541,12 +2539,10 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             if (col.is_binary) {
                 val.type = IndexFieldValue::Type::BINARY_VAL;
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 val.str_value = oss.str();
             } else {
                 // TEXT column - decode as UTF-8
@@ -2571,12 +2567,10 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             if (col.is_binary) {
                 val.type = IndexFieldValue::Type::BINARY_VAL;
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 val.str_value = oss.str();
             } else {
                 val.type = IndexFieldValue::Type::STRING_VAL;
@@ -2598,12 +2592,10 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             if (col.is_binary) {
                 val.type = IndexFieldValue::Type::BINARY_VAL;
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (size_t i = 0; i < field_size && offset + i < max_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 val.str_value = oss.str();
             } else {
                 val.type = IndexFieldValue::Type::STRING_VAL;
@@ -2798,12 +2790,10 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 val.str_value = result;
             } else {
                 std::ostringstream oss;
-                oss << "UNHEX('";
-                for (size_t i = 0; i < field_size; i++) {
+                                for (size_t i = 0; i < field_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 val.str_value = oss.str();
             }
             break;

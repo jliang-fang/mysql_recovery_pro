@@ -335,18 +335,14 @@ struct IndexFieldValue {
             case Type::DATETIME_VAL: return str_value;
             case Type::TIMESTAMP_VAL: return str_value;
             case Type::BINARY_VAL: {
-                // str_value contains UNHEX('...') format
-                if (!str_value.empty() && str_value.substr(0, 7) == "UNHEX('") {
-                    return str_value;
-                }
+                if (!str_value.empty()) return str_value;
                 // If raw_bytes is used instead, convert to hex
-                std::string hex = "UNHEX('";
+                std::string hex;
                 for (uint8_t b : raw_bytes) {
                     char buf[3];
                     snprintf(buf, sizeof(buf), "%02x", b);
                     hex += buf;
                 }
-                hex += "')";
                 return hex;
             }
             case Type::OVERFLOW_PTR:
@@ -474,13 +470,12 @@ struct IndexRecord {
                 result += '\'';
             } else if (f.type == IndexFieldValue::Type::BINARY_VAL) {
                 // Output as hex string for binary data
-                result += "UNHEX('";
+                result += "0x";
                 for (uint8_t b : f.raw_bytes) {
                     const char hex_chars[] = "0123456789abcdef";
                     result += hex_chars[b >> 4];
                     result += hex_chars[b & 0xf];
                 }
-                result += "')";
             } else if (f.type == IndexFieldValue::Type::UNKNOWN_VAL ||
                        f.type == IndexFieldValue::Type::OVERFLOW_PTR) {
                 if (!f.str_value.empty() && f.str_value != "<UNKNOWN>") {
@@ -494,13 +489,12 @@ struct IndexRecord {
                     }
                     result += '\'';
                 } else if (!f.raw_bytes.empty()) {
-                    result += "UNHEX('";
+                    result += "0x";
                     for (uint8_t b : f.raw_bytes) {
                         const char hex_chars[] = "0123456789abcdef";
                         result += hex_chars[b >> 4];
                         result += hex_chars[b & 0xf];
                     }
-                    result += "')";
                 } else {
                     result += "NULL";
                 }

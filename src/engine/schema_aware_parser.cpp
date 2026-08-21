@@ -1153,12 +1153,10 @@ std::string TupleParser::decode_field_data(
             if (col.charset_id == 63) {
                 // Binary data (BINARY/VARBINARY) - output as HEX
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (uint32_t i = 0; i < data_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 value = oss.str();
             } else {
                 // Text data (VARCHAR/CHAR)
@@ -1257,12 +1255,10 @@ std::string TupleParser::decode_field_data(
             } else {
                 // No set_values available, output as hex
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (uint32_t i = 0; i < data_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 value = oss.str();
             }
             offset += data_size;
@@ -1287,12 +1283,10 @@ std::string TupleParser::decode_field_data(
             // Binary BLOB data - output as HEX for SQL compatibility
             {
                 std::ostringstream oss;
-                oss << "UNHEX('";
                 for (uint32_t i = 0; i < data_size; i++) {
                     oss << std::hex << std::setw(2) << std::setfill('0')
                         << static_cast<int>(data[offset + i]);
                 }
-                oss << "')";
                 value = oss.str();
                 offset += data_size;
             }

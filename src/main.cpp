@@ -170,6 +170,7 @@ int main(int argc, char** argv) {
     std::string data_dir = parser.get_option("data-dir", "");
     std::string table_name = parser.get_option("table-name", "");
     std::string schema_str = parser.get_option("schema", "");
+    std::string schema_file_path = parser.get_option("schema-file", "");
     auto depth_opt = parser.get_int_option("depth", 3);
     int depth = static_cast<int>(depth_opt.value_or(3));
 
@@ -462,7 +463,7 @@ int main(int argc, char** argv) {
             auto ures = dbrecovery::tools::run_unified_recovery(
                 line, file_output, table_name, format, page_size,
                 schema_str, frm_path, table_id, system_tablespace,
-                repair, schemaless_recovery, verbose);
+                repair, schemaless_recovery, verbose, schema_file_path);
             dbrecovery::tools::write_unified_result_json(file_output, p.stem().string(), ures);
 
             if (blob_recovery) {
@@ -2212,7 +2213,7 @@ int main(int argc, char** argv) {
         auto ures = dbrecovery::tools::run_unified_recovery(
             actual_ibd_path, output_dir, result_table, format, page_size,
             schema_str, frm_path, table_id, system_tablespace,
-            repair, schemaless_recovery, verbose);
+            repair, schemaless_recovery, verbose, schema_file_path);
         dbrecovery::tools::write_unified_result_json(output_dir, result_table, ures);
         // Generate RecoveryReport HTML via unified result
         try {
@@ -2227,5 +2228,5 @@ int main(int argc, char** argv) {
         std::cout << "[INFO] Classification: " << ures.result_classification
                   << " trust=" << ures.trust_level << " source=" << ures.schema_source
                   << " damage=" << dbrecovery::common::damage_level_to_string(ures.damage_level) << "\n";
-        return ures.success ? 0 : 0;
+        return ures.success ? 0 : 1;
     }

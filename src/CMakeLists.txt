@@ -71,6 +71,7 @@ set(TOOLS_SOURCES
     tools/progress_cli.cpp
     tools/recovery_cli.cpp
     tools/unified_recovery.cpp
+    tools/result_contract.cpp
 )
 
 # Add salvage module sources (Phase 2: Row-level salvage for damaged pages)
