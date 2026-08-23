@@ -4,6 +4,8 @@
 #include "dbrecovery/tools/unified_recovery.hpp"
 #include "dbrecovery/innodb/ddl_change_detector.hpp"
 #include <filesystem>
+#include <fstream>
+#include <nlohmann/json.hpp>
 
 using namespace dbrecovery;
 
@@ -52,6 +54,18 @@ TEST(RecoveryIdempotency, UnifiedPipelineTwice) {
     EXPECT_EQ(r1.total_recovered, r2.total_recovered);
     EXPECT_EQ(r1.evidence_fragments.size(), r2.evidence_fragments.size());
     EXPECT_EQ(r1.result_classification, r2.result_classification);
+    EXPECT_EQ(r1.table_name, r2.table_name);
+    EXPECT_EQ(r1.source_ibd, r2.source_ibd);
+    ASSERT_TRUE(tools::write_unified_result_json("/tmp/idem_out1", "idem_tbl", r1));
+    ASSERT_TRUE(tools::write_unified_result_json("/tmp/idem_out2", "idem_tbl", r2));
+    std::ifstream f1("/tmp/idem_out1/idem_tbl_result.json");
+    std::ifstream f2("/tmp/idem_out2/idem_tbl_result.json");
+    ASSERT_TRUE(f1.good());
+    ASSERT_TRUE(f2.good());
+    nlohmann::json j1, j2;
+    f1 >> j1;
+    f2 >> j2;
+    EXPECT_EQ(j1, j2);
     std::filesystem::remove(tmp);
 }
 

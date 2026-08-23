@@ -7,11 +7,44 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <cstdint>
+#include <utility>
 
 #include "dbrecovery/innodb/index_page_parser.hpp"
 
 namespace dbrecovery {
 namespace exporter {
+
+struct ExportValue {
+    enum class Kind : uint8_t {
+        TEXT,
+        BINARY,
+        NUMBER,
+        BOOLEAN,
+        INVALID_UTF8
+    };
+
+    std::string value;
+    bool is_null = false;
+    Kind kind = Kind::TEXT;
+
+    static ExportValue null() { return {{}, true, Kind::TEXT}; }
+    static ExportValue text(std::string value) {
+        return {std::move(value), false, Kind::TEXT};
+    }
+    static ExportValue binary(std::string value) {
+        return {std::move(value), false, Kind::BINARY};
+    }
+    static ExportValue number(std::string value) {
+        return {std::move(value), false, Kind::NUMBER};
+    }
+    static ExportValue boolean(bool value) {
+        return {value ? "true" : "false", false, Kind::BOOLEAN};
+    }
+    static ExportValue invalid_utf8(std::string value) {
+        return {std::move(value), false, Kind::INVALID_UTF8};
+    }
+};
 
 /**
  * @brief Escape a string for JSON output
@@ -183,6 +216,10 @@ public:
                               const std::vector<std::string>& headers,
                               const std::string& output_path);
 
+    static bool export_to_csv(const std::vector<std::map<std::string, ExportValue>>& records,
+                              const std::vector<std::string>& headers,
+                              const std::string& output_path);
+
     /**
      * @brief 导出为 SQL
      *
@@ -232,6 +269,11 @@ public:
      * @return false 失败
      */
     static bool export_to_json(const std::vector<std::map<std::string, std::string>>& records,
+                               const std::string& output_path,
+                               bool pretty = false);
+
+    static bool export_to_json(const std::vector<std::map<std::string, ExportValue>>& records,
+                               const std::vector<std::string>& headers,
                                const std::string& output_path,
                                bool pretty = false);
 };

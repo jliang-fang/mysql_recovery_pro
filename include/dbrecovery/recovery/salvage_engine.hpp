@@ -62,6 +62,7 @@ struct SalvagedRow {
     uint16_t field_count = 0;
     SalvageLevel salvage_level = SalvageLevel::STRUCTURED;
     std::vector<std::string> fields;
+    std::vector<bool> field_nulls;
     std::string content_hash;      // SHA256 of raw record bytes (for dedup)
     double confidence = 0.0;
     std::string recovery_method;

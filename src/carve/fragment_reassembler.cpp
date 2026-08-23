@@ -28,10 +28,27 @@ PageFragmentReassemblerV2::group_by_space_id(
     }
 
     for (auto& [sid, frags] : groups) {
-        std::sort(frags.begin(), frags.end(),
+        // Deduplicate by page_no: select best candidate for each page_no
+        std::map<uint32_t, std::vector<PageFragment>> by_page_no;
+        for (auto& frag : frags) {
+            by_page_no[frag.page_no].push_back(std::move(frag));
+        }
+
+        std::vector<PageFragment> deduped;
+        for (auto& [pno, candidates] : by_page_no) {
+            if (candidates.size() == 1) {
+                deduped.push_back(std::move(candidates[0]));
+            } else {
+                deduped.push_back(select_best_candidate(candidates));
+            }
+        }
+
+        std::sort(deduped.begin(), deduped.end(),
             [](const PageFragment& a, const PageFragment& b) {
                 return a.page_no < b.page_no;
             });
+
+        frags = std::move(deduped);
     }
 
     return groups;
@@ -47,7 +64,14 @@ PageFragment PageFragmentReassemblerV2::select_best_candidate(
         [](const PageFragment& a, const PageFragment& b) {
             if (a.checksum_valid != b.checksum_valid) return a.checksum_valid;
             if (a.lsn != b.lsn) return a.lsn > b.lsn;
-            return false;
+            // Priority 3: prefer non-zero data over zero-filled pages
+            auto is_zero = [](const std::vector<uint8_t>& d) {
+                for (size_t i = 0; i < std::min(d.size(), size_t(64)); i++) {
+                    if (d[i] != 0) return false;
+                }
+                return true;
+            };
+            return !is_zero(a.data);
         });
 
     return sorted[0];

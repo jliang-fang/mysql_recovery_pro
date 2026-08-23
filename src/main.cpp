@@ -460,11 +460,14 @@ int main(int argc, char** argv) {
                 continue;
             }
 
+            const std::string batch_table = table_name.empty()
+                ? p.stem().string()
+                : table_name;
             auto ures = dbrecovery::tools::run_unified_recovery(
-                line, file_output, table_name, format, page_size,
+                line, file_output, batch_table, format, page_size,
                 schema_str, frm_path, table_id, system_tablespace,
                 repair, schemaless_recovery, verbose, schema_file_path);
-            dbrecovery::tools::write_unified_result_json(file_output, p.stem().string(), ures);
+            dbrecovery::tools::write_unified_result_json(file_output, batch_table, ures);
 
             if (blob_recovery) {
                 std::cout << "  [BLOB] recovery_method=" << ures.recovery_method

@@ -3,112 +3,186 @@
 #include <sstream>
 #include <algorithm>
 #include <iomanip>
+#include <limits>
+#include <nlohmann/json.hpp>
 
 namespace dbrecovery {
 namespace exporter {
+
+namespace {
+std::string csv_escape(const std::string& value) {
+    const bool needs_quotes = value.find_first_of(",\"\r\n") != std::string::npos;
+    if (!needs_quotes) return value;
+
+    std::string escaped;
+    escaped.reserve(value.size() + 2);
+    escaped.push_back('"');
+    for (char c : value) {
+        if (c == '"') escaped.push_back('"');
+        escaped.push_back(c);
+    }
+    escaped.push_back('"');
+    return escaped;
+}
+
+std::string hex_encode(const std::string& value) {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(value.size() * 2);
+    for (unsigned char c : value) {
+        encoded.push_back(digits[c >> 4]);
+        encoded.push_back(digits[c & 0x0f]);
+    }
+    return encoded;
+}
+
+bool has_invalid_utf8(const std::string& value) {
+    size_t i = 0;
+    while (i < value.size()) {
+        const unsigned char c = static_cast<unsigned char>(value[i]);
+        size_t width = 0;
+        uint32_t codepoint = 0;
+        if (c <= 0x7f) {
+            ++i;
+            continue;
+        } else if (c >= 0xc2 && c <= 0xdf) {
+            width = 2; codepoint = c & 0x1f;
+        } else if (c >= 0xe0 && c <= 0xef) {
+            width = 3; codepoint = c & 0x0f;
+        } else if (c >= 0xf0 && c <= 0xf4) {
+            width = 4; codepoint = c & 0x07;
+        } else {
+            return true;
+        }
+        if (i + width > value.size()) return true;
+        for (size_t j = 1; j < width; ++j) {
+            const unsigned char continuation = static_cast<unsigned char>(value[i + j]);
+            if ((continuation & 0xc0) != 0x80) return true;
+            codepoint = (codepoint << 6) | (continuation & 0x3f);
+        }
+        if ((width == 3 && codepoint < 0x800) ||
+            (width == 4 && codepoint < 0x10000) ||
+            codepoint > 0x10ffff ||
+            (codepoint >= 0xd800 && codepoint <= 0xdfff)) return true;
+        i += width;
+    }
+    return false;
+}
+
+std::string canonical_csv_text(const ExportValue& value) {
+    if (value.is_null) return {};
+    if (value.kind == ExportValue::Kind::BINARY) return hex_encode(value.value);
+    if (value.kind == ExportValue::Kind::INVALID_UTF8 ||
+        (value.kind == ExportValue::Kind::TEXT && has_invalid_utf8(value.value))) return {};
+    std::string text;
+    text.reserve(value.value.size());
+    for (unsigned char c : value.value) {
+        if (c == 0) text += "\\u0000";
+        else text.push_back(static_cast<char>(c));
+    }
+    return text;
+}
+
+bool export_value_valid(const ExportValue& value) {
+    return value.is_null || value.kind != ExportValue::Kind::INVALID_UTF8 &&
+        (value.kind != ExportValue::Kind::TEXT || !has_invalid_utf8(value.value));
+}
+
+std::string csv_row(const std::vector<std::string>& headers,
+                    const std::map<std::string, ExportValue>& record) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < headers.size(); ++i) {
+        if (i > 0) oss << ',';
+        const auto it = record.find(headers[i]);
+        if (it != record.end()) oss << csv_escape(canonical_csv_text(it->second));
+    }
+    return oss.str();
+}
+
+nlohmann::json json_value(const ExportValue& value) {
+    if (value.is_null) return nullptr;
+    switch (value.kind) {
+        case ExportValue::Kind::NUMBER:
+            try { return nlohmann::json::parse(value.value); }
+            catch (...) { return value.value; }
+        case ExportValue::Kind::BOOLEAN:
+            return value.value == "true";
+        case ExportValue::Kind::BINARY:
+            return hex_encode(value.value);
+        case ExportValue::Kind::INVALID_UTF8:
+            return nullptr;
+        case ExportValue::Kind::TEXT:
+        default:
+            return value.value;
+    }
+}
+
+std::string json_record(const std::vector<std::string>& headers,
+                        const std::map<std::string, ExportValue>& record,
+                        bool pretty) {
+    nlohmann::json object = nlohmann::json::object();
+    for (const auto& header : headers) {
+        const auto it = record.find(header);
+        object[header] = it == record.end() ? nlohmann::json(nullptr)
+                                            : json_value(it->second);
+    }
+    return object.dump(pretty ? 4 : -1);
+}
+}
 
 CSVExporter::CSVExporter(const std::vector<std::string>& headers) : headers_(headers) {}
 
 CSVExporter::~CSVExporter() = default;
 
 bool CSVExporter::export_record(const std::map<std::string, std::string>& record) {
-    std::ostringstream oss;
-
-    // DEBUG: Track comma count
-    size_t comma_count = 0;
-
-    for (size_t i = 0; i < headers_.size(); ++i) {
-        if (i > 0) {
-            oss << ",";
-            comma_count++;
-        }
-
-        auto it = record.find(headers_[i]);
-        if (it != record.end()) {
-            // 处理 NULL 值
-            std::string value = it->second;
-            if (value == "NULL") {
-                oss << "";  // CSV 中 NULL 表示为空字符串
-            } else {
-                // 转义CSV字段中的逗号、引号、换行符
-                bool needs_quotes = value.find(',') != std::string::npos ||
-                                   value.find('"') != std::string::npos ||
-                                   value.find('\n') != std::string::npos ||
-                                   value.find('\r') != std::string::npos;
-
-                if (needs_quotes) {
-                    oss << "\"";
-                    for (char c : value) {
-                        if (c == '"') oss << "\"\"";
-                        else oss << c;
-                    }
-                    oss << "\"";
-                } else {
-                    oss << value;
-                    // Check if value contains comma (shouldn't happen if needs_quotes is correct)
-                    size_t value_commas = 0;
-                    for (char c : value) {
-                        if (c == ',') value_commas++;
-                    }
-                    comma_count += value_commas;
-                }
-            }
-        } else {
-            // 字段不存在，输出空字符串
-            oss << "";
-        }
-    }
-
-    // DEBUG: Check comma count
-    static int comma_debug = 0;
-    if (comma_debug < 5 && comma_count != headers_.size() - 1) {
-        if (dbrecovery::innodb::g_verbose)         std::cerr << "[DEBUG COMMA] expected " << (headers_.size() - 1) << " commas, got " << comma_count << "\n";
-        comma_debug++;
-    }
-
-    rows_.push_back(oss.str());
+    std::map<std::string, ExportValue> values;
+    for (const auto& [key, value] : record) values[key] = ExportValue::text(value);
+    rows_.push_back(csv_row(headers_, values));
     return true;
 }
 
 std::string CSVExporter::get_result() const {
     std::ostringstream oss;
-
-    // 添加表头
     for (size_t i = 0; i < headers_.size(); ++i) {
-        if (i > 0) oss << ",";
-        oss << headers_[i];
+        if (i > 0) oss << ',';
+        oss << csv_escape(headers_[i]);
     }
-    oss << "\n";
-
-    // 添加数据行
-    for (const auto& row : rows_) {
-        // DEBUG: Check row content
-        static int get_result_debug = 0;
-        if (get_result_debug < 3) {
-            if (dbrecovery::innodb::g_verbose)             std::cerr << "[DEBUG GET_RESULT] row length=" << row.size()
-                      << " first 50 chars=" << row.substr(0, 50) << "\n";
-            get_result_debug++;
-        }
-        oss << row << "\n";
-    }
-
+    oss << '\n';
+    for (const auto& row : rows_) oss << row << '\n';
     return oss.str();
 }
 
-// Exporter::export_to_csv only - other functions in ibd_exporter.cpp
 bool Exporter::export_to_csv(const std::vector<std::map<std::string, std::string>>& records,
                              const std::vector<std::string>& headers,
                              const std::string& output_path) {
     CSVExporter exporter(headers);
-
     for (const auto& record : records) {
-        if (!exporter.export_record(record)) {
-            std::cerr << "[ERROR] Failed to export record to CSV" << std::endl;
-            return false;
+        if (!exporter.export_record(record)) return false;
+    }
+    return exporter.export_to_file(output_path);
+}
+
+bool Exporter::export_to_csv(const std::vector<std::map<std::string, ExportValue>>& records,
+                             const std::vector<std::string>& headers,
+                             const std::string& output_path) {
+    std::ostringstream output;
+    for (size_t i = 0; i < headers.size(); ++i) {
+        if (i > 0) output << ',';
+        output << csv_escape(headers[i]);
+    }
+    output << '\n';
+    for (const auto& record : records) {
+        for (const auto& [header, value] : record) {
+            (void)header;
+            if (!export_value_valid(value)) return false;
         }
+        output << csv_row(headers, record) << '\n';
     }
 
-    return exporter.export_to_file(output_path);
+    std::ofstream file(output_path);
+    if (!file) return false;
+    file << output.str();
+    return static_cast<bool>(file);
 }
 
 // ==================== JSONExporter ====================
@@ -117,45 +191,15 @@ JSONExporter::JSONExporter(bool pretty) : pretty_(pretty) {}
 JSONExporter::~JSONExporter() = default;
 
 bool JSONExporter::export_record(const std::map<std::string, std::string>& record) {
-    std::ostringstream oss;
-    oss << (pretty_ ? "    {\n" : "{");
-
-    bool first = true;
-    for (const auto& [key, value] : record) {
-        if (!first) oss << (pretty_ ? ",\n" : ",");
-        if (pretty_) oss << "        ";
-        oss << "\"" << escape_json(key) << "\": ";
-
-        // Detect numeric/bool/null values
-        if (value == "NULL" || value.empty()) {
-            oss << "null";
-        } else if (value == "true" || value == "false") {
-            oss << value;
-        } else {
-            // Try as number, fall back to string
-            bool is_num = !value.empty() && (std::isdigit(value[0]) || value[0] == '-');
-            if (is_num) {
-                bool all_digits = true;
-                bool has_dot = false;
-                for (size_t i = (value[0] == '-' ? 1 : 0); i < value.size(); i++) {
-                    if (value[i] == '.' && !has_dot) { has_dot = true; continue; }
-                    if (!std::isdigit(value[i])) { all_digits = false; break; }
-                }
-                if (all_digits) {
-                    oss << value;
-                } else {
-                    oss << "\"" << escape_json(value) << "\"";
-                }
-            } else {
-                oss << "\"" << escape_json(value) << "\"";
-            }
-        }
-
-        first = false;
+    std::map<std::string, ExportValue> values;
+    for (const auto& [key, value] : record) values[key] = ExportValue::text(value);
+    std::vector<std::string> headers;
+    headers.reserve(values.size());
+    for (const auto& [key, value] : values) {
+        (void)value;
+        headers.push_back(key);
     }
-    oss << (pretty_ ? "\n    }" : "}");
-
-    rows_.push_back(oss.str());
+    rows_.push_back(json_record(headers, values, pretty_));
     return true;
 }
 
@@ -218,6 +262,26 @@ bool Exporter::export_to_json(const std::vector<std::map<std::string, std::strin
     }
 
     return exporter.export_to_file_streaming(output_path);
+}
+
+bool Exporter::export_to_json(const std::vector<std::map<std::string, ExportValue>>& records,
+                              const std::vector<std::string>& headers,
+                              const std::string& output_path, bool pretty) {
+    std::ofstream file(output_path);
+    if (!file) return false;
+    file << '[';
+    for (size_t i = 0; i < records.size(); ++i) {
+        for (const auto& [header, value] : records[i]) {
+            (void)header;
+            if (!export_value_valid(value)) return false;
+        }
+        if (i > 0) file << ',';
+        if (pretty) file << '\n';
+        file << json_record(headers, records[i], pretty);
+    }
+    if (pretty && !records.empty()) file << '\n';
+    file << "]\n";
+    return static_cast<bool>(file);
 }
 
 } // namespace exporter

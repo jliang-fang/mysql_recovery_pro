@@ -5,6 +5,11 @@ add_executable(test_page_fragment_reassembler test_page_fragment_reassembler.cpp
 target_link_libraries(test_page_fragment_reassembler PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_page_fragment_reassembler)
 
+# V2 fragment reassembler tests
+add_executable(test_fragment_reassembler_v2 test_fragment_reassembler_v2.cpp)
+target_link_libraries(test_fragment_reassembler_v2 PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_fragment_reassembler_v2)
+
 # Page header tests
 add_executable(test_page_header test_page_header.cpp)
 target_link_libraries(test_page_header PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)

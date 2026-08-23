@@ -896,12 +896,15 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
     std::map<std::string, RowVersionHistory> histories;
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Step 1: Scan all undo pages
-    auto undo_pages = scan_undo_pages();
-    if (undo_pages.empty()) return histories;
+    FlashbackFilter filter;
+    filter.max_records = 0;
+    filter.include_incomplete = true;
+    if (lsn_range.has_value()) {
+        filter.start_lsn = lsn_range->first;
+        filter.end_lsn = lsn_range->second;
+    }
+    auto records = scan_records(schema, filter);
 
-    // Step 2: Collect all undo records grouped by PK
-    // Structure: pk_hex → vector of (page_no, offset, record)
     struct UndoRef {
         uint32_t page_no;
         uint16_t offset;
@@ -909,58 +912,23 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
     };
     std::map<std::string, std::vector<UndoRef>> pk_groups;
 
-    for (const auto& [page_data, page_no] : undo_pages) {
-        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
-        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
-
-        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
-        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
-            size_t consumed = 0;
-            auto rec_opt = parse_verified_undo_record(
-                page_data, page_no, offset, schema, &consumed);
-            if (!rec_opt) break;
-
-            auto& rec = *rec_opt;
-            enrich_transaction_metadata(rec);
-
-            if (space_id != 0 && rec.tablespace_id != space_id) {
-                offset += consumed;
-                continue;
+    for (auto& rec : records) {
+        if (space_id != 0 && rec.tablespace_id != space_id) continue;
+        std::string pk;
+        if (!rec.old_fields.empty()) {
+            for (size_t i = 1; i < rec.old_fields.size() && i < 4; i++) {
+                pk += pk_to_hex(rec.old_fields[i].old_value);
             }
-
-            if (lsn_range.has_value()) {
-                if (!rec.commit_lsn.has_value() ||
-                    *rec.commit_lsn < lsn_range->first ||
-                    *rec.commit_lsn > lsn_range->second) {
-                    offset += consumed;
-                    continue;
-                }
-            }
-
-            // Extract table_id from record
-            uint32_t rec_table_id = extract_table_id(rec.old_fields);
-            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
-                offset += consumed;
-                continue;
-            }
-
-            // Extract PK for grouping
-            std::string pk;
-            if (!rec.old_fields.empty()) {
-                // First field is often the old DB_ROLL_PTR, skip it for PK
-                for (size_t i = 1; i < rec.old_fields.size() && i < 4; i++) {
-                    pk += pk_to_hex(rec.old_fields[i].old_value);
-                }
-            }
-            if (pk.empty()) {
-                pk = "pk_" + std::to_string(page_no) + "_" + std::to_string(offset);
-            }
-
-            pk_groups[pk].push_back({page_no, static_cast<uint16_t>(offset), std::move(rec)});
-
-            offset += consumed;
         }
+        if (pk.empty()) {
+            pk = "pk_" + std::to_string(rec.undo_page_no) + "_" + std::to_string(rec.undo_page_offset);
+        }
+        uint32_t pg = rec.undo_page_no;
+        uint16_t off = rec.undo_page_offset;
+        pk_groups[pk].push_back({pg, off, std::move(rec)});
     }
+
+    if (pk_groups.empty()) return histories;
 
     // Step 3: Build version histories for each PK group
     for (auto& [pk, refs] : pk_groups) {
@@ -1010,44 +978,21 @@ std::vector<RowVersionHistory> DeepUndoAnalyzer::heuristic_reconstruct_chains(
     std::vector<RowVersionHistory> chains;
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Step 1: Collect all undo records
+    FlashbackFilter filter;
+    filter.max_records = 0;
+    filter.include_incomplete = true;
+    auto scanned = scan_records(schema, filter);
+
     struct TaggedRecord {
         UndoRecordV2 record;
         uint32_t page_no;
     };
     std::vector<TaggedRecord> all_records;
-
-    auto undo_pages = scan_undo_pages();
-    for (const auto& [page_data, page_no] : undo_pages) {
-        const uint16_t page_free = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_FREE);
-        const uint16_t n_recs = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS);
-
-        size_t offset = read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_START);
-        for (uint16_t ri = 0; ri < n_recs && offset < page_free; ri++) {
-            size_t consumed = 0;
-            auto rec_opt = parse_verified_undo_record(
-                page_data, page_no, offset, schema, &consumed);
-            if (!rec_opt) break;
-
-            auto& rec = *rec_opt;
-
-            if (space_id != 0 && rec.tablespace_id != space_id) {
-                offset += consumed;
-                continue;
-            }
-
-            // Filter by table_id
-            uint32_t rec_table_id = extract_table_id(rec.old_fields);
-            if (rec_table_id != static_cast<uint32_t>(schema.table_id) && schema.table_id != 0) {
-                offset += consumed;
-                continue;
-            }
-
-            all_records.push_back({std::move(rec), page_no});
-
-            // Advance to next record
-            offset += consumed;
-        }
+    all_records.reserve(scanned.size());
+    for (auto& rec : scanned) {
+        if (space_id != 0 && rec.tablespace_id != space_id) continue;
+        uint32_t pg = rec.undo_page_no;
+        all_records.push_back({std::move(rec), pg});
     }
 
     if (all_records.empty()) return chains;

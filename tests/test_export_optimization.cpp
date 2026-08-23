@@ -4,11 +4,35 @@
 #include <gtest/gtest.h>
 #include "dbrecovery/export/data_exporter.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include <fstream>
+#include <string>
 
 namespace dbrecovery {
-namespace export {
+namespace exporter {
 
-// ==================== CSV/SQL/IBD Export Optimization Test Cases ====================
+TEST(ExportOptimizationTest, CSVCanonicalValues) {
+    const std::string path = "/tmp/test_csv_canonical.csv";
+    const std::vector<std::string> headers = {"normal", "nullable", "empty", "literal", "binary", "line"};
+    std::vector<std::map<std::string, dbrecovery::exporter::ExportValue>> records = {{
+        {"normal", {"ok", false}},
+        {"nullable", {"ignored", true}},
+        {"empty", {"", false}},
+        {"literal", {"NULL", false}},
+        {"binary", dbrecovery::exporter::ExportValue::binary(std::string("a\0b", 3))},
+        {"line", {"a,b\"c\r\nd", false}},
+    }};
+
+    ASSERT_TRUE(Exporter::export_to_csv(records, headers, path));
+    std::ifstream file(path, std::ios::binary);
+    ASSERT_TRUE(file.good());
+    const std::string output((std::istreambuf_iterator<char>(file)), {});
+    std::string expected = "normal,nullable,empty,literal,binary,line\nok,,,NULL,";
+    expected += "610062";
+    expected += ",\"a,b\"\"c\r\nd\"\n";
+    EXPECT_EQ(output, expected);
+    std::remove(path.c_str());
+}
+
 
 // Test Case 1: CSV export with valid records
 TEST(ExportOptimizationTest, ValidCSVExport) {
@@ -187,5 +211,5 @@ TEST(ExportOptimizationTest, DifferentRowFormatIBDExport) {
     EXPECT_TRUE(true); // Placeholder
 }
 
-} // namespace export
+} // namespace exporter
 } // namespace dbrecovery

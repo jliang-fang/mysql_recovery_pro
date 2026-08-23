@@ -344,8 +344,10 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l1(
                             << static_cast<int>(data[data_start + field_off + b]);
                     }
                     row.fields.push_back(oss.str());
+                    row.field_nulls.push_back(false);
                 } else {
-                    row.fields.push_back("NULL");
+                    row.fields.push_back("");
+                    row.field_nulls.push_back(true);
                 }
             }
             rows.push_back(row);
@@ -412,8 +414,10 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l2(
                             << static_cast<int>(data[data_start + field_off + b]);
                     }
                     row.fields.push_back(oss.str());
+                    row.field_nulls.push_back(false);
                 } else {
-                    row.fields.push_back("NULL");
+                    row.fields.push_back("");
+                    row.field_nulls.push_back(true);
                 }
             }
             rows.push_back(row);
