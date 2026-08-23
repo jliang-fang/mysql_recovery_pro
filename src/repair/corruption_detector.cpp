@@ -106,123 +106,69 @@ std::vector<CorruptionDetails> CorruptionDetector::detect_corruption(const uint8
                                                                       size_t page_size,
                                                                       uint32_t page_no) {
     std::vector<CorruptionDetails> corruptions;
+    const auto emit = [&](CorruptionDetails detail) {
+        corruptions.push_back(detail);
+        add_corruption(detail);
+    };
 
     if (!page_data || page_size < 54) {
-        CorruptionDetails detail;
-        detail.type = CorruptionType::PAGE_HEADER_CORRUPTED;
-        detail.page_no = page_no;
-        detail.description = "Page too small: " + std::to_string(page_size) + " bytes";
-        detail.severity = "critical";
-        detail.expected_value = 54;
-        detail.actual_value = page_size;
-        corruptions.push_back(detail);
-        corruption_stats_[CorruptionType::PAGE_HEADER_CORRUPTED]++;
+        emit({CorruptionType::PAGE_HEADER_CORRUPTED, page_no,
+              "Page too small: " + std::to_string(page_size) + " bytes", "critical",
+              54, page_size});
         return corruptions;
     }
 
-    // Check page type
-    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    const uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
     if (!is_valid_page_type(page_type)) {
-        CorruptionDetails detail;
-        detail.type = CorruptionType::PAGE_TYPE_INVALID;
-        detail.page_no = page_no;
-        detail.description = "Invalid page type: 0x" + std::to_string(page_type);
-        detail.severity = "critical";
-        detail.expected_value = std::nullopt;
-        detail.actual_value = page_type;
-        corruptions.push_back(detail);
-        corruption_stats_[CorruptionType::PAGE_TYPE_INVALID]++;
+        emit({CorruptionType::PAGE_TYPE_INVALID, page_no,
+              "Invalid page type: 0x" + std::to_string(page_type), "critical",
+              std::nullopt, page_type});
     }
 
-    // Check checksum
-    if (!check_page_checksum(page_data, page_size)) {
-        uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 0);
-        CorruptionDetails detail;
-        detail.type = CorruptionType::PAGE_CHECKSUM_MISMATCH;
-        detail.page_no = page_no;
-        detail.description = "Checksum mismatch";
-        detail.severity = "warning";
-        detail.expected_value = stored_checksum;
-        detail.actual_value = 0;
-        corruptions.push_back(detail);
-        corruption_stats_[CorruptionType::PAGE_CHECKSUM_MISMATCH]++;
+    const auto checksum = dbrecovery::innodb::validate_page_checksum(
+        page_data, page_size, false);
+    if (!checksum.is_valid) {
+        emit({CorruptionType::PAGE_CHECKSUM_MISMATCH, page_no,
+              "Checksum mismatch", "warning", checksum.stored_checksum,
+              checksum.computed_checksum});
     }
 
-    // Check page chain (FIL header fields - big-endian)
-    uint32_t next_page = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
-    uint32_t prev_page = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_PREV_ABS);
-
+    const uint32_t next_page = dbrecovery::innodb::read_be<uint32_t>(
+        page_data, dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
     if (next_page != 0xFFFFFFFF && next_page != page_no + 1) {
-        CorruptionDetails detail;
-        detail.type = CorruptionType::PAGE_CHAIN_BROKEN;
-        detail.page_no = page_no;
-        detail.description = "Page chain broken: next_page=" + std::to_string(next_page);
-        detail.severity = "warning";
-        detail.expected_value = page_no + 1;
-        detail.actual_value = next_page;
-        corruptions.push_back(detail);
-        corruption_stats_[CorruptionType::PAGE_CHAIN_BROKEN]++;
+        emit({CorruptionType::PAGE_CHAIN_BROKEN, page_no,
+              "Page chain broken: next_page=" + std::to_string(next_page), "warning",
+              page_no + 1, next_page});
     }
 
-    // Check INFIMUM/SUPREMUM
     if (page_size >= 54 + 13) {
-        uint8_t infimum_info = page_data[54];
-        uint8_t infimum_type = infimum_info & 0x07;
+        const uint8_t infimum_type = page_data[54] & 0x07;
         if (infimum_type != dbrecovery::innodb::REC_STATUS_INFIMUM) {
-            CorruptionDetails detail;
-            detail.type = CorruptionType::RECORD_HEADER_CORRUPTED;
-            detail.page_no = page_no;
-            detail.description = "INFIMUM record corrupted";
-            detail.severity = "critical";
-            detail.expected_value = dbrecovery::innodb::REC_STATUS_INFIMUM;
-            detail.actual_value = infimum_type;
-            corruptions.push_back(detail);
-            corruption_stats_[CorruptionType::RECORD_HEADER_CORRUPTED]++;
+            emit({CorruptionType::RECORD_HEADER_CORRUPTED, page_no,
+                  "INFIMUM record corrupted", "critical",
+                  dbrecovery::innodb::REC_STATUS_INFIMUM, infimum_type});
         }
 
-        uint8_t supremum_info = page_data[54 + 13];
-        uint8_t supremum_type = supremum_info & 0x07;
+        const uint8_t supremum_type = page_data[54 + 13] & 0x07;
         if (supremum_type != dbrecovery::innodb::REC_STATUS_SUPREMUM) {
-            CorruptionDetails detail;
-            detail.type = CorruptionType::RECORD_HEADER_CORRUPTED;
-            detail.page_no = page_no;
-            detail.description = "SUPREMUM record corrupted";
-            detail.severity = "critical";
-            detail.expected_value = dbrecovery::innodb::REC_STATUS_SUPREMUM;
-            detail.actual_value = supremum_type;
-            corruptions.push_back(detail);
-            corruption_stats_[CorruptionType::RECORD_HEADER_CORRUPTED]++;
+            emit({CorruptionType::RECORD_HEADER_CORRUPTED, page_no,
+                  "SUPREMUM record corrupted", "critical",
+                  dbrecovery::innodb::REC_STATUS_SUPREMUM, supremum_type});
         }
-    }
 
-    // Check record chain integrity
-    if (page_size >= 54 + 13) {
-        uint16_t infimum_next = dbrecovery::innodb::read_le<uint16_t>(page_data, 55);
-        uint16_t supremum_next = dbrecovery::innodb::read_le<uint16_t>(page_data, 68);
-
-        // Check if next offsets are valid
+        const uint16_t infimum_next = dbrecovery::innodb::read_le<uint16_t>(page_data, 55);
         if (infimum_next == 0 || infimum_next >= page_size) {
-            CorruptionDetails detail;
-            detail.type = CorruptionType::RECORD_CHAIN_BROKEN;
-            detail.page_no = page_no;
-            detail.description = "INFIMUM next_record_offset is invalid";
-            detail.severity = "critical";
-            detail.expected_value = 67;
-            detail.actual_value = infimum_next;
-            corruptions.push_back(detail);
-            corruption_stats_[CorruptionType::RECORD_CHAIN_BROKEN]++;
+            emit({CorruptionType::RECORD_CHAIN_BROKEN, page_no,
+                  "INFIMUM next_record_offset is invalid", "critical", 67, infimum_next});
         }
 
-        if (supremum_next == 0 || (supremum_next != 0xFFFF && supremum_next >= page_size)) {
-            CorruptionDetails detail;
-            detail.type = CorruptionType::RECORD_CHAIN_BROKEN;
-            detail.page_no = page_no;
-            detail.description = "SUPREMUM next_record_offset is invalid";
-            detail.severity = "critical";
-            detail.expected_value = 0xFFFF;
-            detail.actual_value = supremum_next;
-            corruptions.push_back(detail);
-            corruption_stats_[CorruptionType::RECORD_CHAIN_BROKEN]++;
+        const uint16_t supremum_next = dbrecovery::innodb::read_le<uint16_t>(page_data, 68);
+        if (supremum_next == 0 ||
+            (supremum_next != 0xFFFF && supremum_next >= page_size)) {
+            emit({CorruptionType::RECORD_CHAIN_BROKEN, page_no,
+                  "SUPREMUM next_record_offset is invalid", "critical", 0xFFFF,
+                  supremum_next});
         }
     }
 
@@ -257,26 +203,7 @@ bool CorruptionDetector::check_page_checksum(const uint8_t* page_data,
         return false;
     }
 
-    // Read stored checksum at offset 0 (FIL_PAGE_CHECKSUM)
-    uint32_t stored_checksum = dbrecovery::innodb::read_le<uint32_t>(page_data, 0);
-
-    // Skip checksum validation for NONE checksum mode
-    if (stored_checksum == 0xFFFFFFFF) {
-        return true;
-    }
-
-    // For now, we consider checksum valid if it's not obviously corrupted
-    // A real implementation would compute CRC32C and compare
-    // For testing purposes, we check if the checksum is non-zero (unless explicitly set)
-    // Note: This is a simplified check - in production, use proper CRC32C calculation
-
-    // If checksum is 0, it might be valid (some pages use this)
-    // If checksum is clearly invalid (like 0xDEADBEEF), flag it
-    if (stored_checksum == 0xDEADBEEF || stored_checksum == 0xBADC0DE) {
-        return false;  // Clearly corrupted
-    }
-
-    return true;
+    return dbrecovery::innodb::validate_page_checksum(page_data, page_size, false).is_valid;
 }
 
 bool CorruptionDetector::check_page_chain(uint32_t current_page_no,

@@ -1,236 +1,83 @@
-// Test cases for file header corruption recovery scenarios
-// These tests are expected to fail initially (TDD approach)
-
 #include <gtest/gtest.h>
-#include "dbrecovery/recovery/engine.hpp"
-#include "dbrecovery/catalog/schema_defs.hpp"
-#include "dbrecovery/innodb/page_defs.hpp"
+
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/repair/header_repairer.hpp"
 
-namespace dbrecovery {
-namespace recovery {
+#include <vector>
 
-// ==================== File Header Corruption Recovery Test Cases ====================
+namespace {
 
-// Test Case 1: Header corruption with invalid page type
-TEST(HeaderRecoveryTest, InvalidPageTypeRecovery) {
-    // Test recovery when page type is corrupted
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "invalid_type_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with invalid page type
-    EXPECT_TRUE(true); // Placeholder
+using dbrecovery::innodb::ChecksumAlgo;
+using dbrecovery::innodb::FIL_PAGE_INDEX;
+using dbrecovery::innodb::FIL_PAGE_OFFSET;
+using dbrecovery::innodb::FIL_PAGE_TYPE_ABS;
+using dbrecovery::innodb::write_be;
+using dbrecovery::innodb::write_le;
+using dbrecovery::innodb::write_page_checksum;
+using dbrecovery::repair::HeaderRepairer;
+
+std::vector<uint8_t> create_index_page(uint32_t page_no = 7) {
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, page_no);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_le<uint32_t>(page.data(), 44, 1);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
+    return page;
 }
 
-// Test Case 2: Header corruption with invalid checksum
-TEST(HeaderRecoveryTest, InvalidChecksumRecovery) {
-    // Test recovery when checksum is corrupted
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "invalid_checksum_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with invalid checksum
-    EXPECT_TRUE(true); // Placeholder
+}  // namespace
+
+TEST(HeaderRecoveryTest, RepairsInvalidIndexPageType) {
+    HeaderRepairer repairer;
+    auto page = create_index_page();
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+
+    ASSERT_TRUE(repairer.repair_page_header(page.data(), page.size()));
+    EXPECT_EQ(dbrecovery::innodb::read_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS),
+              FIL_PAGE_INDEX);
+    EXPECT_TRUE(repairer.validate_page_header(page.data(), page.size()));
+    EXPECT_TRUE(dbrecovery::innodb::validate_page_checksum(
+                    page.data(), page.size(), true)
+                    .is_valid);
 }
 
-// Test Case 3: Header corruption with invalid LSN
-TEST(HeaderRecoveryTest, InvalidLSNRecovery) {
-    // Test recovery when LSN is corrupted
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "invalid_lsn_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with invalid LSN
-    EXPECT_TRUE(true); // Placeholder
+TEST(HeaderRecoveryTest, RewritesCorruptedChecksum) {
+    HeaderRepairer repairer;
+    auto page = create_index_page();
+    page[100] ^= 0x01;
+
+    ASSERT_FALSE(dbrecovery::innodb::validate_page_checksum(
+                     page.data(), page.size(), false)
+                     .is_valid);
+    const uint32_t checksum = repairer.calculate_and_fix_checksum(page.data(), page.size());
+
+    EXPECT_NE(checksum, 0u);
+    EXPECT_TRUE(dbrecovery::innodb::validate_page_checksum(
+                    page.data(), page.size(), true)
+                    .is_valid);
 }
 
-// Test Case 4: Header corruption with invalid page number
-TEST(HeaderRecoveryTest, InvalidPageNumberRecovery) {
-    // Test recovery when page number is corrupted
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "invalid_page_num_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with invalid page number
-    EXPECT_TRUE(true); // Placeholder
+TEST(HeaderRecoveryTest, RebuildsHeaderWithRequestedIdentity) {
+    HeaderRepairer repairer;
+    std::vector<uint8_t> page(16384, 0xFF);
+
+    ASSERT_TRUE(repairer.rebuild_page_header(
+        page.data(), page.size(), 23, FIL_PAGE_INDEX));
+    EXPECT_EQ(dbrecovery::innodb::read_be<uint32_t>(page.data(), FIL_PAGE_OFFSET), 23u);
+    EXPECT_EQ(dbrecovery::innodb::read_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS),
+              FIL_PAGE_INDEX);
+
+    repairer.calculate_and_fix_checksum(page.data(), page.size());
+    EXPECT_TRUE(repairer.validate_page_header(page.data(), page.size()));
 }
 
-// Test Case 5: Header corruption with invalid space ID
-TEST(HeaderRecoveryTest, InvalidSpaceIDRecovery) {
-    // Test recovery when space ID is corrupted
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "invalid_space_id_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with invalid space ID
-    EXPECT_TRUE(true); // Placeholder
-}
+TEST(HeaderRecoveryTest, RejectsNullAndShortPages) {
+    HeaderRepairer repairer;
+    std::vector<uint8_t> short_page(73, 0);
 
-// Test Case 6: Header corruption with truncated file
-TEST(HeaderRecoveryTest, TruncatedFileRecovery) {
-    // Test recovery when file is truncated
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "truncated_file_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with truncated file
-    EXPECT_TRUE(true); // Placeholder
+    EXPECT_FALSE(repairer.repair_page_header(nullptr, 16384));
+    EXPECT_FALSE(repairer.repair_page_header(short_page.data(), short_page.size()));
+    EXPECT_EQ(repairer.calculate_and_fix_checksum(nullptr, 16384), 0u);
 }
-
-// Test Case 7: Header corruption with wrong file size
-TEST(HeaderRecoveryTest, WrongFileSizeRecovery) {
-    // Test recovery when file size doesn't match expected
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "wrong_size_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with wrong file size
-    EXPECT_TRUE(true); // Placeholder
-}
-
-// Test Case 8: Header corruption with mixed corruption types
-TEST(HeaderRecoveryTest, MixedCorruptionRecovery) {
-    // Test recovery with multiple types of corruption
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "mixed_corruption_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with mixed corruption
-    EXPECT_TRUE(true); // Placeholder
-}
-
-// Test Case 9: Header corruption with SDI page corruption
-TEST(HeaderRecoveryTest, SDICorruptionRecovery) {
-    // Test recovery when SDI page is corrupted
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "sdi_corruption_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with SDI corruption
-    EXPECT_TRUE(true); // Placeholder
-}
-
-// Test Case 10: Header corruption with complete header loss
-TEST(HeaderRecoveryTest, CompleteHeaderLossRecovery) {
-    // Test recovery when complete header is lost
-    // Expected to fail initially
-    
-    catalog::TableSchema schema;
-    schema.table_name = "complete_header_loss_table";
-    schema.row_format = 1;
-    schema.page_size = 16384;
-    
-    catalog::ColumnInfo col;
-    col.name = "id";
-    col.mysql_type_id = dbrecovery::innodb::mysql_types::LONGLONG;
-    col.is_nullable = false;
-    schema.columns[1] = col;
-    
-    RecoveryEngine engine;
-    
-    // TODO: Implement actual test with complete header loss
-    EXPECT_TRUE(true); // Placeholder
-}
-
-} // namespace recovery
-} // namespace dbrecovery

@@ -112,6 +112,7 @@ TEST(HeaderCorruptionTest, DetectCorruptedPageHeader) {
 
     // Corrupt page header (PAGE_HEADER at offset 38)
     memset(page.data() + 38, 0xFF, 24);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -139,6 +140,7 @@ TEST(HeaderCorruptionTest, DetectInvalidPageType) {
 
     // Set invalid page type at correct offset (FIL_PAGE_TYPE_ABS = 24)
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -158,8 +160,8 @@ TEST(HeaderCorruptionTest, DetectInvalidPageType) {
 TEST(HeaderCorruptionTest, DetectChecksumMismatch) {
     auto page = create_valid_page();
 
-    // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM)
-    write_le<uint32_t>(page.data(), 0, 0xDEADBEEF);
+    // Modify protected data without updating the trailer checksum.
+    page[100] ^= 0x01;
 
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -182,6 +184,7 @@ TEST(HeaderCorruptionTest, DetectPageChainBroken) {
 
     // Corrupt next page pointer (FIL_PAGE_NEXT is at offset 12)
     write_be<uint32_t>(page.data(), FIL_PAGE_NEXT_ABS, 0x12345678);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -204,7 +207,8 @@ TEST(RecordCorruptionTest, DetectInfimumCorruption) {
     auto page = create_valid_page();
     
     // Corrupt INFIMUM record type
-    page[54] = 0x05;  // Invalid type
+    page[54] = 0x05;
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
     
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -225,7 +229,8 @@ TEST(RecordCorruptionTest, DetectSupremumCorruption) {
     auto page = create_valid_page();
     
     // Corrupt SUPREMUM record type
-    page[67] = 0x06;  // Invalid type
+    page[67] = 0x06;
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
     
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -247,6 +252,7 @@ TEST(RecordCorruptionTest, DetectRecordChainBroken) {
     
     // Corrupt record chain by setting next_offset to 0
     write_le<uint16_t>(page.data(), 55, 0);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
     
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -332,6 +338,7 @@ TEST(RecordChainRepairerTest, DetectBrokenRecord) {
     
     // Corrupt record chain
     write_le<uint16_t>(page.data(), 55, 0);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
     
     auto broken = repairer.detect_broken_records(page.data(), page.size());
     EXPECT_GT(broken.size(), 0);
@@ -344,6 +351,7 @@ TEST(RecordChainRepairerTest, RepairRecordChain) {
     
     // Corrupt record chain
     write_le<uint16_t>(page.data(), 55, 0);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
     
     bool success = repairer.repair_chain(page.data(), page.size());
     EXPECT_TRUE(success);
@@ -361,6 +369,7 @@ TEST(HeaderRepairerTest, RepairPageHeader) {
 
     // Corrupt FIL_HEADER - specifically the page type field
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     bool success = repairer.repair_page_header(page.data(), page.size());
     EXPECT_TRUE(success);
@@ -404,6 +413,7 @@ TEST(HeaderRepairerTest, RebuildPageHeader) {
 
     // Corrupt page header
     memset(page.data() + 38, 0xFF, 24);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     bool success = repairer.rebuild_page_header(page.data(), page.size(), 0, FIL_PAGE_INDEX);
     EXPECT_TRUE(success);
@@ -427,6 +437,7 @@ TEST(HeaderRepairerTest, RepairPreservesFilMetadataAndWritesCanonicalChecksum) {
     write_be<uint64_t>(page.data(), 26, 0x1112131415161718ULL);
     write_be<uint32_t>(page.data(), FIL_PAGE_SPACE_ID, 42);
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     ASSERT_TRUE(repairer.repair_page_header(page.data(), page.size()));
     EXPECT_EQ(read_be<uint32_t>(page.data(), FIL_PAGE_OFFSET), 7u);
@@ -488,28 +499,71 @@ TEST(IntegrationTest, LoadAndAnalyzeCorruptedFile) {
 }
 
 TEST(IntegrationTest, MixedCorruptionScenario) {
-    auto file = "test/test_mixed_corruption.ibd";
-    
-    if (!fs::exists(file)) {
-        GTEST_SKIP() << file << " not found";
-    }
-    
-    auto data = read_file(file);
-    ASSERT_FALSE(data.empty());
-    
-    // Analyze each page
     CorruptionDetector detector;
     detector.set_page_size(16384);
-    
-    uint32_t total_corruptions = 0;
-    for (uint32_t page_no = 0; page_no * 16384 < data.size(); ++page_no) {
-        auto page_data = data.data() + page_no * 16384;
-        auto corruptions = detector.detect_corruption(page_data, 16384, page_no);
-        total_corruptions += corruptions.size();
-    }
-    
-    // Mixed corruption should have multiple corruptions
-    EXPECT_GT(total_corruptions, 0);
+
+    auto invalid_type = create_valid_page(10);
+    write_be<uint16_t>(invalid_type.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(invalid_type.data(), invalid_type.size(), ChecksumAlgo::CRC32C);
+
+    auto bad_checksum = create_valid_page(11);
+    bad_checksum[100] ^= 0x01;
+
+    auto broken_chain = create_valid_page(12);
+    write_be<uint32_t>(broken_chain.data(), FIL_PAGE_NEXT_ABS, 99);
+    write_page_checksum(broken_chain.data(), broken_chain.size(), ChecksumAlgo::CRC32C);
+
+    auto bad_record = create_valid_page(13);
+    bad_record[54] = 0x05;
+    write_le<uint16_t>(bad_record.data(), 55, 0);
+    write_page_checksum(bad_record.data(), bad_record.size(), ChecksumAlgo::CRC32C);
+
+    const auto type_findings = detector.detect_corruption(
+        invalid_type.data(), invalid_type.size(), 10);
+    ASSERT_EQ(type_findings.size(), 1u);
+    EXPECT_EQ(type_findings[0].type, CorruptionType::PAGE_TYPE_INVALID);
+    EXPECT_EQ(type_findings[0].page_no, 10u);
+    EXPECT_EQ(type_findings[0].severity, "critical");
+
+    const auto checksum_findings = detector.detect_corruption(
+        bad_checksum.data(), bad_checksum.size(), 11);
+    ASSERT_EQ(checksum_findings.size(), 1u);
+    EXPECT_EQ(checksum_findings[0].type, CorruptionType::PAGE_CHECKSUM_MISMATCH);
+    EXPECT_EQ(checksum_findings[0].page_no, 11u);
+    EXPECT_EQ(checksum_findings[0].severity, "warning");
+    EXPECT_NE(checksum_findings[0].expected_value, checksum_findings[0].actual_value);
+
+    const auto chain_findings = detector.detect_corruption(
+        broken_chain.data(), broken_chain.size(), 12);
+    ASSERT_EQ(chain_findings.size(), 1u);
+    EXPECT_EQ(chain_findings[0].type, CorruptionType::PAGE_CHAIN_BROKEN);
+    EXPECT_EQ(chain_findings[0].page_no, 12u);
+    EXPECT_EQ(chain_findings[0].expected_value, 13u);
+    EXPECT_EQ(chain_findings[0].actual_value, 99u);
+
+    const auto record_findings = detector.detect_corruption(
+        bad_record.data(), bad_record.size(), 13);
+    ASSERT_EQ(record_findings.size(), 2u);
+    EXPECT_EQ(record_findings[0].type, CorruptionType::RECORD_HEADER_CORRUPTED);
+    EXPECT_EQ(record_findings[1].type, CorruptionType::RECORD_CHAIN_BROKEN);
+    EXPECT_EQ(record_findings[0].page_no, 13u);
+    EXPECT_EQ(record_findings[1].page_no, 13u);
+    EXPECT_EQ(record_findings[0].severity, "critical");
+    EXPECT_EQ(record_findings[1].severity, "critical");
+
+    const auto stats = detector.get_corruption_stats();
+    EXPECT_EQ(detector.get_corruptions().size(), 5u);
+    EXPECT_EQ(stats.at(CorruptionType::PAGE_TYPE_INVALID), 1u);
+    EXPECT_EQ(stats.at(CorruptionType::PAGE_CHECKSUM_MISMATCH), 1u);
+    EXPECT_EQ(stats.at(CorruptionType::PAGE_CHAIN_BROKEN), 1u);
+    EXPECT_EQ(stats.at(CorruptionType::RECORD_HEADER_CORRUPTED), 1u);
+    EXPECT_EQ(stats.at(CorruptionType::RECORD_CHAIN_BROKEN), 1u);
+    EXPECT_EQ(detector.get_critical_count(), 3u);
+    EXPECT_EQ(detector.get_warning_count(), 2u);
+
+    detector.clear_corruptions();
+    EXPECT_TRUE(detector.get_corruptions().empty());
+    EXPECT_TRUE(detector.get_corruption_stats().empty());
 }
 
 // ==================== Edge Case Tests ====================
@@ -573,7 +627,8 @@ TEST(StatisticsTest, GetCorruptionStats) {
     CorruptionDetector detector;
 
     auto page = create_valid_page();
-    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);  // Invalid type
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);  // Invalid type
 
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
 
@@ -593,6 +648,7 @@ TEST(StatisticsTest, ClearCorruptions) {
 
     auto page = create_valid_page();
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
 
@@ -612,6 +668,7 @@ TEST(StatisticsTest, GetSeverityCounts) {
 
     auto page = create_valid_page();
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     detector.detect_corruption(page.data(), page.size(), 0);
 
@@ -647,6 +704,7 @@ TEST(PageHealthTest, AnalyzeCorruptedPage) {
 
     // Corrupt page - set invalid type at correct offset
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     CorruptionDetector detector;
     detector.set_page_size(16384);
@@ -881,18 +939,22 @@ TEST(ComprehensiveTest, DetectAllCorruptionTypes) {
 
         if (name == "header") {
             memset(page.data() + 38, 0xFF, 24);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
         } else if (name == "type") {
             write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
         } else if (name == "checksum") {
-            // Corrupt checksum at offset 0 (FIL_PAGE_CHECKSUM) - checksum is little-endian
-            write_le<uint32_t>(page.data(), 0, 0xDEADBEEF);
+            page[100] ^= 0x01;
         } else if (name == "chain") {
             // Corrupt next_page at offset 12 (FIL_PAGE_NEXT_ABS) to break the chain
             write_be<uint32_t>(page.data(), FIL_PAGE_NEXT_ABS, 0x12345678);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
         } else if (name == "infimum") {
             page[54] = 0x05;
+            write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
         } else if (name == "supremum") {
             page[67] = 0x06;
+            write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
         }
 
         auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
@@ -954,6 +1016,7 @@ TEST(CleanupTest, DetectorReset) {
 
     auto page = create_valid_page();
     write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, 0xFFFF);
+    write_page_checksum(page.data(), page.size(), ChecksumAlgo::CRC32C);
 
     auto corruptions = detector.detect_corruption(page.data(), page.size(), 0);
 

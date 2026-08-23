@@ -1,5 +1,10 @@
 # Unit test configuration for dbrecovery
 
+# SchemaInferrer v2.0 pipeline tests (Phase 4 - Slice A)
+add_executable(test_schema_inferrer innodb/schema_inferrer_test.cpp)
+target_link_libraries(test_schema_inferrer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_schema_inferrer)
+
 # Page fragment reassembler tests
 add_executable(test_page_fragment_reassembler test_page_fragment_reassembler.cpp)
 target_link_libraries(test_page_fragment_reassembler PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
@@ -119,6 +124,11 @@ add_executable(test_corruption_scenarios ../test/test_corruption_scenarios.cpp)
 target_link_libraries(test_corruption_scenarios PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 target_compile_definitions(test_corruption_scenarios PRIVATE TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/test/test_data")
 gtest_discover_tests(test_corruption_scenarios)
+
+# Header repair tests
+add_executable(test_header_recovery test_header_recovery.cpp)
+target_link_libraries(test_header_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_header_recovery)
 
 # io_uring scanner tests (P4 - High-performance I/O)
 add_executable(test_io_uring_scanner ../test/test_io_uring_scanner.cpp)
@@ -279,6 +289,32 @@ gtest_discover_tests(test_sec_btree_repair)
 add_executable(test_heuristic_schema_engine ../test/test_heuristic_schema_engine.cpp)
 target_link_libraries(test_heuristic_schema_engine PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_heuristic_schema_engine)
+
+# CrossPageSampler tests (Phase 4 - Slice C)
+add_executable(test_cross_page_sampler tools/cross_page_sampler_test.cpp)
+target_link_libraries(test_cross_page_sampler PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_cross_page_sampler)
+
+# SchemaTemplateInference tests (Phase 4 - Slice C)
+add_executable(test_schema_template_inference tools/schema_template_inference_test.cpp)
+target_link_libraries(test_schema_template_inference PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_schema_template_inference)
+
+# InteractiveBuilder tests (Phase 4 - Slice D)
+add_executable(test_interactive_builder inference/interactive_builder_test.cpp)
+target_link_libraries(test_interactive_builder PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_interactive_builder)
+
+# Inference benchmark tests (Phase 4 - Slice E)
+add_executable(test_inference_benchmark inference/inference_benchmark_test.cpp)
+target_link_libraries(test_inference_benchmark PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+target_compile_definitions(test_inference_benchmark PRIVATE TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/tests/data")
+gtest_discover_tests(test_inference_benchmark)
+
+# DDLChangeChainDetector tests (Phase 4 - Slice B)
+add_executable(test_ddl_change_detector inference/ddl_change_detector_test.cpp)
+target_link_libraries(test_ddl_change_detector PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_ddl_change_detector)
 
 # ==================== P0 Regression Tests (ASan/UBSan) ====================
 # P0 regression tests for all 7 recently applied fixes
