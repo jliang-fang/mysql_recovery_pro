@@ -161,8 +161,19 @@ inline bool SDIExtractor::is_sdi_page(const uint8_t* page_data) const {
 
     // 读取页类型 (at offset 24, big-endian)
     uint16_t type = read_be<uint16_t>(page_data, FIL_PAGE_TYPE_ABS);
-    // Support both uncompressed SDI (0x45BE) and compressed SDI (0x45BD)
-    return type == FIL_PAGE_SDI || type == FIL_PAGE_SDI_ZIP;
+
+    // Uncompressed SDI (0x45BE) is unambiguous
+    if (type == FIL_PAGE_SDI) return true;
+
+    // FIL_PAGE_SDI_ZIP (0x45BD) is shared with FIL_PAGE_TYPE_BLOB.
+    // Only the SDI signature at offset 64-71 establishes SDI identity.
+    if (type == FIL_PAGE_SDI_ZIP) {
+        if (page_size_ < 72) return false;
+        constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+        return std::memcmp(page_data + 64, SDI_SIG, 8) == 0;
+    }
+
+    return false;
 }
 
 inline std::optional<std::vector<uint8_t>> SDIExtractor::extract_sdi_payload(const uint8_t* page_data, size_t page_size) {

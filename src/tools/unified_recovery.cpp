@@ -498,11 +498,26 @@ UnifiedRecoveryResult run_unified_recovery(
                 have_schema = true;
             }
         }
-        // SDI — placeholder: schema extraction via SDI is handled by caller-supplied
-        // FRM/schema_str; unified pipeline keeps evidence-only invariant here.
+        // SDI schema extraction is handled by the caller (FRM/schema_str).
+        // Version gates: (1) schema trust — with no authoritative schema the
+        // pipeline must not treat parse results as structured recovery, and
+        // (2) format safety — a UNKNOWN version means even bounded SDI scanning
+        // cannot run, and schemaless force-parse must stay forensic-only.
         if (!have_schema && !schemaless_recovery) {
-            (void)detected_version; (void)table_id;
+            result.trust_level = "EVIDENCE_ONLY";
+            result.schema_source = "EVIDENCE_ONLY";
+            if (detected_version == MySQLVersion::UNKNOWN) {
+                result.export_rejection_reason = "schema_trust_insufficient";
+            }
+        } else if (detected_version == MySQLVersion::UNKNOWN && result.trust_level == "AUTHORITATIVE") {
+            // A UNKNOWN version with an authoritative schema is a contradiction
+            // (SDI is the only automatic 8.0+ marker). Demote trust so version
+            // blind parses cannot claim structured recovery.
+            result.trust_level = "EVIDENCE_ONLY";
         }
+#ifndef NDEBUG
+        (void)table_id;
+#endif
 
         result.column_names.clear();
         if (!index_columns.empty()) {

@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <iomanip>
 #include <set>
@@ -1510,6 +1511,23 @@ int main(int argc, char** argv) {
                 page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
 
             if (page_type_be == dbrecovery::innodb::FIL_PAGE_TYPE_BLOB) {
+                // FIL_PAGE_TYPE_BLOB (0x45BD) is shared with FIL_PAGE_SDI_ZIP:
+                // compressed SDI metadata pages carry the same type value.
+                // Only absence of the SDI signature at offset 64-71 makes a
+                // 0x45BD page a BLOB page; otherwise it is SDI metadata and
+                // must not be carved as a BLOB payload.
+                constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+                const bool sdi_signed = page_data.size() >= 72 &&
+                    std::memcmp(page_data.data() + 64, SDI_SIG, 8) == 0;
+
+                if (sdi_signed) {
+                    if (verbose) {
+                        std::cout << "[BLOB] Skipping page " << page_no
+                                  << " (type 0x45BD, SDI signature present)\n";
+                    }
+                    continue;
+                }
+
                 blob_pages++;
                 uint32_t space_id = dbrecovery::innodb::read_be<uint32_t>(
                     page_data.data(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);

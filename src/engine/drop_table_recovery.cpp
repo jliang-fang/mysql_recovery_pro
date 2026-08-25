@@ -185,7 +185,14 @@ std::vector<RecoveredTableMetadata> SystemTablespaceScanner::scan_deleted_tables
             // Check for SDI page type
             uint16_t page_type = (static_cast<uint16_t>(page_buffer[24]) << 8) | page_buffer[25];
 
-            if (page_type == 0x45BD) {  // FIL_PAGE_SDI_ZIP (compressed SDI)
+            if (page_type == 0x45BD) {  // FIL_PAGE_SDI_ZIP (compressed SDI) — shared with BLOB
+                // 0x45BD is ambiguous: FIL_PAGE_SDI_ZIP == FIL_PAGE_TYPE_BLOB.
+                // Only the SDI signature at offset 64-71 establishes SDI identity.
+                // BLOB pages lack this signature and must not be parsed as SDI.
+                constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+                if (page_size_ < 72 || std::memcmp(page_buffer.data() + 64, SDI_SIG, 8) != 0) {
+                    continue;
+                }
                 // Use SDIManager::extract_zip_record() which reads BE lengths,
                 // constructs the standard LE SDI header, and decompresses through
                 // the bounded manager (16 MiB / 20:1 limits).

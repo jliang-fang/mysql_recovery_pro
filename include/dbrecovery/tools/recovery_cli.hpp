@@ -4327,21 +4327,38 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             unified_result_ = ures;
             recovered_records.clear();
             recovered_column_order.clear();
-            for (auto &r : ures.records) {
-                std::map<std::string,std::string> m;
-                for (size_t k = 0; k < r.fields.size(); ++k) {
-                    const std::string field_name = k < ures.column_names.size()
-                        ? ures.column_names[k]
-                        : (std::string("field_") + (k < 10 ? "000" : k < 100 ? "00" : k < 1000 ? "0" : "") + std::to_string(k));
-                    m[field_name] = r.fields[k];
+
+            // Only populate export records when unified pipeline's internal
+            // gate has approved export. This prevents the outer export stage
+            // from writing CSV/SQL for rows that the pipeline rejected
+            // (e.g. insufficient trust, page integrity failure, DDL variation,
+            // severe damage, or no structured rows).
+            if (ures.export_success) {
+                for (auto &r : ures.records) {
+                    std::map<std::string,std::string> m;
+                    for (size_t k = 0; k < r.fields.size(); ++k) {
+                        const std::string field_name = k < ures.column_names.size()
+                            ? ures.column_names[k]
+                            : (std::string("field_") + (k < 10 ? "000" : k < 100 ? "00" : k < 1000 ? "0" : "") + std::to_string(k));
+                        m[field_name] = r.fields[k];
+                    }
+                    recovered_records.push_back(std::move(m));
                 }
-                recovered_records.push_back(std::move(m));
-            }
-            if (!ures.column_names.empty()) {
-                recovered_column_order = ures.column_names;
-            } else if (!recovered_records.empty()) {
-                for (const auto &kv : recovered_records.front())
-                    recovered_column_order.push_back(kv.first);
+                if (!ures.column_names.empty()) {
+                    recovered_column_order = ures.column_names;
+                } else if (!recovered_records.empty()) {
+                    for (const auto &kv : recovered_records.front())
+                        recovered_column_order.push_back(kv.first);
+                }
+            } else {
+                std::string rejection = ures.export_rejection_reason.empty()
+                    ? "export_blocked_by_internal_gate" : ures.export_rejection_reason;
+                std::cout << "[INFO] Unified recovery pipeline blocked export: "
+                          << rejection << " (" << ures.total_recovered
+                          << " structured rows, trust=" << ures.trust_level
+                          << ", classification=" << ures.result_classification << ")\n";
+                // Evidence fragments are logged for reporting but never exported
+                // to CSV/SQL — they remain forensic evidence only.
             }
             if (!ures.evidence_fragments.empty() && verbose) {
                 std::cout << "[INFO] Unified salvage: " << ures.evidence_fragments.size()
