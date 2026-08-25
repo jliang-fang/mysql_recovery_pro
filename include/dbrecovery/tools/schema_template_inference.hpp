@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <chrono>
 #include <sstream>
 #include <fstream>
 #include <algorithm>
@@ -89,6 +90,7 @@ public:
         // Diagnostic only — a non-zero value is a variation signal, not proof of
         // INSTANT DDL without authoritative schema identity.
         bool found_instant_col = false;
+        uint32_t last_instant_col_count = 0;
 
         if (cfg_.detect_schema_variation) {
             std::ifstream file(ibd_path, std::ios::binary);
@@ -107,6 +109,9 @@ public:
                     uint16_t instant_col = innodb::read_be<uint16_t>(page_buf.data(), 60);
                     if (instant_col > 0 && instant_col <= sampling.detected_column_count) {
                         found_instant_col = true;
+                        if (instant_col > last_instant_col_count) {
+                            last_instant_col_count = instant_col;
+                        }
                     }
                 }
 
@@ -309,34 +314,42 @@ private:
     }
 
     static uint8_t map_type_name_to_id(const std::string& type_name) {
-        if (type_name == "TINYINT") return 1;
-        if (type_name == "SMALLINT") return 2;
-        if (type_name == "MEDIUMINT") return 9;
-        if (type_name == "INT") return 3;
-        if (type_name == "BIGINT") return 8;
-        if (type_name == "FLOAT") return 4;
-        if (type_name == "DOUBLE") return 5;
-        if (type_name == "DECIMAL") return 6;
-        if (type_name == "DATETIME") return 12;
-        if (type_name == "TIMESTAMP") return 7;
-        if (type_name == "TIME") return 11;
-        if (type_name == "DATE") return 10;
-        if (type_name == "YEAR") return 13;
-        if (type_name == "VARCHAR") return 15;
-        if (type_name == "CHAR") return 14;
-        if (type_name == "TEXT") return 16;
-        if (type_name == "TINYTEXT") return 16;
-        if (type_name == "MEDIUMTEXT") return 16;
-        if (type_name == "LONGTEXT") return 16;
-        if (type_name == "BLOB") return 23;
-        if (type_name == "TINYBLOB") return 23;
-        if (type_name == "MEDIUMBLOB") return 23;
-        if (type_name == "LONGBLOB") return 23;
-        if (type_name == "JSON") return 31;
-        if (type_name == "ENUM") return 18;
-        if (type_name == "SET") return 19;
-        if (type_name == "BINARY") return 20;
-        if (type_name == "VARBINARY") return 21;
+        // Strip parenthesized suffix like "CHAR(N)" -> "CHAR", "VARCHAR(255)" -> "VARCHAR"
+        std::string base = type_name;
+        size_t paren = base.find('(');
+        if (paren != std::string::npos) base = base.substr(0, paren);
+        // Trim trailing spaces
+        while (!base.empty() && base.back() == ' ') base.pop_back();
+
+        if (base == "TINYINT") return 1;
+        if (base == "SMALLINT") return 2;
+        if (base == "MEDIUMINT") return 9;
+        if (base == "INT") return 3;
+        if (base == "BIGINT") return 8;
+        if (base == "FLOAT") return 4;
+        if (base == "DOUBLE") return 5;
+        if (base == "DECIMAL") return 6;
+        if (base == "DATETIME") return 12;
+        if (base == "TIMESTAMP") return 7;
+        if (base == "TIME") return 11;
+        if (base == "DATE") return 10;
+        if (base == "YEAR") return 13;
+        if (base == "VARCHAR") return 15;
+        if (base == "CHAR") return 14;
+        if (base == "TEXT") return 16;
+        if (base == "TINYTEXT") return 16;
+        if (base == "MEDIUMTEXT") return 16;
+        if (base == "LONGTEXT") return 16;
+        if (base == "BLOB") return 23;
+        if (base == "TINYBLOB") return 23;
+        if (base == "MEDIUMBLOB") return 23;
+        if (base == "LONGBLOB") return 23;
+        if (base == "JSON") return 31;
+        if (base == "ENUM") return 18;
+        if (base == "SET") return 19;
+        if (base == "BINARY") return 20;
+        if (base == "VARBINARY") return 21;
+        if (base == "BIT") return 15;
         return 0;
     }
 

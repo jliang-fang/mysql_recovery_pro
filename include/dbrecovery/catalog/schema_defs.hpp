@@ -547,8 +547,9 @@ struct TableSchema {
                 if (col_json.contains("ordinal_position")) {
                     col.ordinal = col_json["ordinal_position"].get<uint32_t>();
                 }
-                // Fallback: if physical_pos not present, use ordinal_position
-                if (col.physical_pos == 0 && col_json.contains("ordinal_position")) {
+                // Fallback: if physical_pos not present in JSON, use ordinal_position
+                // physical_pos=0 is valid (first column), so only fallback when key is missing
+                if (!col_json.contains("physical_pos") && col_json.contains("ordinal_position")) {
                     col.physical_pos = col_json["ordinal_position"].get<uint32_t>();
                 }
 

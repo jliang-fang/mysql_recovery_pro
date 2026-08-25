@@ -25,7 +25,12 @@ using namespace dbrecovery::inference;
 
 // ==================== Helpers ====================
 
-/** Build a minimal valid InnoDB INDEX page with a few records. */
+/** Build a minimal valid InnoDB INDEX page with a few records.
+ *
+ * All InnoDB page-header fields, page directory slots, and offset tables
+ * are BIG-ENDIAN. Page directory slots are at page_size - 2*(i+1).
+ * REC_NEXT is a signed 16-bit big-endian relative offset from the record
+ * header start. COMPACT record header = 5 bytes (3 status + 2 REC_NEXT). */
 static std::vector<uint8_t> make_index_page_with_records(
     uint16_t n_recs,
     const std::vector<std::vector<uint8_t>>& field_data)
@@ -48,10 +53,12 @@ static std::vector<uint8_t> make_index_page_with_records(
         max_field_count = std::max(max_field_count, fv.size());
     }
 
-    // Layout: offset_table (2 bytes per field) + info_bits(1) + null_bitmap + field_data
+    // COMPACT layout: 5-byte record header + offset_table (2 bytes per field)
+    // + info_bits(1) + null_bitmap + field_data
     uint32_t n_fields = static_cast<uint32_t>(field_data.size());
     uint32_t null_bytes = (n_fields + 7) / 8;
-    uint32_t per_rec_overhead = n_fields * 2 + 1 + null_bytes;
+    constexpr uint32_t kRecHeaderSize = 5;
+    uint32_t per_rec_overhead = kRecHeaderSize + n_fields * 2 + 1 + null_bytes;
     uint32_t total_rec_size = static_cast<uint32_t>(per_rec_overhead + total_data);
 
     // Place records starting at offset 120
@@ -60,14 +67,13 @@ static std::vector<uint8_t> make_index_page_with_records(
 
     if (heap_top > page.size() - 100) heap_top = page.size() - 100;
 
-    page[40] = static_cast<uint8_t>(heap_top & 0xFF);
-    page[41] = static_cast<uint8_t>((heap_top >> 8) & 0xFF);
-    page[54] = static_cast<uint8_t>(n_recs & 0xFF);
-    page[55] = static_cast<uint8_t>((n_recs >> 8) & 0xFF);
-
-    // INFIMUM at offset 99, points to first user record
-    page[100] = static_cast<uint8_t>(rec_start & 0xFF);
-    page[101] = static_cast<uint8_t>((rec_start >> 8) & 0xFF);
+    // PAGE_HEADER: big-endian
+    page[38] = static_cast<uint8_t>((n_recs + 2) >> 8);  // n_slots BE
+    page[39] = static_cast<uint8_t>((n_recs + 2) & 0xFF);
+    page[40] = static_cast<uint8_t>((heap_top >> 8) & 0xFF);  // heap_top BE
+    page[41] = static_cast<uint8_t>(heap_top & 0xFF);
+    page[54] = static_cast<uint8_t>((n_recs >> 8) & 0xFF);  // n_recs BE
+    page[55] = static_cast<uint8_t>(n_recs & 0xFF);
 
     // Write records
     uint16_t current_off = rec_start;
@@ -76,9 +82,10 @@ static std::vector<uint8_t> make_index_page_with_records(
     for (int r = 0; r < n_recs; r++) {
         rec_offsets.push_back(current_off);
 
-        // Build offset table: offsets from end of record
-        // total_len, then field boundaries (strictly decreasing)
-        uint16_t data_offset = per_rec_overhead; // offset from start of record to data area
+        // 5-byte COMPACT record header: bytes 0-1 = REC_NEXT (signed BE)
+        // For the last record, REC_NEXT=0. For others, REC_NEXT = next_rec - current_off.
+        // Build the header upfront after we know next_rec start.
+        // We'll fill it later.
 
         // Compute field sizes
         std::vector<uint16_t> field_sizes;
@@ -91,25 +98,27 @@ static std::vector<uint8_t> make_index_page_with_records(
 
         uint16_t total_len = static_cast<uint16_t>(per_rec_overhead + running);
 
-        // Write offset table: first entry = total_len, then cumulative from end
+        // Offset table at header+5: BE, strictly decreasing cumulative offsets
+        // from the start of the record (header offset 0).
         uint16_t cumulative = total_len;
-        page[current_off] = static_cast<uint8_t>(cumulative & 0xFF);
-        page[current_off + 1] = static_cast<uint8_t>((cumulative >> 8) & 0xFF);
+        uint16_t ot_pos = current_off + kRecHeaderSize;
+        page[ot_pos] = static_cast<uint8_t>((cumulative >> 8) & 0xFF);
+        page[ot_pos + 1] = static_cast<uint8_t>(cumulative & 0xFF);
         cumulative -= field_sizes[0];
 
         for (uint32_t f = 1; f < n_fields; f++) {
-            page[current_off + f * 2] = static_cast<uint8_t>(cumulative & 0xFF);
-            page[current_off + f * 2 + 1] = static_cast<uint8_t>((cumulative >> 8) & 0xFF);
+            page[ot_pos + f * 2] = static_cast<uint8_t>((cumulative >> 8) & 0xFF);
+            page[ot_pos + f * 2 + 1] = static_cast<uint8_t>(cumulative & 0xFF);
             if (f < n_fields - 1) {
                 cumulative -= field_sizes[f];
             }
         }
 
         // info_bits
-        page[current_off + n_fields * 2] = 0x00;
+        page[current_off + kRecHeaderSize + n_fields * 2] = 0x00;
         // null bitmap
         for (uint32_t nb = 0; nb < null_bytes; nb++) {
-            page[current_off + n_fields * 2 + 1 + nb] = 0x00;
+            page[current_off + kRecHeaderSize + n_fields * 2 + 1 + nb] = 0x00;
         }
 
         // Write field data
@@ -124,28 +133,48 @@ static std::vector<uint8_t> make_index_page_with_records(
         current_off += total_len;
     }
 
-    // Page directory
-    uint16_t n_slots = static_cast<uint16_t>(2 + n_recs); // INFIMUM + records + SUPREMUM
-    uint16_t dir_end = static_cast<uint16_t>(page.size() - 2);
+    // Fill REC_NEXT in record headers (signed BE, relative to each header start)
+    for (int r = 0; r < n_recs; r++) {
+        if (r + 1 < n_recs) {
+            int16_t delta = static_cast<int16_t>(rec_offsets[r + 1] - rec_offsets[r]);
+            page[rec_offsets[r]] = static_cast<uint8_t>((delta >> 8) & 0xFF);
+            page[rec_offsets[r] + 1] = static_cast<uint8_t>(delta & 0xFF);
+        } else {
+            // Last record: REC_NEXT = 0 (end of chain)
+            page[rec_offsets[r]] = 0x00;
+            page[rec_offsets[r] + 1] = 0x00;
+        }
+    }
 
-    page[dir_end] = static_cast<uint8_t>(n_slots & 0xFF);
-    page[dir_end + 1] = static_cast<uint8_t>((n_slots >> 8) & 0xFF);
+    // INFIMUM record header at 94, REC_NEXT signed BE = rec_start - 94
+    {
+        int16_t inf_delta = static_cast<int16_t>(rec_start - 94);
+        page[94] = static_cast<uint8_t>((inf_delta >> 8) & 0xFF);
+        page[95] = static_cast<uint8_t>(inf_delta & 0xFF);
+        // INFIMUM data "infimum\0" at 99
+        page[99] = 0x00;  // infimum is at 99, but the header at 94 is what matters
+    }
 
-    // Slot 0 = INFIMUM
-    uint16_t slot_pos = static_cast<uint16_t>(dir_end - n_slots * 2);
-    page[slot_pos] = 0x63; page[slot_pos + 1] = 0x00;
+    // Page directory at end of page: big-endian slot values.
+    // Slot at page_size - 2*(i+1), i=0 = INFIMUM, i=n_slots-1 = SUPREMUM.
+    // Slot 0 = INFIMUM offset (99)
+    // Slots 1..n_recs = record offsets
+    // Last slot = SUPREMUM offset (104)
+    uint16_t n_slots = static_cast<uint16_t>(2 + n_recs);
+
+    // INFIMUM slot
+    page[page.size() - 2 * n_slots] = 0x00; page[page.size() - 2 * n_slots + 1] = 0x63; // 99
 
     // Record slots
     for (int r = 0; r < n_recs; r++) {
-        slot_pos = static_cast<uint16_t>(dir_end - (n_slots - 1 - r) * 2);
-        page[slot_pos] = static_cast<uint8_t>(rec_offsets[r] & 0xFF);
-        page[slot_pos + 1] = static_cast<uint8_t>((rec_offsets[r] >> 8) & 0xFF);
+        uint16_t sp = static_cast<uint16_t>(page.size() - 2 * (n_slots - r));
+        page[sp] = static_cast<uint8_t>((rec_offsets[r] >> 8) & 0xFF);
+        page[sp + 1] = static_cast<uint8_t>(rec_offsets[r] & 0xFF);
     }
 
-    // Last slot = SUPREMUM
-    slot_pos = static_cast<uint16_t>(dir_end - 2);
-    page[slot_pos] = static_cast<uint8_t>(heap_top & 0xFF);
-    page[slot_pos + 1] = static_cast<uint8_t>((heap_top >> 8) & 0xFF);
+    // SUPREMUM slot
+    page[page.size() - 2] = static_cast<uint8_t>((104 >> 8) & 0xFF);
+    page[page.size() - 1] = static_cast<uint8_t>(104 & 0xFF);
 
     return page;
 }
@@ -293,12 +322,17 @@ TEST(P1LayoutFuzzTest, EmptySlotTable) {
     // Also test with zeroed-out page directory
     {
         auto page = make_simple_index_page(3);
-        // Zero out n_slots at end of page
+        // Zero the last two bytes (SUPREMUM slot at page_size-2).
+        // After the BE fix, n_slots is read from PAGE_HEADER @38 (intact),
+        // and the SUPREMUM slot is skipped by the analyzer. So the page
+        // directory is still usable and records are found.
         page[page.size() - 2] = 0x00;
         page[page.size() - 1] = 0x00;
 
         auto info = analyzer.analyze_page(page.data(), page.size());
-        EXPECT_FALSE(info.has_value()); // Should be nullopt or gracefully handled
+        ASSERT_TRUE(info.has_value());
+        // 4 fields per record → 4 columns detected
+        EXPECT_EQ(info->total_columns, 4u);
     }
 }
 
@@ -316,8 +350,8 @@ TEST(P1LayoutFuzzTest, MaximumRecordCount) {
         auto page = make_index_page_with_records(200, fields);
 
         auto info = analyzer.analyze_page(page.data(), page.size());
-        // Should not crash or OOM
-        EXPECT_TRUE(!info.has_value() || info->total_columns == 2);
+        // 2 fields < analyzer's minimum of 3 → opaque 1-column fallback
+        EXPECT_TRUE(!info.has_value() || info->total_columns == 1);
     }
 
     // Create page with 500 very small records (boundary)
@@ -328,8 +362,8 @@ TEST(P1LayoutFuzzTest, MaximumRecordCount) {
         auto page = make_index_page_with_records(500, fields);
 
         auto info = analyzer.analyze_page(page.data(), page.size());
-        // Should not crash
-        EXPECT_TRUE(!info.has_value() || info->total_columns <= 10);
+        // 1 field < analyzer minimum of 3 → opaque 1-column fallback
+        EXPECT_TRUE(!info.has_value() || info->total_columns == 1);
     }
 }
 

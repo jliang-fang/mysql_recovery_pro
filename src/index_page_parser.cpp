@@ -2250,6 +2250,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             break;
         }
         // InnoDB type 15 = NEWDATE/DATE (3 bytes)
+        // MySQL server type 11 also maps to this same storage format
+        case 11:
         case 15: {  // NEWDATE/DATE (3 bytes) - InnoDB type 15
             val.type = IndexFieldValue::Type::DATE_VAL;
             // DATE is stored as: bit 0-4: day, bit 5-8: month, bit 9-22: year, bit 23: sign
@@ -2314,10 +2316,16 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     frac = (frac << 8) | data[offset + 5 + i];
                 }
                 // Format fractional seconds based on precision
+                // MySQL 5.6 packs fraction/10^(6-frac_bytes*2); for odd
+                // precision (frac_bytes*2 > precision) divide by 10 to undo it
                 int precision = col.datetime_precision;
                 if (precision > 0) {
+                    uint32_t display_frac = frac;
+                    if (frac_bytes * 2 > precision) {
+                        display_frac = frac / 10;
+                    }
                     char fbuf[16];
-                    snprintf(fbuf, sizeof(fbuf), ".%0*u", precision, frac);
+                    snprintf(fbuf, sizeof(fbuf), ".%0*u", precision, display_frac);
                     frac_str = fbuf;
                 }
             }
@@ -2395,7 +2403,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                             second += 1;
                             fractional = "0";
                         } else {
-                            fractional = std::to_string((1 << (fr_bytes * 8)) - fr);
+                            uint32_t display = (1 << (fr_bytes * 8)) - fr;
+                            if (fr_bytes * 2 > pad) {
+                                display /= 10;
+                            }
+                            fractional = std::to_string(display);
                         }
                     }
                     char buf[32];
@@ -2424,7 +2436,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                         for (size_t i = 0; i < fr_bytes; i++) {
                             fr = (fr << 8) | data[offset + 3 + i];
                         }
-                        fractional = std::to_string(fr);
+                        uint32_t display = fr;
+                        if (fr_bytes * 2 > pad) {
+                            display = fr / 10;
+                        }
+                        fractional = std::to_string(display);
                     }
 
                     char buf[32];

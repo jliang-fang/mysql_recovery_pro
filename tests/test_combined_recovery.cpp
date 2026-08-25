@@ -41,7 +41,7 @@ TEST(CombinedRecovery, IndexParserToHeuristicFallback) {
 
 TEST(CombinedRecovery, IndexParserToSalvageEngine) {
     recovery::SalvageEngine::Config cfg;
-    cfg.page_size = 16384; cfg.min_confidence = 0.3; cfg.include_fragments = false;
+    cfg.page_size = 16384; cfg.min_confidence = 0.3; cfg.include_evidence_fragments = false;
     recovery::SalvageEngine eng(cfg);
     auto page = make_valid_index_page_combined();
     page[0]=0x00; page[1]=0x00;

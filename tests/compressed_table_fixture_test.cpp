@@ -38,7 +38,22 @@ class CompressedTableFixtureTest : public ::testing::Test {
 protected:
     static constexpr const char* FIXTURE_DIR = "/app/mysql_recovery_test/fixtures/compressed";
 
+    void SetUp() override {
+        struct stat st;
+        if (stat(FIXTURE_DIR, &st) != 0 || !S_ISDIR(st.st_mode)) {
+            GTEST_SKIP() << "Fixture directory not found: " << FIXTURE_DIR;
+        }
+    }
+
+    static bool fixture_dir_exists() {
+        struct stat st;
+        return stat(FIXTURE_DIR, &st) == 0 && S_ISDIR(st.st_mode);
+    }
+
     static std::vector<uint8_t> load_ibd(const std::string& filename) {
+        if (!fixture_dir_exists()) {
+            return {};
+        }
         std::string path = std::string(FIXTURE_DIR) + "/" + filename;
         std::ifstream file(path, std::ios::binary | std::ios::ate);
         if (!file) {

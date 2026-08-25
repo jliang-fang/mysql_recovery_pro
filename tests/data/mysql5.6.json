@@ -1,0 +1,14 @@
+{
+  "byte_size": 98304,
+  "database": "testdb",
+  "ddl": "CREATE TABLE `all_types_test` (\\n  `id` int(11) NOT NULL AUTO_INCREMENT,\\n  `col_tinyint` tinyint(4) DEFAULT NULL,\\n  `col_smallint` smallint(6) DEFAULT NULL,\\n  `col_mediumint` mediumint(9) DEFAULT NULL,\\n  `col_int` int(11) DEFAULT NULL,\\n  `col_bigint` bigint(20) DEFAULT NULL,\\n  `col_float` float DEFAULT NULL,\\n  `col_double` double DEFAULT NULL,\\n  `col_decimal` decimal(10,2) DEFAULT NULL,\\n  `col_date` date DEFAULT NULL,\\n  `col_time` time DEFAULT NULL,\\n  `col_datetime` datetime DEFAULT NULL,\\n  `col_timestamp` timestamp NULL DEFAULT NULL,\\n  `col_year` year(4) DEFAULT NULL,\\n  `col_char` char(20) DEFAULT NULL,\\n  `col_varchar` varchar(100) DEFAULT NULL,\\n  `col_text` text,\\n  `col_blob` blob,\\n  `col_enum` enum('active','inactive','pending') DEFAULT NULL,\\n  `col_set` set('read','write','execute') DEFAULT NULL,\\n  `col_bit` bit(8) DEFAULT NULL,\\n  PRIMARY KEY (`id`)\\n) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=latin1 ROW_FORMAT=DYNAMIC",
+  "image": "mysql:5.6",
+  "page_count": 6,
+  "page_size": 16384,
+  "row_count": 4,
+  "row_format": "Compact",
+  "server_version": "5.6.51",
+  "sha256": "2af8d7e54db85d6dcb9ae5846d3175f1a645df4200bb264085301ae54d569cdc",
+  "table": "all_types_test",
+  "version": "5.6"
+}

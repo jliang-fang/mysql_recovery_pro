@@ -127,6 +127,7 @@ set(INFERENCE_SOURCES
     inference/feature_extractor.cpp
     inference/interactive_builder.cpp
     inference/layout_analyzer.cpp
+    inference/ddl_change_detector.cpp
 )
 
 # Add safety module sources (Phase 2: Bare Device Safety Gate)

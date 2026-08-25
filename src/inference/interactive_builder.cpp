@@ -36,7 +36,7 @@ size_t InteractiveBuilder::load_ibd_file(const std::string& path) {
 
         auto copy = std::make_unique<uint8_t[]>(page_size);
         std::memcpy(copy.get(), buf.get(), page_size);
-        page_data_owned_.emplace_back(copy.release(), page_size);
+        page_data_owned_.emplace_back(std::move(copy), page_size);
         count++;
     }
 
@@ -46,7 +46,7 @@ size_t InteractiveBuilder::load_ibd_file(const std::string& path) {
 void InteractiveBuilder::add_page_data(const uint8_t* data, size_t size) {
     auto copy = std::make_unique<uint8_t[]>(size);
     std::memcpy(copy.get(), data, size);
-    page_data_owned_.emplace_back(copy.release(), size);
+    page_data_owned_.emplace_back(std::move(copy), size);
 }
 
 void InteractiveBuilder::add_column_samples(const std::vector<std::vector<uint8_t>>& raw_values) {
@@ -59,7 +59,7 @@ std::optional<PhysicalLayoutAnalyzer::LayoutInfo> InteractiveBuilder::analyze_la
     // Build a vector of page views from owned data
     std::vector<std::pair<const uint8_t*, size_t>> pages;
     for (const auto& [data, size] : page_data_owned_) {
-        pages.emplace_back(data, size);
+        pages.emplace_back(data.get(), size);
     }
     for (const auto& [data, size] : page_data_views_) {
         pages.emplace_back(data, size);
@@ -77,7 +77,7 @@ std::vector<std::vector<std::vector<uint8_t>>> InteractiveBuilder::extract_colum
 
     std::vector<std::pair<const uint8_t*, size_t>> pages;
     for (const auto& [data, size] : page_data_owned_) {
-        pages.emplace_back(data, size);
+        pages.emplace_back(data.get(), size);
     }
     for (const auto& [data, size] : page_data_views_) {
         pages.emplace_back(data, size);

@@ -283,7 +283,7 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--damage-threshold=<f>\033[0m      Salvage confidence threshold 0.0-1.0 (default 0.15)\n";
     std::cout << "                                 Maps to --salvage-mode min_confidence; fail-closed on NaN/out-of-range\n";
     std::cout << "  \033[1m--damage-log=<path>\033[0m         Write damage distribution JSON to <path> (default: <output>/damage_report.json)\n";
-    std::cout << "  \033[1m--include-fragments\033[0m         In salvage mode, include L3 FRAGMENT and L4\n";
+    std::cout << "  \033[1m--evidence-fragments\033[0m         In salvage mode, include L3 FRAGMENT and L4\n";
     std::cout << "                                 STRING_ONLY items in the separate evidence report.\n";
     std::cout << "                                 Evidence is NEVER exported to CSV/SQL; it is\n";
     std::cout << "                                 forensic-only and non-importable.\n";
@@ -660,7 +660,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool undo_history_mode = parser_.get_bool_option("undo-history", false);
     bool undo_reassemble = parser_.get_bool_option("undo-reassemble", false);
     bool salvage_mode = parser_.get_bool_option("salvage-mode", false);
-    bool include_fragments = parser_.get_bool_option("include-fragments", false);
+    bool include_evidence_fragments = parser_.get_bool_option("evidence-fragments", false);
     std::string damage_threshold_str = parser_.get_option("damage-threshold", "");
     std::string damage_log_path = parser_.get_option("damage-log", "");
     std::string all_indexes_dir = parser_.get_option("all-indexes", "");
@@ -1638,7 +1638,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         dbrecovery::recovery::SalvageEngine::Config salvage_config;
         salvage_config.page_size = page_size;
-        salvage_config.include_fragments = include_fragments;
+        salvage_config.include_evidence_fragments = include_evidence_fragments;
         salvage_config.verbose = verbose;
         salvage_config.min_string_len = 4;
         salvage_config.min_record_fields = 1;
@@ -1695,14 +1695,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         // Forensic evidence (L3/L4) is never exported to CSV/SQL. When
-        // --include-fragments is set, write a separate non-importable evidence
+        // --evidence-fragments is set, write a separate non-importable evidence
         // report with metadata, hashes, and bounded previews only.
         if (!result.evidence_fragments.empty()) {
             std::string counter = std::to_string(result.evidence_fragments.size());
             std::cout << "[INFO] " << counter
                       << " forensic evidence fragments retained (L3/L4, non-importable)\n";
 
-            if (include_fragments) {
+            if (include_evidence_fragments) {
                 std::string evidence_path = output_dir + "/salvage_evidence.json";
                 dbrecovery::salvage::SalvageEvidenceSerializer serializer;
                 std::map<std::string, std::string> metadata;
@@ -1728,7 +1728,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
                 std::cout << "[INFO] Evidence report written to: " << evidence_path << "\n";
                 std::cout << "[WARN] Evidence fragments are forensic-only and CANNOT be\n";
-                std::cout << "       imported into a database. Use --include-fragments to\n";
+                std::cout << "       imported into a database. Use --evidence-fragments to\n";
                 std::cout << "       include this report in the output.\n";
                 salvage_artifacts.push_back({
                     {"path", evidence_path},
@@ -1736,7 +1736,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     {"importable", false}});
             } else {
                 std::cout << "[INFO] Evidence fragments omitted from output. Enable\n";
-                std::cout << "       --include-fragments to write salvage_evidence.json\n";
+                std::cout << "       --evidence-fragments to write salvage_evidence.json\n";
                 std::cout << "       (forensic-only report, never imported).\n";
             }
         } else {

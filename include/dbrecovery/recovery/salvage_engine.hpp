@@ -42,6 +42,13 @@ struct DamageReport {
     uint32_t detected_page_no = 0;
     uint16_t records_found = 0;
     uint16_t records_partial = 0;
+    // Set when bytes 0-3 of the FIL header do not match the checksum bytes
+    // stored at page_size-8..page_size-5 ("old-style" pair) and ALSO the page
+    // lacks a recognized checksum algorithm ID at page_size-4. MySQL <=5.6
+    // wrote both fields (identical values) but never verified them on read,
+    // so this alone flags "unverified", not "corrupt" (see checksum_valid).
+    bool trailer_mismatch = false;
+    bool free_space_corrupt = false;
     std::string diagnosis;
 
     std::string to_string() const;
@@ -103,7 +110,7 @@ public:
         // than receiving them by default. This flag never authorizes export:
         // L3/L4 items always land in `evidence_fragments` and are serialized
         // only through the evidence report, never CSV/SQL export.
-        bool include_fragments = false;
+        bool include_evidence_fragments = false;
         bool verbose = false;
     };
 

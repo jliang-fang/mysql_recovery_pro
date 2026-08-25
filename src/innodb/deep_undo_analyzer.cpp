@@ -605,6 +605,7 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
     history.current_data = current_record;
     history.current_is_deleted = false;
     history.index_id = index_id;
+    history.integrity = HistoryIntegrity::COMPLETE;
     // Extract primary key from current_record if available
     // (will be filled in from the undo chain if not)
 
@@ -612,7 +613,14 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
     std::set<uint64_t> visited;  // Cycle detection
 
     // 5. WHILE current_roll_ptr != 0 AND current_roll_ptr ∉ visited:
-    while (current_roll_ptr != 0 && visited.find(current_roll_ptr) == visited.end()) {
+    while (current_roll_ptr != 0) {
+        if (visited.find(current_roll_ptr) != visited.end()) {
+            stats_.broken_chains++;
+            history.integrity = HistoryIntegrity::CYCLE;
+            history.diagnostic =
+                "cycle detected at roll_ptr " + std::to_string(current_roll_ptr);
+            break;
+        }
 
         // 6. visited.insert(current_roll_ptr)
         visited.insert(current_roll_ptr);
@@ -626,11 +634,17 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
         //    current record and the next readable record is untrustworthy.
         if (undo_page_no == 0 || undo_page_no == FIL_NULL) {
             stats_.broken_chains++;
+            history.integrity = HistoryIntegrity::BROKEN_PAGE;
+            history.diagnostic =
+                "roll_ptr " + std::to_string(current_roll_ptr) + " has no page provenance";
             break;  // No provenance — cannot trust the chain
         }
         auto undo_page = page_manager_.read_undo_page(undo_page_no);
         if (undo_page.empty()) {
             stats_.broken_chains++;
+            history.integrity = HistoryIntegrity::BROKEN_PAGE;
+            history.diagnostic =
+                "undo page " + std::to_string(undo_page_no) + " unreadable";
             break;  // Page not readable → chain break
         }
 
@@ -639,6 +653,10 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
             undo_page, undo_page_no, undo_offset, schema);
         if (!undo_rec_opt) {
             stats_.broken_chains++;
+            history.integrity = HistoryIntegrity::INVALID_RECORD;
+            history.diagnostic =
+                "undo record at page " + std::to_string(undo_page_no) +
+                " offset " + std::to_string(undo_offset) + " failed verification";
             break;
         }
 
@@ -680,6 +698,15 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
             field_prev_ptr != 0 &&
             header_prev_ptr != field_prev_ptr) {
             stats_.broken_chains++;
+            if (history.integrity == HistoryIntegrity::COMPLETE) {
+                history.integrity = HistoryIntegrity::POINTER_CONFLICT;
+                history.diagnostic =
+                    "header prev_undo_ptr (" + std::to_string(header_prev_ptr) +
+                    ") != first-field prev pointer (" +
+                    std::to_string(field_prev_ptr) + ") at undo page " +
+                    std::to_string(last_rec.undo_page_no) + " offset " +
+                    std::to_string(last_rec.undo_page_offset);
+            }
             break;
         }
 
@@ -693,6 +720,14 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
         // 14. Safety limit: max 1000 versions
         if (history.undo_chain.size() >= max_chain_depth_) {
             history.truncated = true;
+            if (history.integrity == HistoryIntegrity::COMPLETE) {
+                history.integrity = HistoryIntegrity::TRUNCATED;
+                history.diagnostic =
+                    "undo chain exceeded max depth " +
+                    std::to_string(max_chain_depth_) + " at undo page " +
+                    std::to_string(last_rec.undo_page_no) + " offset " +
+                    std::to_string(last_rec.undo_page_offset);
+            }
             break;
         }
 
@@ -933,6 +968,7 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
     // Step 3: Build version histories for each PK group
     for (auto& [pk, refs] : pk_groups) {
         RowVersionHistory history;
+        history.integrity = HistoryIntegrity::HEURISTIC;
         history.index_id = index_id;
         history.primary_key.clear();
         for (auto& ref : refs) {
@@ -1018,6 +1054,7 @@ std::vector<RowVersionHistory> DeepUndoAnalyzer::heuristic_reconstruct_chains(
         if (entries.empty()) continue;
 
         RowVersionHistory history;
+        history.integrity = HistoryIntegrity::HEURISTIC;
         history.index_id = 0;
         history.primary_key.clear();
 
@@ -1094,6 +1131,8 @@ std::optional<std::vector<uint8_t>> RowVersionHistory::get_version_at(
 }
 
 std::string RowVersionHistory::to_insert_sql(const catalog::TableSchema& schema) const {
+    if (!export_safe()) return "";
+
     // Build INSERT statement from the latest non-deleted version
     // If current_is_deleted, use the newest undo record's data
     // If not deleted, we can't reconstruct full row from just the undo chain

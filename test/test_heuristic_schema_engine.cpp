@@ -30,11 +30,11 @@ using namespace dbrecovery::inference;
  *
  * PhysicalLayoutAnalyzer::analyze_page() expects:
  *   - page_type at offset 24 = 0x45BF (FIL_PAGE_INDEX)
- *   - n_recs at offset 54 (LE) > 0 and <= 1000
- *   - heap_top at offset 58 (LE) >= 120 and <= page_size - 8
- *   - infimum's next_offset at offset 100-101 (LE) = first user record offset
+ *   - n_recs at offset 54 (BE) > 0 and <= 1000
+ *   - heap_top at offset 40 (BE) >= 120 and <= page_size - 8
+ *   - 5-byte COMPACT record header (3 status + 2-byte REC_NEXT signed BE)
  *   - first_rec_offset >= 120 and < heap_top
- *   - offset table entries (LE uint16, strictly decreasing, non-zero)
+ *   - offset table entries at rec_off+5 (BE uint16, strictly decreasing, non-zero)
  *   - col_count from offset table entries must be 3-100
  */
 static std::vector<uint8_t> build_index_page(
@@ -45,6 +45,7 @@ static std::vector<uint8_t> build_index_page(
 
     std::vector<uint8_t> page(16384, 0);
     const size_t ps = 16384;
+    constexpr uint32_t kRecHeaderSize = 5;
 
     // === FIL_HEADER (offset 0-37) ===
     // FIL_PAGE_PREV (0-3)
@@ -60,43 +61,33 @@ static std::vector<uint8_t> build_index_page(
     page[18] = 0x01; page[19] = 0x00; page[20] = 0x00; page[21] = 0x00;
     // FIL_PAGE_OFFSET (22-23)
     page[22] = 0x00; page[23] = 0x00;
-    // FIL_PAGE_FILE_FLUSH_LSN (24-31) -- already set page_type at 24-25
-    // Actually page_type is at 24-25, file_flush_lsn is at 24-31
-    // Overwrite page_type correctly
-    // Already done above
 
     // === PAGE_HEADER (offset 38-93) ===
-    // PAGE_N_DIR_SLOTS (38-39)
+    // PAGE_N_DIR_SLOTS (38-39, BE)
     uint16_t n_slots = n_recs + 2;
-    page[38] = n_slots & 0xFF; page[39] = (n_slots >> 8) & 0xFF;
+    page[38] = (n_slots >> 8) & 0xFF; page[39] = n_slots & 0xFF;
 
     // Compute data layout
-    // The extractor reads field_offsets from rec_off (col_count entries).
-    // field_offsets[0] = next_rec (also = total record length from rec_off,
-    // since the next record immediately follows this one).
-    // field_offsets[1..col_count-1] = offset table entries for fields
-    // col_count-2 down to 0 (end of each field, relative to rec_off).
-    //
-    // Data starts at: rec_off + col_count*2 + 1 (info_bits) + null_bitmap_bytes
-    // This matches the extractor's calculation in PhysicalLayoutAnalyzer.
     uint32_t null_bitmap_bytes = (col_count + 7) / 8;
     uint32_t offset_table_bytes = col_count * 2;
-    uint32_t data_start_offset = first_rec_offset + offset_table_bytes + 1 /* info_bits */ + null_bitmap_bytes;
+    uint32_t data_start_offset = first_rec_offset + kRecHeaderSize + offset_table_bytes + 1 /* info_bits */ + null_bitmap_bytes;
 
     // Compute total field data size
     uint32_t total_data_size = 0;
     for (const auto& f : field_data) total_data_size += f.size();
+    uint32_t total_len = kRecHeaderSize + offset_table_bytes + 1 + null_bitmap_bytes + total_data_size;
 
-    // PAGE_HEAP_TOP (40-41) = end of records + page directory
-    uint32_t record_data_end = data_start_offset + total_data_size;
+    // PAGE_HEAP_TOP (40-41, BE) = end of records + page directory
+    uint32_t aligned_rec_size = ((total_len + 3) / 4) * 4;
+    uint32_t record_data_end = first_rec_offset + aligned_rec_size * n_recs;
     uint32_t page_dir_start = ((record_data_end + 7) / 8) * 8; // align to 8
-    uint32_t heap_top = page_dir_start + (n_recs + 2) * 2; // +2 for infimum/supremum
+    uint32_t heap_top = page_dir_start + n_slots * 2;
     if (heap_top > ps - 8) heap_top = ps - 8;
-    page[40] = heap_top & 0xFF; page[41] = (heap_top >> 8) & 0xFF;
+    page[40] = (heap_top >> 8) & 0xFF; page[41] = heap_top & 0xFF;
 
-    // PAGE_N_HEAP (42-43)
-    uint16_t n_heap = n_recs + 2; // +2 for infimum/supremum
-    page[42] = n_heap & 0xFF; page[43] = (n_heap >> 8) & 0xFF;
+    // PAGE_N_HEAP (42-43, BE)
+    uint16_t n_heap = n_recs + 2;
+    page[42] = (n_heap >> 8) & 0xFF; page[43] = n_heap & 0xFF;
 
     // PAGE_FREE (44-45)
     page[44] = 0x00; page[45] = 0x00;
@@ -109,46 +100,35 @@ static std::vector<uint8_t> build_index_page(
     // PAGE_N_DIRECTION (52-53)
     page[52] = 0x00; page[53] = 0x00;
 
-    // PAGE_N_RECS (54-55, LE)
-    page[54] = n_recs & 0xFF;
-    page[55] = (n_recs >> 8) & 0xFF;
+    // PAGE_N_RECS (54-55, BE)
+    page[54] = (n_recs >> 8) & 0xFF; page[55] = n_recs & 0xFF;
 
     // PAGE_MAX_TRX_ID (56-57)
     page[56] = 0x00; page[57] = 0x00;
 
-    // PAGE_LEVEL (58-59, LE) = 0 for leaf
+    // PAGE_LEVEL (58-59) = 0 for leaf
     page[58] = 0x00; page[59] = 0x00;
 
     // PAGE_INDEX_ID (60-67)
     for (int i = 0; i < 8; i++) page[60 + i] = 0x00;
 
-    // Rest of page header (68-93) = 0
-    // FSEG header (74-93)
+    // === INFIMUM COMPACT record header at 94 (5 bytes) ===
+    // REC_NEXT at 94-95 (signed BE) = first_rec_offset - 94
+    {
+        int16_t inf_delta = static_cast<int16_t>(first_rec_offset - 94);
+        page[94] = (inf_delta >> 8) & 0xFF;
+        page[95] = inf_delta & 0xFF;
+        page[96] = 0x00;  // info_bits
+        page[97] = 0x00;  // heap_no low
+        page[98] = 0x00;
+    }
 
-    // === INFIMUM record (offset 99, 5 bytes) ===
-    // COMPACT format: INFIMUM at offset 99
-    const uint32_t INFIMUM_OFF = 99;
-    page[INFIMUM_OFF] = 0x00; // info_bits
-
-    // INFIMUM next_offset (2 bytes at 100-101, LE) = first user record offset
-    page[INFIMUM_OFF + 1] = first_rec_offset & 0xFF;
-    page[INFIMUM_OFF + 2] = (first_rec_offset >> 8) & 0xFF;
-
-    // INFIMUM heap_no (2 bytes at 102-103, LE) = 0
-    page[INFIMUM_OFF + 3] = 0x00;
-    page[INFIMUM_OFF + 4] = 0x00;
-
-    // === SUPREMUM record (offset 104, 5+ bytes) ===
-    const uint32_t SUPREMUM_OFF = 104;
-    page[SUPREMUM_OFF] = 0x03; // info_bits with SUPREMUM status
-
-    // SUPREMUM next_offset (2 bytes, LE) = 0 (end of chain)
-    page[SUPREMUM_OFF + 1] = 0x00;
-    page[SUPREMUM_OFF + 2] = 0x00;
-
-    // SUPREMUM heap_no (2 bytes, LE) = 1
-    page[SUPREMUM_OFF + 3] = 0x01;
-    page[SUPREMUM_OFF + 4] = 0x00;
+    // === SUPREMUM COMPACT record header at 104 (5 bytes) ===
+    // REC_NEXT = 0 (end of chain)
+    page[104] = 0x00; page[105] = 0x00;
+    page[106] = 0x03;  // info_bits with SUPREMUM flag
+    page[107] = 0x01;  // heap_no = 1
+    page[108] = 0x00;
 
     // === User Records ===
     uint32_t current_rec_offset = first_rec_offset;
@@ -157,78 +137,57 @@ static std::vector<uint8_t> build_index_page(
 
     for (uint32_t r = 0; r < n_recs; r++) {
         user_rec_offsets.push_back(current_rec_offset);
-        // Compute offset table entries (relative to rec offset, decreasing order)
-        // Stored in reverse field order: last field end first
-        // field_offsets[0] = end of last field (largest)
-        // field_offsets[col_count-1] = end of first field (smallest)
-        std::vector<uint16_t> field_ends;
-        uint32_t accum = data_start_offset - current_rec_offset;
-        for (uint32_t c = 0; c < col_count; c++) {
-            accum += field_data[c].size();
-            field_ends.push_back(accum);
-        }
 
-        // Write offset table in reverse order (decreasing, LE)
+        // Compute total record length
+        uint32_t total_len = kRecHeaderSize + offset_table_bytes + 1 + null_bitmap_bytes + total_data_size;
+
+        // Offset table at rec_off + kRecHeaderSize (BE, strictly decreasing)
+        // First entry = total_len (end of last field), then subtract reverse-order
+        uint32_t cumulative = total_len;
         for (uint32_t c = 0; c < col_count; c++) {
-            uint32_t rev_idx = col_count - 1 - c;
-            uint16_t val = field_ends[rev_idx];
-            page[current_rec_offset + c * 2] = val & 0xFF;
-            page[current_rec_offset + c * 2 + 1] = (val >> 8) & 0xFF;
+            uint16_t val = static_cast<uint16_t>(cumulative);
+            page[current_rec_offset + kRecHeaderSize + c * 2] = (val >> 8) & 0xFF;
+            page[current_rec_offset + kRecHeaderSize + c * 2 + 1] = val & 0xFF;
+            cumulative -= static_cast<uint32_t>(field_data[c].size());
         }
 
         // info_bits (1 byte after offset table)
-        uint32_t info_off = current_rec_offset + offset_table_bytes;
-        page[info_off] = 0x00;
+        page[current_rec_offset + kRecHeaderSize + offset_table_bytes] = 0x00;
 
-        // NULL bitmap
-        uint32_t null_off = info_off + 1;
-        // All fields non-null, so bitmap = 0
+        // NULL bitmap (all non-null, already zeroed)
 
-        // Field data (all non-null)
+        // Field data
         uint32_t write_off = data_offset;
         for (uint32_t c = 0; c < col_count; c++) {
             std::memcpy(&page[write_off], field_data[c].data(), field_data[c].size());
             write_off += field_data[c].size();
         }
 
-        // Do NOT overwrite offset table entries with next_rec.
-        // The first 2 bytes (offset[0]) already contain the correct
-        // total record length (relative to rec_off), which the extractor
-        // reads as both field_offsets[0] and next_rec.
-        // Overwriting would corrupt the offset table and cause field
-        // extraction to read garbage data.
+        // REC_NEXT at bytes 0-1 (signed BE)
         if (r + 1 < n_recs) {
             current_rec_offset = write_off;
-            // align to 4
             current_rec_offset = ((current_rec_offset + 3) / 4) * 4;
-            data_offset = current_rec_offset + offset_table_bytes + 1 + null_bitmap_bytes;
+            data_offset = current_rec_offset + kRecHeaderSize + offset_table_bytes + 1 + null_bitmap_bytes;
+
+            int16_t delta = static_cast<int16_t>(current_rec_offset - user_rec_offsets.back());
+            page[user_rec_offsets.back()] = (delta >> 8) & 0xFF;
+            page[user_rec_offsets.back() + 1] = delta & 0xFF;
+        } else {
+            page[user_rec_offsets.back()] = 0x00;
+            page[user_rec_offsets.back() + 1] = 0x00;
         }
     }
 
-    // === Page Directory (at page_dir_start) ===
-    // Slot 0: INFIMUM (offset 99)
-    page[page_dir_start] = 99 & 0xFF;
-    page[page_dir_start + 1] = (99 >> 8) & 0xFF;
-    // Slot 1: SUPREMUM
-    page[page_dir_start + 2] = SUPREMUM_OFF & 0xFF;
-    page[page_dir_start + 3] = (SUPREMUM_OFF >> 8) & 0xFF;
-
-    // === Page Directory at end of page (for PhysicalLayoutAnalyzer) ===
-    // PhysicalLayoutAnalyzer::analyze_page() reads n_slots from page_size-2 (LE),
-    // then for i in [1, n_slots-1) reads slot at dir_end - (n_slots - i)*2 where
-    // dir_end = page_size - 2. Each slot is a LE uint16 record offset.
-    // Slot 0 = INFIMUM (skipped by analyzer, i starts at 1).
-    // Slots 1..n_slots-2 = user records.
-    // Slot n_slots-1 = SUPREMUM (skipped by analyzer, i+1 < n_slots stops before).
-    page[ps - 2] = n_slots & 0xFF;
-    page[ps - 1] = (n_slots >> 8) & 0xFF;
-    uint16_t dir_end = ps - 2;
+    // === Page Directory at end of page (BE) ===
+    // Slot at page_size - 2*(i+1), i=0 = INFIMUM (skipped), i=n_slots-1 = SUPREMUM (skipped)
     for (uint16_t i = 1; i + 1 < n_slots; i++) {
-        uint16_t slot_pos = dir_end - (n_slots - i) * 2;
-        uint32_t rec = (i - 1 < n_recs) ? user_rec_offsets[i - 1] : 0;
-        uint16_t rec_off = static_cast<uint16_t>(rec);
-        page[slot_pos] = rec_off & 0xFF;
-        page[slot_pos + 1] = (rec_off >> 8) & 0xFF;
+        uint16_t slot_pos = static_cast<uint16_t>(ps - 2 * (i + 1));
+        uint32_t rec_idx = i - 1;
+        if (rec_idx < user_rec_offsets.size()) {
+            uint16_t rec_off = static_cast<uint16_t>(user_rec_offsets[rec_idx]);
+            page[slot_pos] = (rec_off >> 8) & 0xFF;
+            page[slot_pos + 1] = rec_off & 0xFF;
+        }
     }
 
     return page;

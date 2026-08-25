@@ -13,7 +13,7 @@
 namespace dbrecovery {
 
 // ==================== 版本特征表 ====================
-const std::array<MySQLVersionDetector::VersionFeature, 6> MySQLVersionDetector::version_features_ = {{
+const std::array<MySQLVersionDetector::VersionFeature, 5> MySQLVersionDetector::version_features_ = {{
     // MySQL 5.6 - 引入COMPACT格式，新校验和
     {MySQLVersion::MYSQL_56, "MySQL 5.6", 1024, 65536, false, false, false, false, true, 0},
 

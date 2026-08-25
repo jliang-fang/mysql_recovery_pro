@@ -937,6 +937,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainZeroRollPtr) {
     EXPECT_EQ(history.index_id, 100u);
     ASSERT_EQ(history.current_data.size(), 3u);
     EXPECT_EQ(history.current_data[0], 1);
+    EXPECT_EQ(history.integrity, HistoryIntegrity::COMPLETE);
+    EXPECT_TRUE(history.diagnostic.empty());
+    EXPECT_FALSE(history.truncated);
 }
 
 TEST(DeepUndoAnalyzerTest, TraceVersionChainNoIbdata) {
@@ -953,6 +956,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainNoIbdata) {
     EXPECT_EQ(history.index_id, 200u);
     const auto& stats = analyzer.get_stats();
     EXPECT_EQ(stats.broken_chains, 1u);
+
+    EXPECT_EQ(history.integrity, HistoryIntegrity::BROKEN_PAGE);
+    EXPECT_FALSE(history.diagnostic.empty());
 }
 
 TEST(DeepUndoAnalyzerTest, RebuildAllHistoriesEmpty) {
@@ -1342,6 +1348,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainThreeVersionWalk) {
     EXPECT_EQ(stats.broken_chains, 0u);
     EXPECT_EQ(stats.total_undo_records, 3u);
 
+    EXPECT_EQ(history.integrity, HistoryIntegrity::COMPLETE);
+    EXPECT_TRUE(history.diagnostic.empty());
+
     std::remove(path.c_str());
 }
 
@@ -1367,6 +1376,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainRollPtrPointsToCorruptPage) {
     EXPECT_EQ(history.n_versions, 1u);
     EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
 
+    EXPECT_EQ(history.integrity, HistoryIntegrity::BROKEN_PAGE);
+    EXPECT_FALSE(history.diagnostic.empty());
+
     std::remove(path.c_str());
 }
 
@@ -1377,7 +1389,7 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainCycleDetected) {
     std::vector<uint8_t> page(16384, 0);
     write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
     uint16_t rec_off = TRX_UNDO_PAGE_HDR_SIZE;
-    auto rec = make_update_rec(100, 200, 55, 0,
+    auto rec = make_update_rec(100, 200, 55, RollPtrDecoder::encode(5, rec_off, 0),
         {make_roll_ptr_field(5, rec_off), {0x01, 0x00, 0x00, 0x00}});
     std::memcpy(page.data() + rec_off, rec.data(), rec.size());
     uint16_t free_off = rec_off + static_cast<uint16_t>(rec.size());
@@ -1404,6 +1416,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainCycleDetected) {
     // terminated by the visited set. Either way it must NOT hang or exceed 1.
     ASSERT_LE(history.undo_chain.size(), 1u);
     EXPECT_LE(history.n_versions, 2u);
+
+    EXPECT_EQ(history.integrity, HistoryIntegrity::CYCLE);
+    EXPECT_FALSE(history.diagnostic.empty());
 
     std::remove(path.c_str());
 }
@@ -1505,6 +1520,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainConflictingHeaderAndFieldBreak) {
     EXPECT_EQ(history.n_versions, 2u);
     EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
 
+    EXPECT_EQ(history.integrity, HistoryIntegrity::POINTER_CONFLICT);
+    EXPECT_FALSE(history.diagnostic.empty());
+
     std::remove(chain.path.c_str());
 }
 
@@ -1532,6 +1550,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainNullHeaderEndsDespiteNonzeroField) {
     EXPECT_EQ(analyzer.get_stats().broken_chains, 0u)
         << "null header is a normal chain end, not corruption";
 
+    EXPECT_EQ(history.integrity, HistoryIntegrity::COMPLETE);
+    EXPECT_TRUE(history.diagnostic.empty());
+
     std::remove(chain.path.c_str());
 }
 
@@ -1558,6 +1579,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainNullFieldContinuesViaHeader) {
     EXPECT_EQ(history.undo_chain[1].trx_id, 102u);
     EXPECT_EQ(history.n_versions, 3u);
     EXPECT_EQ(analyzer.get_stats().broken_chains, 0u);
+
+    EXPECT_EQ(history.integrity, HistoryIntegrity::COMPLETE);
+    EXPECT_TRUE(history.diagnostic.empty());
 
     std::remove(chain.path.c_str());
 }
@@ -1596,6 +1620,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainInvalidContinuationBreaks) {
     EXPECT_EQ(history.n_versions, 2u);
     EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
 
+    EXPECT_EQ(history.integrity, HistoryIntegrity::INVALID_RECORD);
+    EXPECT_FALSE(history.diagnostic.empty());
+
     std::remove(path.c_str());
 }
 
@@ -1617,6 +1644,9 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainUnresolvedProfileRejects) {
     EXPECT_TRUE(history.undo_chain.empty());
     EXPECT_EQ(history.n_versions, 1u);
     EXPECT_EQ(analyzer.get_stats().broken_chains, 1u);
+
+    EXPECT_EQ(history.integrity, HistoryIntegrity::INVALID_RECORD);
+    EXPECT_FALSE(history.diagnostic.empty());
 
     std::remove(chain.path.c_str());
 }

@@ -39,7 +39,7 @@ TEST(L3L4Isolation, IncludeFragmentsFlagStillNotInCsv) {
     cfg.min_confidence = 0.0;
     cfg.enable_pattern_match = true; cfg.enable_string_extract = true;
     cfg.enable_signature_scan = false;
-    cfg.include_fragments = true;
+    cfg.include_evidence_fragments = true;
     SalvageEngine eng(cfg);
     std::vector<uint8_t> p(4096, 0);
     std::string email = "iso@test.org";

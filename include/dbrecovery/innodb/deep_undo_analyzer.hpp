@@ -126,6 +126,24 @@ struct UndoRecordV2 {
 };
 
 /**
+ * @brief Integrity verdict for a reconstructed version history
+ *
+ * Only COMPLETE histories (roll_ptr==0 or INSERT-terminated, with every link
+ * verified) may be treated as authoritative for automatic SQL/CSV export.
+ * Every other state means the chain could not be fully proven; consumers must
+ * refuse automatic export and surface the diagnostic instead.
+ */
+enum class HistoryIntegrity : uint8_t {
+    COMPLETE,          // roll_ptr==0 or INSERT-termiinated normally
+    BROKEN_PAGE,       // undo page unreadable / provenance rejected
+    INVALID_RECORD,    // undo record failed verified parsing
+    POINTER_CONFLICT,  // header prev_undo_ptr != first-field prev pointer
+    CYCLE,             // roll pointer revisit detected
+    TRUNCATED,         // exceeded max_chain_depth_
+    HEURISTIC,         // grouped reconstruction (not pointer-traced)
+};
+
+/**
  * @brief Complete version history for a single row
  *
  * Tracks all versions of a row from INSERT through UPDATEs to DELETE.
@@ -144,6 +162,16 @@ struct RowVersionHistory {
     std::vector<uint8_t> primary_key;
     uint32_t n_versions  = 0;       // Total versions including current
     bool truncated       = false;   // Chain was truncated at 1000 versions
+
+    // Integrity verdict — set by the analyzer; COMPLETE is the only
+    // exportable state.
+    HistoryIntegrity integrity = HistoryIntegrity::COMPLETE;
+    std::string diagnostic;         // Human-readable failure reason (page/offset)
+
+    /**
+     * @brief Whether this history may be exported as authoritative data
+     */
+    bool export_safe() const { return integrity == HistoryIntegrity::COMPLETE; }
 
     /**
      * @brief Get the row state at a given point in time

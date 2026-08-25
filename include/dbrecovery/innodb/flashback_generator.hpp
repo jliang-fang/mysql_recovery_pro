@@ -150,6 +150,25 @@ public:
         std::chrono::system_clock::time_point point,
         const catalog::TableSchema& schema);
 
+    // FlashbackChainResult — safe chain API with integrity enforcement
+    struct FlashbackChainResult {
+        std::vector<FlashbackRecord> records;
+        HistoryIntegrity integrity =
+            HistoryIntegrity::COMPLETE;
+        std::string diagnostic;
+        bool exportable = false;
+
+        explicit operator bool() const { return exportable; }
+    };
+
+    FlashbackChainResult flashback_full_chain_safe(
+        const std::vector<uint8_t>& current_record,
+        uint64_t roll_ptr,
+        const catalog::TableSchema& schema,
+        uint64_t index_id);
+
+    // Deprecated: use flashback_full_chain_safe instead.
+    // Returns empty records when integrity != COMPLETE.
     std::vector<FlashbackRecord> flashback_full_chain(
         const std::vector<uint8_t>& current_record,
         uint64_t roll_ptr,

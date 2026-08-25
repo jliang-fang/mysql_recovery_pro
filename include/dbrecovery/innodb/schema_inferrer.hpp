@@ -149,7 +149,7 @@ public:
         
         // User pattern: user_XXXXX or userXXXX
         user_prefix_regex_ = std::regex(
-            R"(^user[0-9]+|[a-zA-Z0-9_]+)$)",
+            R"(^(?:user[0-9]+|[a-zA-Z0-9_]+)$)",
             std::regex::optimize
         );
     }

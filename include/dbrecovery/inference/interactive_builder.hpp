@@ -128,8 +128,8 @@ public:
     void clear();
 
 private:
-    // Raw page data pool
-    std::vector<std::pair<const uint8_t*, size_t>> page_data_owned_;
+    // Raw page data pool (owned)
+    std::vector<std::pair<std::unique_ptr<uint8_t[]>, size_t>> page_data_owned_;
     std::vector<std::pair<const uint8_t*, size_t>> page_data_views_;
 
     // Column samples per column (ordinal → raw values)

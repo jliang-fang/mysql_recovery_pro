@@ -1,0 +1,14 @@
+{
+  "byte_size": 114688,
+  "database": "testdb",
+  "ddl": "CREATE TABLE `all_types_test` (\\n  `id` int NOT NULL AUTO_INCREMENT,\\n  `col_tinyint` tinyint DEFAULT NULL,\\n  `col_smallint` smallint DEFAULT NULL,\\n  `col_mediumint` mediumint DEFAULT NULL,\\n  `col_int` int DEFAULT NULL,\\n  `col_bigint` bigint DEFAULT NULL,\\n  `col_float` float DEFAULT NULL,\\n  `col_double` double DEFAULT NULL,\\n  `col_decimal` decimal(10,2) DEFAULT NULL,\\n  `col_date` date DEFAULT NULL,\\n  `col_time` time DEFAULT NULL,\\n  `col_datetime` datetime DEFAULT NULL,\\n  `col_timestamp` timestamp NULL DEFAULT NULL,\\n  `col_year` year DEFAULT NULL,\\n  `col_char` char(20) DEFAULT NULL,\\n  `col_varchar` varchar(100) DEFAULT NULL,\\n  `col_text` text,\\n  `col_blob` blob,\\n  `col_enum` enum('active','inactive','pending') DEFAULT NULL,\\n  `col_set` set('read','write','execute') DEFAULT NULL,\\n  `col_bit` bit(8) DEFAULT NULL,\\n  `col_json` json DEFAULT NULL,\\n  PRIMARY KEY (`id`)\\n) ENGINE=InnoDB AUTO_INCREMENT=5 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci ROW_FORMAT=DYNAMIC",
+  "image": "mysql:9.0",
+  "page_count": 7,
+  "page_size": 16384,
+  "row_count": 4,
+  "row_format": "Dynamic",
+  "server_version": "9.0.1",
+  "sha256": "338b56168a527833a945aa12c99c8337352f3d058bf14f3fa00199ea7972674e",
+  "table": "all_types_test",
+  "version": "9.0"
+}

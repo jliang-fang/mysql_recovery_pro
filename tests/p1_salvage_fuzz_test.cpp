@@ -252,7 +252,7 @@ TEST(P1SalvageFuzzTest, MixedDamageLevels) {
     cfg.enable_signature_scan = true;
     cfg.enable_pattern_match = true;
     cfg.enable_string_extract = true;
-    // include_fragments=false (default) — L3/L4 must be in evidence_fragments only
+    // include_evidence_fragments=false (default) — L3/L4 must be in evidence_fragments only
     engine.set_config(cfg);
 
     for (int iter = 0; iter < 5; iter++) {
@@ -412,7 +412,7 @@ TEST(P1SalvageFuzzTest, ExtremeConfidenceThresholds) {
 // ==================== Evidence Separation (L3/L4 → evidence_fragments) ====================
 
 TEST(P1SalvageFuzzTest, EvidenceSeparationDefault) {
-    // With include_fragments=false (default), L3/L4 must route to evidence_fragments,
+    // With include_evidence_fragments=false (default), L3/L4 must route to evidence_fragments,
     // never to rows. STRUCTURED rows must remain in rows.
     SalvageEngine engine;
     SalvageEngine::Config cfg;
@@ -420,7 +420,7 @@ TEST(P1SalvageFuzzTest, EvidenceSeparationDefault) {
     cfg.enable_signature_scan = true;
     cfg.enable_pattern_match = true;
     cfg.enable_string_extract = true;
-    cfg.include_fragments = false;
+    cfg.include_evidence_fragments = false;
     engine.set_config(cfg);
 
     std::vector<std::pair<const uint8_t*, size_t>> pages;
@@ -459,14 +459,14 @@ TEST(P1SalvageFuzzTest, EvidenceSeparationDefault) {
 }
 
 TEST(P1SalvageFuzzTest, EvidenceSeparationIncludeFragments) {
-    // With include_fragments=true, evidence_fragments should be preserved
+    // With include_evidence_fragments=true, evidence_fragments should be preserved
     SalvageEngine engine;
     SalvageEngine::Config cfg;
     cfg.min_confidence = 0.0;
     cfg.enable_signature_scan = true;
     cfg.enable_pattern_match = true;
     cfg.enable_string_extract = true;
-    cfg.include_fragments = true;
+    cfg.include_evidence_fragments = true;
     engine.set_config(cfg);
 
     std::vector<std::pair<const uint8_t*, size_t>> pages;
@@ -480,7 +480,7 @@ TEST(P1SalvageFuzzTest, EvidenceSeparationIncludeFragments) {
 
     auto result = engine.salvage_pages(pages);
 
-    // With include_fragments=true, evidence_fragments must be non-empty
+    // With include_evidence_fragments=true, evidence_fragments must be non-empty
     // (random data pages typically produce L3/L4 fragments)
     bool has_evidence = !result.evidence_fragments.empty();
     EXPECT_TRUE(has_evidence);
@@ -705,7 +705,7 @@ TEST(P1SalvageFuzzTest, AutoSalvageStructuredOnly) {
     cfg.enable_signature_scan = true;
     cfg.enable_pattern_match = true;
     cfg.enable_string_extract = true;
-    cfg.include_fragments = false;
+    cfg.include_evidence_fragments = false;
     engine.set_config(cfg);
 
     std::vector<std::pair<const uint8_t*, size_t>> pages;

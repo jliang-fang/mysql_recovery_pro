@@ -582,7 +582,36 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_point_in_time(
     return results;
 }
 
-// ==================== Flashback full chain ====================
+// ==================== Flashback full chain (safe) ====================
+
+FlashbackGenerator::FlashbackChainResult
+FlashbackGenerator::flashback_full_chain_safe(
+    const std::vector<uint8_t>& current_record,
+    uint64_t roll_ptr,
+    const catalog::TableSchema& schema,
+    uint64_t index_id) {
+
+    FlashbackChainResult result;
+
+    auto history = analyzer_->trace_version_chain(
+        current_record, roll_ptr, schema, index_id);
+
+    result.integrity = history.integrity;
+    result.diagnostic = history.diagnostic;
+    result.exportable = history.export_safe();
+
+    // Only decode records when the chain is safe for export
+    if (result.exportable) {
+        for (const auto& rec : history.undo_chain) {
+            auto fr = decode_single_record(rec, schema);
+            result.records.push_back(std::move(fr));
+        }
+    }
+
+    return result;
+}
+
+// ==================== Flashback full chain (deprecated) ====================
 
 std::vector<FlashbackRecord> FlashbackGenerator::flashback_full_chain(
     const std::vector<uint8_t>& current_record,
@@ -590,18 +619,15 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_full_chain(
     const catalog::TableSchema& schema,
     uint64_t index_id) {
 
-    std::vector<FlashbackRecord> records;
-
-    auto history = analyzer_->trace_version_chain(
+    auto safe_result = flashback_full_chain_safe(
         current_record, roll_ptr, schema, index_id);
 
-    // Decode each version in the chain
-    for (const auto& rec : history.undo_chain) {
-        auto fr = decode_single_record(rec, schema);
-        records.push_back(std::move(fr));
+    // Fail-closed: return empty records when chain is not safely exportable
+    if (!safe_result.exportable) {
+        return {};
     }
 
-    return records;
+    return std::move(safe_result.records);
 }
 
 // ==================== Output generation ====================
@@ -609,6 +635,8 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_full_chain(
 std::string FlashbackGenerator::generate_output(
     const std::vector<FlashbackRecord>& records,
     const catalog::TableSchema& schema) {
+
+    if (records.empty()) return "";
 
     switch (config_.output_format) {
         case FlashbackOutputFormat::SQL:

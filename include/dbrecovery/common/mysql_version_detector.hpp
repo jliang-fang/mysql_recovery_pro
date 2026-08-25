@@ -59,6 +59,16 @@ struct MultiPageDetectionResult {
 /**
  * @brief MySQL版本自动检测器
  * @details 通过分析InnoDB页数据中的多个特征字段来确定MySQL版本
+ *
+ * ## 版本识别能力声明（硬化，fail-closed）
+ *
+ * 自动检测**仅**能以 SDI 页签名（page type 0x26F3 + "SDI" 校验）权威确认
+ * **MySQL 8.0 family**（8.0 / 8.4 / 9.0 统一归为 MYSQL_80 返回）。
+ *
+ * - FSP 标志、LSN 扩展、undo 页头等佐证证据**只能**给出下界，
+ *   **不足以**判定 MySQL 5.6/5.7 —— 核验后这些输入一律返回 UNKNOWN。
+ * - `matches_version(..., MYSQL_57)`（及 5.6）恒为 false，避免误配对版本敏感逻辑。
+ * - 任何无 SDI 证据的场景 → UNKNOWN，调用方必须 fail-closed。
  */
 class MySQLVersionDetector {
 public:
@@ -140,8 +150,8 @@ private:
         uint16_t sdi_page_type;        // SDI页类型值
     };
 
-    // 版本特征表（支持：5.6, 5.7, 8.0, 8.4, 9.0）
-    static const std::array<VersionFeature, 6> version_features_;
+    // 版本特征表（支持：5.6, 5.7, 8.0, 8.4, 9.0 —— 必须与下方 initializer 条目数一致）
+    static const std::array<VersionFeature, 5> version_features_;
 };
 
 // ==================== 版本检测结果 ====================

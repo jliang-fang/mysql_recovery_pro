@@ -163,6 +163,44 @@ static uint32_t innodb_checksum_impl(const uint8_t* data, size_t size) {
     return sum;
 }
 
+// ==================== MySQL 5.6 ut_fold_binary Checksum ====================
+// From MySQL source: include/ut0ut.h ut_fold_binary()
+// Used by buf_calc_page_old_checksum() in MySQL 5.6
+//
+// Algorithm:
+//   fold = 0
+//   for each 4-byte little-endian word in the range:
+//     fold = ((fold ^ word) * 0x9E3779B9) & 0xFFFFFFFF
+
+static uint32_t ut_fold_binary_impl(const uint8_t* data, size_t size) {
+    uint32_t fold = 0;
+    constexpr uint32_t UT_HASH_RANDOM_MASK = 0x9E3779B9;
+
+    size_t i = 0;
+    while (i + 4 <= size) {
+        uint32_t word = static_cast<uint32_t>(data[i]) |
+                        (static_cast<uint32_t>(data[i + 1]) << 8) |
+                        (static_cast<uint32_t>(data[i + 2]) << 16) |
+                        (static_cast<uint32_t>(data[i + 3]) << 24);
+        fold = ((fold ^ word) * UT_HASH_RANDOM_MASK) & 0xFFFFFFFF;
+        i += 4;
+    }
+
+    // Handle remaining bytes
+    if (i < size) {
+        uint32_t partial = 0;
+        size_t shift = 0;
+        while (i < size) {
+            partial |= static_cast<uint32_t>(data[i]) << shift;
+            shift += 8;
+            i++;
+        }
+        fold = ((fold ^ partial) * UT_HASH_RANDOM_MASK) & 0xFFFFFFFF;
+    }
+
+    return fold;
+}
+
 // ==================== Public API Implementation ====================
 
 ChecksumAlgo detect_checksum_algorithm(const uint8_t* page, size_t page_size) {
@@ -220,6 +258,13 @@ uint32_t compute_innodb_checksum(const uint8_t* data, size_t size) {
         return 0;
     }
     return innodb_checksum_impl(data, size);
+}
+
+uint32_t compute_ut_fold_binary_checksum(const uint8_t* data, size_t size) {
+    if (!data || size == 0) {
+        return 0;
+    }
+    return ut_fold_binary_impl(data, size);
 }
 
 /**
@@ -296,10 +341,26 @@ ChecksumValidationResult validate_page_checksum(
                     return ChecksumValidationResult::valid(
                         stored_checksum, stored_algo_id, old_checksum, ChecksumAlgo::INNODB);
                 }
+                uint32_t fold_checksum = compute_ut_fold_binary_checksum(heap_copy.data() + 4, page_size - 4 - 8);
+                if (fold_checksum == header_checksum || fold_checksum == trailer_checksum) {
+                    return ChecksumValidationResult::valid(
+                        stored_checksum, stored_algo_id, fold_checksum, ChecksumAlgo::INNODB);
+                }
                 uint32_t new_checksum = compute_crc32c_checksum(heap_copy.data() + 4, page_size - 4 - 8);
                 if (new_checksum == trailer_checksum) {
                     return ChecksumValidationResult::valid(
                         stored_checksum, stored_algo_id, new_checksum, ChecksumAlgo::CRC32C);
+                }
+
+                // Also try segmented c1 + c2 (MySQL 5.7+ format without algorithm ID)
+                {
+                    uint32_t c1 = compute_innodb_checksum(heap_copy.data() + 4, 26 - 4);
+                    uint32_t c2 = compute_innodb_checksum(heap_copy.data() + 38, page_size - 38 - 8);
+                    uint32_t innodb_sum = c1 + c2;
+                    if (innodb_sum == header_checksum || innodb_sum == trailer_checksum) {
+                        return ChecksumValidationResult::valid(
+                            stored_checksum, stored_algo_id, innodb_sum, ChecksumAlgo::INNODB);
+                    }
                 }
             } else {
                 // MySQL 5.7+: segmented computation
@@ -355,6 +416,13 @@ ChecksumValidationResult validate_page_checksum(
                     stored_checksum, stored_algo_id, old_checksum, ChecksumAlgo::INNODB);
             }
 
+            // Try ut_fold_binary (MySQL 5.6 alternative legacy algorithm)
+            uint32_t fold_checksum = compute_ut_fold_binary_checksum(page_copy + 4, page_size - 4 - 8);
+            if (fold_checksum == header_checksum || fold_checksum == trailer_checksum) {
+                return ChecksumValidationResult::valid(
+                    stored_checksum, stored_algo_id, fold_checksum, ChecksumAlgo::INNODB);
+            }
+
             // Also try CRC32C for the trailer checksum (MySQL 5.6 stores new_checksum at page_size-8)
             uint32_t new_checksum = compute_crc32c_checksum(page_copy + 4, page_size - 4 - 8);
             if (new_checksum == trailer_checksum) {
@@ -366,6 +434,32 @@ ChecksumValidationResult validate_page_checksum(
             if (old_checksum == trailer_checksum) {
                 return ChecksumValidationResult::valid(
                     stored_checksum, stored_algo_id, old_checksum, ChecksumAlgo::INNODB);
+            }
+
+            // Also try segmented c1 + c2 (MySQL 5.7+ format without algorithm ID).
+            // Some pages (e.g. INDEX 0x45BF in MySQL 8.0) lack an algorithm ID field
+            // but were created with 5.7+ segmented innodb checksum.
+            {
+                uint32_t c1 = compute_innodb_checksum(page_copy + 4, 26 - 4);
+                uint32_t c2 = compute_innodb_checksum(page_copy + 38, page_size - 38 - 8);
+                uint32_t innodb_sum = c1 + c2;
+                if (innodb_sum == header_checksum || innodb_sum == trailer_checksum) {
+                    return ChecksumValidationResult::valid(
+                        stored_checksum, stored_algo_id, innodb_sum, ChecksumAlgo::INNODB);
+                }
+            }
+
+            // Also try segmented CRC32C (c1 XOR c2, MySQL 5.7+ format). Pages
+            // without a valid algorithm ID field can still carry a segmented
+            // CRC32C checksum (fixture/tool-generated or upgraded files).
+            {
+                uint32_t crc1 = compute_crc32c_checksum(page_copy + 4, 26 - 4);
+                uint32_t crc2 = compute_crc32c_checksum(page_copy + 38, page_size - 38 - 8);
+                uint32_t crc_sum = crc1 ^ crc2;
+                if (crc_sum == header_checksum || crc_sum == trailer_checksum) {
+                    return ChecksumValidationResult::valid(
+                        stored_checksum, stored_algo_id, crc_sum, ChecksumAlgo::CRC32C);
+                }
             }
         } else {
             // MySQL 5.7+: segmented computation (c1 + c2)

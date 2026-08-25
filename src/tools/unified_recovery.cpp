@@ -299,7 +299,7 @@ bool convert_schema(const catalog::TableSchema& schema,
         column.enum_values = source.enum_values;
         column.set_values = source.set_values;
         column.ordinal_position = source.ordinal ? source.ordinal : entry.first;
-        column.physical_pos = source.physical_pos ? source.physical_pos : entry.first;
+        column.physical_pos = source.physical_pos;
         columns.push_back(std::move(column));
     }
     if (columns.empty()) return false;
@@ -416,6 +416,7 @@ UnifiedRecoveryResult run_unified_recovery(
                     evidence.fil_header_valid = damage.fil_header_valid;
                     evidence.page_header_valid = damage.page_header_valid;
                     evidence.checksum_valid = damage.checksum_valid;
+                    evidence.free_space_corrupt = damage.free_space_corrupt;
                     evidence.damage_level = damage.level;
                     evidence.diagnosis = damage.diagnosis;
                     result.page_damage.push_back(std::move(evidence));
@@ -647,7 +648,7 @@ UnifiedRecoveryResult run_unified_recovery(
                 recovery::SalvageEngine::Config cfg;
                 cfg.page_size = page_size;
                 cfg.min_confidence = 0.3;
-                cfg.include_fragments = false;
+                cfg.include_evidence_fragments = false;
                 recovery::SalvageEngine eng(cfg);
                 std::ifstream f(ibd_path, std::ios::binary);
                 std::vector<std::pair<const uint8_t*, size_t>> pages;
@@ -680,9 +681,13 @@ UnifiedRecoveryResult run_unified_recovery(
         const bool page_integrity_failure = std::any_of(
             result.page_damage.begin(), result.page_damage.end(),
             [](const PageDamageEvidence& page) {
+                // ALLOCATED pages (type=0x0000) are empty with no records
+                // and should not trigger integrity failure
+                if (page.page_type == 0x0000) return false;
                 return !page.checksum_valid ||
                        !page.fil_header_valid ||
-                       !page.page_header_valid;
+                       !page.page_header_valid ||
+                       page.free_space_corrupt;
             });
         if (page_integrity_failure && !result.records.empty()) {
             for (auto& row : result.records) {
@@ -776,9 +781,13 @@ UnifiedRecoveryResult run_unified_recovery(
     const bool page_integrity_failure = std::any_of(
         result.page_damage.begin(), result.page_damage.end(),
         [](const PageDamageEvidence& page) {
+            // ALLOCATED pages (type=0x0000) are empty with no records
+            // and should not trigger integrity failure
+            if (page.page_type == 0x0000) return false;
             return !page.checksum_valid ||
                    !page.fil_header_valid ||
-                   !page.page_header_valid;
+                   !page.page_header_valid ||
+                   page.free_space_corrupt;
         });
     const bool structured_ready = result.total_recovered > 0 &&
                                   trusted_schema &&

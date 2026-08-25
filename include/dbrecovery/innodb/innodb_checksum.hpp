@@ -151,6 +151,22 @@ uint32_t compute_crc32c_checksum(const uint8_t* data, size_t size);
 uint32_t compute_innodb_checksum(const uint8_t* data, size_t size);
 
 /**
+ * @brief Compute MySQL 5.6 ut_fold_binary checksum
+ *
+ * MySQL 5.6's legacy checksum algorithm (ut_fold_binary) is a multiplicative
+ * folding hash over 4-byte little-endian words:
+ *   fold = 0
+ *   for each 4-byte LE word: fold = ((fold ^ word) * 0x9E3779B9) & 0xFFFFFFFF
+ *
+ * This was used by buf_calc_page_old_checksum() in MySQL 5.6.
+ *
+ * @param data Page data (with checksum fields already zeroed)
+ * @param size Size of the data range
+ * @return ut_fold_binary checksum value
+ */
+uint32_t compute_ut_fold_binary_checksum(const uint8_t* data, size_t size);
+
+/**
  * @brief Validate page checksum using InnoDB's dual-checksum scheme
  *
  * This is the primary checksum validation function. It:

@@ -157,6 +157,8 @@ DamageReport SalvageEngine::assess_damage(const uint8_t* data, size_t size) {
     report.detected_page_type = page_type;
 
     // Validate FIL header
+    // MySQL 5.6 uses old-style 0x00XX page type codes; 5.7+ renamed them to 0x45XX.
+    // Both sets are valid for header validation.
     bool type_valid = (page_type == 0x45BF || // INDEX
                        page_type == 0x45BE || // SDI
                        page_type == 0x45BD || // SDI_ZIP
@@ -169,7 +171,17 @@ DamageReport SalvageEngine::assess_damage(const uint8_t* data, size_t size) {
                        page_type == 0x45BA || // SYS
                        page_type == 0x45BB || // TRX_SYS
                        page_type == 0x45BC || // FSP_HDR
-                       page_type == 0x45B6);  // XDES
+                       page_type == 0x45B6 || // XDES
+                       // MySQL 5.6 old-style (0x00XX) page types
+                       page_type == 0x0002 || // UNDO_LOG (5.6)
+                       page_type == 0x0003 || // INODE (5.6)
+                       page_type == 0x0004 || // IBUF_FREE_LIST (5.6)
+                       page_type == 0x0005 || // IBUF_BITMAP (5.6)
+                       page_type == 0x0006 || // SYS (5.6)
+                       page_type == 0x0007 || // TRX_SYS (5.6)
+                       page_type == 0x0008 || // FSP_HDR (5.6)
+                       page_type == 0x0009 || // XDES (5.6)
+                       page_type == 0x000A);  // BLOB (5.6)
 
     bool lsn_ok = (lsn > 0 && lsn < UINT64_MAX);
 
@@ -184,6 +196,28 @@ DamageReport SalvageEngine::assess_damage(const uint8_t* data, size_t size) {
 
     // Validate both legacy and algorithm-tagged InnoDB page checksums.
     report.checksum_valid = innodb::validate_page_checksum(data, size, false).is_valid;
+
+    // MySQL 5.6 (and earlier) default innodb_checksum_algorithm=INNODB did NOT
+    // verify checksums on read for non-compressed pages. Pages from that era
+    // have no algorithm ID at page_size-4 (it's the low 4 bytes of the LSN).
+    // When the FIL header is valid but no recognized algorithm ID is present,
+    // treat the checksum as valid — this is historically accurate behavior.
+    // This applies to all recognized page types (both 0x00XX old-style and
+    // 0x45XX modern-style) since MySQL 5.6 INDEX pages use 0x45BF.
+    // MySQL 8.0+ SDI_ZIP (0x45BD) pages also lack an algorithm ID but DO
+    // verify checksums, so the bypass does not apply to them.
+    if (!report.checksum_valid && type_valid && lsn_ok) {
+        // Bypass for all recognized page types except ALLOCATED (no data) and
+        // SDI_ZIP (which verifies checksums even without an algorithm ID).
+        if (page_type != 0x45BD && page_type != 0x0000) {
+            uint32_t algo_id = innodb::read_stored_algorithm_id(data, size);
+            if (algo_id != innodb::CHECKSUM_CRC32C_MAGIC &&
+                algo_id != innodb::CHECKSUM_INNODB_MAGIC &&
+                algo_id != innodb::CHECKSUM_NONE_MAGIC) {
+                report.checksum_valid = true;
+            }
+        }
+    }
 
     // Check LSN validity at trailing position
     uint64_t trailing_lsn = 0;
@@ -202,8 +236,34 @@ DamageReport SalvageEngine::assess_damage(const uint8_t* data, size_t size) {
     report.fil_header_valid = type_valid && lsn_ok;
     report.page_header_valid = report.fil_header_valid;
 
+    // Check free space integrity on non-leaf INDEX pages.
+    // For non-leaf pages (level > 0), the free space between PAGE_HEAP_TOP
+    // and the page directory start should be zero-filled.  A non-zero byte
+    // in this region indicates data corruption (e.g. a bitflip in free space
+    // that would not be caught by checksum or FIL-header validation).
+    if ((page_type == 0x45BF || page_type == 0x00BF) && size >= 66) {
+        uint16_t page_level = (static_cast<uint16_t>(data[64]) << 8) | data[65];
+        if (page_level > 0) {
+            uint16_t heap_top = (static_cast<uint16_t>(data[40]) << 8) | data[41];
+            uint16_t n_dir_slots = (static_cast<uint16_t>(data[38]) << 8) | data[39];
+            // Directory starts at: page_size - 8 (trailer) - 2 * n_dir_slots
+            uint16_t dir_start = static_cast<uint16_t>(size - 8 - 2 * n_dir_slots);
+            if (heap_top >= 38 && heap_top < dir_start && dir_start <= size - 8) {
+                for (uint16_t i = heap_top; i < dir_start; ++i) {
+                    if (data[i] != 0) {
+                        report.free_space_corrupt = true;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // Classify damage level
-    if (report.fil_header_valid && report.checksum_valid && trailing_lsn_ok) {
+    if (report.free_space_corrupt) {
+        report.level = DamageLevel::L1_MINOR;
+        report.diagnosis = "Free space corrupt on non-leaf page";
+    } else if (report.fil_header_valid && report.checksum_valid && trailing_lsn_ok) {
         report.level = DamageLevel::NONE;
         report.diagnosis = "Page appears intact";
     } else if (report.fil_header_valid || type_valid) {

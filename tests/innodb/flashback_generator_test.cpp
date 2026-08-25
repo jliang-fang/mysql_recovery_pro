@@ -1168,23 +1168,19 @@ TEST(FlashbackGeneratorTest, GenerateOutputEmptyRecords) {
     FlashbackGenerator gen;
     auto schema = make_test_schema();
 
-    // SQL output
+    // With empty records, generate_output now returns empty string
+    // (fail-closed: no data to export)
     gen.config().output_format = FlashbackOutputFormat::SQL;
     std::string sql = gen.generate_output({}, schema);
     EXPECT_TRUE(sql.empty());
 
-    // CSV output
     gen.config().output_format = FlashbackOutputFormat::CSV;
     std::string csv = gen.generate_output({}, schema);
-    // CSV should have a header row even with no records
-    EXPECT_NE(csv.find("operation"), std::string::npos);
-    EXPECT_NE(csv.find("trx_id"), std::string::npos);
+    EXPECT_TRUE(csv.empty());
 
-    // JSON output
     gen.config().output_format = FlashbackOutputFormat::JSON;
     std::string json = gen.generate_output({}, schema);
-    EXPECT_NE(json.find("["), std::string::npos);
-    EXPECT_NE(json.find("]"), std::string::npos);
+    EXPECT_TRUE(json.empty());
 }
 
 TEST(FlashbackGeneratorTest, GenerateOutputSQL) {
@@ -1719,6 +1715,216 @@ TEST(FlashbackGeneratorTest, ToJsonBackslash) {
 
     std::string json = rec.to_json(false);
     EXPECT_NE(json.find("a\\\\b"), std::string::npos);
+}
+
+// ==================== Flashback Full Chain Safe Tests ====================
+//
+// These tests verify flashback_full_chain_safe() and the deprecated
+// flashback_full_chain() API. They build minimal undo pages with version
+// chains and check the integrity/exportable/diagnostic fields.
+
+// Undo page header constants (from deep_undo_analyzer.cpp, not exposed in header)
+namespace {
+constexpr uint16_t TRX_UNDO_PAGE_START    = 28;
+constexpr uint16_t TRX_UNDO_PAGE_FREE     = 30;
+constexpr uint16_t TRX_UNDO_PAGE_N_RECS   = 32;
+constexpr uint16_t TRX_UNDO_PAGE_HDR_SIZE = 40;
+
+static std::string create_temp_file(const std::vector<uint8_t>& data,
+                                     const std::string& suffix = "") {
+    std::string path = "/tmp/test_flashback_chain" + suffix + ".bin";
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    out.close();
+    return path;
+}
+
+static std::vector<uint8_t> make_roll_ptr_field(uint32_t page_no, uint16_t offset) {
+    std::vector<uint8_t> f(6, 0);
+    write_le<uint32_t>(f.data(), 0, page_no);
+    write_le<uint16_t>(f.data(), 4, offset);
+    return f;
+}
+
+static std::vector<uint8_t> make_field(const std::vector<uint8_t>& data) {
+    std::vector<uint8_t> out;
+    if (data.size() < 128) {
+        out.push_back(static_cast<uint8_t>(data.size()));
+    } else {
+        out.push_back(static_cast<uint8_t>(0x80 | (data.size() >> 8)));
+        out.push_back(static_cast<uint8_t>(data.size() & 0xFF));
+    }
+    out.insert(out.end(), data.begin(), data.end());
+    return out;
+}
+
+static std::vector<uint8_t> make_update_rec(
+    uint32_t page_no, uint16_t page_offset, uint64_t trx_id,
+    uint64_t prev_roll_ptr, const std::vector<std::vector<uint8_t>>& fields,
+    UndoFormatProfile profile = UndoFormatProfile::MYSQL8_7BYTE) {
+    const size_t rp_len = (profile == UndoFormatProfile::MYSQL8_7BYTE) ? 7 : 6;
+    std::vector<uint8_t> rec;
+    rec.push_back(2);   // TRX_UNDO_UPDATE
+    rec.push_back(static_cast<uint8_t>(fields.size()));
+
+    for (size_t i = 0; i < 4; i++)
+        rec.push_back(static_cast<uint8_t>((page_no >> (i * 8)) & 0xFF));
+    for (size_t i = 0; i < 2; i++)
+        rec.push_back(static_cast<uint8_t>((page_offset >> (i * 8)) & 0xFF));
+    rec.push_back(0);  // info_bits
+    for (size_t i = 0; i < 5; i++)
+        rec.push_back(static_cast<uint8_t>((trx_id >> (i * 8)) & 0xFF));
+
+    auto decoded = RollPtrDecoder::decode(prev_roll_ptr);
+    uint8_t storage[7] = {0};
+    RollPtrDecoder::encode_storage(storage, decoded);
+    rec.insert(rec.end(), storage + (7 - rp_len), storage + 7);
+
+    for (const auto& f : fields) {
+        auto fld = make_field(f);
+        rec.insert(rec.end(), fld.begin(), fld.end());
+    }
+    return rec;
+}
+
+static std::vector<uint8_t> make_undo_page(
+    const std::vector<std::vector<uint8_t>>& record_datas,
+    size_t page_size = 16384,
+    uint32_t space_id = 0) {
+    std::vector<uint8_t> page(page_size, 0);
+    write_be<uint16_t>(page.data(), 24, FIL_PAGE_UNDO_LOG);
+
+    uint16_t start = TRX_UNDO_PAGE_HDR_SIZE;
+    uint16_t free_off = start;
+    for (const auto& rd : record_datas) {
+        if (free_off + rd.size() > page_size) break;
+        std::memcpy(page.data() + free_off, rd.data(), rd.size());
+        free_off += static_cast<uint16_t>(rd.size());
+    }
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_START, start);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
+    write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS,
+                       static_cast<uint16_t>(record_datas.size()));
+    write_be<uint32_t>(page.data(), 34, space_id);
+    return page;
+}
+} // anonymous namespace
+
+TEST(FlashbackGeneratorTest, FlashbackFullChainSafeComplete) {
+    // Build a valid 2-record chain on page 5, trace it, assert exportable.
+    // Oldest record first (null roll_ptr), then newer record pointing to oldest.
+    const uint32_t page_no = 5;
+    const uint16_t old_off = TRX_UNDO_PAGE_HDR_SIZE;
+    auto rec_old = make_update_rec(100, 200, 100, 0,
+        {make_roll_ptr_field(0, 0), {0x0A, 0, 0, 0}});
+    uint16_t new_off = old_off + static_cast<uint16_t>(rec_old.size());
+    auto rec_new = make_update_rec(300, 400, 101,
+        RollPtrDecoder::encode(page_no, old_off, 0),
+        {make_roll_ptr_field(page_no, old_off), {0x14, 0, 0, 0}});
+
+    auto page = make_undo_page({rec_old, rec_new});
+    std::vector<uint8_t> file(16384 * 6, 0);
+    std::memcpy(file.data() + page_no * 16384, page.data(), page.size());
+    std::string path = create_temp_file(file, "_safe_complete");
+
+    FlashbackGenerator gen;
+    gen.set_ibdata_path(path);
+    gen.set_page_size(16384);
+    gen.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    auto schema = make_test_schema();
+    uint64_t roll_ptr = RollPtrDecoder::encode(page_no, new_off, 0);
+    auto result = gen.flashback_full_chain_safe({}, roll_ptr, schema, 42);
+
+    EXPECT_TRUE(result.exportable);
+    EXPECT_EQ(result.integrity, HistoryIntegrity::COMPLETE);
+    EXPECT_TRUE(result.diagnostic.empty());
+    EXPECT_TRUE(result);
+    EXPECT_FALSE(result.records.empty());
+
+    std::remove(path.c_str());
+}
+
+TEST(FlashbackGeneratorTest, FlashbackFullChainSafeBrokenPage) {
+    // Roll_ptr to page 0 (zero-filled, not an undo page) -> BROKEN_PAGE
+    std::vector<uint8_t> file(16384, 0);
+    std::string path = create_temp_file(file, "_safe_broken");
+
+    FlashbackGenerator gen;
+    gen.set_ibdata_path(path);
+    gen.set_page_size(16384);
+
+    auto schema = make_test_schema();
+    uint64_t roll_ptr = RollPtrDecoder::encode(0, 40, 0);
+    auto result = gen.flashback_full_chain_safe({}, roll_ptr, schema, 42);
+
+    EXPECT_FALSE(result.exportable);
+    EXPECT_EQ(result.integrity, HistoryIntegrity::BROKEN_PAGE);
+    EXPECT_FALSE(result.diagnostic.empty());
+    EXPECT_FALSE(result);
+    EXPECT_TRUE(result.records.empty());
+
+    std::remove(path.c_str());
+}
+
+TEST(FlashbackGeneratorTest, FlashbackFullChainSafeCycle) {
+    // Self-referential roll_ptr -> CYCLE
+    const uint32_t page_no = 5;
+    const uint16_t rec_off = TRX_UNDO_PAGE_HDR_SIZE;
+    auto rec = make_update_rec(100, 200, 101, 0,
+        {make_roll_ptr_field(page_no, rec_off), {0x0A, 0, 0, 0}});
+    // Patch the header to point to self
+    {
+        auto decoded = RollPtrDecoder::decode(RollPtrDecoder::encode(page_no, rec_off, 0));
+        uint8_t storage[7] = {0};
+        RollPtrDecoder::encode_storage(storage, decoded);
+        // Header is at offset+14 in the record
+        auto page = make_undo_page({rec});
+        std::memcpy(page.data() + rec_off + 14, storage, 7);
+        uint16_t free_off = rec_off + static_cast<uint16_t>(rec.size());
+        write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_FREE, free_off);
+        write_le<uint16_t>(page.data(), TRX_UNDO_PAGE_N_RECS, 1);
+
+        std::vector<uint8_t> file(16384 * 6, 0);
+        std::memcpy(file.data() + page_no * 16384, page.data(), page.size());
+        std::string path = create_temp_file(file, "_safe_cycle");
+
+        FlashbackGenerator gen;
+        gen.set_ibdata_path(path);
+        gen.set_page_size(16384);
+        gen.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+        auto schema = make_test_schema();
+        uint64_t roll_ptr = RollPtrDecoder::encode(page_no, rec_off, 0);
+        auto result = gen.flashback_full_chain_safe({}, roll_ptr, schema, 42);
+
+        EXPECT_FALSE(result.exportable);
+        EXPECT_EQ(result.integrity, HistoryIntegrity::CYCLE);
+        EXPECT_FALSE(result.diagnostic.empty());
+        EXPECT_FALSE(result);
+        EXPECT_TRUE(result.records.empty());
+
+        std::remove(path.c_str());
+    }
+}
+
+TEST(FlashbackGeneratorTest, FlashbackFullChainDeprecatedFailClosed) {
+    // Deprecated flashback_full_chain() must return empty records when
+    // the chain is not safely exportable.
+    std::vector<uint8_t> file(16384, 0);
+    std::string path = create_temp_file(file, "_deprecated_fail");
+
+    FlashbackGenerator gen;
+    gen.set_ibdata_path(path);
+    gen.set_page_size(16384);
+
+    auto schema = make_test_schema();
+    uint64_t roll_ptr = RollPtrDecoder::encode(0, 40, 0);
+    auto records = gen.flashback_full_chain({}, roll_ptr, schema, 42);
+
+    EXPECT_TRUE(records.empty());
+
+    std::remove(path.c_str());
 }
 
 } // namespace innodb

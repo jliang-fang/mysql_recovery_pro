@@ -17,6 +17,8 @@ struct PageDamageEvidence {
     bool fil_header_valid = false;
     bool page_header_valid = false;
     bool checksum_valid = false;
+    bool trailer_mismatch = false;
+    bool free_space_corrupt = false;
     common::DamageLevel damage_level = common::DamageLevel::NONE;
     std::string diagnosis;
 };

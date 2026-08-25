@@ -19,7 +19,7 @@ static std::vector<uint8_t> make_clean_index_page_sa() {
 }
 
 TEST(SalvageAccuracy, CleanPageZeroFalsePositive) {
-    SalvageEngine::Config cfg; cfg.min_confidence=0.3; cfg.include_fragments=false;
+    SalvageEngine::Config cfg; cfg.min_confidence=0.3; cfg.include_evidence_fragments=false;
     SalvageEngine eng(cfg);
     auto page = make_clean_index_page_sa();
     auto dmg = SalvageEngine::assess_damage(page.data(), page.size());
