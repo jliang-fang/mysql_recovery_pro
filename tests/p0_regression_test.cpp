@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 #include <cstring>
 #include <vector>
+#include <memory>
 #include <cstdint>
 #include <random>
 #include <algorithm>
@@ -35,11 +36,19 @@
 #include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/validate/unified_validator.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
+#include "dbrecovery/engine/drop_table_recovery.hpp"
+#include "dbrecovery/innodb/page_types_v2.hpp"
+#include "dbrecovery/innodb/deep_undo_analyzer.hpp"
+#include "dbrecovery/innodb/flashback_generator.hpp"
 
 namespace dbrecovery {
 namespace {
 
 using namespace innodb;
+
+// Disambiguate: `using namespace innodb` would otherwise shadow dbrecovery::MySQLVersion
+// (innodb::page_types_v2.hpp defines its own distinct MySQLVersion enum).
+using dbrecovery::MySQLVersion;
 
 // ======================================================================
 // P0.1: FIL Header Endianness
@@ -272,6 +281,66 @@ TEST_F(FILHeaderEndiannessTest, FILHeaderSizeConsistency) {
 
     // Verify that FIL_PAGE_SPACE_ID is at offset 34
     EXPECT_EQ(FIL_PAGE_SPACE_ID, 34) << "FIL_PAGE_SPACE_ID must be at offset 34";
+}
+
+// ======================================================================
+// P0.1b: Version/page detection fail-closed (recursion + soft-default)
+// ======================================================================
+
+TEST_F(FILHeaderEndiannessTest, VersionCompatibilityFactoryNoRecursionOnIndexPage) {
+    auto buf = create_page_buffer();
+    set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    set_be32(buf, 0, 0x3A4B5C6D);
+
+    // Must not crash from infinite recursion (version_compat.cpp:382 cycle)
+    MySQLVersion v1 = VersionCompatibilityFactory::instance().detect_version(buf.data(), buf.size());
+    EXPECT_EQ(v1, MySQLVersion::UNKNOWN)
+        << "VersionCompatibilityFactory::detect_version on INDEX page without SDI must return UNKNOWN";
+
+    MySQLVersion v2 = dbrecovery::detect_mysql_version(buf.data(), buf.size());
+    EXPECT_EQ(v2, MySQLVersion::UNKNOWN)
+        << "dbrecovery::detect_mysql_version on INDEX page without SDI must return UNKNOWN";
+}
+
+TEST_F(FILHeaderEndiannessTest, VersionCompatibilityFactoryDetectsSdiPage) {
+    auto buf = create_page_buffer();
+    set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    constexpr uint8_t SDI_SIG[8] = {0x08, 'S', 'D', 'I', '0', '0', '0', '0'};
+    std::memcpy(buf.data() + 64, SDI_SIG, 8);
+
+    MySQLVersion version = VersionCompatibilityFactory::instance().detect_version(buf.data(), buf.size());
+    EXPECT_EQ(version, MySQLVersion::MYSQL_80)
+        << "VersionCompatibilityFactory::detect_version must return MYSQL_80 for SDI page";
+}
+
+TEST_F(FILHeaderEndiannessTest, PageParserFactoryCreateParserNoCrash) {
+    auto buf = create_page_buffer();
+    set_be16(buf, FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    set_be32(buf, 0, 0x3A4B5C6D);
+
+    // Must not crash (no infinite recursion from unescoped detect_mysql_version call)
+    auto parser = innodb::PageParserFactory::create_parser(buf.data(), buf.size());
+    EXPECT_NE(parser, nullptr)
+        << "PageParserFactory::create_parser must return non-null for unknown version (fail-closed)";
+}
+
+TEST_F(FILHeaderEndiannessTest, PageTypeDetectorDefaultUnknown) {
+    innodb::MySQLVersion version = innodb::PageTypeDetector::detect_version(FIL_PAGE_INDEX, nullptr, 0);
+    EXPECT_EQ(version, innodb::MySQLVersion::UNKNOWN)
+        << "PageTypeDetector::detect_version must return UNKNOWN for non-SDI page types, not MYSQL_57";
+}
+
+TEST(SystemTablespaceScannerVersionTest, UnknownFilenameReturnsUnknown) {
+    engine::SystemTablespaceScanner scanner("/some/unknown/path.ibd", 16384);
+    std::string version = scanner.detect_mysql_version();
+    EXPECT_EQ(version, "UNKNOWN")
+        << "Unknown filename must not silently default to 5.7";
+}
+
+TEST(SystemTablespaceScannerVersionTest, IsMysql80FormatFalseForUnknown) {
+    engine::SystemTablespaceScanner scanner("/some/unknown/path.ibd", 16384);
+    EXPECT_FALSE(scanner.is_mysql80_format())
+        << "is_mysql80_format must be false for unknown filename";
 }
 
 // ======================================================================
@@ -631,6 +700,186 @@ TEST_F(DeepUndoAnalyzerVersionTest, RollPtrSizeConsistency) {
 }
 
 // ======================================================================
+// P0.2b: Deep Undo Fail-Closed Gates
+// ======================================================================
+
+class DeepUndoFailClosedTest : public ::testing::Test {
+protected:
+    static constexpr size_t PAGE_SIZE = 16384;
+    static constexpr uint16_t TRX_UNDO_PAGE_FREE = 30;  // LE u16 offset
+    static constexpr size_t TRX_UNDO_PAGE_HDR_SIZE = 40;
+
+    struct UndoPage {
+        std::vector<uint8_t> data;
+        size_t record_offset;
+    };
+
+    // Create a minimal undo page with an UPDATE record at record_offset
+    UndoPage create_undo_update_page(uint32_t page_no, uint16_t page_offset,
+                                     uint32_t prev_ptr_page_no, uint16_t prev_ptr_offset,
+                                     bool is_7byte = false) {
+        UndoPage up;
+        up.data.resize(PAGE_SIZE, 0);
+        up.record_offset = TRX_UNDO_PAGE_HDR_SIZE + 10;
+
+        // Set FIL page type to UNDO_LOG (BE at offset 24)
+        set_be16(up.data, FIL_PAGE_TYPE_ABS, FIL_PAGE_UNDO_LOG);
+
+        // Set TRX_UNDO_PAGE_FREE (LE) to include the full record
+        size_t roll_ptr_len = is_7byte ? 7 : 6;
+        size_t total_record_size = 2 + 4 + 2 + 1 + 5 + roll_ptr_len + 10;
+        set_le16(up.data, TRX_UNDO_PAGE_FREE, up.record_offset + total_record_size);
+
+        // Write the UPDATE record header
+        size_t pos = up.record_offset;
+        up.data[pos] = 2;          // TRX_UNDO_UPDATE
+        up.data[pos + 1] = 1;      // field_count = 1
+        set_le32(up.data, pos + 2, page_no);   // page_no (4B LE)
+        set_le16(up.data, pos + 6, page_offset); // page_offset (2B LE)
+        up.data[pos + 8] = 0;      // info_bits
+        set_le32(up.data, pos + 9, 12345);     // trx_id low 4 bytes
+        up.data[pos + 13] = 0;     // trx_id high byte
+
+        // prev_undo_ptr at offset+14: storage format is (page_no<<20 | offset)
+        // as big-endian roll_ptr_len bytes.
+        uint64_t val = (static_cast<uint64_t>(prev_ptr_page_no) << 20) |
+                       (prev_ptr_offset & 0x3FFFF);
+        for (size_t i = 0; i < roll_ptr_len; i++) {
+            up.data[pos + 14 + roll_ptr_len - 1 - i] =
+                static_cast<uint8_t>(val & 0xFF);
+            val >>= 8;
+        }
+
+        // Add a small field (1-byte length prefix = 5, then 5 bytes data)
+        up.data[pos + 14 + roll_ptr_len] = 5;
+        for (int i = 0; i < 5; i++) {
+            up.data[pos + 15 + roll_ptr_len + i] = static_cast<uint8_t>(i);
+        }
+
+        return up;
+    }
+
+    void set_be16(std::vector<uint8_t>& buf, size_t offset, uint16_t v) {
+        buf[offset] = static_cast<uint8_t>(v >> 8);
+        buf[offset + 1] = static_cast<uint8_t>(v & 0xFF);
+    }
+
+    void set_le16(std::vector<uint8_t>& buf, size_t offset, uint16_t v) {
+        buf[offset] = static_cast<uint8_t>(v & 0xFF);
+        buf[offset + 1] = static_cast<uint8_t>(v >> 8);
+    }
+
+    void set_le32(std::vector<uint8_t>& buf, size_t offset, uint32_t v) {
+        buf[offset]     = static_cast<uint8_t>(v & 0xFF);
+        buf[offset + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        buf[offset + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        buf[offset + 3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    }
+};
+
+TEST_F(DeepUndoFailClosedTest, ParserRejectsUpdateWithUnresolvedProfile) {
+    // UndoRecordV2Parser with default UNRESOLVED profile must reject
+    // UPDATE/DELETE records because the roll-pointer width is unknown.
+    // (deep_undo_analyzer.cpp:465-468)
+    auto up = create_undo_update_page(100, 200, 0x100, 0x1);
+
+    UndoRecordV2Parser parser;
+    // Default profile is UNRESOLVED — no call to set_undo_format_profile
+
+    auto result = parser.parse(up.data.data(), PAGE_SIZE, up.record_offset);
+    EXPECT_FALSE(result.has_value())
+        << "Parser with UNRESOLVED profile must reject UPDATE record";
+}
+
+TEST_F(DeepUndoFailClosedTest, ParserRejectsTruncatedUpdateHeader) {
+    // When the undo page's page_free is too small for the required header
+    // (ROLL_PTR_OFFSET + roll_ptr_len), parse() must return nullopt.
+    // (deep_undo_analyzer.cpp:477-485)
+    auto up = create_undo_update_page(100, 200, 0x100, 0x1);
+
+    // Override page_free to 15 bytes from record start — enough for type+field_count
+    // (2) + page_no (4) + page_offset (2) + info_bits (1) + trx_id (5) = 14,
+    // but NOT enough for the 6-byte roll_ptr at offset 14 (needs 14+6=20).
+    set_le16(up.data, TRX_UNDO_PAGE_FREE, up.record_offset + 15);
+
+    UndoRecordV2Parser parser;
+    parser.set_undo_format_profile(UndoFormatProfile::LEGACY_6BYTE);
+
+    auto result = parser.parse(up.data.data(), PAGE_SIZE, up.record_offset);
+    EXPECT_FALSE(result.has_value())
+        << "Parser must reject UPDATE record with truncated header (page_free too small)";
+}
+
+TEST_F(DeepUndoFailClosedTest, ExportSafeOnlyForComplete) {
+    // RowVersionHistory::export_safe() must return true only for COMPLETE.
+    // Every other HistoryIntegrity value must return false.
+    // (deep_undo_analyzer.hpp:174)
+    RowVersionHistory history;
+
+    history.integrity = HistoryIntegrity::COMPLETE;
+    EXPECT_TRUE(history.export_safe()) << "COMPLETE must be export-safe";
+
+    history.integrity = HistoryIntegrity::BROKEN_PAGE;
+    EXPECT_FALSE(history.export_safe()) << "BROKEN_PAGE must not be export-safe";
+
+    history.integrity = HistoryIntegrity::INVALID_RECORD;
+    EXPECT_FALSE(history.export_safe()) << "INVALID_RECORD must not be export-safe";
+
+    history.integrity = HistoryIntegrity::POINTER_CONFLICT;
+    EXPECT_FALSE(history.export_safe()) << "POINTER_CONFLICT must not be export-safe";
+
+    history.integrity = HistoryIntegrity::CYCLE;
+    EXPECT_FALSE(history.export_safe()) << "CYCLE must not be export-safe";
+
+    history.integrity = HistoryIntegrity::TRUNCATED;
+    EXPECT_FALSE(history.export_safe()) << "TRUNCATED must not be export-safe";
+
+    history.integrity = HistoryIntegrity::HEURISTIC;
+    EXPECT_FALSE(history.export_safe()) << "HEURISTIC must not be export-safe";
+}
+
+TEST_F(DeepUndoFailClosedTest, FlashbackFullChainReturnsEmptyForBroken) {
+    // flashback_full_chain must return {} when the roll_ptr points to
+    // page_no=0, which triggers BROKEN_PAGE in trace_version_chain
+    // before any I/O is attempted. (flashback_generator.cpp:625-628)
+    FlashbackGenerator gen;
+
+    catalog::TableSchema schema;
+    schema.table_name = "test";
+
+    // encode(page_no=0, offset=1, flags=0) — page_no=0 triggers BROKEN_PAGE
+    // at deep_undo_analyzer.cpp:635 without any file I/O.
+    uint64_t roll_ptr = RollPtrDecoder::encode(0, 1, 0);
+
+    std::vector<uint8_t> current_record = {0x01, 0x02, 0x03};
+
+    auto result = gen.flashback_full_chain(current_record, roll_ptr, schema, 42);
+    EXPECT_TRUE(result.empty())
+        << "flashback_full_chain must return {} for broken chain (page_no=0)";
+}
+
+TEST_F(DeepUndoFailClosedTest, ParserAcceptsUpdateWithResolvedProfile) {
+    // With LEGACY_6BYTE profile, a valid UPDATE record must parse successfully.
+    // This is the positive control for the ParserRejectsUpdateWithUnresolvedProfile test.
+    // prev_undo_ptr is stored as (page_no<<20 | offset) big-endian in storage.
+    auto up = create_undo_update_page(100, 200, 0x100, 0);
+
+    UndoRecordV2Parser parser;
+    parser.set_undo_format_profile(UndoFormatProfile::LEGACY_6BYTE);
+
+    auto result = parser.parse(up.data.data(), PAGE_SIZE, up.record_offset);
+    ASSERT_TRUE(result.has_value())
+        << "Parser with LEGACY_6BYTE profile must accept valid UPDATE record";
+    EXPECT_EQ(result->type, UndoRecordV2::UPDATE);
+    EXPECT_EQ(result->page_no, 100u);
+    EXPECT_EQ(result->page_offset, 200u);
+    EXPECT_EQ(result->trx_id, 12345u);
+    // prev_undo_ptr decoded from storage: page_no=0x100, offset=0, flags=0
+    // Internal encode: page_no | (offset<<32) | (flags<<50) = 0x100
+    EXPECT_EQ(result->prev_undo_ptr, 0x100u);
+}
+
+// ======================================================================
 // P0.4: SDI Decompression Safety
 // ======================================================================
 
@@ -769,6 +1018,116 @@ TEST_F(SDIDecompressionSafetyTest, EmptyPayload) {
     std::vector<uint8_t> empty;
     auto result = SDIManager::extract_sdi_json(empty.data(), empty.size());
     EXPECT_FALSE(result.has_value()) << "Empty payload must not crash";
+}
+
+// ----------------------------------------------------------------------
+// P0-3: Constrained SDI extraction — schema-promotion path must fail
+// closed. parse_sdi_record()/parse_sdi_record_structured() are the ONLY
+// APIs that promote decompressed SDI to an authoritative TableSchema; they
+// delegate exclusively to the single bounded extract_standard_payload().
+// Any bound violation (ratio, output size, trailing input) must yield NO
+// schema — never a partial one — and must propagate a structured status.
+// ----------------------------------------------------------------------
+
+// Declared 100:1 ratio (800/8) > 20:1 must be rejected before decompression,
+// and the schema-promoting API must return an empty schema, not a partial one.
+TEST_F(SDIDecompressionSafetyTest, SchemaPathFailsClosedOnRatioAttack) {
+    std::vector<uint8_t> payload(20 + 8, 0);
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, 800);   // 800/8 = 100:1 > 20:1
+    write_le<uint32_t>(payload.data(), 16, 8);
+    for (size_t i = 0; i < 8; ++i) payload[20 + i] = 0xA5;
+
+    const auto schema = SDIManager::parse_sdi_record(payload.data(), payload.size());
+    EXPECT_TRUE(schema.table_name.empty()) << "No partial schema may leak";
+    EXPECT_TRUE(schema.columns.empty());
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::DECOMPRESSION_LIMIT);
+    EXPECT_TRUE(par.schema.table_name.empty());
+}
+
+// Declared uncompressed_len beyond SDI_MAX_UNCOMPRESSED_SIZE must be rejected
+// as DECOMPRESSION_LIMIT with no schema on the promotion path.
+TEST_F(SDIDecompressionSafetyTest, SchemaPathFailsClosedOnOversizedOutput) {
+    constexpr uint32_t oversized = 16 * 1024 * 1024 + 1;
+    std::vector<uint8_t> payload(20 + 8, 0);
+    write_le<uint32_t>(payload.data(), 0, 1);
+    write_le<uint64_t>(payload.data(), 4, 1);
+    write_le<uint32_t>(payload.data(), 12, oversized);
+    write_le<uint32_t>(payload.data(), 16, 8);
+
+    const auto schema = SDIManager::parse_sdi_record(payload.data(), payload.size());
+    EXPECT_TRUE(schema.table_name.empty());
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::DECOMPRESSION_LIMIT);
+    EXPECT_TRUE(par.schema.table_name.empty());
+}
+
+// Trailing bytes after the deflate stream must be rejected (Z_STREAM_END with
+// remaining input), yielding no schema, never silently accepted.
+TEST_F(SDIDecompressionSafetyTest, SchemaPathFailsClosedOnTrailingInput) {
+    const std::string json = R"({"table":{"name":"t","columns":[{"name":"id","type":4,"is_nullable":false}]}})";
+    auto base = create_compressed_sdi_payload(json);
+    ASSERT_FALSE(base.empty());
+    const size_t declared = base.size() - 20;
+    std::vector<uint8_t> payload(base.begin(), base.end());
+    payload.resize(payload.size() + 8, 0x42);
+    write_le<uint32_t>(payload.data(), 16, static_cast<uint32_t>(declared + 8));
+
+    const auto schema = SDIManager::parse_sdi_record(payload.data(), payload.size());
+    EXPECT_TRUE(schema.table_name.empty());
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_NE(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_TRUE(par.schema.table_name.empty());
+}
+
+// A valid compressed SDI record with a real table schema must promote to an
+// AUTHORITATIVE TableSchema with provenance (hash/source/trust) attached.
+TEST_F(SDIDecompressionSafetyTest, ValidSchemaPromotesToAuthoritative) {
+    const std::string json =
+        R"({"table":{"name":"t1","columns":[{"name":"id","type":4,"is_nullable":false},{"name":"name","type":16,"is_nullable":true}]}})";
+    auto payload = create_compressed_sdi_payload(json);
+    ASSERT_FALSE(payload.empty());
+
+    const auto par = SDIManager::parse_sdi_record_structured(payload.data(), payload.size());
+    EXPECT_EQ(par.status, SDIManager::SDIParseStatus::SUCCESS);
+    EXPECT_EQ(par.schema.table_name, "t1");
+    EXPECT_EQ(par.schema.schema_source, "SDI");
+    EXPECT_EQ(par.schema.trust_level, "AUTHORITATIVE");
+    EXPECT_EQ(par.schema.schema_hash.size(), 64u);
+    EXPECT_FALSE(par.schema.columns.empty());
+}
+
+// Heuristic ZIP extraction, even when it succeeds, must be tagged
+// HeuristicCorruptedZip — distinct from both strict origins — so the
+// consumer-side gate (main.cpp / recovery_cli.hpp / partition_table_recovery)
+// keeps it as EVIDENCE_ONLY and never promotes it to an authoritative schema.
+TEST_F(SDIDecompressionSafetyTest, HeuristicZipNeverAuthoritative) {
+    const std::string json = R"({"table":{"name":"t","columns":[{"name":"id","type":4,"is_nullable":false}]}})";
+    auto payload = create_compressed_sdi_payload(json);
+    ASSERT_FALSE(payload.empty());
+    const size_t compressed_size = payload.size() - 20;
+    std::vector<uint8_t> page(1024, 0);
+    // Place the deflate stream near the end of the page so the heuristic
+    // scan's max_input = search_end - offset equals the stream size,
+    // avoiding trailing-zero rejection.
+    const size_t stream_offset = (1024 - 8) - compressed_size;
+    std::copy(payload.begin() + 20, payload.end(), page.begin() + stream_offset);
+
+    auto heuristic = SDIManager::extract_heuristic_zip_page(page.data(), page.size());
+    // The heuristic must either succeed under HeuristicCorruptedZip or fail
+    // closed — either way, never confused with a strict origin.
+    if (heuristic.success()) {
+        EXPECT_EQ(heuristic.origin, SDIManager::ExtractionOrigin::HeuristicCorruptedZip);
+    } else {
+        EXPECT_FALSE(heuristic.failure_reason.empty());
+    }
+    EXPECT_NE(heuristic.origin, SDIManager::ExtractionOrigin::StrictStandardPayload);
+    EXPECT_NE(heuristic.origin, SDIManager::ExtractionOrigin::StrictZipRecordAdapter);
 }
 
 // ======================================================================
