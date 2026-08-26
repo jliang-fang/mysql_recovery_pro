@@ -85,6 +85,14 @@ ResultContract result_contract_from_legacy(const nlohmann::json& legacy,
     contract.header_damage_pages = legacy_value(legacy, "header_damage_pages", contract.header_damage_pages);
     contract.reason = legacy_value(legacy, "reason", contract.reason);
     contract.source_ibd = legacy_value(legacy, "source_ibd", fallback_source_ibd);
+    contract.compression_status = legacy_value(legacy, "compression_status", contract.compression_status);
+    contract.logical_page_size = legacy_value(legacy, "logical_page_size", contract.logical_page_size);
+    contract.physical_page_size = legacy_value(legacy, "physical_page_size", contract.physical_page_size);
+    contract.compression_classification_basis = legacy_value(
+        legacy, "compression_classification_basis", contract.compression_classification_basis);
+    contract.decoder_validated = legacy_value(legacy, "decoder_validated", contract.decoder_validated);
+    contract.compression_rejection_reason = legacy_value(
+        legacy, "compression_rejection_reason", contract.compression_rejection_reason);
     contract.importable = false;
     return contract;
 }
@@ -118,6 +126,12 @@ ResultContract result_contract_from_unified(const UnifiedRecoveryResult& result,
         ? "independent validation is required before import"
         : contract.export_rejection_reason;
     contract.source_ibd = !result.source_ibd.empty() ? result.source_ibd : source_ibd;
+    contract.compression_status = result.compression_status;
+    contract.logical_page_size = result.logical_page_size;
+    contract.physical_page_size = result.physical_page_size;
+    contract.compression_classification_basis = result.compression_classification_basis;
+    contract.decoder_validated = result.decoder_validated;
+    contract.compression_rejection_reason = result.compression_rejection_reason;
     return contract;
 }
 
@@ -142,7 +156,13 @@ nlohmann::json result_contract_object(const ResultContract& result) {
         {"header_damage_pages", result.header_damage_pages},
         {"importable", false},
         {"reason", result.reason},
-        {"source_ibd", result.source_ibd}
+        {"source_ibd", result.source_ibd},
+        {"compression_status", result.compression_status},
+        {"logical_page_size", result.logical_page_size},
+        {"physical_page_size", result.physical_page_size},
+        {"compression_classification_basis", result.compression_classification_basis},
+        {"decoder_validated", result.decoder_validated},
+        {"compression_rejection_reason", result.compression_rejection_reason}
     };
 }
 

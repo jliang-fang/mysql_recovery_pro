@@ -16,9 +16,11 @@
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 #include "dbrecovery/innodb/offline_keyring_parser.hpp"
+#include "dbrecovery/innodb/compressed_table_recovery.hpp"
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/salvage/secondary_index_rescuer.hpp"
+#include "dbrecovery/salvage/evidence_serializer.hpp"
 #include "dbrecovery/innodb.h"
 #include <filesystem>
 #include <fstream>
@@ -342,6 +344,7 @@ UnifiedRecoveryResult run_unified_recovery(
     UnifiedRecoveryResult result;
     result.table_name = table_name.empty() ? "recovered_table" : table_name;
     result.source_ibd = ibd_path;
+    result.decoder_validated = innodb::CompressedTableRecovery::decoder_is_validated();
     (void)repair;
     auto start = std::chrono::high_resolution_clock::now();
 
@@ -360,8 +363,67 @@ UnifiedRecoveryResult run_unified_recovery(
     bool pipeline_allowed = true;
     if (ibd_path.empty() || !fs::exists(ibd_path)) {
         result.damage_level = common::DamageLevel::L4_CRITICAL;
-        result.recovery_method = "none";
+        result.compression_status = "MALFORMED";
+        result.compression_rejection_reason = "compressed input is malformed or incomplete";
+        result.recovery_method = "compressed_layout_evidence";
+        result.trust_level = "EVIDENCE_ONLY";
+        result.schema_source = "EVIDENCE_ONLY";
+        result.result_classification = "forensic_evidence";
+        result.export_rejection_reason = "compressed_status_MALFORMED";
         pipeline_allowed = false;
+    }
+
+    // Compressed tables remain evidence-only until a real fixture validates the decoder.
+    if (pipeline_allowed) {
+        const size_t classification_page_size = page_size ? page_size : 16384;
+        innodb::CompressedTableRecovery compressed(classification_page_size);
+        const auto compression_status = compressed.classify(ibd_path, classification_page_size);
+        result.compression_status = innodb::CompressedTableRecoveryStats::status_to_string(
+            compression_status);
+        result.logical_page_size = classification_page_size;
+        const auto status_name = result.compression_status;
+        switch (compression_status) {
+            case innodb::CompressionStatus::NOT_COMPRESSED:
+                break;
+            case innodb::CompressionStatus::RECOGNIZED_UNSUPPORTED:
+                result.compression_rejection_reason = "decoder is not fixture-validated";
+                break;
+            case innodb::CompressionStatus::MALFORMED:
+                result.compression_rejection_reason = "compressed input is malformed or incomplete";
+                break;
+            case innodb::CompressionStatus::CORRUPTED_METADATA:
+                result.compression_rejection_reason = "compressed FSP metadata is corrupted or invalid";
+                break;
+            case innodb::CompressionStatus::PHYSICAL_LENGTH_MISMATCH:
+                result.compression_rejection_reason = "declared compressed physical stride mismatches the file layout";
+                break;
+            case innodb::CompressionStatus::COMPRESSED_AND_ENCRYPTED:
+                result.compression_rejection_reason = "compressed and encrypted tablespaces are unsupported";
+                break;
+            case innodb::CompressionStatus::RECOVERED:
+                if (!result.decoder_validated) {
+                    result.compression_rejection_reason = "recovered compressed status requires a validated decoder";
+                }
+                break;
+        }
+        const bool compressed_status_allowed =
+            compression_status == innodb::CompressionStatus::NOT_COMPRESSED ||
+            (compression_status == innodb::CompressionStatus::RECOVERED &&
+             result.decoder_validated);
+        if (!compressed_status_allowed) {
+            std::ifstream metadata_file(ibd_path, std::ios::binary);
+            std::vector<uint8_t> page0(classification_page_size, 0);
+            metadata_file.read(reinterpret_cast<char*>(page0.data()), page0.size());
+            const auto metadata = innodb::parse_fsp_compression_metadata(
+                page0.data(), static_cast<size_t>(metadata_file.gcount()), classification_page_size);
+            if (metadata) result.physical_page_size = metadata->physical_page_size;
+            result.recovery_method = "compressed_layout_evidence";
+            result.trust_level = "EVIDENCE_ONLY";
+            result.schema_source = "EVIDENCE_ONLY";
+            result.result_classification = "forensic_evidence";
+            result.export_rejection_reason = "compressed_status_" + status_name;
+            pipeline_allowed = false;
+        }
     }
 
     // TDE candidate gate — keep plaintext parse blocked for candidate inputs
@@ -784,6 +846,23 @@ UnifiedRecoveryResult run_unified_recovery(
                 maps, result.column_names, csv_path);
             if (!result.export_success) result.export_rejection_reason = "csv_export_failed";
         }
+
+        // Evidence fragments are serialized separately and are never eligible for CSV/SQL export.
+        if (!result.evidence_fragments.empty() && !output_dir.empty()) {
+            fs::create_directories(output_dir);
+            salvage::SalvageEvidenceSerializer serializer;
+            const std::map<std::string, std::string> metadata = {
+                {"source_ibd", result.source_ibd},
+                {"table_name", result.table_name},
+                {"page_size", std::to_string(page_size)},
+                {"classification", "forensic_evidence"},
+                {"importable", "false"}
+            };
+            const std::string evidence_path = output_dir + "/" + result.table_name + "_evidence.json";
+            if (!serializer.write_evidence(evidence_path, result.evidence_fragments, metadata)) {
+                result.export_rejection_reason = "evidence_export_failed";
+            }
+        }
     }
 
     if (result.trust_level.empty()) result.trust_level = "EVIDENCE_ONLY";
@@ -793,7 +872,7 @@ UnifiedRecoveryResult run_unified_recovery(
     const bool trusted_schema = result.trust_level == "AUTHORITATIVE" ||
                                 result.trust_level == "USER" ||
                                 result.trust_level == "FRM";
-    const bool page_integrity_failure = std::any_of(
+    const bool final_page_integrity_failure = std::any_of(
         result.page_damage.begin(), result.page_damage.end(),
         [](const PageDamageEvidence& page) {
             // ALLOCATED pages (type=0x0000) are empty with no records
@@ -807,7 +886,7 @@ UnifiedRecoveryResult run_unified_recovery(
     const bool structured_ready = result.total_recovered > 0 &&
                                   trusted_schema &&
                                   !result.ddl_variation_detected &&
-                                  !page_integrity_failure &&
+                                  !final_page_integrity_failure &&
                                   result.damage_level < common::DamageLevel::L3_SEVERE;
     if (structured_ready && result.export_rejection_reason.empty() && output_dir.empty()) {
         result.export_success = true;
@@ -817,7 +896,7 @@ UnifiedRecoveryResult run_unified_recovery(
             result.export_rejection_reason = "no_structured_rows";
         } else if (!trusted_schema) {
             result.export_rejection_reason = "schema_trust_insufficient";
-        } else if (page_integrity_failure) {
+        } else if (final_page_integrity_failure) {
             result.export_rejection_reason = "page_integrity_failure";
         } else if (result.damage_level >= common::DamageLevel::L3_SEVERE) {
             result.export_rejection_reason = "severe_or_critical_page_damage";

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <chrono>
 #include <fstream>
+#include <limits>
 #include <zlib.h>
 
 namespace dbrecovery {
@@ -142,8 +143,12 @@ std::vector<uint8_t> CompressedTableRecovery::decompress_page_data(
     const uint8_t* payload = compressed_data + ZSD_HEADER_SIZE;
     size_t payload_size = std::min(static_cast<size_t>(zlen), compressed_size - ZSD_HEADER_SIZE);
 
-    // Compression ratio safety check: reject if zlen > 512 * expected_size
-    if (zlen > static_cast<uint16_t>(expected_size * 512)) {
+    // Compression ratio safety check: reject if zlen > 512 * expected_size.
+    const size_t max_compressed_size =
+        expected_size > std::numeric_limits<size_t>::max() / 512
+            ? std::numeric_limits<size_t>::max()
+            : expected_size * 512;
+    if (static_cast<size_t>(zlen) > max_compressed_size) {
         return {};
     }
 
@@ -319,6 +324,9 @@ CompressionStatus CompressedTableRecovery::classify(const std::string& file_path
                 return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
             }
             const uint16_t page1_type = read_be<uint16_t>(page1.data(), FIL_PAGE_TYPE_ABS);
+            if (page1_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+                return CompressionStatus::COMPRESSED_AND_ENCRYPTED;
+            }
             // Accept any known InnoDB page type; anything else means the stride is wrong.
             if (page1_type != FIL_PAGE_INDEX &&
                 page1_type != FIL_PAGE_TYPE_FSP_HDR &&
@@ -327,8 +335,7 @@ CompressionStatus CompressedTableRecovery::classify(const std::string& file_path
                 page1_type != FIL_PAGE_SDI_ZIP &&
                 page1_type != FIL_PAGE_TYPE_BLOB &&
                 page1_type != FIL_PAGE_UNDO_LOG &&
-                page1_type != FIL_PAGE_COMPRESSED &&
-                page1_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+                page1_type != FIL_PAGE_COMPRESSED) {
                 return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
             }
         }

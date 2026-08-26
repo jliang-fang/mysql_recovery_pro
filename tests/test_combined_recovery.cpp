@@ -10,6 +10,33 @@
 
 using namespace dbrecovery;
 
+static void write_be16_combined(std::vector<uint8_t>& p, size_t offset, uint16_t value) {
+    p[offset] = static_cast<uint8_t>(value >> 8);
+    p[offset + 1] = static_cast<uint8_t>(value);
+}
+
+static void write_be32_combined(std::vector<uint8_t>& p, size_t offset, uint32_t value) {
+    p[offset] = static_cast<uint8_t>(value >> 24);
+    p[offset + 1] = static_cast<uint8_t>(value >> 16);
+    p[offset + 2] = static_cast<uint8_t>(value >> 8);
+    p[offset + 3] = static_cast<uint8_t>(value);
+}
+
+static void write_binary_combined(const std::string& path, const std::vector<uint8_t>& data) {
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+}
+
+static std::vector<uint8_t> make_compressed_layout_combined(bool valid_flags) {
+    std::vector<uint8_t> data(16384 * 8, 0);
+    write_be16_combined(data, 24, 17848);
+    write_be32_combined(data, 42, valid_flags ? 2u : 10u);
+    if (valid_flags) {
+        write_be16_combined(data, 8192 + 24, 17855);
+    }
+    return data;
+}
+
 static std::vector<uint8_t> make_valid_index_page_combined() {
     std::vector<uint8_t> p(16384, 0);
     p[0]=0x12; p[1]=0x34; p[2]=0x56; p[3]=0x78;
@@ -26,6 +53,92 @@ static std::vector<uint8_t> make_valid_index_page_combined() {
     return p;
 }
 
+
+TEST(CombinedRecovery, CompressedUnsupportedBlocksUnifiedPipeline) {
+    const std::string tmp = "/tmp/combined_compressed_unsupported.ibd";
+    write_binary_combined(tmp, make_compressed_layout_combined(true));
+    const auto r = tools::run_unified_recovery(
+        tmp, "/tmp/combined_compressed_unsupported_out", "compressed_t", "csv",
+        16384, "", "", 0, "", false, false, false);
+    EXPECT_EQ(r.compression_status, "RECOGNIZED_UNSUPPORTED");
+    EXPECT_EQ(r.total_recovered, 0u);
+    EXPECT_EQ(r.result_classification, "forensic_evidence");
+    EXPECT_FALSE(r.export_success);
+    EXPECT_FALSE(r.success);
+    EXPECT_FALSE(r.decoder_validated);
+    EXPECT_FALSE(r.compression_rejection_reason.empty());
+    EXPECT_EQ(r.export_rejection_reason, "compressed_status_RECOGNIZED_UNSUPPORTED");
+    std::filesystem::remove(tmp);
+}
+
+TEST(CombinedRecovery, CompressedMetadataFailureBlocksUnifiedPipeline) {
+    const std::string tmp = "/tmp/combined_compressed_metadata.ibd";
+    write_binary_combined(tmp, make_compressed_layout_combined(false));
+    const auto r = tools::run_unified_recovery(
+        tmp, "/tmp/combined_compressed_metadata_out", "compressed_bad", "csv",
+        16384, "", "", 0, "", false, false, false);
+    EXPECT_EQ(r.compression_status, "CORRUPTED_METADATA");
+    EXPECT_EQ(r.total_recovered, 0u);
+    EXPECT_EQ(r.result_classification, "forensic_evidence");
+    EXPECT_FALSE(r.export_success);
+    EXPECT_FALSE(r.success);
+    EXPECT_EQ(r.export_rejection_reason, "compressed_status_CORRUPTED_METADATA");
+    std::filesystem::remove(tmp);
+}
+TEST(CombinedRecovery, CompressedMalformedBlocksUnifiedPipeline) {
+    const auto r = tools::run_unified_recovery(
+        "/tmp/combined_missing_input.ibd", "/tmp/combined_malformed_out",
+        "compressed_missing", "csv", 16384, "", "", 0, "", false, false, false);
+    EXPECT_EQ(r.compression_status, "MALFORMED");
+    EXPECT_EQ(r.total_recovered, 0u);
+    EXPECT_EQ(r.result_classification, "forensic_evidence");
+    EXPECT_FALSE(r.export_success);
+    EXPECT_FALSE(r.success);
+    EXPECT_FALSE(r.compression_rejection_reason.empty());
+    EXPECT_EQ(r.export_rejection_reason, "compressed_status_MALFORMED");
+}
+
+TEST(CombinedRecovery, CompressedPhysicalMismatchBlocksUnifiedPipeline) {
+    const std::string tmp = "/tmp/combined_compressed_physical_mismatch.ibd";
+    std::vector<uint8_t> data(16384 * 8, 0);
+    write_be16_combined(data, 24, 17848);
+    write_be32_combined(data, 42, 2u);
+    write_be16_combined(data, 16384 + 24, 17855);
+    write_binary_combined(tmp, data);
+
+    const auto r = tools::run_unified_recovery(
+        tmp, "/tmp/combined_compressed_physical_mismatch_out", "compressed_mismatch",
+        "csv", 16384, "", "", 0, "", false, false, false);
+    EXPECT_EQ(r.compression_status, "PHYSICAL_LENGTH_MISMATCH");
+    EXPECT_EQ(r.total_recovered, 0u);
+    EXPECT_EQ(r.result_classification, "forensic_evidence");
+    EXPECT_FALSE(r.export_success);
+    EXPECT_FALSE(r.success);
+    EXPECT_FALSE(r.compression_rejection_reason.empty());
+    EXPECT_EQ(r.export_rejection_reason, "compressed_status_PHYSICAL_LENGTH_MISMATCH");
+    std::filesystem::remove(tmp);
+}
+
+TEST(CombinedRecovery, CompressedEncryptedBlocksUnifiedPipeline) {
+    const std::string tmp = "/tmp/combined_compressed_encrypted.ibd";
+    std::vector<uint8_t> data(16384 * 2, 0);
+    write_be16_combined(data, 24, 17848);
+    write_be32_combined(data, 42, 2u);
+    write_be16_combined(data, 8192 + 24, 17847);
+    write_binary_combined(tmp, data);
+
+    const auto r = tools::run_unified_recovery(
+        tmp, "/tmp/combined_compressed_encrypted_out", "compressed_encrypted",
+        "csv", 16384, "", "", 0, "", false, false, false);
+    EXPECT_EQ(r.compression_status, "COMPRESSED_AND_ENCRYPTED");
+    EXPECT_EQ(r.total_recovered, 0u);
+    EXPECT_EQ(r.result_classification, "forensic_evidence");
+    EXPECT_FALSE(r.export_success);
+    EXPECT_FALSE(r.success);
+    EXPECT_FALSE(r.compression_rejection_reason.empty());
+    EXPECT_EQ(r.export_rejection_reason, "compressed_status_COMPRESSED_AND_ENCRYPTED");
+    std::filesystem::remove(tmp);
+}
 TEST(CombinedRecovery, IndexParserToHeuristicFallback) {
     std::string tmp = "/tmp/combined_heuristic_test.ibd";
     {
@@ -38,6 +151,7 @@ TEST(CombinedRecovery, IndexParserToHeuristicFallback) {
     EXPECT_EQ(r.total_recovered, 0u);
     std::filesystem::remove(tmp);
 }
+
 
 TEST(CombinedRecovery, IndexParserToSalvageEngine) {
     recovery::SalvageEngine::Config cfg;
@@ -130,7 +244,8 @@ TEST(CombinedRecovery, EmptyLegacyResultHasAllCanonicalFields) {
         "ddl_variation_detected", "export_success",
         "export_rejection_reason", "total_pages_scanned", "damaged_pages",
         "checksum_mismatches", "header_damage_pages", "importable", "reason",
-        "source_ibd"
+        "source_ibd", "compression_status", "logical_page_size", "physical_page_size",
+        "compression_classification_basis", "decoder_validated", "compression_rejection_reason"
     };
 
     for (const auto& key : keys) {

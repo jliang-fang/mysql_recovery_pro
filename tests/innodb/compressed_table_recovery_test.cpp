@@ -1,6 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <vector>
+#include <zlib.h>
+
+#define private public
+#include "dbrecovery/innodb/compressed_table_recovery.hpp"
+#undef private
 
 #include "dbrecovery/innodb/page_defs.hpp"
 
@@ -26,7 +32,38 @@ std::vector<uint8_t> make_fsp_page(size_t page_size, uint8_t zip_ssize) {
     return page;
 }
 
+std::vector<uint8_t> make_zlib_frame(size_t expected_size) {
+    std::vector<uint8_t> source(expected_size, 0x5a);
+    uLong compressed_bound = compressBound(static_cast<uLong>(source.size()));
+    std::vector<uint8_t> compressed(compressed_bound);
+    uLong compressed_size = compressed_bound;
+    EXPECT_EQ(compress2(compressed.data(), &compressed_size,
+                        source.data(), static_cast<uLong>(source.size()),
+                        Z_BEST_SPEED), Z_OK);
+    compressed.resize(static_cast<size_t>(compressed_size));
+
+    std::vector<uint8_t> frame(32 + compressed.size(), 0);
+    frame[8] = static_cast<uint8_t>(compressed_size);
+    frame[9] = static_cast<uint8_t>(compressed_size >> 8);
+    std::memcpy(frame.data() + 32, compressed.data(), compressed.size());
+    return frame;
+}
+
 } // namespace
+
+TEST(CompressedTableRecoverySafetyTest, AcceptsLargeDeclaredLengthWithoutIntegerWrap) {
+    dbrecovery::innodb::CompressedTableRecovery recovery;
+    auto frame = make_zlib_frame(16384);
+    frame[8] = 0xff;
+    frame[9] = 0xff;
+
+    const auto decompressed = recovery.decompress_page_data(
+        frame.data(), frame.size(), 16384);
+
+    ASSERT_EQ(decompressed.size(), 16384u);
+    EXPECT_EQ(decompressed.front(), 0x5a);
+    EXPECT_EQ(decompressed.back(), 0x5a);
+}
 
 TEST(FSPCompressionMetadataTest, ParsesCanonicalCompressedFlags) {
     const auto page = make_fsp_page(16384, 2);

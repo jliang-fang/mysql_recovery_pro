@@ -32,6 +32,12 @@ struct ResultContract {
     bool importable = false;
     std::string reason = "independent validation is required before import";
     std::string source_ibd;
+    std::string compression_status = "NOT_COMPRESSED";
+    uint64_t logical_page_size = 0;
+    uint64_t physical_page_size = 0;
+    std::string compression_classification_basis = "canonical_fsp_flags";
+    bool decoder_validated = false;
+    std::string compression_rejection_reason;
 };
 
 ResultContract result_contract_from_unified(const UnifiedRecoveryResult& result,
