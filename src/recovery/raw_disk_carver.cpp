@@ -59,9 +59,9 @@ bool RawDiskCarver::is_valid_page_strict(const uint8_t* data, size_t page_size) 
 
     // For compressed pages, try LZ4 decompression first then validate
     if (page_type == FIL_PAGE_COMPRESSED || page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
-        // For compressed+encrypted, decryption is needed first — skip for now
+        // Encrypted compressed pages require authenticated decryption first.
         if (page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
-            return true;  // Accept as valid, TDE handling happens downstream
+            return false;
         }
         // Try LZ4 decompression: compressed data starts after ZSD header (32 bytes)
         if (page_size > 32) {
@@ -145,7 +145,6 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
             case FIL_PAGE_SDI_ZIP:      // 0x45BD - 压缩SDI页/BLOB页
             case FIL_PAGE_UNDO_LOG:     // 0x45B2 - Undo日志页
             case FIL_PAGE_COMPRESSED:   // 0x45B5 - 压缩页
-            case FIL_PAGE_COMPRESSED_AND_ENCRYPTED: // 0x45B7
             case FIL_PAGE_TYPE_ALLOCATED: // 0x0000 - 已分配
             case 0x0003:  // FIL_PAGE_INODE
             case 0x0005:  // FIL_PAGE_IBUF_BITMAP
@@ -903,11 +902,13 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
                 // 使用schema-aware解析
                 auto records = parse_records_with_schema(page_data, *matched_schema);
                 all_records.insert(all_records.end(), records.begin(), records.end());
-            } else {
-                // 使用schemaless解析
-                auto records = parse_records_schemaless(page_data);
-                all_records.insert(all_records.end(), records.begin(), records.end());
             }
+        }
+
+        if (!matched_schema.has_value()) {
+            // Heuristic rows remain forensic evidence and are not exportable.
+            processed++;
+            continue;
         }
 
         if (!all_records.empty()) {

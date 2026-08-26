@@ -15,6 +15,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <limits>
 #include <zlib.h>
 
 namespace dbrecovery {
@@ -171,55 +172,48 @@ std::vector<uint8_t> BlobScanner::read_blob_chain(
 
     std::vector<uint8_t> result;
     std::set<uint32_t> visited_pages;
-    std::vector<uint32_t> page_chain;  // Track page chain for debugging
+    constexpr size_t MAX_BLOB_SIZE = 48 * 1024 * 1024;
+
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file || page_size_ == 0) return result;
+    const std::streamoff file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
 
     uint32_t current_page = first_page;
     size_t remaining = total_length;
     size_t offset_in_page = BTR_BLOB_HDR_SIZE;
-
     while (current_page != 0 && remaining > 0 && visited_pages.size() < 10000) {
         if (visited_pages.count(current_page)) {
-            std::cerr << "[ERROR] BLOB page loop detected at page " << current_page 
-                      << " (chain: " << page_chain.size() << " pages visited)\n";
-            // Try to recover as much as possible by breaking the chain
-            break;
+            std::cerr << "[ERROR] BLOB page loop detected at page " << current_page << "\n";
+            return {};
         }
         visited_pages.insert(current_page);
-        page_chain.push_back(current_page);
 
-        std::ifstream file(file_path, std::ios::binary);
-        if (!file) {
-            std::cerr << "[ERROR] Cannot read BLOB page " << current_page << "\n";
-            break;
+        const uint64_t page_offset = static_cast<uint64_t>(current_page) * page_size_;
+        if (page_offset > static_cast<uint64_t>(file_size) ||
+            page_size_ > static_cast<size_t>(file_size - static_cast<std::streamoff>(page_offset))) {
+            return {};
         }
-
-        file.seekg(static_cast<std::streamoff>(current_page) * page_size_, std::ios::beg);
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(page_offset), std::ios::beg);
         std::vector<uint8_t> page_buffer(page_size_);
         file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
+        if (file.gcount() != static_cast<std::streamsize>(page_size_)) return {};
 
-        // Calculate data available in this page
-        size_t available = page_size_ - offset_in_page;
-        size_t to_read = std::min(available, remaining);
+        const size_t available = page_size_ > offset_in_page ? page_size_ - offset_in_page : 0;
+        const size_t to_read = std::min(available, remaining);
+        if (result.size() > MAX_BLOB_SIZE - to_read) return {};
+        result.insert(result.end(), page_buffer.begin() + offset_in_page,
+                      page_buffer.begin() + offset_in_page + to_read);
+        remaining -= to_read;
 
-        if (to_read > 0) {
-            result.insert(result.end(),
-                         page_buffer.begin() + offset_in_page,
-                         page_buffer.begin() + offset_in_page + to_read);
-            remaining -= to_read;
-        }
-
-        // Read next page from BLOB page header
-        if (page_buffer.size() >= BTR_BLOB_NEXT + 4) {
-            current_page = read_le<uint32_t>(page_buffer.data(), BTR_BLOB_NEXT);
-            offset_in_page = BTR_BLOB_HDR_SIZE;  // Reset for subsequent pages
-        } else {
-            break;
-        }
+        if (page_buffer.size() < BTR_BLOB_NEXT + 4) return {};
+        current_page = read_le<uint32_t>(page_buffer.data(), BTR_BLOB_NEXT);
+        offset_in_page = BTR_BLOB_HDR_SIZE;
     }
 
-    // Update statistics
+    if (remaining != 0 || result.size() != total_length) return {};
     stats_.total_blob_bytes += static_cast<uint32_t>(result.size());
-    
     return result;
 }
 
@@ -463,81 +457,79 @@ std::vector<uint8_t> BlobScanner::read_zblob_chain(
     const std::string& file_path,
     uint32_t first_page) {
 
+    constexpr size_t MAX_BLOB_SIZE = 48 * 1024 * 1024;
     std::vector<uint8_t> result;
     std::set<uint32_t> visited_pages;
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file || page_size_ == 0 || page_size_ <= ZBLOB_DATA_START) return {};
+    const std::streamoff file_size = file.tellg();
+    file.seekg(0, std::ios::beg);
 
-    // Initialize zlib decompressor for streaming
-    z_stream strm;
-    memset(&strm, 0, sizeof(strm));
-
-    if (inflateInit(&strm) != Z_OK) {
-        std::cerr << "[ERROR] Failed to initialize zlib decompressor\n";
-        return result;
-    }
-
+    z_stream strm{};
+    if (inflateInit(&strm) != Z_OK) return {};
+    bool stream_finished = false;
     uint32_t current_page = first_page;
-    uint8_t out_buffer[64 * 1024];  // 64KB output buffer
+    uint8_t out_buffer[64 * 1024];
 
     while (current_page != ZBLOB_END_MARKER && visited_pages.size() < 10000) {
-        if (visited_pages.count(current_page)) {
-            std::cerr << "[ERROR] ZBLOB page loop detected at page " << current_page << "\n";
-            break;
+        if (!visited_pages.insert(current_page).second) {
+            inflateEnd(&strm);
+            return {};
         }
-        visited_pages.insert(current_page);
-
-        std::ifstream file(file_path, std::ios::binary);
-        if (!file) {
-            std::cerr << "[ERROR] Cannot read ZBLOB page " << current_page << "\n";
-            break;
+        const uint64_t page_offset = static_cast<uint64_t>(current_page) * page_size_;
+        if (page_offset > static_cast<uint64_t>(file_size) ||
+            page_size_ > static_cast<size_t>(file_size - static_cast<std::streamoff>(page_offset))) {
+            inflateEnd(&strm);
+            return {};
         }
-
-        file.seekg(static_cast<std::streamoff>(current_page) * page_size_, std::ios::beg);
+        file.clear();
+        file.seekg(static_cast<std::streamoff>(page_offset), std::ios::beg);
         std::vector<uint8_t> page_buffer(page_size_);
         file.read(reinterpret_cast<char*>(page_buffer.data()), page_size_);
-
-        if (file.gcount() < static_cast<std::streamsize>(ZBLOB_DATA_START)) {
-            break;
+        if (file.gcount() != static_cast<std::streamsize>(page_size_)) {
+            inflateEnd(&strm);
+            return {};
         }
 
-        // Read next page pointer (big-endian in ZBLOB, unlike regular BLOB)
-        uint32_t next_page = read_be<uint32_t>(page_buffer.data(), ZBLOB_NEXT_PAGE);
+        const uint32_t next_page = read_be<uint32_t>(page_buffer.data(), ZBLOB_NEXT_PAGE);
+        const size_t compressed_size = page_size_ - ZBLOB_DATA_START;
+        if (compressed_size > static_cast<size_t>(std::numeric_limits<uInt>::max())) {
+            inflateEnd(&strm);
+            return {};
+        }
+        strm.avail_in = static_cast<uInt>(compressed_size);
+        strm.next_in = page_buffer.data() + ZBLOB_DATA_START;
 
-        // Extract compressed data from offset 38
-        size_t compressed_size = page_size_ - ZBLOB_DATA_START;
-        if (page_buffer.size() >= ZBLOB_DATA_START) {
-            strm.avail_in = static_cast<uInt>(compressed_size);
-            strm.next_in = page_buffer.data() + ZBLOB_DATA_START;
-
-            // Decompress this chunk
-            do {
-                strm.avail_out = sizeof(out_buffer);
-                strm.next_out = out_buffer;
-
-                int ret = inflate(&strm, Z_NO_FLUSH);
-
-                if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR) {
-                    std::cerr << "[WARN] ZBLOB decompression error on page " << current_page << "\n";
-                    break;
-                }
-
-                if (strm.avail_out < sizeof(out_buffer)) {
-                    size_t have = sizeof(out_buffer) - strm.avail_out;
-                    result.insert(result.end(), out_buffer, out_buffer + have);
-                }
-
-                if (ret == Z_STREAM_END) {
-                    // Decompression complete
+        do {
+            strm.avail_out = sizeof(out_buffer);
+            strm.next_out = out_buffer;
+            const int ret = inflate(&strm, Z_NO_FLUSH);
+            if (ret != Z_OK && ret != Z_STREAM_END) {
+                inflateEnd(&strm);
+                return {};
+            }
+            const size_t have = sizeof(out_buffer) - strm.avail_out;
+            if (have > MAX_BLOB_SIZE - result.size()) {
+                inflateEnd(&strm);
+                return {};
+            }
+            result.insert(result.end(), out_buffer, out_buffer + have);
+            if (ret == Z_STREAM_END) {
+                stream_finished = true;
+                if (strm.avail_in != 0) {
                     inflateEnd(&strm);
-                    stats_.total_blob_bytes += static_cast<uint32_t>(result.size());
-                    return result;
+                    return {};
                 }
-            } while (strm.avail_out == 0);
-        }
+                break;
+            }
+        } while (strm.avail_out == 0 || strm.avail_in != 0);
 
+        if (stream_finished) break;
         current_page = next_page;
     }
 
     inflateEnd(&strm);
+    if (!stream_finished) return {};
     stats_.total_blob_bytes += static_cast<uint32_t>(result.size());
     return result;
 }
@@ -547,11 +539,12 @@ std::vector<uint8_t> BlobScanner::decompress_zblob_page(
     void* decompressor_state) {
 
     std::vector<uint8_t> result;
-
-    if (compressed_data.empty()) {
+    constexpr size_t MAX_BLOB_SIZE = 48 * 1024 * 1024;
+    if (compressed_data.empty() ||
+        compressed_data.size() > static_cast<size_t>(std::numeric_limits<uInt>::max())) {
         return result;
     }
-
+    bool stream_finished = false;
     z_stream* strm = nullptr;
     bool own_strm = false;
 
@@ -576,18 +569,29 @@ std::vector<uint8_t> BlobScanner::decompress_zblob_page(
         strm->avail_out = sizeof(out_buffer);
         strm->next_out = out_buffer;
 
-        int ret = inflate(strm, Z_NO_FLUSH);
+        const int ret = inflate(strm, Z_NO_FLUSH);
 
-        if (ret == Z_STREAM_ERROR || ret == Z_DATA_ERROR) {
-            break;
+        if (ret != Z_OK && ret != Z_STREAM_END) {
+            if (own_strm) inflateEnd(strm);
+            if (own_strm) delete strm;
+            return {};
         }
 
-        if (strm->avail_out < sizeof(out_buffer)) {
-            size_t have = sizeof(out_buffer) - strm->avail_out;
-            result.insert(result.end(), out_buffer, out_buffer + have);
+        const size_t have = sizeof(out_buffer) - strm->avail_out;
+        if (have > MAX_BLOB_SIZE - result.size()) {
+            if (own_strm) inflateEnd(strm);
+            if (own_strm) delete strm;
+            return {};
         }
+        result.insert(result.end(), out_buffer, out_buffer + have);
 
         if (ret == Z_STREAM_END) {
+            stream_finished = true;
+            if (strm->avail_in != 0) {
+                if (own_strm) inflateEnd(strm);
+                if (own_strm) delete strm;
+                return {};
+            }
             break;
         }
     } while (strm->avail_out == 0);
@@ -597,7 +601,7 @@ std::vector<uint8_t> BlobScanner::decompress_zblob_page(
         delete strm;
     }
 
-    return result;
+    return stream_finished ? result : std::vector<uint8_t>{};
 }
 
 std::vector<uint8_t> BlobScanner::read_blob_auto(

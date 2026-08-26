@@ -1345,6 +1345,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             records = generator.flashback_updates(schema);
         }
 
+        auto& stats = generator.get_stats();
+
         // Only complete records may produce a structured flashback artifact.
         const bool flashback_export_allowed = !records.empty() &&
                                               stats.complete_records == records.size();
@@ -1374,7 +1376,6 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cout << "[INFO] No flashback records found\n";
         }
 
-        auto& stats = generator.get_stats();
         std::cout << "[INFO] Flashback stats: total=" << stats.total_records
                   << ", complete=" << stats.complete_records
                   << ", partial=" << stats.partial_records
@@ -1391,7 +1392,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::string flash_artifact = records.empty() ? "" : output_dir + "/flashback" + flash_ext;
         nlohmann::json flash_artifacts = nlohmann::json::array();
         if (!flash_artifact.empty()) flash_artifacts.push_back(flash_artifact);
-        write_result_json({
+        write_result_json(nlohmann::json{
             {"mode", "flashback_" + mode_label},
             {"classification", flashback_export_allowed ? "structured_recovery" : "forensic_evidence"},
             {"structured_rows", flashback_export_allowed ? stats.complete_records : 0},

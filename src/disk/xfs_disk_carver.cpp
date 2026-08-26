@@ -1109,6 +1109,11 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
             }
         }
 
+        // Encrypted compressed pages require authenticated decryption before parsing.
+        if (page_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+            continue;
+        }
+
         // Accept INDEX, SDI, BLOB, and ZBLOB pages
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
             page_type != FIL_PAGE_SDI_ZIP &&
@@ -2186,11 +2191,13 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                 // Schema-aware parsing
                 auto records = parse_records_with_schema_xfs(page_info.data, *external_schema_);
                 all_records.insert(all_records.end(), records.begin(), records.end());
-            } else {
-                // Schema-less parsing
-                auto records = parse_records_schemaless_xfs(page_info.data);
-                all_records.insert(all_records.end(), records.begin(), records.end());
             }
+        }
+
+        if (!use_schema) {
+            // Heuristic rows remain forensic evidence and are not exportable.
+            processed++;
+            continue;
         }
 
         if (!all_records.empty()) {

@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <lz4.h>
 
 namespace dbrecovery {
@@ -35,18 +36,26 @@ public:
             return std::vector<uint8_t>();
         }
 
+        if (max_size == 0 || max_size > MAX_DECOMPRESSED_SIZE) {
+            max_size = MAX_DECOMPRESSED_SIZE;
+        }
+
         // Sanity check: compressed data should not be larger than decompressed
-        if (expected_len > 0 && src_len > expected_len) {
-            // Possibly corrupt data
+        if (expected_len > 0 && (src_len > expected_len || expected_len > max_size)) {
             return std::vector<uint8_t>();
         }
 
-        // Determine output buffer size
-        size_t dest_size = expected_len > 0 ? expected_len : src_len * 4;
+        // Determine output buffer size without overflowing the fallback estimate.
+        size_t dest_size = expected_len;
+        if (dest_size == 0) {
+            if (src_len > max_size / 4) return std::vector<uint8_t>();
+            dest_size = src_len * 4;
+        }
 
-        // Cap at maximum size to prevent memory exhaustion attacks
-        if (dest_size > max_size) {
-            dest_size = max_size;
+        if (dest_size == 0 || dest_size > max_size ||
+            src_len > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            dest_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            return std::vector<uint8_t>();
         }
 
         std::vector<uint8_t> dest(dest_size);
@@ -59,8 +68,8 @@ public:
             static_cast<int>(dest_size)
         );
 
-        if (decompressed_size < 0) {
-            // Decompression failed
+        if (decompressed_size < 0 ||
+            (expected_len > 0 && static_cast<size_t>(decompressed_size) != expected_len)) {
             return std::vector<uint8_t>();
         }
 
@@ -81,6 +90,11 @@ public:
                                      uint8_t* dest, size_t dest_size,
                                      size_t& actual_size) {
         if (src == nullptr || dest == nullptr || src_len == 0) {
+            return false;
+        }
+
+        if (src_len > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+            dest_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
             return false;
         }
 
@@ -105,7 +119,11 @@ public:
      * @return Maximum compressed size bound
      */
     static size_t compress_bound(size_t src_size) {
-        return static_cast<size_t>(LZ4_compressBound(static_cast<int>(src_size)));
+        if (src_size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+            return 0;
+        }
+        const int bound = LZ4_compressBound(static_cast<int>(src_size));
+        return bound > 0 ? static_cast<size_t>(bound) : 0;
     }
 
     /**
