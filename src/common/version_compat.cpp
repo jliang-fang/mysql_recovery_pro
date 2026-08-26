@@ -379,7 +379,7 @@ void VersionCompatibilityFactory::init_version_info() {
 }
 
 MySQLVersion VersionCompatibilityFactory::detect_version(const uint8_t* page_data, size_t page_size) const {
-    return dbrecovery::detect_mysql_version(page_data, page_size);
+    return MySQLVersionDetector::detect(page_data, page_size);
 }
 
 RowFormat VersionCompatibilityFactory::detect_row_format(const uint8_t* page_data,

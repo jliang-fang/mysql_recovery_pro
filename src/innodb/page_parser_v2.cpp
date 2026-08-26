@@ -865,7 +865,7 @@ MySQLVersion PageTypeDetector::detect_version(uint16_t page_type,
         return MySQLVersion::MYSQL_80;
     }
 
-    return MySQLVersion::MYSQL_57;
+    return MySQLVersion::UNKNOWN;
 }
 
 std::string PageTypeDetector::page_type_to_string(uint16_t type) {

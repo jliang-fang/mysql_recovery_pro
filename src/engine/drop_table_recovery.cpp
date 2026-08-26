@@ -85,7 +85,7 @@ std::string SystemTablespaceScanner::detect_mysql_version() {
     } else if (filename == "ibdata1" || filename.find("ibdata") != std::string::npos) {
         mysql_version_ = "5.7";
     } else {
-        mysql_version_ = "5.7";
+        mysql_version_ = "UNKNOWN";
     }
 
     return mysql_version_;
