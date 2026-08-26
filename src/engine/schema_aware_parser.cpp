@@ -2597,29 +2597,11 @@ SchemaTemplate::Column SchemaSdiRecovery::recover_from_sdi_json(
 std::optional<std::string> SchemaSdiRecovery::extract_sdi_json(
     const uint8_t* data, uint32_t payload_offset, uint32_t payload_size) {
 
-    if (!data || payload_size == 0) {
-        return std::nullopt;
-    }
-
-    // Look for JSON start marker
-    for (uint32_t i = payload_offset; i < payload_size; ++i) {
-        if (data[i] == '{') {
-            // Found potential JSON start
-            // Find matching end
-            uint32_t depth = 0;
-            for (uint32_t j = i; j < payload_size; ++j) {
-                if (data[j] == '{') depth++;
-                if (data[j] == '}') {
-                    depth--;
-                    if (depth == 0) {
-                        return std::string(reinterpret_cast<const char*>(data + i),
-                                          j - i + 1);
-                    }
-                }
-            }
-        }
-    }
-
+    // This legacy API has no page identity, SDI signature, or bounded decompression
+    // context. Refuse extraction rather than treating arbitrary braces as SDI JSON.
+    (void)data;
+    (void)payload_offset;
+    (void)payload_size;
     return std::nullopt;
 }
 

@@ -490,7 +490,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             "ddl_variation_detected", "export_success",
             "export_rejection_reason", "total_pages_scanned", "damaged_pages",
             "checksum_mismatches", "header_damage_pages", "importable", "reason",
-            "source_ibd"
+            "source_ibd", "compression_status", "logical_page_size", "physical_page_size",
+            "compression_classification_basis", "decoder_validated", "compression_rejection_reason"
         };
         nlohmann::json details = nlohmann::json::object();
         for (const auto& [key, value] : result.items()) {
@@ -1344,8 +1345,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             records = generator.flashback_updates(schema);
         }
 
-        // Idempotent output: refuse to overwrite existing flashback artifact
-        if (!records.empty()) {
+        // Only complete records may produce a structured flashback artifact.
+        const bool flashback_export_allowed = !records.empty() &&
+                                              stats.complete_records == records.size();
+        if (flashback_export_allowed) {
             fs::create_directories(output_dir);
             std::string ext = (config.output_format == dbrecovery::innodb::FlashbackOutputFormat::CSV) ? ".csv"
                             : (config.output_format == dbrecovery::innodb::FlashbackOutputFormat::JSON) ? ".json"
@@ -1390,16 +1393,18 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         if (!flash_artifact.empty()) flash_artifacts.push_back(flash_artifact);
         write_result_json({
             {"mode", "flashback_" + mode_label},
-            {"classification", records.empty() ? "forensic_evidence" : "structured_recovery"},
-            {"structured_rows", stats.complete_records},
-            {"evidence_fragments", stats.partial_records},
-            {"importable", !records.empty()},
-            {"reason", records.empty() ? "evidence-empty: no flashback records matched filter"
-                                       : "flashback " + mode_label + " recovered " + std::to_string(records.size()) + " statement(s)"},
+            {"classification", flashback_export_allowed ? "structured_recovery" : "forensic_evidence"},
+            {"structured_rows", flashback_export_allowed ? stats.complete_records : 0},
+            {"evidence_fragments", stats.partial_records + (flashback_export_allowed ? 0 : records.size())},
+            {"importable", false},
+            {"reason", flashback_export_allowed
+                ? "flashback artifact written; independent validation is required before import"
+                : (records.empty() ? "evidence-empty: no flashback records matched filter"
+                                    : "flashback export blocked: incomplete records are forensic evidence only")},
             {"artifacts", flash_artifacts},
             {"evidence_empty", records.empty()},
             {"history_versions_recovered", stats_.history_versions_recovered},
-            {"flashback_statements_generated", stats_.flashback_statements_generated}
+            {"flashback_statements_generated", flashback_export_allowed ? stats_.flashback_statements_generated : 0}
         });
         return 0;
     }
@@ -1665,8 +1670,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         fs::create_directories(output_dir);
         nlohmann::json salvage_artifacts = nlohmann::json::array();
 
-        // Structured rows (L1/L2) are always exportable to CSV.
-        if (!result.rows.empty()) {
+        // Structured rows are exportable only after explicit schema/integrity validation.
+        const bool salvage_export_allowed = false;
+        if (salvage_export_allowed) {
             std::string csv_path = output_dir + "/salvaged_data.csv";
 
             if (!dbrecovery::recovery::SalvageEngine::export_csv(csv_path, result.rows)) {
@@ -1773,26 +1779,34 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             dmg["diagnosis"] = result.damage.diagnosis;
             dmg["total_pages_scanned"] = result.total_pages_scanned;
             dmg["pages_with_data"] = result.pages_with_data;
-            dmg["structured_rows"] = result.rows.size();
-            dmg["evidence_fragments"] = result.evidence_fragments.size();
+            dmg["structured_rows"] = 0;
+            dmg["evidence_fragments"] = result.evidence_fragments.size() + result.rows.size();
             std::ofstream dmg_file(damage_log);
             dmg_file << dmg.dump(2) << "\n";
             std::cout << "[INFO] Damage report written to: " << damage_log << "\n";
             salvage_artifacts.push_back({{"path", damage_log},{"kind","damage_report"},{"importable",false}});
         }
 
+        const uint64_t salvage_structured_rows = salvage_export_allowed ? result.rows.size() : 0;
+        const uint64_t salvage_evidence_count = result.evidence_fragments.size() +
+            (salvage_export_allowed ? 0 : result.rows.size());
+
         if (!write_result_json({
                 {"mode", "salvage"},
-                {"classification", result.rows.empty() ? "forensic_evidence" : "structured_recovery"},
-                {"structured_rows", result.rows.size()},
-                {"evidence_fragments", result.evidence_fragments.size()},
+                {"success", false},
+                {"classification", "forensic_evidence"},
+                {"structured_rows", salvage_structured_rows},
+                {"evidence_fragments", salvage_evidence_count},
+                {"schema_source", "EVIDENCE_ONLY"},
+                {"schema_trust_level", "EVIDENCE_ONLY"},
+                {"recovery_method", "salvage"},
+                {"export_success", false},
+                {"export_rejection_reason", "salvage rows require explicit schema and integrity validation before structured export"},
                 {"importable", false},
-                {"reason", result.rows.empty()
-                    ? "evidence-empty: no structured salvage rows recovered"
-                    : "structured salvage rows recovered; evidence fragments remain non-importable"},
+                {"reason", "salvage output is forensic evidence only; structured export requires explicit schema and integrity validation"},
                 {"source_inputs", {{"ibd", ibd_path}}},
                 {"artifacts", salvage_artifacts},
-                {"evidence_empty", result.evidence_fragments.empty()}})) {
+                {"evidence_empty", salvage_evidence_count == 0}})) {
             return 1;
         }
         return 0;
@@ -3298,8 +3312,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.output_directory = output_dir;
         config.page_size = page_size;
         config.schema_file = schema_file_path;
-        config.export_csv = (format == "csv");
-        config.export_sql = (format == "sql");
+        config.export_csv = false;
+        config.export_sql = false;
+        config.export_json = false;
         recovery.set_config(config);
 
         auto result = recovery.recover([&](double progress, const std::string& msg) {
@@ -3330,6 +3345,25 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
             generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+            if (!write_result_json({
+                    {"mode", "drop_table_recovery"},
+                    {"success", false},
+                    {"classification", "forensic_evidence"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", result.total_records},
+                    {"schema_source", "EVIDENCE_ONLY"},
+                    {"schema_trust_level", "EVIDENCE_ONLY"},
+                    {"recovery_method", "drop_table_recovery"},
+                    {"export_success", false},
+                    {"export_rejection_reason", "DROP TABLE recovery output requires independent schema and page-integrity validation"},
+                    {"importable", false},
+                    {"reason", "DROP TABLE recovery output requires independent schema and page-integrity validation"},
+                    {"source_inputs", {{"system_tablespace", system_tablespace}, {"data_dir", data_dir}}},
+                    {"tables_found", result.tables_found},
+                    {"tables_recovered", result.tables_recovered},
+                    {"artifacts", nlohmann::json::array()}})) {
+                return 1;
+            }
             return 0;
         } else {
             std::cerr << "[ERROR] DROP TABLE recovery failed.\n";
@@ -3475,6 +3509,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     std::vector<std::map<std::string, std::string>> recovered_records;
     std::vector<std::string> recovered_column_order;  // 用于保持列顺序
+    bool specialized_structured_export_allowed = true;
+    std::string specialized_export_rejection_reason;
     bool shared_specialized_handled = false;
 
     struct PhysicalFormat {
@@ -4309,6 +4345,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
             if (format.kind != "none") {
                 shared_specialized_handled = true;
+                specialized_structured_export_allowed = false;
+                specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
             }
         }
         if (shared_specialized_handled) {
@@ -4379,6 +4417,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // Truncate 恢复 - 使用 InnoDBIndexParser 进行高精度恢复
     if (truncate_recovery) {
+        specialized_structured_export_allowed = false;
+        specialized_export_rejection_reason = "TRUNCATE recovery requires an authoritative schema before structured export";
         std::cout << "[INFO] Starting Truncate recovery (using InnoDBIndexParser)...\n";
 
         // Try to detect page size from file
@@ -4418,6 +4458,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
             if (format.kind != "none") {
                 shared_specialized_handled = true;
+                specialized_structured_export_allowed = false;
+                specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
             }
         }
         if (shared_specialized_handled) {
@@ -4481,6 +4523,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // rm -rf 恢复 - 使用 InnoDBIndexParser 进行高精度恢复
     // InnoDBIndexParser 正确解析 COMPACT/DYNAMIC 行格式，实现 >=99.9% 恢复率
     if (rmrf_recovery) {
+        specialized_structured_export_allowed = false;
+        specialized_export_rejection_reason = "rm-rf recovery requires an authoritative schema before structured export";
         std::cout << "[INFO] Starting rm -rf recovery (using InnoDBIndexParser)...\n";
 
         // Try to detect page size from file
@@ -4521,6 +4565,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
             if (format.kind != "none") {
                 shared_specialized_handled = true;
+                specialized_structured_export_allowed = false;
+                specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
             }
         }
         if (shared_specialized_handled) {
@@ -4793,11 +4839,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 导出结果
     std::string output_path;
     bool export_succeeded = true;
+    bool structured_export_blocked = !specialized_structured_export_allowed;
     nlohmann::json recovery_artifacts = nlohmann::json::array();
 
-    // v2.0: --parallel-export routes CSV/SQL export through the multi-threaded
-    // exporter instead of the single-threaded Exporter.
-    if (parallel_export && (format == "csv" || format == "sql")) {
+    if (structured_export_blocked) {
+        std::cout << "[WARN] Structured export blocked: "
+                  << (specialized_export_rejection_reason.empty()
+                      ? "recovery result is not independently exportable"
+                      : specialized_export_rejection_reason) << "\n";
+    } else if (parallel_export && (format == "csv" || format == "sql")) {
         uint32_t pw = static_cast<uint32_t>(num_workers_opt.value_or(4));
         std::string export_table_name = "recovered_table";
         if (recovered_column_order.empty() && !recovered_records.empty()) {
@@ -4922,13 +4972,18 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     if (!write_result_json({
             {"mode", "recovery"},
-            {"classification", recovered_records.empty() ? "forensic_evidence" : "structured_recovery"},
-            {"structured_rows", recovered_records.size()},
-            {"evidence_fragments", 0},
+            {"classification", (structured_export_blocked || recovered_records.empty())
+                ? "forensic_evidence" : "structured_recovery"},
+            {"structured_rows", structured_export_blocked ? 0 : recovered_records.size()},
+            {"evidence_fragments", structured_export_blocked ? recovered_records.size() : 0},
             {"importable", false},
-            {"reason", recovered_records.empty()
-                ? "evidence-empty: no structured rows recovered"
-                : "structured rows recovered; independent validation is required before import"},
+            {"reason", structured_export_blocked
+                ? (specialized_export_rejection_reason.empty()
+                    ? "structured export blocked; recovered data retained as forensic evidence"
+                    : specialized_export_rejection_reason)
+                : (recovered_records.empty()
+                    ? "evidence-empty: no structured rows recovered"
+                    : "structured rows recovered; independent validation is required before import")},
             {"source_inputs", {{"ibd", ibd_path}}},
             {"artifacts", recovery_artifacts},
             {"recovery_type", recovery_type},
