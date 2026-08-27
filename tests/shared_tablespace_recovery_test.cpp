@@ -349,7 +349,60 @@ TEST(SharedTablespaceRecoveryTest, MissingFileReturnsEmptyManifest) {
     EXPECT_EQ(manifest.verdict, ImportabilityVerdict::UNKNOWN);
 }
 
-// ==================== Main ====================
+TEST(SharedTablespaceRecoveryTest, CacheInvalidatesWhenPathChanges) {
+    const auto first = build_shared_tablespace(
+        "dbrec_ts_cache_first.ibd", {build_page(0, 11, FIL_PAGE_INDEX, true)});
+    const auto second = build_shared_tablespace(
+        "dbrec_ts_cache_second.ibd", {build_page(0, 22, FIL_PAGE_INDEX, true)});
+
+    SharedTablespaceRecovery engine;
+    engine.set_tablespace_path(first);
+    auto first_manifest = engine.scan_pages(0);
+    ASSERT_EQ(first_manifest.entries.size(), 1);
+    EXPECT_EQ(first_manifest.entries[0].space_id, 11);
+
+    engine.set_tablespace_path(second);
+    auto second_manifest = engine.scan_pages(0);
+    ASSERT_EQ(second_manifest.entries.size(), 1);
+    EXPECT_EQ(second_manifest.entries[0].space_id, 22);
+}
+
+TEST(SharedTablespaceRecoveryTest, CacheInvalidatesWhenScanConfigChanges) {
+    auto page = build_page(0, 31, FIL_PAGE_INDEX, true);
+    page[100] ^= 0xFF;
+    const auto path = build_shared_tablespace("dbrec_ts_cache_config.ibd", {page});
+
+    SharedTablespaceRecovery engine;
+    engine.set_tablespace_path(path);
+    auto verified = engine.scan_pages(0);
+    ASSERT_EQ(verified.pages_scanned, 1);
+    EXPECT_EQ(verified.pages_with_invalid_checksum, 1);
+
+    SharedTablespaceScanConfig config;
+    config.verify_checksums = false;
+    engine.set_scan_config(config);
+    auto unverified = engine.scan_pages(0);
+    EXPECT_EQ(unverified.pages_scanned, 1);
+    EXPECT_EQ(unverified.pages_with_valid_checksum, 1);
+    EXPECT_EQ(unverified.pages_with_invalid_checksum, 0);
+}
+
+TEST(SharedTablespaceRecoveryTest, LargeFileFallsBackToStreamingScan) {
+    auto page = build_page(0, 41, FIL_PAGE_INDEX, true);
+    const auto path = build_shared_tablespace("dbrec_ts_cache_fallback.ibd", {page});
+
+    SharedTablespaceScanConfig config;
+    config.max_memory_bytes = 1;
+
+    SharedTablespaceRecovery engine;
+    engine.set_tablespace_path(path);
+    engine.set_scan_config(config);
+    const auto manifest = engine.scan_pages(0);
+
+    EXPECT_EQ(manifest.pages_scanned, 1);
+    ASSERT_EQ(manifest.entries.size(), 0);
+    EXPECT_EQ(manifest.verdict, ImportabilityVerdict::IMPORTABLE);
+}
 
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);

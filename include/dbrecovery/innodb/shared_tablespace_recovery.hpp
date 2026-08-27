@@ -105,7 +105,7 @@ public:
     void set_scan_config(const SharedTablespaceScanConfig& config);
     const SharedTablespaceStats& get_stats() const;
 
-    // Phase 5e: Streaming scan returns manifest (no full page cache)
+    // Scan returns a manifest while reusing the bounded page cache.
     PageBundleManifest scan_pages(uint32_t filter_space_id = 0);
 
     // Legacy API methods (backward compatible, use streaming internally)
@@ -124,7 +124,9 @@ private:
 
     std::vector<SDIEntry> extract_sdi_entries();
 
-    // Phase 5e: Read a single page from file (streaming, no cache)
+    void ensure_cache_populated();
+
+    // Read a single page when the bounded cache is not applicable.
     bool read_page(std::ifstream& file, uint32_t page_no, std::vector<uint8_t>& page_buf) const;
 
     size_t page_size_;
@@ -132,6 +134,8 @@ private:
     std::string output_dir_;
     SharedTablespaceStats stats_;
     SharedTablespaceScanConfig scan_config_;
+    std::map<uint32_t, std::vector<uint8_t>> page_cache_;
+    bool cache_populated_ = false;
 };
 
 } // namespace innodb
