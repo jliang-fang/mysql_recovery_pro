@@ -1509,14 +1509,19 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
         }
 
-        // Strategy 2: Undo log scan (if system tablespace available)
+        nlohmann::json executed_strategies = nlohmann::json::array({"salvage_engine"});
+        nlohmann::json not_executed_strategies = nlohmann::json::array();
+
+        // Undo history integration is not implemented in auto-salvage yet.
         if (!system_tablespace.empty()) {
-            std::cout << "[AUTO-SALVAGE] Strategy 2: Undo log history scan\n";
+            std::cout << "[AUTO-SALVAGE] Undo log history scan: not executed (unsupported)\n";
+            not_executed_strategies.push_back("undo_log_history");
         }
 
-        // Strategy 3: Secondary indexes from --all-indexes dir
+        // Strategy 2: Secondary indexes from --all-indexes dir
         if (!all_indexes_dir.empty()) {
-            std::cout << "[AUTO-SALVAGE] Strategy 3: Scanning secondary indexes from " << all_indexes_dir << "\n";
+            executed_strategies.push_back("secondary_index_scan");
+            std::cout << "[AUTO-SALVAGE] Strategy 2: Scanning secondary indexes from " << all_indexes_dir << "\n";
             std::error_code ec;
             for (auto& entry : fs::recursive_directory_iterator(all_indexes_dir, ec)) {
                 if (ec) break;
@@ -1566,15 +1571,41 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // Strategy 3: Disk carving (if device path available)
         if (!device_path.empty()) {
-            std::cout << "[AUTO-SALVAGE] Strategy 3: Disk carving\n";
+            std::cout << "[AUTO-SALVAGE] Disk carving: not executed (unsupported)\n";
+            not_executed_strategies.push_back("disk_carving");
         }
 
-        // Correlate all fragments
+        nlohmann::json correlation_summary = nlohmann::json::object();
         if (!all_fragments.empty()) {
             auto corr_result = correlator.correlate();
+            correlation_summary = {
+                {"fragments", all_fragments.size()},
+                {"summary", corr_result.to_string()}
+            };
             std::cout << "[AUTO-SALVAGE] " << corr_result.to_string() << "\n";
         } else {
             std::cout << "[WARN] No data could be salvaged by any strategy\n";
+        }
+
+        if (!write_result_json({
+                {"mode", "auto_salvage"},
+                {"success", false},
+                {"classification", "forensic_evidence"},
+                {"structured_rows", 0},
+                {"evidence_fragments", all_fragments.size()},
+                {"schema_source", "EVIDENCE_ONLY"},
+                {"schema_trust_level", "EVIDENCE_ONLY"},
+                {"recovery_method", "auto_salvage"},
+                {"export_success", false},
+                {"export_rejection_reason", "auto-salvage output is forensic evidence only"},
+                {"importable", false},
+                {"reason", "auto-salvage strategies do not produce importable structured recovery"},
+                {"source_inputs", {{"ibd", ibd_path}, {"device_path", device_path},
+                                   {"system_tablespace", system_tablespace}}},
+                {"executed_strategies", executed_strategies},
+                {"not_executed_strategies", not_executed_strategies},
+                {"correlation", correlation_summary}})) {
+            return 1;
         }
         return 0;
     }
