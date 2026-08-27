@@ -45,6 +45,23 @@ std::string to_lower(const std::string& str) {
     return result;
 }
 
+dbrecovery::MySQLVersion parse_mysql_version_value(const std::string& value) {
+    try {
+        const uint32_t ver = static_cast<uint32_t>(std::stoul(value));
+        if (ver >= 90000) return dbrecovery::MySQLVersion::MYSQL_90;
+        if (ver >= 80400) return dbrecovery::MySQLVersion::MYSQL_84;
+        if (ver >= 80000) return dbrecovery::MySQLVersion::MYSQL_80;
+        if (ver >= 50700) return dbrecovery::MySQLVersion::MYSQL_57;
+        if (ver >= 50600) return dbrecovery::MySQLVersion::MYSQL_56;
+    } catch (...) {
+    }
+    return dbrecovery::MySQLVersion::UNKNOWN;
+}
+
+uint32_t mysql_version_number(dbrecovery::MySQLVersion version) {
+    return dbrecovery::mysql_version_to_number(version);
+}
+
 // 辅助函数：从 SDI 页解析表结构
 std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
     const std::string& ibd_path, uint64_t table_id,
@@ -80,6 +97,64 @@ std::optional<dbrecovery::catalog::TableSchema> parse_schema_from_sdi(
     }
 
     return std::nullopt;
+}
+
+struct SDIExtractionOutcome {
+    std::optional<dbrecovery::catalog::TableSchema> schema;
+    std::string status = "NOT_FOUND";
+    std::string reason;
+};
+
+SDIExtractionOutcome extract_sdi_schema_with_status(
+    const std::string& ibd_path, dbrecovery::MySQLVersion version) {
+    SDIExtractionOutcome outcome;
+    dbrecovery::innodb::SDIExtractor extractor;
+    const auto results = extractor.extract_from_file_if_compatible(ibd_path, version);
+    const auto& stats = extractor.stats();
+
+    if (version != dbrecovery::MySQLVersion::UNKNOWN &&
+        !dbrecovery::version_supports_sdi(version)) {
+        outcome.status = "UNSUPPORTED";
+        outcome.reason = "the resolved MySQL version does not contain SDI metadata";
+        return outcome;
+    }
+    if (stats.total_pages == 0) {
+        outcome.reason = "input contains no complete pages";
+        return outcome;
+    }
+    if (stats.sdi_pages == 0) {
+        outcome.reason = "no SDI pages were identified";
+        return outcome;
+    }
+
+    bool heuristic_only = false;
+    for (const auto& extracted : results) {
+        if (!extracted.is_valid || extracted.sdi_json.empty()) continue;
+        if (extracted.origin == dbrecovery::innodb::SDIManager::ExtractionOrigin::HeuristicCorruptedZip) {
+            heuristic_only = true;
+            continue;
+        }
+        try {
+            const auto json = nlohmann::json::parse(extracted.sdi_json);
+            dbrecovery::catalog::TableSchema schema;
+            if (schema.from_json(json)) {
+                schema.schema_hash =
+                    dbrecovery::salvage::SalvageEvidenceSerializer::sha256_hex(extracted.sdi_json);
+                schema.schema_source = "SDI";
+                schema.trust_level = "AUTHORITATIVE";
+                outcome.schema = std::move(schema);
+                outcome.status = "EXTRACTED";
+                return outcome;
+            }
+        } catch (const nlohmann::json::exception&) {
+        }
+    }
+
+    outcome.status = heuristic_only ? "HEURISTIC_ONLY" : "CORRUPTED";
+    outcome.reason = heuristic_only
+        ? "only heuristic SDI evidence was found; authoritative schema promotion is forbidden"
+        : "SDI pages were identified but no valid schema could be parsed";
+    return outcome;
 }
 
 // 辅助函数：创建默认表结构
@@ -279,23 +354,31 @@ int main(int argc, char** argv) {
             return 1;
         }
 
-        auto schema_opt = parse_schema_from_sdi(ibd_path, table_id,
-            dbrecovery::MySQLVersion::UNKNOWN);
-        if (schema_opt.has_value()) {
-            auto json_str = schema_opt.value().to_json().dump(2);
+        auto sdi_outcome = extract_sdi_schema_with_status(
+            ibd_path, dbrecovery::MySQLVersion::UNKNOWN);
+        if (sdi_outcome.schema.has_value()) {
+            const auto json_str = sdi_outcome.schema->to_json().dump(2);
             std::cout << json_str << "\n";
-            
+
             std::string sdi_path = output_dir + "/sdi_metadata.json";
             std::ofstream sdi_file(sdi_path);
-            if (sdi_file) {
-                sdi_file << json_str;
-                sdi_file.close();
-                std::cout << "[INFO] SDI metadata saved to: " << sdi_path << "\n";
+            if (!sdi_file) {
+                std::cerr << "[ERROR] Failed to write SDI metadata: " << sdi_path << "\n";
+                return 1;
             }
-        } else {
-            std::cout << "[WARN] No SDI found in file.\n";
+            sdi_file << json_str;
+            if (!sdi_file) {
+                std::cerr << "[ERROR] Failed to write SDI metadata: " << sdi_path << "\n";
+                return 1;
+            }
+            std::cout << "[INFO] SDI metadata saved to: " << sdi_path << "\n";
+            return 0;
         }
-        return 0;
+
+        std::cerr << "[ERROR] SDI extraction status=" << sdi_outcome.status;
+        if (!sdi_outcome.reason.empty()) std::cerr << ": " << sdi_outcome.reason;
+        std::cerr << "\n";
+        return 1;
     }
 
     // ✅ 恢复模式：解析特定页
@@ -467,7 +550,8 @@ int main(int argc, char** argv) {
             auto ures = dbrecovery::tools::run_unified_recovery(
                 line, file_output, batch_table, format, page_size,
                 schema_str, frm_path, table_id, system_tablespace,
-                repair, schemaless_recovery, verbose, schema_file_path);
+                repair, schemaless_recovery, verbose, schema_file_path,
+                secondary_index_paths, secondary_index_name);
             dbrecovery::tools::write_unified_result_json(file_output, batch_table, ures);
 
             if (blob_recovery) {
@@ -1287,23 +1371,43 @@ int main(int argc, char** argv) {
         } else {
             dbrecovery::MySQLVersion tuple_detected = dbrecovery::MySQLVersion::UNKNOWN;
             if (!mysql_version.empty()) {
-                try {
-                    uint32_t ver = std::stoul(mysql_version);
-                    if (ver >= 90000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_90;
-                    else if (ver >= 80400) tuple_detected = dbrecovery::MySQLVersion::MYSQL_84;
-                    else if (ver >= 80000) tuple_detected = dbrecovery::MySQLVersion::MYSQL_80;
-                    else if (ver >= 50700) tuple_detected = dbrecovery::MySQLVersion::MYSQL_57;
-                    else if (ver >= 50600) tuple_detected = dbrecovery::MySQLVersion::MYSQL_56;
-                    else tuple_detected = dbrecovery::MySQLVersion::UNKNOWN;
-                } catch (...) {
-                    tuple_detected = dbrecovery::MySQLVersion::UNKNOWN;
-                } {}
+                tuple_detected = parse_mysql_version_value(mysql_version);
+                if (tuple_detected == dbrecovery::MySQLVersion::UNKNOWN) {
+                    std::cerr << "[ERROR] Unsupported or invalid --mysql-version: "
+                              << mysql_version << "\n";
+                    return 1;
+                }
             } else {
                 std::ifstream ver_file(ibd_path, std::ios::binary);
                 if (ver_file) {
-                    std::vector<uint8_t> ver_page(page_size > 0 ? page_size : 16384);
-                    ver_file.read(reinterpret_cast<char*>(ver_page.data()), ver_page.size());
-                    tuple_detected = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), ver_page.size());
+                    const size_t detection_page_size = page_size > 0 ? page_size : 16384;
+                    std::vector<std::vector<uint8_t>> owned_pages;
+                    std::vector<const uint8_t*> pages;
+                    constexpr size_t max_version_pages = 16;
+                    for (size_t i = 0; i < max_version_pages; ++i) {
+                        std::vector<uint8_t> page(detection_page_size);
+                        ver_file.read(reinterpret_cast<char*>(page.data()),
+                                      static_cast<std::streamsize>(page.size()));
+                        if (ver_file.gcount() != static_cast<std::streamsize>(page.size())) break;
+                        owned_pages.push_back(std::move(page));
+                    }
+                    pages.reserve(owned_pages.size());
+                    for (const auto& page : owned_pages) pages.push_back(page.data());
+                    if (!pages.empty()) {
+                        const auto evidence =
+                            dbrecovery::MySQLVersionDetector::detect_pages_with_evidence(
+                                pages, detection_page_size);
+                        tuple_detected = evidence.version;
+                        if (tuple_detected == dbrecovery::MySQLVersion::UNKNOWN) {
+                            std::cerr << "[ERROR] Could not auto-detect MySQL version: "
+                                      << evidence.rejection_reasons.front() << "\n";
+                            return 1;
+                        }
+                    }
+                }
+                if (tuple_detected == dbrecovery::MySQLVersion::UNKNOWN) {
+                    std::cerr << "[ERROR] Cannot establish MySQL version from input pages.\n";
+                    return 1;
                 }
             }
 
@@ -1634,38 +1738,47 @@ int main(int argc, char** argv) {
         // Set MySQL version for format-specific behavior
         dbrecovery::MySQLVersion detected_version = dbrecovery::MySQLVersion::UNKNOWN;
         if (!mysql_version.empty()) {
-            uint32_t ver = 0;
-            try { ver = std::stoul(mysql_version); } catch (...) {}
-            if (ver > 0) index_parser.set_mysql_version(ver);
+            detected_version = parse_mysql_version_value(mysql_version);
+            if (detected_version == dbrecovery::MySQLVersion::UNKNOWN) {
+                std::cerr << "[ERROR] Unsupported or invalid --mysql-version: "
+                          << mysql_version << "\n";
+                return 1;
+            }
         } else {
-            // No explicit version: attempt auto-detection from the first page.
-            // Require explicit --mysql-version when detection is unresolved.
+            // No explicit version: use evidence from multiple complete pages.
             std::ifstream ver_file(effective_ibd, std::ios::binary);
             if (ver_file) {
-                std::vector<uint8_t> ver_page(page_size > 0 ? page_size : 16384);
-                ver_file.read(reinterpret_cast<char*>(ver_page.data()), ver_page.size());
-                detected_version = dbrecovery::MySQLVersionDetector::detect(ver_page.data(), ver_page.size());
-                if (detected_version != dbrecovery::MySQLVersion::UNKNOWN) {
-                    switch (detected_version) {
-                        case dbrecovery::MySQLVersion::MYSQL_56: index_parser.set_mysql_version(50600); break;
-                        case dbrecovery::MySQLVersion::MYSQL_57: index_parser.set_mysql_version(50700); break;
-                        case dbrecovery::MySQLVersion::MYSQL_80: index_parser.set_mysql_version(80000); break;
-                        case dbrecovery::MySQLVersion::MYSQL_84: index_parser.set_mysql_version(80400); break;
-                        case dbrecovery::MySQLVersion::MYSQL_90: index_parser.set_mysql_version(90000); break;
-                        default: break;
-                    }
-                    std::cout << "[INFO] Auto-detected MySQL version from file header\n";
-                } else {
-                    std::cerr << "[ERROR] Could not auto-detect MySQL version. "
-                              << "Use --mysql-version=<version> to specify explicitly.\n";
-                    return 1;
+                std::vector<std::vector<uint8_t>> owned_pages;
+                std::vector<const uint8_t*> pages;
+                constexpr size_t max_version_pages = 16;
+                for (size_t i = 0; i < max_version_pages; ++i) {
+                    std::vector<uint8_t> page(page_size);
+                    ver_file.read(reinterpret_cast<char*>(page.data()),
+                                  static_cast<std::streamsize>(page.size()));
+                    if (ver_file.gcount() != static_cast<std::streamsize>(page.size())) break;
+                    owned_pages.push_back(std::move(page));
                 }
-            } else {
-                std::cerr << "[ERROR] Cannot read input file for version detection. "
-                          << "Use --mysql-version=<version> to specify explicitly.\n";
+                pages.reserve(owned_pages.size());
+                for (const auto& page : owned_pages) pages.push_back(page.data());
+                if (!pages.empty()) {
+                    const auto evidence =
+                        dbrecovery::MySQLVersionDetector::detect_pages_with_evidence(
+                            pages, page_size);
+                    detected_version = evidence.version;
+                    if (detected_version == dbrecovery::MySQLVersion::UNKNOWN) {
+                        std::cerr << "[ERROR] Could not auto-detect MySQL version: "
+                                  << evidence.rejection_reasons.front() << "\n";
+                        return 1;
+                    }
+                }
+            }
+            if (detected_version == dbrecovery::MySQLVersion::UNKNOWN) {
+                std::cerr << "[ERROR] Cannot establish MySQL version from input pages.\n";
                 return 1;
             }
         }
+        index_parser.set_mysql_version(mysql_version_number(detected_version));
+        std::cout << "[INFO] MySQL version format profile established\n";
 
         // Parse schema from --schema option if provided
         std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;  // Moved outside for scope
@@ -2234,7 +2347,8 @@ int main(int argc, char** argv) {
         auto ures = dbrecovery::tools::run_unified_recovery(
             actual_ibd_path, output_dir, result_table, format, page_size,
             schema_str, frm_path, table_id, system_tablespace,
-            repair, schemaless_recovery, verbose, schema_file_path);
+            repair, schemaless_recovery, verbose, schema_file_path,
+            secondary_index_paths, secondary_index_name);
         dbrecovery::tools::write_unified_result_json(output_dir, result_table, ures);
         // Generate RecoveryReport HTML via unified result
         try {

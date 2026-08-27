@@ -26,6 +26,7 @@ struct ResultContract {
     bool export_success = false;
     std::string export_rejection_reason;
     uint64_t total_pages_scanned = 0;
+    uint64_t skipped_pages = 0;
     uint64_t damaged_pages = 0;
     uint64_t checksum_mismatches = 0;
     uint64_t header_damage_pages = 0;

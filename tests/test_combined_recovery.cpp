@@ -242,7 +242,7 @@ TEST(CombinedRecovery, EmptyLegacyResultHasAllCanonicalFields) {
         "structured_rows", "evidence_fragments", "schema_source",
         "schema_trust_level", "damage_level", "recovery_method",
         "ddl_variation_detected", "export_success",
-        "export_rejection_reason", "total_pages_scanned", "damaged_pages",
+        "export_rejection_reason", "total_pages_scanned", "skipped_pages", "damaged_pages",
         "checksum_mismatches", "header_damage_pages", "importable", "reason",
         "source_ibd", "compression_status", "logical_page_size", "physical_page_size",
         "compression_classification_basis", "decoder_validated", "compression_rejection_reason"

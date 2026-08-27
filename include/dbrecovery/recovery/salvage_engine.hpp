@@ -99,6 +99,7 @@ public:
         uint32_t min_string_len = 4;
         uint32_t max_l4_fragment_bytes = 4096;
         uint32_t max_l4_fragments = 1024;
+        uint32_t max_l3_fragments = 1024;
         uint32_t min_record_fields = 2;
         double min_confidence = 0.3;
         bool enable_signature_scan = true;

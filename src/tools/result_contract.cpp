@@ -80,6 +80,7 @@ ResultContract result_contract_from_legacy(const nlohmann::json& legacy,
     contract.export_success = legacy_value(legacy, "export_success", contract.export_success);
     contract.export_rejection_reason = legacy_value(legacy, "export_rejection_reason", contract.export_rejection_reason);
     contract.total_pages_scanned = legacy_value(legacy, "total_pages_scanned", contract.total_pages_scanned);
+    contract.skipped_pages = legacy_value(legacy, "skipped_pages", contract.skipped_pages);
     contract.damaged_pages = legacy_value(legacy, "damaged_pages", contract.damaged_pages);
     contract.checksum_mismatches = legacy_value(legacy, "checksum_mismatches", contract.checksum_mismatches);
     contract.header_damage_pages = legacy_value(legacy, "header_damage_pages", contract.header_damage_pages);
@@ -115,7 +116,8 @@ ResultContract result_contract_from_unified(const UnifiedRecoveryResult& result,
     contract.ddl_variation_detected = result.ddl_variation_detected;
     contract.export_success = result.export_success;
     contract.export_rejection_reason = result.export_rejection_reason;
-    contract.total_pages_scanned = result.page_damage.size();
+    contract.total_pages_scanned = result.total_pages_scanned;
+    contract.skipped_pages = result.skipped_pages;
     for (const auto& page : result.page_damage) {
         if (page.damage_level != common::DamageLevel::NONE) ++contract.damaged_pages;
         if (!page.checksum_valid) ++contract.checksum_mismatches;
@@ -151,6 +153,7 @@ nlohmann::json result_contract_object(const ResultContract& result) {
         {"export_success", result.export_success},
         {"export_rejection_reason", result.export_rejection_reason},
         {"total_pages_scanned", result.total_pages_scanned},
+        {"skipped_pages", result.skipped_pages},
         {"damaged_pages", result.damaged_pages},
         {"checksum_mismatches", result.checksum_mismatches},
         {"header_damage_pages", result.header_damage_pages},

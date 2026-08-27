@@ -504,7 +504,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l3(
     auto extract_patterns = [&](const std::regex& re, const std::string& method) {
         auto begin = std::sregex_iterator(buffer.begin(), buffer.end(), re);
         auto end = std::sregex_iterator();
-        for (auto it = begin; it != end; ++it) {
+        for (auto it = begin; it != end && rows.size() < config_.max_l3_fragments; ++it) {
             SalvagedRow row;
             row.page_offset = it->position();
             row.page_no = extract_page_no(data, size);
@@ -671,6 +671,10 @@ SalvageResult SalvageEngine::salvage_pages(
     // count collisions in the report.
     std::unordered_set<std::string> emitted_hashes;
     uint32_t dedup_collisions = 0;
+    uint32_t l3_fragments_emitted = 0;
+    uint32_t l4_fragments_emitted = 0;
+    bool l3_budget_exhausted = false;
+    bool l4_budget_exhausted = false;
 
     for (const auto& [data, size] : pages) {
         auto damage = assess_damage(data, size);
@@ -694,8 +698,20 @@ SalvageResult SalvageEngine::salvage_pages(
                     // STRUCTURED (L1/L2) rows into rows.
                     if (row.salvage_level == SalvageLevel::STRUCTURED) {
                         result.rows.push_back(std::move(row));
-                    } else {
-                        result.evidence_fragments.push_back(std::move(row));
+                    } else if (row.salvage_level == SalvageLevel::FRAGMENT) {
+                        if (l3_fragments_emitted < config_.max_l3_fragments) {
+                            result.evidence_fragments.push_back(std::move(row));
+                            ++l3_fragments_emitted;
+                        } else {
+                            l3_budget_exhausted = true;
+                        }
+                    } else if (row.salvage_level == SalvageLevel::STRING_ONLY) {
+                        if (l4_fragments_emitted < config_.max_l4_fragments) {
+                            result.evidence_fragments.push_back(std::move(row));
+                            ++l4_fragments_emitted;
+                        } else {
+                            l4_budget_exhausted = true;
+                        }
                     }
                 }
             }
@@ -706,6 +722,17 @@ SalvageResult SalvageEngine::salvage_pages(
         result.warnings.push_back(
             "Deduplicated " + std::to_string(dedup_collisions) +
             " fragments sharing identical raw content");
+    }
+
+    if (l3_budget_exhausted) {
+        result.warnings.push_back(
+            "L3 evidence fragment budget exhausted at " +
+            std::to_string(config_.max_l3_fragments));
+    }
+    if (l4_budget_exhausted) {
+        result.warnings.push_back(
+            "L4 evidence fragment budget exhausted at " +
+            std::to_string(config_.max_l4_fragments));
     }
 
     if (result.rows.empty() && result.evidence_fragments.empty()) {

@@ -332,6 +332,12 @@ uint64_t UndoRecordV2Parser::extract_prev_ptr_from_field(
     return RollPtrDecoder::extract_prev_ptr_from_field(field_data);
 }
 
+uint64_t UndoRecordV2Parser::extract_prev_ptr_from_field(
+    const std::vector<uint8_t>& field_data,
+    UndoFormatProfile profile) {
+    return RollPtrDecoder::extract_prev_ptr_from_field(field_data, profile);
+}
+
 std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
     const uint8_t* page_data,
     size_t page_size,
@@ -488,17 +494,19 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
     // Parse field data
     size_t field_offset = offset + header_size;
     if (field_offset >= data_size) {
-        // No fields to parse, but return the record (may have just header)
+        if (field_count != 0) return std::nullopt;
+        if (consumed_size) {
+            *consumed_size = header_size;
+        }
         return rec;
     }
 
-    // Read all fields from the undo record
-    // The first field typically contains the old DB_ROLL_PTR value
-    // Subsequent fields contain old values of modified columns
+    // Read all fields from the undo record. A partial record is not a valid
+    // historical version and must never be admitted to structured recovery.
     uint8_t fields_read = 0;
-    while (fields_read < field_count && field_offset < data_size) {
+    while (fields_read < field_count) {
         auto field_opt = read_field(page_data, data_size, field_offset);
-        if (!field_opt) break;
+        if (!field_opt) return std::nullopt;
 
         auto& [field_data, bytes_consumed] = *field_opt;
         field_offset += bytes_consumed;
@@ -692,7 +700,8 @@ RowVersionHistory DeepUndoAnalyzer::trace_version_chain(
         const uint64_t field_prev_ptr = last_rec.old_fields.empty()
             ? 0
             : UndoRecordV2Parser::extract_prev_ptr_from_field(
-                  last_rec.old_fields.front().old_value);
+                  last_rec.old_fields.front().old_value,
+                  undo_format_profile_);
 
         if (header_prev_ptr != 0 &&
             field_prev_ptr != 0 &&
@@ -795,9 +804,8 @@ void DeepUndoAnalyzer::ensure_index_built() {
     // If already built, skip
     if (index_built_) return;
 
-    // Build the internal index
-    internal_index_.build(ibdata_path_, page_size_, 0);
-    index_built_ = true;
+    // Build the internal index and only mark it ready after a successful scan.
+    index_built_ = internal_index_.build(ibdata_path_, page_size_, 0);
 }
 
 uint32_t DeepUndoAnalyzer::extract_table_id(

@@ -843,11 +843,11 @@ RecordData RecordReconstructor::reconstruct_from_undo(
     pos += roll_ptr_len;
 
     // 读取 n_fields
-    uint16_t n_fields = 0;
-    if (pos + 2 <= undo_size) {
-        n_fields = read_le<uint16_t>(undo_data, pos);
-        pos += 2;
+    if (pos + 2 > undo_size) {
+        return RecordData{};
     }
+    const uint16_t n_fields = read_le<uint16_t>(undo_data, pos);
+    pos += 2;
 
     // 解析字段数据
     for (uint16_t i = 0; i < n_fields && i < columns.size(); ++i) {
@@ -881,6 +881,12 @@ RecordData RecordReconstructor::reconstruct_from_undo(
 
         pos += len;
         record.columns.push_back(col_data);
+    }
+
+    // A truncated field list is not a partially recoverable structured record.
+    // Reject the whole record so incomplete undo data cannot be exported.
+    if (record.columns.size() != std::min<size_t>(n_fields, columns.size())) {
+        return RecordData{};
     }
 
     return record;

@@ -47,6 +47,8 @@ struct UnifiedRecoveryResult {
     std::string compression_classification_basis = "canonical_fsp_flags";
     bool decoder_validated = false;
     std::string compression_rejection_reason;
+    uint64_t total_pages_scanned = 0;
+    uint64_t skipped_pages = 0;
 };
 
 UnifiedRecoveryResult run_unified_recovery(
@@ -62,7 +64,9 @@ UnifiedRecoveryResult run_unified_recovery(
     bool repair,
     bool schemaless_recovery,
     bool verbose,
-    const std::string& schema_file_path = "");
+    const std::string& schema_file_path = "",
+    const std::string& secondary_index_paths = "",
+    const std::string& secondary_index_name = "");
 
 bool write_unified_result_json(const std::string& output_dir,
                                const std::string& table_name,

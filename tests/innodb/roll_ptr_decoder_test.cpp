@@ -276,6 +276,25 @@ TEST(RollPtrDecoderTest, EncodeMaxValues) {
     EXPECT_EQ(decoded.flags, 0x3Fu);
 }
 
+TEST(RollPtrDecoderTest, EncodeRejectsOutOfRangeInternalValues) {
+    EXPECT_EQ(RollPtrDecoder::encode(1, 0x40000, 0), 0u);
+    EXPECT_EQ(RollPtrDecoder::encode(1, 0, 0x40), 0u);
+}
+
+TEST(RollPtrDecoderTest, EncodeStorageRejectsOutOfRangeValues) {
+    uint8_t data[7] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    EXPECT_FALSE(RollPtrDecoder::encode_storage(data, {1, 0x40000, 0}));
+    EXPECT_FALSE(RollPtrDecoder::encode_storage(data, {1, 1, 0x10}));
+    for (const auto byte : data) EXPECT_EQ(byte, 0xA5);
+}
+
+TEST(RollPtrDecoderTest, EncodeStorage6ByteRejectsOutOfRangeValues) {
+    uint8_t data[6] = {0xA5, 0xA5, 0xA5, 0xA5, 0xA5, 0xA5};
+    EXPECT_FALSE(RollPtrDecoder::encode_storage_6byte(data, {1, 1, 1}));
+    EXPECT_FALSE(RollPtrDecoder::encode_storage_6byte(data, {1, 0x40000, 0}));
+    for (const auto byte : data) EXPECT_EQ(byte, 0xA5);
+}
+
 // ==================== Profile-based decode_storage Tests ====================
 
 TEST(RollPtrDecoderTest, DecodeStorageWithProfile7Bytes) {

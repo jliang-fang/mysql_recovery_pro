@@ -340,7 +340,9 @@ UnifiedRecoveryResult run_unified_recovery(
     bool repair,
     bool schemaless_recovery,
     bool verbose,
-    const std::string& schema_file_path) {
+    const std::string& schema_file_path,
+    const std::string& secondary_index_paths,
+    const std::string& secondary_index_name) {
     UnifiedRecoveryResult result;
     result.table_name = table_name.empty() ? "recovered_table" : table_name;
     result.source_ibd = ibd_path;
@@ -438,6 +440,8 @@ UnifiedRecoveryResult run_unified_recovery(
                 result.trust_level = "EVIDENCE_ONLY";
                 result.schema_source = "EVIDENCE_ONLY";
                 result.result_classification = "forensic_evidence";
+                result.compression_rejection_reason = "input matches an unvalidated TDE candidate heuristic";
+                result.export_rejection_reason = "tde_candidate_UNVALIDATED";
                 pipeline_allowed = false;
             }
         }
@@ -463,6 +467,8 @@ UnifiedRecoveryResult run_unified_recovery(
             if (df) {
                 const auto file_size = static_cast<uint64_t>(df.tellg());
                 const uint64_t page_count = file_size / page_size;
+                result.total_pages_scanned = page_count;
+                result.skipped_pages = file_size % page_size == 0 ? 0 : 1;
                 df.seekg(0);
                 result.page_damage.reserve(static_cast<size_t>(std::min<uint64_t>(page_count, 1000000)));
                 for (uint64_t page_index = 0; page_index < page_count; ++page_index) {
@@ -489,14 +495,29 @@ UnifiedRecoveryResult run_unified_recovery(
             }
         }
 
-        // Version detection for schema gates
+        // Version detection for schema gates uses multiple complete pages so a
+        // damaged first page cannot be treated as the whole format evidence.
         MySQLVersion detected_version = MySQLVersion::UNKNOWN;
         {
             std::ifstream vf(ibd_path, std::ios::binary);
             if (vf) {
-                std::vector<uint8_t> vp(psize);
-                vf.read(reinterpret_cast<char*>(vp.data()), vp.size());
-                detected_version = MySQLVersionDetector::detect(vp.data(), vp.size());
+                std::vector<std::vector<uint8_t>> version_owned;
+                std::vector<const uint8_t*> version_pages;
+                constexpr size_t max_version_pages = 16;
+                for (size_t i = 0; i < max_version_pages; ++i) {
+                    std::vector<uint8_t> page(psize);
+                    vf.read(reinterpret_cast<char*>(page.data()),
+                            static_cast<std::streamsize>(page.size()));
+                    if (vf.gcount() != static_cast<std::streamsize>(page.size())) break;
+                    version_owned.push_back(std::move(page));
+                }
+                version_pages.reserve(version_owned.size());
+                for (const auto& page : version_owned) version_pages.push_back(page.data());
+                if (!version_pages.empty()) {
+                    const auto evidence = MySQLVersionDetector::detect_pages_with_evidence(
+                        version_pages, psize);
+                    detected_version = evidence.version;
+                }
             }
         }
 
@@ -733,11 +754,11 @@ UnifiedRecoveryResult run_unified_recovery(
                 if (f) {
                     f.seekg(0, std::ios::end); size_t fsz = static_cast<size_t>(f.tellg()); f.seekg(0);
                     size_t np = fsz / page_size;
-                    owned.reserve(std::min<size_t>(np, 256));
-                    for (size_t i=0;i<np && owned.size()<256;i++) {
+                    owned.reserve(np);
+                    for (size_t i = 0; i < np; ++i) {
                         std::vector<uint8_t> buf(page_size);
                         f.read(reinterpret_cast<char*>(buf.data()), page_size);
-                        if (f.gcount()!=(std::streamsize)page_size) break;
+                        if (f.gcount() != static_cast<std::streamsize>(page_size)) break;
                         owned.push_back(std::move(buf));
                     }
                     for (auto &b: owned) pages.emplace_back(b.data(), b.size());
@@ -781,34 +802,75 @@ UnifiedRecoveryResult run_unified_recovery(
         }
 
         result.total_recovered = static_cast<uint32_t>(result.records.size());
-        // Deduplicate by content_hash
-        {
-            std::unordered_set<std::string> seen;
-            std::vector<recovery::SalvagedRow> dedup;
-            dedup.reserve(result.records.size());
-            for (auto &r: result.records) {
-                std::string h = r.content_hash;
-                if (h.empty()) { for (auto &ff: r.fields) h+=ff+"|"; }
-                if (seen.insert(h).second) dedup.push_back(std::move(r));
-            }
-            result.records.swap(dedup);
-            result.total_recovered = static_cast<uint32_t>(result.records.size());
-        }
 
         if (have_schema || schema_source!="EVIDENCE_ONLY") {
             result.schema_source = schema_source;
             result.trust_level = result.ddl_variation_detected ? "EVIDENCE_ONLY" : schema_source;
         }
 
-        // Step 7: Secondary index rescue when recovery low
-        if (result.total_recovered < 10) {
-            try {
-                salvage::SecondaryIndexRescuer resc(page_size);
-                (void)resc;
-            } catch (...) {}
+        // Step 7: Secondary index rescue when recovery is low. Structured
+        // promotion requires an authoritative schema, explicit target, and
+        // a clean primary-page integrity gate.
+        if (result.total_recovered < 10 && !page_integrity_failure &&
+            !secondary_index_paths.empty() && !schema_file_path.empty() &&
+            !secondary_index_name.empty()) {
+            catalog::TableSchema rescue_schema;
+            salvage::SecondaryIndexRescuer resc(page_size);
+            if (load_schema_file(schema_file_path, rescue_schema) &&
+                rescue_schema.trust_level == "AUTHORITATIVE") {
+                resc.set_schema(rescue_schema);
+                if (resc.set_target_secondary_index(secondary_index_name)) {
+                    if (result.column_names.empty()) {
+                        for (const auto& column : rescue_schema.get_active_columns(rescue_schema.max_row_version)) {
+                            result.column_names.push_back(column.name);
+                        }
+                    }
+                    std::vector<std::string> sec_paths;
+                    std::istringstream path_stream(secondary_index_paths);
+                    std::string path;
+                    while (std::getline(path_stream, path, ',')) {
+                        if (!path.empty()) sec_paths.push_back(path);
+                    }
+                    auto rescued = resc.rescue_from_indexes(sec_paths);
+                    for (const auto& row : rescued) {
+                        if (!row.identity_verified || row.completeness <= 0.0) continue;
+                        recovery::SalvagedRow sr;
+                        sr.salvage_level = recovery::SalvageLevel::STRUCTURED;
+                        sr.confidence = row.completeness;
+                        sr.recovery_method = "secondary_index_rescue";
+                        for (const auto& [name, value] : row.fields) {
+                            auto it = std::find(result.column_names.begin(), result.column_names.end(), name);
+                            if (it == result.column_names.end()) continue;
+                            const size_t index = static_cast<size_t>(it - result.column_names.begin());
+                            if (sr.fields.size() <= index) {
+                                sr.fields.resize(index + 1);
+                                sr.field_nulls.resize(index + 1, false);
+                            }
+                            sr.fields[index] = value;
+                        }
+                        sr.field_count = static_cast<uint16_t>(sr.fields.size());
+                        if (sr.field_count >= 2) result.records.push_back(std::move(sr));
+                    }
+                    result.recovery_method += "+secondary_index_rescue";
+                }
+            }
         }
 
-        // Step 8: Strategy recommendation informational
+        // Recompute after every structured promotion, including secondary rescue.
+        {
+            std::unordered_set<std::string> seen;
+            std::vector<recovery::SalvagedRow> dedup;
+            dedup.reserve(result.records.size());
+            for (auto& row : result.records) {
+                std::string hash = row.content_hash;
+                if (hash.empty()) {
+                    for (const auto& field : row.fields) hash += field + "|";
+                }
+                if (seen.insert(hash).second) dedup.push_back(std::move(row));
+            }
+            result.records.swap(dedup);
+        }
+        result.total_recovered = static_cast<uint32_t>(result.records.size());
         try {
             recovery::StrategyRecommender rec;
             if (verbose) { auto rr = rec.recommend("CORRUPTION"); (void)rr.to_text(); }
@@ -920,9 +982,9 @@ UnifiedRecoveryResult run_unified_recovery(
             if (!page.fil_header_valid || !page.page_header_valid) ++header_damage;
         }
         report::DataStats data;
-        data.total_pages_scanned = result.page_damage.size();
+        data.total_pages_scanned = result.total_pages_scanned;
         data.corrupted_pages = damaged_pages;
-        data.skipped_pages = header_damage;
+        data.skipped_pages = result.skipped_pages;
         data.records_fully_recovered = result.total_recovered;
         data.records_partially_recovered = result.evidence_fragments.size();
         data.recovery_rate_percent = result.total_recovered > 0 ? 100.0 : 0.0;
@@ -944,7 +1006,7 @@ UnifiedRecoveryResult run_unified_recovery(
         }
         if (!table_name.empty()) rb.add_ddl("TABLE " + result.table_name);
         report::RecoveryReport built_report = rb.build();
-        built_report.data.total_pages_scanned = result.page_damage.size();
+        built_report.data.total_pages_scanned = result.total_pages_scanned;
         built_report.data.corrupted_pages = damaged_pages;
         built_report.data.skipped_pages = header_damage;
         built_report.damage.pages_with_header_damage = header_damage;

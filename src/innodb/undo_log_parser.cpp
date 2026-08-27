@@ -472,34 +472,6 @@ std::optional<uint64_t> parse_trx_id_from_record(
     return trx_id;
 }
 
-/**
- * @brief Parse rollback pointer from undo log record
- *
- * The rollback pointer (roll_ptr) is stored after the transaction ID and
- * contains information about where to find the previous version of the record.
- *
- * Delegates to RollPtrDecoder for unified multi-version support.
- *
- * @param record_data The undo log record data
- * @param offset Offset to start of rollback pointer
- * @return Rollback pointer as tuple (page_no, offset) or nullopt
- */
-std::optional<std::tuple<uint32_t, uint16_t>> parse_roll_ptr_from_record(
-    const std::vector<uint8_t>& record_data, size_t offset) {
-
-    if (offset + 6 > record_data.size()) {
-        return std::nullopt;
-    }
-
-    // Use RollPtrDecoder for field data format (LE: 4B page_no + 2B offset)
-    auto decoded = RollPtrDecoder::decode_field_data(record_data.data() + offset, 6);
-    if (!decoded.is_valid()) {
-        return std::nullopt;
-    }
-
-    return std::make_tuple(decoded.page_no, static_cast<uint16_t>(decoded.offset));
-}
-
 std::optional<std::tuple<uint64_t, uint32_t, uint32_t>> UndoLogParser::find_transaction_by_trx_id(
     const std::string& ibdata_path, uint64_t target_trx_id) {
     
@@ -805,7 +777,7 @@ std::vector<UndoLogEntry> UndoLogParser::traverse_undo_chain(
 
         auto prev_ptr = RollPtrDecoder::decode_storage(
             page_data.data() + prev_ptr_offset,
-            page_free - prev_ptr_offset,
+            roll_ptr_width,
             profile);
         if (!prev_ptr.is_valid()) break;
 

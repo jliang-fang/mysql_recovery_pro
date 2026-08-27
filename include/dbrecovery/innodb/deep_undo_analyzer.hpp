@@ -218,7 +218,20 @@ public:
      * @brief Set the data file path (ibdata1 or undo tablespace)
      */
     void set_data_file(const std::string& path) {
+        if (data_file_path_ == path) return;
+        if (file_.is_open()) file_.close();
+        for (auto& file : undo_tablespace_files_) {
+            if (file.is_open()) file.close();
+        }
         data_file_path_ = path;
+        opened_ = false;
+        page_count_ = 0;
+        undo_tablespace_files_.clear();
+        undo_tablespace_pages_.clear();
+        undo_tablespace_paths_.clear();
+        undo_tablespace_starts_.clear();
+        undo_tablespace_ends_.clear();
+        undo_tablespaces_opened_ = false;
     }
 
     /**
@@ -345,6 +358,9 @@ public:
      */
     static uint64_t extract_prev_ptr_from_field(const std::vector<uint8_t>& field_data);
 
+    static uint64_t extract_prev_ptr_from_field(const std::vector<uint8_t>& field_data,
+                                                UndoFormatProfile profile);
+
 private:
     UndoFormatProfile undo_format_profile_ = UndoFormatProfile::UNRESOLVED;
 
@@ -388,9 +404,13 @@ public:
      * @brief Set the ibdata1 path
      */
     void set_ibdata_path(const std::string& path) {
+        if (ibdata_path_ == path) return;
         ibdata_path_ = path;
         page_manager_.set_data_file(path);
         timestamp_index_.reset();
+        internal_index_.reset();
+        undo_page_index_ = nullptr;
+        index_built_ = false;
     }
 
     /**

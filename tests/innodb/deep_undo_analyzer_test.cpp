@@ -796,6 +796,23 @@ TEST(DeepUndoAnalyzerTest, ParserParseInvalidType) {
     EXPECT_FALSE(result.has_value());
 }
 
+TEST(DeepUndoAnalyzerTest, ParserParseTruncatedFieldCountRejected) {
+    UndoRecordV2Parser parser;
+    std::vector<uint8_t> rec = {1, 2, 1, 0xAA};
+    auto page = make_undo_page({rec});
+    auto result = parser.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE, nullptr);
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST(DeepUndoAnalyzerTest, ParserParseTruncatedUpdateHeaderRejected) {
+    UndoRecordV2Parser parser;
+    parser.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+    std::vector<uint8_t> rec = {2, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0};
+    auto page = make_undo_page({rec});
+    auto result = parser.parse(page.data(), page.size(), TRX_UNDO_PAGE_HDR_SIZE, nullptr);
+    EXPECT_FALSE(result.has_value());
+}
+
 TEST(DeepUndoAnalyzerTest, ParserParseTooManyFields) {
     UndoRecordV2Parser parser;
     std::vector<uint8_t> rec = {0x01, 51};  // field_count = 51 > 50

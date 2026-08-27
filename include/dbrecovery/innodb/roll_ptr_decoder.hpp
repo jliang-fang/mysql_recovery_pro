@@ -27,10 +27,10 @@
 #include <cstdint>
 #include <vector>
 #include <cstring>
-#include <cassert>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/common/version_compat.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -51,6 +51,23 @@ enum class UndoFormatProfile : uint8_t {
     LEGACY_6BYTE = 1,  ///< MySQL 5.6/5.7: 6-byte BE roll_ptr in undo page header
     MYSQL8_7BYTE = 2,  ///< MySQL 8.0+: 7-byte BE roll_ptr in undo page header
 };
+
+inline UndoFormatProfile undo_format_profile_for_version(::dbrecovery::MySQLVersion version) {
+    switch (version) {
+        case ::dbrecovery::MySQLVersion::MYSQL_56:
+        case ::dbrecovery::MySQLVersion::MYSQL_57:
+            return UndoFormatProfile::LEGACY_6BYTE;
+        case ::dbrecovery::MySQLVersion::MYSQL_80:
+        case ::dbrecovery::MySQLVersion::MYSQL_81:
+        case ::dbrecovery::MySQLVersion::MYSQL_82:
+        case ::dbrecovery::MySQLVersion::MYSQL_83:
+        case ::dbrecovery::MySQLVersion::MYSQL_84:
+        case ::dbrecovery::MySQLVersion::MYSQL_90:
+            return UndoFormatProfile::MYSQL8_7BYTE;
+        default:
+            return UndoFormatProfile::UNRESOLVED;
+    }
+}
 
 /**
  * @brief Unified DB_ROLL_PTR decoder for MySQL 5.6/5.7 and 8.0+
@@ -111,9 +128,10 @@ public:
      * Symmetric with decode(): encode(a, b, c) → decode() → {a, b, c}
      */
     static uint64_t encode(uint32_t page_no, uint32_t offset, uint8_t flags = 0) {
+        if (offset > 0x3FFFF || flags > 0x3F) return 0;
         return static_cast<uint64_t>(page_no) |
-               (static_cast<uint64_t>(offset & 0x3FFFF) << 32) |
-               (static_cast<uint64_t>(flags & 0x3F) << 50);
+               (static_cast<uint64_t>(offset) << 32) |
+               (static_cast<uint64_t>(flags) << 50);
     }
 
     // ==================== Storage Format (BE in undo page header) ====================
@@ -143,10 +161,10 @@ public:
      * @return Decoded components (empty/invalid if size < 6)
      */
     static DecodedRollPtr decode_storage(const uint8_t* data, size_t size) {
-        if (!data || size < 6) return {};
+        if (!data || (size != 6 && size != 7)) return {};
 
         uint64_t val = 0;
-        for (size_t i = 0; i < size && i < 7; i++) {
+        for (size_t i = 0; i < size; i++) {
             val = (val << 8) | data[i];
         }
 
@@ -238,22 +256,18 @@ public:
      * @param[out] out  Output buffer (must be at least 7 bytes)
      * @param rp        Decoded roll pointer
      */
-    static void encode_storage(uint8_t* out, const DecodedRollPtr& rp) {
-        if (!out) return;
+    static bool encode_storage(uint8_t* out, const DecodedRollPtr& rp) {
+        if (!out || rp.offset > 0x3FFFF || rp.flags > 0x0F) return false;
 
-        // page_no << 20 | offset in 7 bytes BE
         uint64_t val = (static_cast<uint64_t>(rp.page_no) << 20) |
-                       (rp.offset & 0x3FFFF) |
-                       (static_cast<uint64_t>(rp.flags & 0x0F) << 52);
-
-        // Never silently truncate internal 6-bit flags to the 4-bit storage
-        // field; debug builds assert so callers dropping bits are caught.
-        assert(rp.flags <= 0x0F);
+                       static_cast<uint64_t>(rp.offset) |
+                       (static_cast<uint64_t>(rp.flags) << 52);
 
         for (int i = 6; i >= 0; i--) {
             out[i] = static_cast<uint8_t>(val & 0xFF);
             val >>= 8;
         }
+        return true;
     }
 
     /**
@@ -270,16 +284,17 @@ public:
      * @param[out] out  Output buffer (must be at least 6 bytes)
      * @param rp        Decoded roll pointer
      */
-    static void encode_storage_6byte(uint8_t* out, const DecodedRollPtr& rp) {
-        if (!out) return;
+    static bool encode_storage_6byte(uint8_t* out, const DecodedRollPtr& rp) {
+        if (!out || rp.offset > 0x3FFFF || rp.flags != 0) return false;
 
         uint64_t val = (static_cast<uint64_t>(rp.page_no) << 20) |
-                       (rp.offset & 0x3FFFF);
+                       static_cast<uint64_t>(rp.offset);
 
         for (int i = 5; i >= 0; i--) {
             out[i] = static_cast<uint8_t>(val & 0xFF);
             val >>= 8;
         }
+        return true;
     }
 
     // ==================== Field Data Format (LE in undo field data) ====================
@@ -317,6 +332,19 @@ public:
     }
 
     /**
+     * @brief Extract a field-data roll pointer with an explicit profile
+     *
+     * Field-data pointers are currently six-byte little-endian values for
+     * resolved undo formats. An unresolved profile is rejected rather than
+     * treated as evidence for a format.
+     */
+    static uint64_t decode_field_data_to_internal(const uint8_t* data, size_t size,
+                                                   UndoFormatProfile profile) {
+        if (profile == UndoFormatProfile::UNRESOLVED || size != 6) return 0;
+        return decode_field_data_to_internal(data, size);
+    }
+
+    /**
      * @brief Legacy wrapper — extract prev_undo_ptr from undo field data
      *
      * Maintains API compatibility with UndoRecordV2Parser::extract_prev_ptr_from_field().
@@ -327,6 +355,12 @@ public:
     static uint64_t extract_prev_ptr_from_field(const std::vector<uint8_t>& field_data) {
         if (field_data.empty()) return 0;
         return decode_field_data_to_internal(field_data.data(), field_data.size());
+    }
+
+    static uint64_t extract_prev_ptr_from_field(const std::vector<uint8_t>& field_data,
+                                                 UndoFormatProfile profile) {
+        if (field_data.empty()) return 0;
+        return decode_field_data_to_internal(field_data.data(), field_data.size(), profile);
     }
 
     // ==================== Utility Methods ====================

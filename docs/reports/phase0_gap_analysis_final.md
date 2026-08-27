@@ -1,19 +1,19 @@
 # MySQL Recovery Pro Phase 0 生产级差距分析报告
 
-> 生成日期: 2026-08-14
-> 范围: 只读代码审查 + 蓝图/源码/CMake/CLI/测试交叉映射
-> 方法: 逐文件审查 20+ 关键源文件，交叉比对 2026-08-08 差距分析报告
+> 生成日期: 2026-08-27
+> 范围: 源码、CMake、CLI、测试和隔离构建结果的交叉审计
+> 方法: 对 Phase 0 修复后的实际实现进行静态审查，并以 `/app/mysql_recovery_test` 隔离验证为准
 
 ---
 
 ## 摘要
 
 本报告对 MySQL Recovery Pro 代码库进行生产级差距分析，覆盖：
-- **架构蓝图映射**：ARCHITECTURE_v2_BEYOND_ODU.md 中 P0-P4 模块到实际源码、CMake 目标、CLI 参数和测试的映射
-- **7 项静态审计发现**：逐项验证 2026-08-08 差距分析报告的全部 P0/P1/P2 问题
+- **架构蓝图映射**：`docs/architecture_v2_blueprint.md` 中 P0-P4 模块到实际源码、CMake 目标、CLI 参数和测试的映射（未找到 `ARCHITECTURE_v2_BEYOND_ODU.md`）
+- **安全边界复核**：版本、Undo、SDI、compressed/TDE、salvage 和统一结果契约
 - **风险等级评估**：CLEAN / 已修复 / 部分缓解 / 仍存在
 
-**核心结论：P0 全部 7 项已修复，代码库 P0 状态 CLEAN。** 剩余问题均为 MEDIUM（2 项）或 LOW（3 项），且 2 项旧报告 MEDIUM 声明已过时（代码已修复或已删除）。
+**核心结论：已完成的版本、Undo、SDI、compressed 状态、salvage 隔离和统一结果契约修复均保持 fail-closed。尚未经过真实 MySQL compressed/TDE/keyring fixture 验证的路径不宣称支持；heuristic 和候选探测结果仅为 forensic evidence。**
 
 ---
 
@@ -29,7 +29,7 @@
 | Compressed Table | `src/innodb/compressed_table_recovery.cpp` | `dbrecovery_innodb` | `--compressed-recovery` | `test_compressed_table_recovery` |
 | Encrypted/TDE | `src/innodb/encrypted_table_recovery.cpp`, `offline_keyring_parser.cpp` | `dbrecovery_innodb` | `--keyring-file`, `--tde-password` | `test_tde_keyring` |
 | Undo/Flashback | `include/dbrecovery/innodb/deep_undo_analyzer.hpp` | `dbrecovery_innodb` | `--flashback-delete`, `--flashback-update` | `test_deep_undo_analyzer`, `test_flashback_generator` |
-| Salvage Engine | `src/salvage/salvage_engine.cpp` | `dbrecovery_innodb` | `--salvage-mode`, `--include-fragments` | `test_p1_salvage_fuzz` |
+| Salvage Engine | `src/salvage/salvage_engine.cpp` | `dbrecovery_innodb` | `--salvage-mode`, `--evidence-fragments` | `test_p1_salvage_fuzz` |
 | Secondary Index | `include/dbrecovery/innodb/secondary_index_rescuer.hpp` | `dbrecovery_innodb` | `--secondary-rescue`, `--secondary-index` | `test_secondary_index_rescuer` |
 | Redo Log Replay | `src/innodb/redo_log_replayer.cpp` | `dbrecovery_innodb` | `--redo-replay`, `--redo-log`, `--redo-space-id` | `test_redo_log_replay` |
 | Partition Table | `include/dbrecovery/innodb/partition_table_recovery.hpp` | `dbrecovery_innodb` | `--partition-recovery` | `test_partition_table_recovery` |
@@ -280,7 +280,7 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 
 **安全前提：** `export_csv()`（`salvage_engine.cpp:580-635`）**fail-closed** — 任何非 STRUCTURED 行被拒绝写入 CSV/SQL。L3/L4 仅通过 `evidence_fragments` 报告序列化。
 
-**合规性：** 符合用户要求："任何启发式阈值（尤其 salvage L3/L4）只在先提交误报/召回分析且获得确认后调整"。
+`--evidence-fragments` 控制单独 forensic evidence 报告的输出；L3/L4 永远不会写入 CSV/SQL。`--auto-salvage` 当前实际执行 SalvageEngine、PageIdentityEngine 和 DataCorrelationEngine；其结果仍需按证据等级理解，不能视为已验证的可导入恢复。
 
 #### 7b. SecondaryIndexRescuer REDUNDANT 支持（旧报告 MEDIUM）
 
@@ -326,7 +326,7 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 
 ## 第四部分：风险等级汇总
 
-### P0 项目（全部 7 项已修复 — 状态 CLEAN）
+### P0 项目（边界修复已完成，仍需真实 fixture 认证）
 
 | 编号 | 描述 | 文件 | 提交 | 验证 |
 |------|------|------|------|------|
@@ -347,6 +347,8 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 | LOW | 1 | 共享表空间缓存缺失 | `shared_tablespace_recovery.hpp` |
 | LOW | 1 | KeyringFile XOR 占位符（主路径已用 OfflineKeyringParser） | `tde_decryptor.hpp:358-360` |
 | LOW | 1 | 校验和启发式仅检查大小 | `mysql_version_detector.cpp:250-254` |
+| NOT VERIFIED | 1 | compressed/TDE/native keyring 缺少真实 MySQL fixture 验证，生产路径保持 unsupported 或 candidate-only | `unified_recovery.cpp`, `encrypted_table_recovery.cpp`, `offline_keyring_parser.cpp` |
+| NOT VERIFIED | 1 | 分布式恢复未实现 | 能力矩阵外 |
 
 ### 已过时需移除的条目
 
@@ -360,9 +362,9 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 
 ## 第五部分：建议
 
-### 生产前必修复（P0 — 全部已完成）
+### 生产前必修复（P0 — 已完成并经隔离回归验证）
 
-所有 7 项 P0 问题已修复并验证。当前代码库 P0 状态：**CLEAN**。
+已完成的 P0 边界修复均保持 fail-closed；这不等同于 compressed/TDE/keyring 获得真实 MySQL fixture 认证。
 
 ### 建议优先修复（P1）
 
@@ -419,4 +421,4 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 
 ---
 
-*报告结束。本阶段为只读分析，未修改任何代码。*
+*报告结束。本阶段包含源码、测试和文档变更；构建与验证均在隔离目录执行。*
