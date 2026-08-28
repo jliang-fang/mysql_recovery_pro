@@ -843,6 +843,8 @@ std::vector<UndoRecordV2> DeepUndoAnalyzer::scan_records(
             if (!rec_opt) break;
 
             auto& rec = *rec_opt;
+            rec.roll_ptr = RollPtrDecoder::encode(page_no,
+                                                  static_cast<uint32_t>(offset));
             enrich_transaction_metadata(rec);
 
             // Filter by type (empty = keep all)
@@ -951,61 +953,38 @@ std::map<std::string, RowVersionHistory> DeepUndoAnalyzer::rebuild_all_histories
     struct UndoRef {
         uint32_t page_no;
         uint16_t offset;
+        uint64_t roll_ptr;
         UndoRecordV2 record;
     };
-    std::map<std::string, std::vector<UndoRef>> pk_groups;
+    std::map<uint64_t, UndoRef> by_roll_ptr;
+    std::vector<UndoRef> roots;
 
     for (auto& rec : records) {
         if (space_id != 0 && rec.tablespace_id != space_id) continue;
-        std::string pk;
-        if (!rec.old_fields.empty()) {
-            for (size_t i = 1; i < rec.old_fields.size() && i < 4; i++) {
-                pk += pk_to_hex(rec.old_fields[i].old_value);
-            }
-        }
-        if (pk.empty()) {
-            pk = "pk_" + std::to_string(rec.undo_page_no) + "_" + std::to_string(rec.undo_page_offset);
-        }
-        uint32_t pg = rec.undo_page_no;
-        uint16_t off = rec.undo_page_offset;
-        pk_groups[pk].push_back({pg, off, std::move(rec)});
+        const uint64_t roll_ptr = RollPtrDecoder::encode(
+            rec.undo_page_no, rec.undo_page_offset);
+        rec.roll_ptr = roll_ptr;
+        UndoRef ref{rec.undo_page_no, rec.undo_page_offset, roll_ptr, std::move(rec)};
+        by_roll_ptr.emplace(roll_ptr, std::move(ref));
     }
 
-    if (pk_groups.empty()) return histories;
-
-    // Step 3: Build version histories for each PK group
-    for (auto& [pk, refs] : pk_groups) {
-        RowVersionHistory history;
-        history.integrity = HistoryIntegrity::HEURISTIC;
-        history.index_id = index_id;
-        history.primary_key.clear();
-        for (auto& ref : refs) {
-            history.primary_key.insert(
-                history.primary_key.end(),
-                ref.record.primary_key_raw.begin(),
-                ref.record.primary_key_raw.end());
+    for (const auto& [roll_ptr, ref] : by_roll_ptr) {
+        bool referenced = false;
+        for (const auto& [_, candidate] : by_roll_ptr) {
+            if (candidate.record.prev_undo_ptr == roll_ptr) {
+                referenced = true;
+                break;
+            }
         }
+        if (!referenced) roots.push_back({ref.page_no, ref.offset, ref.roll_ptr, ref.record});
+    }
 
-        // Sort by undo_no (insert first, then updates, then deletes)
-        std::sort(refs.begin(), refs.end(),
-            [](const UndoRef& a, const UndoRef& b) {
-                int type_a = (a.record.type == UndoRecordV2::INSERT) ? 0
-                           : (a.record.type == UndoRecordV2::DELETE_MARK) ? 2
-                           : 1;
-                int type_b = (b.record.type == UndoRecordV2::INSERT) ? 0
-                           : (b.record.type == UndoRecordV2::DELETE_MARK) ? 2
-                           : 1;
-                if (type_a != type_b) return type_a < type_b;
-                return a.record.undo_page_no < b.record.undo_page_no;
-            });
-
-        for (auto& ref : refs) {
-            history.undo_chain.push_back(std::move(ref.record));
-        }
-
-        history.n_versions = static_cast<uint32_t>(history.undo_chain.size());
-        histories[pk] = std::move(history);
-        stats_.chains_traced++;
+    for (auto& root : roots) {
+        auto history = trace_version_chain({}, root.roll_ptr, schema, index_id);
+        const std::string key = history.primary_key.empty()
+            ? "roll_" + std::to_string(root.roll_ptr)
+            : pk_to_hex(history.primary_key);
+        histories.emplace(key, std::move(history));
     }
 
     auto end_time = std::chrono::high_resolution_clock::now();

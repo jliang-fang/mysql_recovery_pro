@@ -445,7 +445,6 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_deletes(
     auto start = std::chrono::high_resolution_clock::now();
     std::vector<FlashbackRecord> records;
 
-    // Delegate the undo scan to DeepUndoAnalyzer's shared primitive
     innodb::FlashbackFilter filter;
     filter.trx_id = config_.trx_id;
     filter.start_lsn = config_.start_lsn;
@@ -459,8 +458,28 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_deletes(
         {UndoRecordV2::DELETE_MARK});
 
     for (auto& rec : undo_records) {
-        auto fr = decode_single_record(rec, schema);
-        if (config_.include_incomplete || fr.is_complete) {
+        auto history = analyzer_->trace_version_chain({}, rec.roll_ptr, schema, rec.index_id);
+        UndoRecordV2 merged = rec;
+        std::map<uint16_t, UndoFieldValue> fields;
+        for (const auto& version : history.undo_chain) {
+            for (const auto& field : version.old_fields) {
+                fields[field.field_no] = field;
+            }
+        }
+        if (!fields.empty()) {
+            merged.old_fields.clear();
+            for (const auto& [field_no, field] : fields) {
+                (void)field_no;
+                merged.old_fields.push_back(field);
+            }
+        }
+
+        auto fr = decode_single_record(merged, schema);
+        if (history.integrity != HistoryIntegrity::COMPLETE) {
+            fr.is_complete = false;
+        }
+        if (config_.include_incomplete ||
+            (history.integrity == HistoryIntegrity::COMPLETE && fr.is_complete)) {
             records.push_back(std::move(fr));
         }
     }
@@ -502,8 +521,13 @@ std::vector<FlashbackRecord> FlashbackGenerator::flashback_updates(
         {UndoRecordV2::UPDATE});
 
     for (auto& rec : undo_records) {
+        auto history = analyzer_->trace_version_chain({}, rec.roll_ptr, schema, rec.index_id);
         auto fr = decode_single_record(rec, schema);
-        if (config_.include_incomplete || fr.is_complete) {
+        if (history.integrity != HistoryIntegrity::COMPLETE) {
+            fr.is_complete = false;
+        }
+        if (config_.include_incomplete ||
+            (history.integrity == HistoryIntegrity::COMPLETE && fr.is_complete)) {
             records.push_back(std::move(fr));
         }
     }

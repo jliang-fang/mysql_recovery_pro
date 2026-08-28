@@ -666,6 +666,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     bool infer_schema_mode = parser_.get_bool_option("infer-schema", false);
     bool interactive_schema_mode = parser_.get_bool_option("interactive-schema", false);
     bool undo_history_mode = parser_.get_bool_option("undo-history", false);
+    bool undo_history_legacy = parser_.get_bool_option("undo-history-legacy", false);
     bool undo_reassemble = parser_.get_bool_option("undo-reassemble", false);
     bool salvage_mode = parser_.get_bool_option("salvage-mode", false);
     bool include_evidence_fragments = parser_.get_bool_option("evidence-fragments", false);
@@ -936,12 +937,115 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return 0;
     }
 
-    // v2.0: Undo history mode — forensic inventory only
+    // v2.0: Undo history mode — pointer-verified V2 histories by default
     if (undo_history_mode) {
-        std::cout << "[INFO] Forensic Undo Inventory Mode\n";
-        std::cout << "[INFO] NOTE: This output is heuristic evidence only. It is NOT pointer-verified\n";
-        std::cout << "[INFO] row history and must NOT be used for flashback or row reconstruction.\n";
-        std::cout << "[INFO] Use --flashback-delete / --flashback-update for verified flashback.\n";
+        if (undo_history_legacy) {
+            std::cout << "[INFO] Legacy forensic undo inventory explicitly requested\n";
+        } else {
+            const std::string mode = "undo_history";
+            const auto reject = [&](const std::string& reason) {
+                std::cerr << "[ERROR] " << reason << "\n";
+                return write_result_json({
+                    {"mode", mode}, {"classification", "expected_reject"},
+                    {"structured_rows", 0}, {"evidence_fragments", 0},
+                    {"importable", false}, {"reason", reason},
+                    {"artifacts", nlohmann::json::array()}}) ? 1 : 1;
+            };
+            if (!mysql_version_explicit || mysql_version.empty()) {
+                return reject("--undo-history requires explicit --mysql-version");
+            }
+            const bool version_known = mysql_version == "5.6" || mysql_version == "5.7" ||
+                mysql_version == "8.0" || mysql_version == "8.1" || mysql_version == "8.2" ||
+                mysql_version == "8.3" || mysql_version == "8.4" || mysql_version == "9.0";
+            if (!version_known) return reject("unsupported --mysql-version for --undo-history");
+            if (system_tablespace.empty() && undo_tablespace.empty()) {
+                return reject("--undo-history requires --system-tablespace or --undo-tablespace");
+            }
+            auto schema_opt = load_schema_from_file(schema_file_path);
+            if (!schema_opt) return reject("--undo-history requires --schema-file");
+            auto schema = *schema_opt;
+            if (!schema.validate()) return reject("--undo-history received invalid schema");
+
+            uint64_t index_id = 0;
+            if (!target_index_ids_str.empty()) {
+                std::istringstream ids(target_index_ids_str);
+                std::string value;
+                if (std::getline(ids, value, ',')) {
+                    try { index_id = std::stoull(value); } catch (...) { index_id = 0; }
+                }
+            }
+            if (index_id == 0) {
+                for (const auto& index : schema.indexes) {
+                    if (index.is_primary) { index_id = index.index_id; break; }
+                }
+            }
+            if (index_id == 0) return reject("--undo-history requires a resolved primary index_id");
+            if (schema.space_id == 0) return reject("--undo-history requires schema.space_id provenance");
+
+            dbrecovery::innodb::DeepUndoAnalyzer analyzer(page_size);
+            analyzer.set_ibdata_path(system_tablespace);
+            if (!undo_tablespace.empty()) analyzer.add_undo_tablespace(undo_tablespace);
+            analyzer.set_page_size(page_size);
+            analyzer.set_tablespace_id(schema.space_id);
+            dbrecovery::innodb::UndoFormatProfile profile =
+                dbrecovery::innodb::UndoFormatProfile::UNRESOLVED;
+            if (mysql_version == "5.6") profile = dbrecovery::innodb::UndoFormatProfile::LEGACY_6BYTE;
+            else if (mysql_version == "5.7") profile = dbrecovery::innodb::UndoFormatProfile::LEGACY_6BYTE;
+            else profile = dbrecovery::innodb::UndoFormatProfile::MYSQL8_7BYTE;
+            analyzer.set_undo_format_profile(profile);
+
+            auto histories = analyzer.rebuild_all_histories(schema.space_id, schema, index_id);
+            std::string history_artifact;
+            fs::create_directories(output_dir);
+            const std::string hist_path = output_dir + "/undo_history.csv";
+            std::ofstream hist_file(hist_path);
+            if (!hist_file) return reject("failed to create verified undo history artifact");
+            hist_file << "pk_hex,index_id,chain_length,integrity,export_safe,diagnostic\n";
+            auto integrity_name = [](dbrecovery::innodb::HistoryIntegrity integrity) {
+                switch (integrity) {
+                    case dbrecovery::innodb::HistoryIntegrity::COMPLETE: return "COMPLETE";
+                    case dbrecovery::innodb::HistoryIntegrity::BROKEN_PAGE: return "BROKEN_PAGE";
+                    case dbrecovery::innodb::HistoryIntegrity::INVALID_RECORD: return "INVALID_RECORD";
+                    case dbrecovery::innodb::HistoryIntegrity::POINTER_CONFLICT: return "POINTER_CONFLICT";
+                    case dbrecovery::innodb::HistoryIntegrity::CYCLE: return "CYCLE";
+                    case dbrecovery::innodb::HistoryIntegrity::TRUNCATED: return "TRUNCATED";
+                    case dbrecovery::innodb::HistoryIntegrity::HEURISTIC: return "HEURISTIC";
+                }
+                return "UNKNOWN";
+            };
+            size_t complete = 0;
+            for (const auto& [pk, history] : histories) {
+                if (history.export_safe()) ++complete;
+                hist_file << pk << "," << history.index_id << ","
+                          << history.chain_length() << ","
+                          << integrity_name(history.integrity) << ","
+                          << (history.export_safe() ? "true" : "false") << ",\"";
+                for (char c : history.diagnostic) {
+                    if (c == '\"') hist_file << '\"';
+                    hist_file << c;
+                }
+                hist_file << "\"\n";
+            }
+            hist_file.flush();
+            if (!hist_file) return reject("failed to write verified undo history artifact");
+            history_artifact = hist_path;
+            nlohmann::json artifacts = nlohmann::json::array();
+            if (fs::exists(history_artifact)) artifacts.push_back(history_artifact);
+            const auto& analyzer_stats = analyzer.get_stats();
+            if (!write_result_json({
+                    {"mode", mode}, {"classification", "forensic_evidence"},
+                    {"structured_rows", complete},
+                    {"evidence_fragments", histories.size() - complete},
+                    {"importable", false},
+                    {"reason", histories.empty() ? "evidence-empty: no verified histories found" :
+                        "verified history inventory; import remains disabled"},
+                    {"artifacts", artifacts}, {"evidence_empty", histories.empty()},
+                    {"chains_traced", analyzer_stats.chains_traced},
+                    {"broken_chains", analyzer_stats.broken_chains}})) return 1;
+            return 0;
+        }
+
+        std::cout << "[INFO] Legacy forensic Undo Inventory Mode\n";
 
         std::string sys_ts = system_tablespace;
         if (sys_ts.empty() && undo_tablespace.empty()) {
@@ -1373,6 +1477,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Only complete records may produce a structured flashback artifact.
         const bool flashback_export_allowed = !records.empty() &&
                                               stats.complete_records == records.size();
+        std::string written_flash_artifact;
         if (flashback_export_allowed) {
             fs::create_directories(output_dir);
             std::string ext = (config.output_format == dbrecovery::innodb::FlashbackOutputFormat::CSV) ? ".csv"
@@ -1395,6 +1500,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
             std::cout << "[INFO] " << records.size() << " flashback records written to: "
                       << out_path << "\n";
+            written_flash_artifact = out_path;
         } else {
             std::cout << "[INFO] No flashback records found\n";
         }
@@ -1409,12 +1515,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         stats_.history_versions_recovered = stats.total_records;
         stats_.records_recovered = stats.complete_records;
 
-        // Canonical result contract for flashback artifact
-        std::string flash_ext = (config.output_format == dbrecovery::innodb::FlashbackOutputFormat::CSV) ? ".csv"
-                              : (config.output_format == dbrecovery::innodb::FlashbackOutputFormat::JSON) ? ".json" : ".sql";
-        std::string flash_artifact = records.empty() ? "" : output_dir + "/flashback" + flash_ext;
         nlohmann::json flash_artifacts = nlohmann::json::array();
-        if (!flash_artifact.empty()) flash_artifacts.push_back(flash_artifact);
+        if (!written_flash_artifact.empty() && fs::exists(written_flash_artifact)) flash_artifacts.push_back(written_flash_artifact);
         write_result_json(nlohmann::json{
             {"mode", "flashback_" + mode_label},
             {"classification", flashback_export_allowed ? "structured_recovery" : "forensic_evidence"},

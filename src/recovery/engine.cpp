@@ -8,6 +8,8 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
+#include <ctime>
+#include <iomanip>
 
 namespace dbrecovery {
 namespace recovery {
@@ -958,6 +960,34 @@ std::vector<std::string> RecoveryEngine::flashback_deletes(
     innodb::FlashbackConfig fg_config;
     fg_config.mode = innodb::FlashbackMode::DELETE;
     fg_config.output_format = innodb::FlashbackOutputFormat::SQL;
+    auto parse_time = [](const std::string& value,
+                         std::chrono::system_clock::time_point& result) {
+        if (value.empty()) return true;
+        std::tm tm{};
+        std::istringstream input(value);
+        input >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+        if (input.fail()) return false;
+        tm.tm_isdst = -1;
+        const std::time_t timestamp = std::mktime(&tm);
+        if (timestamp == static_cast<std::time_t>(-1)) return false;
+        result = std::chrono::system_clock::from_time_t(timestamp);
+        return true;
+    };
+    std::chrono::system_clock::time_point parsed_time;
+    if (!start_time.empty()) {
+        if (!parse_time(start_time, parsed_time)) {
+            std::cerr << "[ERROR] Invalid flashback time filter; expected YYYY-MM-DD HH:MM:SS\n";
+            return {};
+        }
+        fg_config.start_time = parsed_time;
+    }
+    if (!end_time.empty()) {
+        if (!parse_time(end_time, parsed_time)) {
+            std::cerr << "[ERROR] Invalid flashback time filter; expected YYYY-MM-DD HH:MM:SS\n";
+            return {};
+        }
+        fg_config.end_time = parsed_time;
+    }
     flashback_generator_.set_config(fg_config);
 
     auto results = flashback_generator_.flashback_deletes(schema_);
