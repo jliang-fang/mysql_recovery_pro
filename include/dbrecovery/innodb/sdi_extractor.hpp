@@ -129,6 +129,15 @@ public:
      */
     std::vector<ExtractedSDI> extract_from_page(const uint8_t* page_data, size_t page_size);
 
+    /**
+     * @brief Version-gated extraction from one page
+     *
+     * Known MySQL versions without SDI are skipped. UNKNOWN deliberately
+     * force-scans for forensic workflows. This preserves cumulative statistics.
+     */
+    std::vector<ExtractedSDI> extract_from_page_if_compatible(
+        const uint8_t* page_data, size_t page_size, dbrecovery::MySQLVersion version);
+
 public:
     size_t page_size_;
     SDIExtractStats extract_stats_;
@@ -250,6 +259,15 @@ inline std::vector<ExtractedSDI> SDIExtractor::extract_from_page(const uint8_t* 
     if (results.empty()) ++extract_stats_.sdi_failed;
     else extract_stats_.sdi_extracted += results.size();
     return results;
+}
+
+inline std::vector<ExtractedSDI> SDIExtractor::extract_from_page_if_compatible(
+    const uint8_t* page_data, size_t page_size, dbrecovery::MySQLVersion version) {
+    if (version != dbrecovery::MySQLVersion::UNKNOWN &&
+        !dbrecovery::version_supports_sdi(version)) {
+        return {};
+    }
+    return extract_from_page(page_data, page_size);
 }
 
 inline std::vector<ExtractedSDI> SDIExtractor::extract_from_buffer(const uint8_t* data, size_t size) {

@@ -237,6 +237,20 @@ TEST(SDIExtractorTest, VersionGatedSkipsMySQL57) {
     EXPECT_EQ(extractor.stats().sdi_pages, 0);
 }
 
+TEST(SDIExtractorTest, PageVersionGatedSkipsMySQL57) {
+    SDIExtractor extractor;
+    std::vector<uint8_t> page(16384, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);
+
+    auto results = extractor.extract_from_page_if_compatible(
+        page.data(), page.size(), dbrecovery::MySQLVersion::MYSQL_57);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().total_pages, 0);
+    EXPECT_EQ(extractor.stats().sdi_pages, 0);
+}
+
 TEST(SDIExtractorTest, VersionGatedAllowsMySQL80) {
     SDIExtractor extractor;
 
@@ -251,6 +265,35 @@ TEST(SDIExtractorTest, VersionGatedAllowsMySQL80) {
 
     EXPECT_EQ(results.size(), 0);
     EXPECT_EQ(extractor.stats().total_pages, 1);
+    EXPECT_EQ(extractor.stats().sdi_pages, 1);
+}
+
+TEST(SDIExtractorTest, PageVersionGatedAllowsMySQL80) {
+    SDIExtractor extractor(32768);
+    std::vector<uint8_t> page(32768, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);
+
+    auto results = extractor.extract_from_page_if_compatible(
+        page.data(), page.size(), dbrecovery::MySQLVersion::MYSQL_80);
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(extractor.stats().sdi_pages, 1);
+
+    // A non-default page size must still be parsed by the page-level API.
+    EXPECT_EQ(extractor.page_size_, 32768u);
+}
+
+TEST(SDIExtractorTest, PageVersionGatedUnknownForcesScan) {
+    SDIExtractor extractor(4096);
+    std::vector<uint8_t> page(4096, 0);
+    write_be<uint16_t>(page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+    write_be<uint32_t>(page.data(), FIL_PAGE_OFFSET, 1);
+
+    auto results = extractor.extract_from_page_if_compatible(
+        page.data(), page.size(), dbrecovery::MySQLVersion::UNKNOWN);
+
+    EXPECT_TRUE(results.empty());
     EXPECT_EQ(extractor.stats().sdi_pages, 1);
 }
 

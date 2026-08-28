@@ -1,4 +1,5 @@
 #include "dbrecovery/recovery/raw_disk_carver.hpp"
+#include "dbrecovery/safety/safety_gate.hpp"
 #include "dbrecovery/innodb/binary_reader.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
@@ -37,6 +38,36 @@ static constexpr uint8_t FRM_SIGNATURE[] = {0xfe, 0x01, 0x0a, 0x0c, 0x03, 0x00, 
 
 RawDiskCarver::RawDiskCarver() = default;
 RawDiskCarver::~RawDiskCarver() = default;
+
+bool RawDiskCarver::admit_source(const std::string& source_path, std::string* reason) {
+    auto reject = [reason](const std::string& message) {
+        if (reason) *reason = message;
+        return false;
+    };
+
+#ifdef __linux__
+    struct stat st{};
+    if (stat(source_path.c_str(), &st) != 0) {
+        return reject("source does not exist or cannot be accessed");
+    }
+
+    if (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) return true;
+    if (!S_ISBLK(st.st_mode)) return reject("source is not a regular file, directory, or block device");
+
+    dbrecovery::safety::SafetyGate gate;
+    const auto report = gate.verify_device(source_path);
+    if (!dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report)) {
+        return reject("block-device safety verification did not prove read-only exclusive access");
+    }
+    return true;
+#else
+    std::error_code ec;
+    const auto status = std::filesystem::status(source_path, ec);
+    if (ec || !std::filesystem::exists(status)) return reject("source does not exist or cannot be accessed");
+    if (std::filesystem::is_regular_file(status) || std::filesystem::is_directory(status)) return true;
+    return reject("source is not a regular file or directory");
+#endif
+}
 
 void RawDiskCarver::set_config(const Config& config) {
     config_ = config;
@@ -307,6 +338,12 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
     // 检查设备路径
     if (config_.device_path.empty()) {
         result.errors.push_back("Device path not specified");
+        return result;
+    }
+
+    std::string admission_reason;
+    if (!admit_source(config_.device_path, &admission_reason)) {
+        result.errors.push_back("Raw source rejected: " + admission_reason);
         return result;
     }
 

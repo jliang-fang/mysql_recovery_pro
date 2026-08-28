@@ -42,7 +42,7 @@ struct SafetyReport {
  * @code
  *   SafetyGate gate;
  *   SafetyReport report = gate.verify_device("/dev/nvme0n1");
- *   if (report.confidence > 0.5) {
+ *   if (SafetyGate::permits_read_only_raw_access(report)) {
  *       // Safe to proceed with read-only recovery
  *   }
  * @endcode
@@ -62,6 +62,11 @@ public:
     SafetyGate& operator=(const SafetyGate&) = delete;
     SafetyGate(SafetyGate&&) = default;
     SafetyGate& operator=(SafetyGate&&) = default;
+
+    /**
+     * @brief Return whether all mandatory read-only raw-access facts are proven.
+     */
+    static bool permits_read_only_raw_access(const SafetyReport& report);
 
     /**
      * @brief Set a callback for log messages.

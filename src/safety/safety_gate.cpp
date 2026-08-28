@@ -8,6 +8,13 @@ namespace safety {
 
 SafetyGate::SafetyGate() = default;
 
+bool SafetyGate::permits_read_only_raw_access(const SafetyReport& report) {
+    return report.device_identity_verified &&
+           report.read_only_confirmed &&
+           report.exclusive_access &&
+           report.not_mounted_or_ok;
+}
+
 void SafetyGate::set_log_callback(LogCallback cb) {
     log_callback_ = std::move(cb);
 }

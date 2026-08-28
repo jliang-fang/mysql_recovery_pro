@@ -1,11 +1,15 @@
 #include <gtest/gtest.h>
 #include "dbrecovery/recovery/raw_disk_carver.hpp"
+#include "dbrecovery/safety/safety_gate.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include <cstdint>
 #include <vector>
 #include <cstring>
 #include <string>
+#include <array>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <zlib.h>
 
 namespace dbrecovery {
@@ -56,6 +60,59 @@ static std::vector<uint8_t> create_page_strict_valid(uint16_t page_type, uint32_
         write_be<uint64_t>(page.data(), 66, 100);               // index_id != 0
     }
     return page;
+}
+
+TEST(RawDiskCarverTest, SafetyGateRequiresAllMandatoryFacts) {
+    dbrecovery::safety::SafetyReport report;
+    report.device_identity_verified = true;
+    report.read_only_confirmed = true;
+    report.exclusive_access = true;
+    report.not_mounted_or_ok = true;
+    EXPECT_TRUE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+
+    const std::array<bool, 4> mandatory = {true, true, true, true};
+    for (size_t i = 0; i < mandatory.size(); ++i) {
+        auto candidate = report;
+        if (i == 0) candidate.device_identity_verified = false;
+        if (i == 1) candidate.read_only_confirmed = false;
+        if (i == 2) candidate.exclusive_access = false;
+        if (i == 3) candidate.not_mounted_or_ok = false;
+        EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(candidate));
+    }
+}
+
+TEST(RawDiskCarverTest, SafetyGateDiagnosticsDoNotAuthorize) {
+    dbrecovery::safety::SafetyReport report;
+    report.confidence = 1.0;
+    report.loopback_verified = true;
+    EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+}
+
+TEST(RawDiskCarverTest, AdmitSourceAcceptsRegularFileAndDirectory) {
+    const auto root = std::filesystem::temp_directory_path() / "raw_disk_carver_admission_test";
+    std::filesystem::create_directories(root);
+    const auto file = root / "image.bin";
+    std::ofstream(file, std::ios::binary).put('\0');
+
+    EXPECT_TRUE(RawDiskCarver::admit_source(file.string()));
+    EXPECT_TRUE(RawDiskCarver::admit_source(root.string()));
+
+    std::filesystem::remove_all(root);
+}
+
+TEST(RawDiskCarverTest, AdmitSourceRejectsMissingAndUnsupportedSources) {
+    std::string reason;
+    EXPECT_FALSE(RawDiskCarver::admit_source(
+        (std::filesystem::temp_directory_path() / "does-not-exist-raw-source").string(), &reason));
+    EXPECT_FALSE(reason.empty());
+
+#ifndef _WIN32
+    const auto fifo = std::filesystem::temp_directory_path() / "raw_disk_carver_admission_fifo";
+    std::filesystem::remove(fifo);
+    ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+    EXPECT_FALSE(RawDiskCarver::admit_source(fifo.string(), &reason));
+    std::filesystem::remove(fifo);
+#endif
 }
 
 // ==================== Config Tests ====================

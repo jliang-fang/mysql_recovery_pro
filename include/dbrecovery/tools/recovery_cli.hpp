@@ -386,7 +386,14 @@ inline std::vector<innodb::ExtractedSDI> RecoveryCLI::extract_sdi_data(
     const std::string& ibd_path, dbrecovery::MySQLVersion version) {
     auto start = std::chrono::high_resolution_clock::now();
 
-    innodb::SDIExtractor extractor(16384);
+    innodb::InnoDBFileReader reader(ibd_path);
+    if (!reader.is_valid()) {
+        const auto end = std::chrono::high_resolution_clock::now();
+        stats_.elapsed_seconds += std::chrono::duration<double>(end - start).count();
+        return {};
+    }
+
+    innodb::SDIExtractor extractor(reader.get_page_size());
     auto results = extractor.extract_from_file_if_compatible(ibd_path, version);
 
     auto end = std::chrono::high_resolution_clock::now();
@@ -756,6 +763,22 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     if (reassemble_mode) {
         if (device_path.empty()) {
             const std::string reason = "--reassemble requires --device-path for raw disk carving source";
+            std::cerr << "[ERROR] " << reason << "\n";
+            if (!write_result_json({
+                    {"mode", "reassemble"},
+                    {"classification", "expected_reject"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason}})) {
+                return 1;
+            }
+            return 1;
+        }
+
+        std::string admission_reason;
+        if (!dbrecovery::recovery::RawDiskCarver::admit_source(device_path, &admission_reason)) {
+            const std::string reason = "--reassemble raw source rejected: " + admission_reason;
             std::cerr << "[ERROR] " << reason << "\n";
             if (!write_result_json({
                     {"mode", "reassemble"},
@@ -2605,6 +2628,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return 1;
         }
 
+        std::string admission_reason;
+        if (!dbrecovery::recovery::RawDiskCarver::admit_source(device_path, &admission_reason)) {
+            std::cerr << "[ERROR] Disk carving raw source rejected: " << admission_reason << "\n";
+            return 1;
+        }
+
         std::cout << "[INFO] Starting raw disk carving recovery...\n";
         std::cout << "[INFO] Device: " << device_path << "\n";
         std::cout << "[INFO] Filesystem: " << filesystem_type << "\n";
@@ -3588,7 +3617,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 辅助函数：从 SDI 页解析表结构
     // 统一走 SDIExtractor 受限路径（版本门控 + 结构化提取结果），避免 CLI
     // 绕过 sdi_manager 的受限解压。heuristic 提取永不进入权威 schema。
-    auto parse_schema_from_sdi = [&](const std::string& ibd_path, uint64_t table_id) -> std::optional<dbrecovery::catalog::TableSchema> {
+    auto parse_schema_from_sdi = [&](const std::string& ibd_path, uint64_t table_id,
+                                     dbrecovery::MySQLVersion sdi_version) -> std::optional<dbrecovery::catalog::TableSchema> {
         dbrecovery::innodb::InnoDBFileReader reader(ibd_path);
         if (!reader.is_valid()) {
             std::cerr << "[ERROR] Failed to open file for SDI parsing: " << ibd_path << "\n";
@@ -3603,7 +3633,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (page_data.empty()) continue;
 
             dbrecovery::innodb::SDIExtractor extractor(reader.get_page_size());
-            const auto extractions = extractor.extract_from_page(page_data.data(), page_data.size());
+            const auto extractions = extractor.extract_from_page_if_compatible(
+                page_data.data(), page_data.size(), sdi_version);
             for (const auto& extracted : extractions) {
                 if (!extracted.is_valid || extracted.sdi_json.empty()) continue;
 
@@ -3655,8 +3686,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // Phase 6: 从 .ibd 解析 TableSchema (SDI 优先，其次空 schema) 的公共辅助
     auto resolve_table_schema = [&](const std::string& ibd, uint64_t tid,
-                                     uint32_t page_sz) -> dbrecovery::catalog::TableSchema {
-        auto schema_opt = parse_schema_from_sdi(ibd, tid);
+                                     uint32_t page_sz,
+                                     dbrecovery::MySQLVersion sdi_version) -> dbrecovery::catalog::TableSchema {
+        auto schema_opt = parse_schema_from_sdi(ibd, tid, sdi_version);
         dbrecovery::catalog::TableSchema schema;
         if (schema_opt.has_value()) {
             schema = schema_opt.value();
@@ -3675,7 +3707,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::CompressedTableRecovery comp_rec(compression.logical_page_size);
         comp_rec.set_compressed_page_size(compression.physical_page_size);
         comp_rec.set_file_path(ibd);
-        comp_rec.set_schema(resolve_table_schema(ibd, table_id, compression.logical_page_size));
+        comp_rec.set_schema(resolve_table_schema(ibd, table_id, compression.logical_page_size, sdi_version));
         if (!comp_rec.auto_detect_compression(ibd)) {
             std::cout << "[WARN] Compressed tablespace recognized but physical metadata unreadable — "
                       << "emitting zero structured rows\n";
@@ -3701,7 +3733,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Encrypted tablespace detected — routing to EncryptedTableRecovery\n";
         dbrecovery::innodb::EncryptedTableRecovery enc_rec(page_sz);
         enc_rec.set_file_path(ibd);
-        enc_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz));
+        enc_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz, sdi_version));
 
         bool key_ready = false;
         if (!parsed_tde_keys.empty()) {
@@ -4518,7 +4550,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         } else {
             std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying specialized TRUNCATE recovery...\n";
 
-            auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+            auto schema_opt = parse_schema_from_sdi(ibd_path, table_id, sdi_version);
             dbrecovery::catalog::TableSchema schema;
             if (schema_opt.has_value()) {
                 schema = schema_opt.value();
@@ -4614,7 +4646,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // If no FRM schema, try SDI schema extraction for column names
         if (!has_frm_schema) {
-            auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+            auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id, sdi_version);
             if (sdi_schema_opt.has_value()) {
                 const auto& schema = sdi_schema_opt.value();
                 std::vector<dbrecovery::innodb::IndexColumnDef> columns;
@@ -4666,7 +4698,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::cout << "[WARN] InnoDBIndexParser returned 0 records, trying heuristic fallback...\n";
 
             // Fallback to heuristic parsing
-            auto schema_opt = parse_schema_from_sdi(ibd_path, table_id);
+            auto schema_opt = parse_schema_from_sdi(ibd_path, table_id, sdi_version);
             dbrecovery::catalog::TableSchema schema;
             if (schema_opt.has_value()) {
                 schema = schema_opt.value();

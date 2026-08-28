@@ -120,6 +120,14 @@ public:
     ~RawDiskCarver();
 
     /**
+     * @brief Validate a raw source before any scan or read is attempted.
+     *
+     * Regular files and directories are accepted. Block devices require all
+     * mandatory SafetyGate facts; other special files are rejected.
+     */
+    static bool admit_source(const std::string& source_path, std::string* reason = nullptr);
+
+    /**
      * @brief 设置配置
      */
     void set_config(const Config& config);
