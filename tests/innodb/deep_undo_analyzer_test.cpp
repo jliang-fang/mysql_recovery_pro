@@ -2,6 +2,7 @@
 #include "dbrecovery/innodb/deep_undo_analyzer.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
+#include "dbrecovery/undo/undo_page_manager.hpp"
 #include <fstream>
 #include <vector>
 #include <cstdio>
@@ -1669,6 +1670,42 @@ TEST(DeepUndoAnalyzerTest, TraceVersionChainUnresolvedProfileRejects) {
 }
 
 // ==================== FlashbackGenerator-style Output Tests ====================
+
+TEST(DeepUndoAnalyzerTest, UndoFacadeRoutesV2Configuration) {
+    dbrecovery::undo::UndoPageManager mgr;
+    EXPECT_EQ(mgr.undo_format_profile(), UndoFormatProfile::UNRESOLVED);
+
+    mgr.set_undo_format_profile(UndoFormatProfile::LEGACY_6BYTE);
+    EXPECT_EQ(mgr.undo_format_profile(), UndoFormatProfile::LEGACY_6BYTE);
+
+    mgr.set_max_chain_depth(7);
+    mgr.set_tablespace_id(42);
+    EXPECT_EQ(mgr.analysis_stats().chains_traced, 0u);
+}
+
+TEST(DeepUndoAnalyzerTest, UndoFacadeV2ScanUsesConfiguredSource) {
+    std::vector<uint8_t> data(16384, 0);
+    const std::string path = create_temp_file(data, "_facade");
+
+    dbrecovery::undo::UndoPageManager mgr;
+    mgr.set_data_file(path);
+    mgr.set_page_size(16384);
+    mgr.set_undo_format_profile(UndoFormatProfile::MYSQL8_7BYTE);
+
+    catalog::TableSchema schema;
+    const auto records = mgr.scan_records_v2(schema);
+    EXPECT_TRUE(records.empty());
+    EXPECT_EQ(mgr.undo_format_profile(), UndoFormatProfile::MYSQL8_7BYTE);
+
+    std::remove(path.c_str());
+}
+
+TEST(DeepUndoAnalyzerTest, UndoFacadeLegacyPathRemainsExplicit) {
+    dbrecovery::undo::UndoPageManager mgr;
+    std::vector<uint8_t> page(16384, 0);
+    const auto records = mgr.parse_page_legacy(page.data(), page.size(), 0);
+    EXPECT_TRUE(records.empty());
+}
 
 } // namespace innodb
 } // namespace dbrecovery
