@@ -354,6 +354,11 @@ add_executable(test_redo_plan_gate redo_plan_gate_test.cpp)
 target_link_libraries(test_redo_plan_gate PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_redo_plan_gate)
 
+# Phase 4: Parallel export equivalence (serial vs parallel produce same output)
+add_executable(test_parallel_export_equivalence parallel_export_equivalence_test.cpp)
+target_link_libraries(test_parallel_export_equivalence PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_parallel_export_equivalence)
+
 	# Compressed table recovery metadata tests
 add_executable(test_compressed_table_recovery innodb/compressed_table_recovery_test.cpp)
 target_link_libraries(test_compressed_table_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
