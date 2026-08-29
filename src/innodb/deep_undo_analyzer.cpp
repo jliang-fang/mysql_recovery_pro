@@ -474,8 +474,8 @@ std::optional<UndoRecordV2> UndoRecordV2Parser::parse(
             return std::nullopt;
         }
 
-        const bool is_8byte_profile = (profile == UndoFormatProfile::MYSQL8_7BYTE);
-        const size_t roll_ptr_len = is_8byte_profile ? ROLL_PTR_LEN_80 : ROLL_PTR_LEN_56;
+        const bool is_7byte_profile = (profile == UndoFormatProfile::MYSQL8_7BYTE);
+        const size_t roll_ptr_len = is_7byte_profile ? ROLL_PTR_LEN_80 : ROLL_PTR_LEN_56;
         if (data_size - offset >= ROLL_PTR_OFFSET + roll_ptr_len) {
             header_size = ROLL_PTR_OFFSET + roll_ptr_len;
             rec.prev_undo_ptr = RollPtrDecoder::decode_storage_to_internal(

@@ -85,7 +85,8 @@ const std::map<uint32_t, std::vector<uint8_t>>& RedoLogReplayer::get_base_pages(
 }
 
 bool RedoLogReplayer::check_base_page_identity(
-    uint32_t page_no, const std::vector<uint8_t>& page_data,
+    uint32_t page_no, uint32_t expected_space_id,
+    const std::vector<uint8_t>& page_data,
     uint32_t& out_space_id, uint32_t& out_fil_page_no) const {
 
     out_space_id = 0;
@@ -97,11 +98,13 @@ bool RedoLogReplayer::check_base_page_identity(
     out_space_id = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), FIL_PAGE_SPACE_ID);
     out_fil_page_no = dbrecovery::innodb::read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
 
-    // Identity match: page_no must equal FIL_PAGE_OFFSET, and space_id must be non-zero.
-    // (space_id == 0 is valid for the system tablespace, but a redo-replay base page
-    //  without a recognizable space id cannot be attributed safely.)
+    // Identity match: page_no must equal FIL_PAGE_OFFSET, and the base page's
+    // space_id must match the redo record's r_space_id.  This prevents accepting
+    // a base page from a different tablespace when two tablespaces share the same
+    // page number.
     if (out_fil_page_no != page_no) return false;
     if (out_space_id == 0) return false;
+    if (out_space_id != expected_space_id) return false;
 
     return true;
 }
@@ -154,7 +157,7 @@ RedoLogInventory RedoLogReplayer::generate_inventory() const {
                 ne.has_base_page = true;
                 uint32_t spid = 0, fil_pg = 0;
                 ne.base_page_identity_match =
-                    check_base_page_identity(record.r_page_no, it->second, spid, fil_pg);
+                    check_base_page_identity(record.r_page_no, record.r_space_id, it->second, spid, fil_pg);
             }
 
             ne.type_distribution[static_cast<uint8_t>(record.r_type)]++;
@@ -173,7 +176,7 @@ RedoLogInventory RedoLogReplayer::generate_inventory() const {
                     entry->has_base_page = true;
                     uint32_t spid = 0, fil_pg = 0;
                     entry->base_page_identity_match =
-                        check_base_page_identity(record.r_page_no, it->second, spid, fil_pg);
+                        check_base_page_identity(record.r_page_no, record.r_space_id, it->second, spid, fil_pg);
                 }
             }
         }
@@ -224,7 +227,7 @@ RedoPatchPlan RedoLogReplayer::generate_patch_plan(bool require_base_pages) cons
             continue;
         }
         uint32_t spid = 0, fil_pg = 0;
-        bool ok = check_base_page_identity(record.r_page_no, it->second, spid, fil_pg);
+        bool ok = check_base_page_identity(record.r_page_no, record.r_space_id, it->second, spid, fil_pg);
         auto got = page_identity_ok.find(record.r_page_no);
         if (got == page_identity_ok.end()) {
             page_identity_ok[record.r_page_no] = ok;
@@ -272,7 +275,7 @@ RedoPatchPlan RedoLogReplayer::generate_patch_plan(bool require_base_pages) cons
             e.has_base_page = true;
             uint32_t spid = 0, fil_pg = 0;
             e.base_page_identity_match =
-                check_base_page_identity(record.r_page_no, pit->second, spid, fil_pg);
+                check_base_page_identity(record.r_page_no, record.r_space_id, pit->second, spid, fil_pg);
         }
         if (require_base_pages && !e.has_base_page) {
             plan.warnings.push_back(
@@ -372,7 +375,7 @@ RedoPreConditionResult RedoLogReplayer::validate_conditions() const {
             continue;
         }
         uint32_t spid = 0, fil_pg = 0;
-        if (!check_base_page_identity(record.r_page_no, it->second, spid, fil_pg)) {
+        if (!check_base_page_identity(record.r_page_no, record.r_space_id, it->second, spid, fil_pg)) {
             cond.base_pages_identity_match = false;
         }
     }

@@ -81,7 +81,7 @@ public:
      */
     struct DecodedRollPtr {
         uint32_t page_no = 0;  // Undo page number
-        uint32_t offset  = 0;  // Offset within undo page (16-bit, stored as uint32_t)
+        uint32_t offset  = 0;  // Offset within undo page (18-bit, stored as uint32_t)
         uint8_t  flags   = 0;  // 8.0+ flags byte, 0 for 5.6/5.7
 
         bool is_valid() const {

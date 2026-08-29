@@ -316,9 +316,13 @@ private:
 
     /**
      * @brief Phase 5f: Check base page identity — FIL_PAGE_SPACE_ID and FIL_PAGE_OFFSET
-     * @return true if page_no matches FIL_PAGE_OFFSET and space_id is non-zero
+     *
+     * Compares out_space_id against expected_space_id (from the redo record's r_space_id)
+     * to prevent cross-tablespace acceptance when page_no collides.
+     * @return true if page_no matches FIL_PAGE_OFFSET AND space_id matches expected_space_id
      */
-    bool check_base_page_identity(uint32_t page_no, const std::vector<uint8_t>& page_data,
+    bool check_base_page_identity(uint32_t page_no, uint32_t expected_space_id,
+                                   const std::vector<uint8_t>& page_data,
                                    uint32_t& out_space_id, uint32_t& out_fil_page_no) const;
 
     /**

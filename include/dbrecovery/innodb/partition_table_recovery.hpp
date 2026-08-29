@@ -247,6 +247,18 @@ inline std::optional<PartitionInfo> PartitionTableRecovery::parse_partition_from
         info.last_page_no = static_cast<uint32_t>(file_size / page_size_) - 1;
     }
 
+    // 读取 page 0 的 FIL header 填充 tablespace_id
+    std::ifstream ibd(path, std::ios::binary);
+    if (ibd) {
+        std::vector<uint8_t> page0(page_size_, 0);
+        ibd.read(reinterpret_cast<char*>(page0.data()),
+                 static_cast<std::streamsize>(page_size_));
+        if (ibd.gcount() >= static_cast<std::streamsize>(FIL_HEADER_SIZE)) {
+            info.tablespace_id = dbrecovery::innodb::read_be<uint32_t>(
+                page0.data(), FIL_PAGE_SPACE_ID);
+        }
+    }
+
     return info;
 }
 
@@ -521,6 +533,19 @@ inline std::vector<PartitionInfo> PartitionTableScanner::get_partitions(
                         uint64_t file_size = std::filesystem::file_size(entry.path(), ec);
                         if (!ec && file_size >= page_size_) {
                             info.last_page_no = static_cast<uint32_t>(file_size / page_size_) - 1;
+                        }
+
+                        // 读取 page 0 的 FIL header 填充 tablespace_id，
+                        // 否则 identity gate 会拒绝所有非零 space-id 的 INDEX 页。
+                        std::ifstream ibd(entry.path(), std::ios::binary);
+                        if (ibd) {
+                            std::vector<uint8_t> page0(page_size_, 0);
+                            ibd.read(reinterpret_cast<char*>(page0.data()),
+                                     static_cast<std::streamsize>(page_size_));
+                            if (ibd.gcount() >= static_cast<std::streamsize>(FIL_HEADER_SIZE)) {
+                                info.tablespace_id = dbrecovery::innodb::read_be<uint32_t>(
+                                    page0.data(), FIL_PAGE_SPACE_ID);
+                            }
                         }
 
                         partitions.push_back(info);

@@ -250,6 +250,61 @@ TEST(RedoRedoPlanGateTest, ReplaySafeAppliesOnlyWhenAllPass) {
     EXPECT_EQ(replayer.get_updated_pages().size(), 1u);
 }
 
+// ==================== Cross-tablespace identity mismatch ====================
+
+TEST(RedoRedoPlanGateTest, CrossTablespaceIdentityMismatchRejectsReplay) {
+    // Base page carries space_id=99 (page_no=2), but the redo record targets
+    // r_space_id=1, r_page_no=2.  Without expected_space_id comparison the
+    // old code would accept this base page because page_no matched.
+    RedoLogReplayer replayer;
+    replayer.set_page_size(16384);
+
+    auto page = make_page(2, 99);   // page_no=2, space_id=99
+    replayer.add_page(2, page);
+
+    std::vector<uint8_t> data = {0xAA};
+    replayer.add_redo_records({
+        make_record(MLOG_COMP_REC_INSERT, 1, 2, 100, data),   // r_space_id=1 ≠ 99
+        make_record(MLOG_CHECKPOINT, 1, 2, 200, data),
+    });
+
+    auto cond = replayer.validate_conditions();
+    EXPECT_TRUE(cond.pages_available);
+    EXPECT_FALSE(cond.base_pages_identity_match);   // space_id mismatch
+    EXPECT_FALSE(cond.all_passed());
+
+    // replay_safe must fail closed — the base page must remain byte-identical.
+    auto page_before = replayer.get_base_pages().at(2);
+    auto result = replayer.replay_safe();
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.records_applied, 0u);
+    auto page_after = replayer.get_base_pages().at(2);
+    EXPECT_TRUE(page_before == page_after);
+}
+
+TEST(RedoRedoPlanGateTest, SameTablespaceIdentityPassesReplay) {
+    // Same page_no=2, space_id=99 for both base page and redo record → identity passes.
+    RedoLogReplayer replayer;
+    replayer.set_page_size(16384);
+
+    auto page = make_page(2, 99);
+    replayer.add_page(2, page);
+
+    std::vector<uint8_t> data = {0xAA, 0xBB};
+    replayer.add_redo_records({
+        make_record(MLOG_COMP_REC_INSERT, 99, 2, 100, data),
+        make_record(MLOG_CHECKPOINT, 99, 2, 200, data),
+    });
+
+    auto cond = replayer.validate_conditions();
+    EXPECT_TRUE(cond.base_pages_identity_match);
+    EXPECT_TRUE(cond.all_passed());
+
+    auto result = replayer.replay_safe();
+    EXPECT_TRUE(result.success);
+    EXPECT_GE(result.records_processed, 2u);
+}
+
 // ==================== MLOG name helper ====================
 
 TEST(RedoRedoPlanGateTest, MlogTypeNameStaticKnownAndUnknown) {

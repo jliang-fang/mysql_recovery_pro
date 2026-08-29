@@ -124,6 +124,32 @@ TEST(PartitionTableRecoveryTest, ConfiguredPartitionsSurviveRecover) {
     EXPECT_EQ(engine.get_stats().total_partitions, 3);
 }
 
+// ==================== P0: scanner populates tablespace_id from page 0 ====================
+
+TEST(PartitionTableRecoveryTest, ScannerPopulatesTablespaceIdFromPageZero) {
+    // Build an IBD whose page 0 carries FIL_PAGE_SPACE_ID = 123.
+    // The scanner must read page 0 and fill PartitionInfo::tablespace_id;
+    // previously it defaulted to 0, causing the identity gate to reject
+    // all non-zero space-id pages.
+    auto page0 = build_index_page(true, 123);
+    std::string ibd_path = make_temp_file("dbrec_t1#P#p0.ibd", page0);
+
+    // Place the file in a temp directory so the scanner can discover it.
+    auto dir = std::filesystem::temp_directory_path() / "dbrec_part_scan_test";
+    std::filesystem::create_directories(dir);
+    auto dest = dir / "dbrec_t1#P#p0.ibd";
+    std::filesystem::copy_file(ibd_path, dest, std::filesystem::copy_options::overwrite_existing);
+
+    PartitionTableScanner scanner(16384);
+    scanner.set_data_directory(dir.string());
+    auto partitions = scanner.get_partitions("dbrec_t1");
+
+    ASSERT_EQ(partitions.size(), 1);
+    EXPECT_EQ(partitions[0].tablespace_id, 123u);
+
+    std::filesystem::remove_all(dir);
+}
+
 // ==================== P1: INDEX page recognized only in canonical byte order ====================
 
 TEST(PartitionTableRecoveryTest, IndexPageRecognizedOnlyInCanonicalByteOrder) {

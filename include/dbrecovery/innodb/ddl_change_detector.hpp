@@ -68,7 +68,7 @@ public:
             file.read(reinterpret_cast<char*>(page_buf.data()), page_size_);
             if (file.gcount() < static_cast<std::streamsize>(page_size_)) break;
 
-            uint16_t page_type = read_le<uint16_t>(page_buf.data(), 24);
+            uint16_t page_type = read_be<uint16_t>(page_buf.data(), FIL_PAGE_TYPE_ABS);
             if (page_type != FIL_PAGE_INDEX) continue;
 
             // Skip internal (non-leaf) pages — only analyze leaf pages
