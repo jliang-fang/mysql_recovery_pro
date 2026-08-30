@@ -220,12 +220,11 @@ double InnoDBSignatureLibrary::match_signature(
 }
 
 uint16_t InnoDBSignatureLibrary::detect_page_type(const uint8_t* data, size_t size) {
-    if (size < FIL_PAGE_TYPE_OFFSET + 2) {
+    if (size < innodb::FIL_PAGE_TYPE_ABS + sizeof(uint16_t)) {
         return 0xFFFF;
     }
 
-    uint16_t page_type = (data[FIL_PAGE_TYPE_OFFSET] << 8) | data[FIL_PAGE_TYPE_OFFSET + 1];
-    return page_type;
+    return innodb::read_be<uint16_t>(data, innodb::FIL_PAGE_TYPE_ABS);
 }
 
 MySQLVersion InnoDBSignatureLibrary::detect_version(const uint8_t* page_data, size_t page_size) {
@@ -313,16 +312,13 @@ std::optional<InnoDBSignatureLibrary::FILHeader> InnoDBSignatureLibrary::parse_f
     }
 
     FILHeader header;
-    header.checksum1 = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | data[3];
-    header.page_number = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | data[7];
-    header.prev_page = (data[8] << 24) | (data[9] << 16) | (data[10] << 8) | data[11];
-    header.next_page = (data[12] << 24) | (data[13] << 16) | (data[14] << 8) | data[15];
-    header.lsn = ((uint64_t)data[16] << 56) | ((uint64_t)data[17] << 48) |
-                 ((uint64_t)data[18] << 40) | ((uint64_t)data[19] << 32) |
-                 ((uint64_t)data[20] << 24) | ((uint64_t)data[21] << 16) |
-                 ((uint64_t)data[22] << 8) | data[23];
-    header.page_type = (data[24] << 8) | data[25];
-    header.space_id = (data[34] << 24) | (data[35] << 16) | (data[36] << 8) | data[37];
+    header.checksum1 = innodb::read_be<uint32_t>(data);
+    header.page_number = innodb::read_be<uint32_t>(data, innodb::FIL_PAGE_OFFSET);
+    header.prev_page = innodb::read_be<uint32_t>(data, innodb::FIL_PAGE_PREV_ABS);
+    header.next_page = innodb::read_be<uint32_t>(data, innodb::FIL_PAGE_NEXT_ABS);
+    header.lsn = innodb::read_be<uint64_t>(data, innodb::FIL_PAGE_LSN_ABS);
+    header.page_type = innodb::read_be<uint16_t>(data, innodb::FIL_PAGE_TYPE_ABS);
+    header.space_id = innodb::read_be<uint32_t>(data, innodb::FIL_PAGE_SPACE_ID);
 
     return header;
 }

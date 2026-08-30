@@ -63,8 +63,6 @@ inline UndoFormatProfile undo_format_profile_for_version(::dbrecovery::MySQLVers
         case ::dbrecovery::MySQLVersion::MYSQL_81:
         case ::dbrecovery::MySQLVersion::MYSQL_82:
         case ::dbrecovery::MySQLVersion::MYSQL_83:
-        case ::dbrecovery::MySQLVersion::MYSQL_84:
-        case ::dbrecovery::MySQLVersion::MYSQL_90:
             return UndoFormatProfile::MYSQL8_7BYTE;
         default:
             return UndoFormatProfile::UNRESOLVED;

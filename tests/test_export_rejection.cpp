@@ -13,6 +13,15 @@ TEST(ExportRejection, ZeroRowsEmptyExport) {
     std::remove(p.c_str());
 }
 
+TEST(ExportRejection, DefaultRowRejected) {
+    SalvagedRow row;
+    row.fields = {"unclassified"};
+    std::string p = "/tmp/export_reject_default.csv";
+    std::remove(p.c_str());
+    EXPECT_FALSE(SalvageEngine::export_csv(p, {row}));
+    std::remove(p.c_str());
+}
+
 TEST(ExportRejection, OnlyEvidenceRejected) {
     SalvagedRow frag;
     frag.salvage_level = SalvageLevel::FRAGMENT;

@@ -5,6 +5,7 @@
 #include <vector>
 #include <string>
 #include <array>
+#include "dbrecovery/innodb/page_defs.hpp"
 
 namespace dbrecovery {
 namespace disk {
@@ -35,7 +36,7 @@ inline bool has_valid_ibd_header(const uint8_t* data, size_t size, uint32_t page
     }
     
     // 读取 FIL_PAGE_TYPE (offset 24)
-    uint16_t page_type = static_cast<uint16_t>(data[24]) | (static_cast<uint16_t>(data[25]) << 8);
+    const uint16_t page_type = innodb::read_be<uint16_t>(data, innodb::FIL_PAGE_TYPE_ABS);
     
     // MySQL 5.6 的索引页类型: 0x45BC (17852) 或 0x45BF (48965)
     bool is_valid_type = (page_type == 0x45BC) || (page_type == 0x45BF) || 
@@ -67,7 +68,7 @@ inline bool is_valid_innodb_index_page(const uint8_t* data, size_t size, uint32_
     }
     
     // 读取页类型
-    uint16_t page_type = static_cast<uint16_t>(data[24]) | (static_cast<uint16_t>(data[25]) << 8);
+    const uint16_t page_type = innodb::read_be<uint16_t>(data, innodb::FIL_PAGE_TYPE_ABS);
     
     // 有效的 InnoDB 页类型
     return (page_type == 0x45BC) ||  // MySQL 5.6 索引页
@@ -88,18 +89,12 @@ inline bool check_page_crc32(const uint8_t* data, size_t size, uint32_t page_siz
 
 /// @brief 从页数据中提取空间 ID
 inline uint32_t extract_space_id(const uint8_t* data) {
-    return static_cast<uint32_t>(data[0]) |
-           (static_cast<uint32_t>(data[1]) << 8) |
-           (static_cast<uint32_t>(data[2]) << 16) |
-           (static_cast<uint32_t>(data[3]) << 24);
+    return innodb::read_be<uint32_t>(data, innodb::FIL_PAGE_SPACE_ID);
 }
 
 /// @brief 从页数据中提取页号
 inline uint32_t extract_page_number(const uint8_t* data) {
-    return static_cast<uint32_t>(data[4]) |
-           (static_cast<uint32_t>(data[5]) << 8) |
-           (static_cast<uint32_t>(data[6]) << 16) |
-           (static_cast<uint32_t>(data[7]) << 24);
+    return innodb::read_be<uint32_t>(data, innodb::FIL_PAGE_OFFSET);
 }
 
 /// @brief 提取页号（big-endian，用于旧版本 MySQL）
@@ -275,8 +270,8 @@ void scan_for_ibd_blocks(const uint8_t* data, size_t size, Callback callback,
                 break;
             }
             
-            uint16_t page_type = static_cast<uint16_t>(data[offset + 24]) |
-                                (static_cast<uint16_t>(data[offset + 25]) << 8);
+            const uint16_t page_type = innodb::read_be<uint16_t>(
+                data + offset, innodb::FIL_PAGE_TYPE_ABS);
             
             // 检查是否是有效的 InnoDB 页类型
             if (!is_valid_innodb_index_page(data + offset, page_size, page_size)) {

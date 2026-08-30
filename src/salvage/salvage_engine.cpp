@@ -358,6 +358,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l1(
         uint32_t field_count, record_len;
         if (detect_offset_table(data, rec_off, heap_top, field_count, record_len)) {
             SalvagedRow row;
+            row.salvage_level = SalvageLevel::STRUCTURED;
             row.page_offset = 0;
             row.record_offset = rec_off;
             row.page_no = extract_page_no(data, size);
@@ -433,6 +434,7 @@ std::vector<SalvagedRow> SalvageEngine::salvage_l2(
         uint32_t field_count, record_len;
         if (detect_offset_table(data, pos, size, field_count, record_len)) {
             SalvagedRow row;
+            row.salvage_level = SalvageLevel::STRUCTURED;
             row.page_offset = pos;
             row.record_offset = pos;
             row.page_no = extract_page_no(data, size);

@@ -27,16 +27,14 @@ public:
             
             // 1. FIL Header
             // Offset 24: Page Type (FIL_PAGE_INDEX / 0x45BC for 5.6)
-            uint16_t type = 17852; // MySQL 5.6 index page type
-            page[24] = type & 0xFF;
-            page[25] = (type >> 8) & 0xFF;
+            constexpr uint16_t type = 17852;
+            dbrecovery::innodb::write_be<uint16_t>(
+                page.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS, type);
 
             // Offset 4: Page Number
-            uint32_t pno = static_cast<uint32_t>(p);
-            page[4] = pno & 0xFF;
-            page[5] = (pno >> 8) & 0xFF;
-            page[6] = (pno >> 16) & 0xFF;
-            page[7] = (pno >> 24) & 0xFF;
+            const uint32_t pno = static_cast<uint32_t>(p);
+            dbrecovery::innodb::write_be<uint32_t>(
+                page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET, pno);
 
             // 2. Page Header
             // Offset 38: n_dir_slots, 40: heap_top

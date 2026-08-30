@@ -41,8 +41,10 @@ std::unique_ptr<PageHeaderBase> PageFactory::create_page_header(
             return std::make_unique<PageHeaderV84>(page_data, page_size, version);
 
         default:
-            // Fallback to 5.6 compatible mode for unsupported versions
-            return std::make_unique<PageHeaderV56>(page_data, page_size);
+            // Fail closed: UNKNOWN or unsupported versions must not select a
+            // parser, or pages could be misread under a wrong layout.
+            throw std::invalid_argument(
+                "UNKNOWN/unsupported MySQL version — cannot select page parser");
     }
 }
 

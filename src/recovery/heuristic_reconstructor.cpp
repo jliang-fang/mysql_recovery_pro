@@ -6,6 +6,7 @@
  */
 
 #include "dbrecovery/recovery/heuristic_reconstructor.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -669,18 +670,14 @@ HeuristicReconstructor::PagePointers HeuristicReconstructor::parse_page_pointers
 
     PagePointers ptrs = {};
 
-    if (page_size < 16) {
+    if (page_size < innodb::FIL_PAGE_NEXT_ABS + sizeof(uint32_t)) {
         return ptrs;
     }
 
-    // FIL_PAGE_PREV at offset 8
-    ptrs.prev_page = (page_data[8] << 24) | (page_data[9] << 16) |
-                     (page_data[10] << 8) | page_data[11];
+    ptrs.prev_page = innodb::read_be<uint32_t>(page_data, innodb::FIL_PAGE_PREV_ABS);
     ptrs.prev_valid = (ptrs.prev_page != 0xFFFFFFFF);
 
-    // FIL_PAGE_NEXT at offset 12
-    ptrs.next_page = (page_data[12] << 24) | (page_data[13] << 16) |
-                     (page_data[14] << 8) | page_data[15];
+    ptrs.next_page = innodb::read_be<uint32_t>(page_data, innodb::FIL_PAGE_NEXT_ABS);
     ptrs.next_valid = (ptrs.next_page != 0xFFFFFFFF);
 
     return ptrs;

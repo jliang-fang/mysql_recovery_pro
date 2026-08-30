@@ -250,7 +250,7 @@ bool DiskScanner::analyze_ibd_file(const std::string& path) {
         file.seekg(page_no * page_size_, std::ios::beg);
         file.read(reinterpret_cast<char*>(page_data.data()), page_size_);
 
-        uint16_t page_type = innodb::read_le<uint16_t>(
+        const uint16_t page_type = innodb::read_be<uint16_t>(
             page_data.data(), innodb::FIL_PAGE_TYPE_ABS);
 
         if (page_type == innodb::FIL_PAGE_INDEX) {
@@ -263,7 +263,7 @@ bool DiskScanner::analyze_ibd_file(const std::string& path) {
         } else if (page_type == innodb::FIL_PAGE_UNDO_LOG) {
             undo_pages++;
             valid_pages++;
-        } else if (page_type == 15) { // BLOB page type
+        } else if (page_type == innodb::FIL_PAGE_TYPE_BLOB) {
             blob_pages++;
             valid_pages++;
             blob_pages_.push_back({page_no, page_data});

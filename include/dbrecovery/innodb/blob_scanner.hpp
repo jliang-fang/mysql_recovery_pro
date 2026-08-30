@@ -360,13 +360,8 @@ inline BLOBPage BlobScanner::parse_blob_page_header(const std::vector<uint8_t>& 
     }
 
     // Parse FIL header
-    page.page_no = (static_cast<uint32_t>(page_data[4]) << 24) |
-                   (static_cast<uint32_t>(page_data[5]) << 16) |
-                   (static_cast<uint32_t>(page_data[6]) << 8) |
-                   static_cast<uint32_t>(page_data[7]);
-
-    page.page_type = (static_cast<uint16_t>(page_data[24]) << 8) |
-                     static_cast<uint16_t>(page_data[25]);
+    page.page_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
+    page.page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
     // Parse BLOB header at FIL_PAGE_DATA (offset 38)
     const uint8_t* blob_hdr = page_data.data() + FIL_HEADER_SIZE;
@@ -391,8 +386,7 @@ inline bool BlobScanner::is_valid_blob_page(const std::vector<uint8_t>& page_dat
         return false;
     }
 
-    uint16_t page_type = (static_cast<uint16_t>(page_data[24]) << 8) |
-                         static_cast<uint16_t>(page_data[25]);
+    const uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
     // Check for BLOB page types
     return page_type == static_cast<uint16_t>(BlobPageType::BLOB) ||

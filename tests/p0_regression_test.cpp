@@ -666,28 +666,16 @@ TEST_F(DeepUndoAnalyzerVersionTest, VersionAwareRollPtrSize) {
 }
 
 TEST_F(DeepUndoAnalyzerVersionTest, RollPtrSizeConsistency) {
-    // Verify that the correct storage size is used based on MySQL version:
-    // 6 bytes for MySQL < 8.0, 7 bytes for MySQL >= 8.0
-
-    // The version-aware logic in read_prev_undo_ptr does:
-    //   size_t roll_ptr_size = (mysql_version >= MySQLVersion::MYSQL_80) ? 7 : 6;
-    //   return RollPtrDecoder::decode_storage_to_internal(page_data + offset, roll_ptr_size);
-
-    // Test all version boundaries by verifying the size selection logic
-    auto test_version_size = [](MySQLVersion v) -> size_t {
-        return (v >= MySQLVersion::MYSQL_80) ? 7 : 6;
-    };
-
-    EXPECT_EQ(test_version_size(MySQLVersion::MYSQL_56), 6u)
-        << "MYSQL_56 must use 6-byte format";
-    EXPECT_EQ(test_version_size(MySQLVersion::MYSQL_57), 6u)
-        << "MYSQL_57 must use 6-byte format";
-    EXPECT_EQ(test_version_size(MySQLVersion::MYSQL_80), 7u)
-        << "MYSQL_80 must use 7-byte format";
-    EXPECT_EQ(test_version_size(MySQLVersion::MYSQL_84), 7u)
-        << "MYSQL_84 must use 7-byte format";
-    EXPECT_EQ(test_version_size(MySQLVersion::MYSQL_90), 7u)
-        << "MYSQL_90 must use 7-byte format";
+    EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_56),
+              UndoFormatProfile::LEGACY_6BYTE);
+    EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_57),
+              UndoFormatProfile::LEGACY_6BYTE);
+    EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_80),
+              UndoFormatProfile::MYSQL8_7BYTE);
+    EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_84),
+              UndoFormatProfile::UNRESOLVED);
+    EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_90),
+              UndoFormatProfile::UNRESOLVED);
 
     // Also verify that RollPtrDecoder::decode_storage with null data does not crash
     auto decoded_6 = RollPtrDecoder::decode_storage(nullptr, 6);

@@ -50,6 +50,12 @@ std::string SalvageEvidenceSerializer::to_json(
 
     nlohmann::json j;
 
+    for (const auto& frag : fragments) {
+        if (frag.salvage_level == dbrecovery::recovery::SalvageLevel::STRUCTURED) {
+            return {};
+        }
+    }
+
     // Non-importable marker — this is forensic evidence, not structured data
     j["_metadata"]["format"] = "salvage_evidence";
     j["_metadata"]["version"] = 1;
@@ -125,6 +131,8 @@ bool SalvageEvidenceSerializer::write_evidence(
     const std::map<std::string, std::string>& metadata) {
 
     std::string json_str = to_json(fragments, metadata);
+
+    if (json_str.empty()) return false;
 
     std::ofstream file(path);
     if (!file) return false;

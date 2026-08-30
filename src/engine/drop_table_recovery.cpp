@@ -1507,8 +1507,9 @@ DropTableRecovery::Result DropTableRecovery::recover(
                         auto page_data = reader.read_page_raw(pg);
                         if (page_data.empty() || page_data.size() < 50) continue;
 
-                        uint16_t page_type = (static_cast<uint16_t>(page_data[24]) << 8) | page_data[25];
-                        if (page_type == 0x45BF) {  // INDEX page
+                        const uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(
+                            page_data.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+                        if (page_type == dbrecovery::innodb::FIL_PAGE_INDEX) {
                             OrphanedPageScanner::OrphanedPage op;
                             op.page_number = pg;
                             op.page_size = reader.get_page_size();

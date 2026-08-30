@@ -60,6 +60,22 @@ TEST(L3L4Isolation, IncludeFragmentsFlagStillNotInCsv) {
     std::remove(p2.c_str());
 }
 
+TEST(L3L4Isolation, EvidenceSerializerRejectsStructuredRows) {
+    dbrecovery::salvage::SalvageEvidenceSerializer ser;
+    SalvagedRow structured;
+    structured.salvage_level = SalvageLevel::STRUCTURED;
+    structured.fields = {"structured"};
+    SalvagedRow fragment;
+    fragment.salvage_level = SalvageLevel::FRAGMENT;
+    fragment.fields = {"fragment"};
+
+    std::string path = "/tmp/l3_l4_structured_evidence.json";
+    std::remove(path.c_str());
+    EXPECT_TRUE(ser.to_json({structured, fragment}).empty());
+    EXPECT_FALSE(ser.write_evidence(path, {structured, fragment}));
+    EXPECT_EQ(std::remove(path.c_str()), -1);
+}
+
 TEST(L3L4Isolation, ExportRejected) {
     SalvagedRow structured; structured.salvage_level = SalvageLevel::STRUCTURED;
     structured.fields = {"a","b"}; structured.confidence = 0.9; structured.field_count = 2;

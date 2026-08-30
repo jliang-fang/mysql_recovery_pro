@@ -7,6 +7,7 @@
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/salvage/evidence_serializer.hpp"
 #include <fstream>
 #include <iostream>
@@ -449,7 +450,8 @@ std::vector<std::map<std::string, std::string>> MySQL56Parser::parse_compact() {
     if (!data_ || size_ < 100) return records;
 
     // 检查页类型
-    uint16_t page_type = innodb::read_be<uint16_t>(data_ + 24);
+    uint16_t page_type = innodb::read_be<uint16_t>(
+        data_, innodb::FIL_PAGE_TYPE_ABS);
     if (page_type != innodb::FIL_PAGE_INDEX) {
         return records;
     }
@@ -616,7 +618,8 @@ MySQL84Parser::MySQL84Parser(const uint8_t* data, size_t size)
 
     // 检查临时页标志
     if (size >= 100) {
-        uint16_t page_type = innodb::read_be<uint16_t>(data + 24);
+        uint16_t page_type = innodb::read_be<uint16_t>(
+            data, innodb::FIL_PAGE_TYPE_ABS);
         is_temporary_ = (page_type == 0x26F6);  // FIL_PAGE_TEMP
     }
 }

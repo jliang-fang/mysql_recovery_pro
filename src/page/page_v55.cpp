@@ -29,28 +29,28 @@ PageHeaderV55::PageHeaderV55(const uint8_t* page_data, size_t page_size, MySQLVe
 }
 
 uint32_t PageHeaderV55::get_prev_page() const {
-    // FIL_PAGE_PREV: offset 0-3
-    if (page_size_ < 4) return 0xFFFFFFFF;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 0);
+    // FIL_PAGE_PREV: canonical big-endian at FIL_PAGE_PREV_ABS (8)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_PREV_ABS + sizeof(uint32_t)) return 0xFFFFFFFF;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_PREV_ABS);
 }
 
 uint32_t PageHeaderV55::get_next_page() const {
-    // FIL_PAGE_NEXT: offset 4-7
-    if (page_size_ < 8) return 0xFFFFFFFF;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 4);
+    // FIL_PAGE_NEXT: canonical big-endian at FIL_PAGE_NEXT_ABS (12)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_NEXT_ABS + sizeof(uint32_t)) return 0xFFFFFFFF;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
 }
 
 uint64_t PageHeaderV55::get_lsn() const {
-    // FIL_PAGE_LSN: offset 8-15 (8 bytes)
-    if (page_size_ < 16) return 0;
-    return dbrecovery::innodb::read_le<uint64_t>(data_.get(), 8);
+    // FIL_PAGE_LSN: canonical big-endian at FIL_PAGE_LSN_ABS (16, 8 bytes)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_LSN_ABS + sizeof(uint64_t)) return 0;
+    return dbrecovery::innodb::read_be<uint64_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_LSN_ABS);
 }
 
 PageType PageHeaderV55::get_page_type() const {
-    // FIL_PAGE_TYPE: offset 16-17 (2 bytes)
-    if (page_size_ < 18) return PageType::UNKNOWN;
-    uint16_t type = dbrecovery::innodb::read_le<uint16_t>(data_.get(), 16);
-    return static_cast<PageType>(type);
+    // FIL_PAGE_TYPE: canonical big-endian at FIL_PAGE_TYPE_ABS (24, 2 bytes)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_TYPE_ABS + sizeof(uint16_t)) return PageType::UNKNOWN;
+    uint16_t type = dbrecovery::innodb::read_be<uint16_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    return page_type_from_fil(type);
 }
 
 uint16_t PageHeaderV55::get_level() const {
@@ -190,15 +190,15 @@ RowFormat PageHeaderV55::get_row_format() const {
 }
 
 uint32_t PageHeaderV55::get_space_id() const {
-    // FIL_PAGE_SPACE_ID: offset 18-21 (relative to page start)
-    if (page_size_ < 22) return 0;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 18);
+    // FIL_PAGE_SPACE_ID: canonical big-endian at FIL_PAGE_SPACE_ID (34)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_SPACE_ID + sizeof(uint32_t)) return 0;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_SPACE_ID);
 }
 
 uint32_t PageHeaderV55::get_page_offset() const {
-    // FIL_PAGE_OFFSET: offset 12-15 (relative to page start)
-    if (page_size_ < 16) return 0;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 12);
+    // FIL_PAGE_OFFSET: canonical big-endian at FIL_PAGE_OFFSET (4)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_OFFSET + sizeof(uint32_t)) return 0;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_OFFSET);
 }
 
 uint16_t PageHeaderV55::get_max_trx_id() const {
@@ -265,24 +265,24 @@ PageHeaderV50::PageHeaderV50(const uint8_t* page_data, size_t page_size, MySQLVe
 }
 
 uint32_t PageHeaderV50::get_prev_page() const {
-    if (page_size_ < 4) return 0xFFFFFFFF;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 0);
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_PREV_ABS + sizeof(uint32_t)) return 0xFFFFFFFF;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_PREV_ABS);
 }
 
 uint32_t PageHeaderV50::get_next_page() const {
-    if (page_size_ < 8) return 0xFFFFFFFF;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 4);
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_NEXT_ABS + sizeof(uint32_t)) return 0xFFFFFFFF;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_NEXT_ABS);
 }
 
 uint64_t PageHeaderV50::get_lsn() const {
-    if (page_size_ < 16) return 0;
-    return dbrecovery::innodb::read_le<uint64_t>(data_.get(), 8);
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_LSN_ABS + sizeof(uint64_t)) return 0;
+    return dbrecovery::innodb::read_be<uint64_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_LSN_ABS);
 }
 
 PageType PageHeaderV50::get_page_type() const {
-    if (page_size_ < 18) return PageType::UNKNOWN;
-    uint16_t type = dbrecovery::innodb::read_le<uint16_t>(data_.get(), 16);
-    return static_cast<PageType>(type);
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_TYPE_ABS + sizeof(uint16_t)) return PageType::UNKNOWN;
+    uint16_t type = dbrecovery::innodb::read_be<uint16_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
+    return page_type_from_fil(type);
 }
 
 uint16_t PageHeaderV50::get_level() const {
@@ -370,8 +370,9 @@ uint32_t PageHeaderV50::get_space_id() const {
 }
 
 uint32_t PageHeaderV50::get_page_offset() const {
-    if (page_size_ < 16) return 0;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 12);
+    // FIL_PAGE_OFFSET: canonical big-endian at FIL_PAGE_OFFSET (4)
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_OFFSET + sizeof(uint32_t)) return 0;
+    return dbrecovery::innodb::read_be<uint32_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_OFFSET);
 }
 
 uint16_t PageHeaderV50::get_max_trx_id() const {
@@ -425,8 +426,10 @@ std::unique_ptr<PageHeaderBase> PageFactoryExtended::create_page_header_extended
             return std::make_unique<PageHeaderV80>(page_data, page_size, version);
 
         default:
-            // Fallback to 5.6 compatible mode for unsupported versions
-            return std::make_unique<PageHeaderV56>(page_data, page_size);
+            // Fail closed: UNKNOWN or unsupported versions must not select a
+            // parser, or pages could be misread under a wrong layout.
+            throw std::invalid_argument(
+                "UNKNOWN/unsupported MySQL version — cannot select page parser");
     }
 }
 

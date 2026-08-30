@@ -989,11 +989,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (!undo_tablespace.empty()) analyzer.add_undo_tablespace(undo_tablespace);
             analyzer.set_page_size(page_size);
             analyzer.set_tablespace_id(schema.space_id);
-            dbrecovery::innodb::UndoFormatProfile profile =
-                dbrecovery::innodb::UndoFormatProfile::UNRESOLVED;
-            if (mysql_version == "5.6") profile = dbrecovery::innodb::UndoFormatProfile::LEGACY_6BYTE;
-            else if (mysql_version == "5.7") profile = dbrecovery::innodb::UndoFormatProfile::LEGACY_6BYTE;
-            else profile = dbrecovery::innodb::UndoFormatProfile::MYSQL8_7BYTE;
+            const auto profile = dbrecovery::innodb::undo_format_profile_for_version(sdi_version);
+            if (profile == dbrecovery::innodb::UndoFormatProfile::UNRESOLVED) {
+                return reject("--undo-history version lacks a verified undo format profile");
+            }
             analyzer.set_undo_format_profile(profile);
 
             auto histories = analyzer.rebuild_all_histories(schema.space_id, schema, index_id);

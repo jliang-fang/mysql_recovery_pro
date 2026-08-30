@@ -9,6 +9,8 @@
 #include <vector>
 #include <string>
 
+#include "dbrecovery/innodb/page_defs.hpp"
+
 namespace mysql_recovery {
 
 // ==================== 基础类型定义 ====================
@@ -43,6 +45,26 @@ enum class PageType {
     BLOB = 9972,        // 0x26F4 - BLOB page
     COMPRESSED = 9973,  // 0x26F5 - Compressed page
 };
+
+inline PageType page_type_from_fil(uint16_t raw_fil_type) {
+    switch (raw_fil_type) {
+        case dbrecovery::innodb::FIL_PAGE_INDEX:
+            return PageType::INDEX;
+        case dbrecovery::innodb::FIL_PAGE_UNDO_LOG:
+            return PageType::UNDO_LOG;
+        case dbrecovery::innodb::FIL_PAGE_SDI:
+            return PageType::SDI;
+        case dbrecovery::innodb::FIL_PAGE_SDI_ZIP:
+            return PageType::BLOB;
+        case dbrecovery::innodb::FIL_PAGE_COMPRESSED:
+        case dbrecovery::innodb::FIL_PAGE_COMPRESSED_AND_ENCRYPTED:
+            return PageType::COMPRESSED;
+        case dbrecovery::innodb::FIL_PAGE_TYPE_ALLOCATED:
+            return PageType::ALLOCATED;
+        default:
+            return PageType::UNKNOWN;
+    }
+}
 
 // ==================== Page Header 抽象基类 ====================
 /**

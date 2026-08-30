@@ -67,7 +67,7 @@ struct SalvagedRow {
     uint64_t record_offset = 0;
     uint32_t page_no = 0;          // page number from FIL header (FIL_PAGE_OFFSET)
     uint16_t field_count = 0;
-    SalvageLevel salvage_level = SalvageLevel::STRUCTURED;
+    SalvageLevel salvage_level = SalvageLevel::FRAGMENT;
     std::vector<std::string> fields;
     std::vector<bool> field_nulls;
     std::string content_hash;      // SHA256 of raw record bytes (for dedup)

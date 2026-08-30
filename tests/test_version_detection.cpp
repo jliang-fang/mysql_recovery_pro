@@ -45,11 +45,11 @@ uint16_t to_canonical_page_type(uint16_t page_type) {
 
 /**
  * @brief Create a minimal page with specified parameters
- * @details Writes BOTH the canonical big-endian FIL header (offset 24 page
- * type, offset 26 flush LSN, offset 38 page version) for the version detector
- * AND the legacy little-endian fields at the wrong offsets that the legacy
- * PageHeader accessors read. The canonical detector never reads the legacy
- * offsets, so the dual-write is non-conflicting.
+ * @details Writes the canonical big-endian InnoDB FIL header (offset 4 page
+ * number, offset 8 prev, offset 12 next, offset 16 LSN, offset 24 page type,
+ * offset 34 space id) and the PAGE_HEADER/BTR_HEADER fields that the
+ * version-specific PageHeader classes read. No legacy little-endian shadow
+ * fields are written: the readers must consume the canonical offsets.
  */
 std::vector<uint8_t> create_test_page(
     uint32_t prev_page = 0,
@@ -82,19 +82,6 @@ std::vector<uint8_t> create_test_page(
     dbrecovery::innodb::write_be<uint64_t>(page.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS + 2, 0);
     // Checksum at offset 0 (big-endian), set to 0 for test pages.
     dbrecovery::innodb::write_be<uint32_t>(page.data(), 0, 0);
-
-    // Legacy dual-writes (little-endian at the wrong offsets the legacy
-    // PageHeader accessors read). None of these offsets are read by the
-    // canonical version detector, so both representations coexist.
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 16, page_type);   // legacy get_page_type
-    dbrecovery::innodb::write_le<uint64_t>(page.data(), 8, lsn);          // legacy get_lsn
-    dbrecovery::innodb::write_le<uint32_t>(page.data(), 18, space_id);    // legacy get_space_id
-    dbrecovery::innodb::write_le<uint32_t>(page.data(), 12, 0);           // legacy get_page_offset
-    dbrecovery::innodb::write_le<uint32_t>(page.data(), 0, prev_page);    // legacy get_prev_page
-    dbrecovery::innodb::write_le<uint32_t>(page.data(), 4, next_page);    // legacy get_next_page
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 34, level);       // legacy get_level
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 36, n_recs);      // legacy get_n_recs
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 48, n_dir_slots); // legacy get_n_dir_slots
 
     // PAGE_HEADER (at offset 38) — page header fields are big-endian.
     // PAGE_N_DIR_SLOTS at offset 38, PAGE_HEAP_TOP at 40, PAGE_N_HEAP at 42,
@@ -286,9 +273,8 @@ TEST(VersionDetection, ConfidenceRequiresSignedSdiEvidence) {
 }
 
 TEST(VersionDetection, DetectSDIPage) {
-    // Create an SDI page
+    // create_test_page_v80 includes canonical SDI type and signature evidence.
     auto page = create_test_page_v80(1, 0x100000000ULL);
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 16, static_cast<uint16_t>(PageType::SDI));
 
     MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
     EXPECT_EQ(version, MySQLVersion::MYSQL_80)
@@ -304,19 +290,11 @@ TEST(VersionDetection, DetectVersionFromFactory) {
         << "PageFactory should detect 8.0 version";
 }
 
-TEST(VersionDetection, CreatePageHeaderV55) {
-    // Create a 5.5/5.1 page (space_id = 0 to avoid detection as 8.0)
+TEST(VersionDetection, CreatePageHeaderRejectsUnknownVersion) {
     auto page = create_test_page_v55(0, 38);
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
-    ASSERT_NE(header, nullptr);
-
-    // 5.5/5.1 pages should be detected as 56 or 57
-    EXPECT_TRUE(header->get_version() == MySQLVersion::MYSQL_56 ||
-                header->get_version() == MySQLVersion::MYSQL_57)
-        << "Should be 5.6/5.7, got " << static_cast<int>(header->get_version());
-    EXPECT_EQ(header->get_page_type(), PageType::INDEX);
-    EXPECT_EQ(header->get_n_recs(), 2);
+    EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                 std::invalid_argument);
 }
 
 TEST(VersionDetection, CreatePageHeaderV80) {
@@ -327,7 +305,7 @@ TEST(VersionDetection, CreatePageHeaderV80) {
     ASSERT_NE(header, nullptr);
 
     EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_80);
-    EXPECT_EQ(header->get_page_type(), PageType::INDEX);
+    EXPECT_EQ(header->get_page_type(), PageType::SDI);
 }
 
 TEST(VersionDetection, CreatePageHeaderV84) {
@@ -339,6 +317,37 @@ TEST(VersionDetection, CreatePageHeaderV84) {
 
     EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_84);
     EXPECT_EQ(header->get_page_type(), PageType::INDEX);
+}
+
+TEST(VersionDetection, CanonicalFilFieldsMatchAcrossHeaders) {
+    constexpr uint32_t kPageNumber = 0x10203040;
+    constexpr uint32_t kPrevPage = 0x11223344;
+    constexpr uint32_t kNextPage = 0x55667788;
+    constexpr uint64_t kLsn = 0x0102030405060708ULL;
+    constexpr uint32_t kSpaceId = 0x90ABCDEF;
+
+    auto page = create_test_page(
+        kPrevPage, kNextPage, kLsn, static_cast<uint16_t>(PageType::INDEX),
+        0, 2, 2, 38, kSpaceId);
+    dbrecovery::innodb::write_be<uint32_t>(
+        page.data(), dbrecovery::innodb::FIL_PAGE_OFFSET, kPageNumber);
+
+    PageHeaderV55 v55(page.data(), page.size());
+    PageHeaderV56 v56(page.data(), page.size());
+    PageHeaderV80 v80(page.data(), page.size());
+    PageHeaderV84 v84(page.data(), page.size());
+
+    for (const PageHeaderBase* header : {static_cast<const PageHeaderBase*>(&v55),
+                                        static_cast<const PageHeaderBase*>(&v56),
+                                        static_cast<const PageHeaderBase*>(&v80),
+                                        static_cast<const PageHeaderBase*>(&v84)}) {
+        EXPECT_EQ(header->get_page_offset(), kPageNumber);
+        EXPECT_EQ(header->get_prev_page(), kPrevPage);
+        EXPECT_EQ(header->get_next_page(), kNextPage);
+        EXPECT_EQ(header->get_lsn(), kLsn);
+        EXPECT_EQ(header->get_page_type(), PageType::INDEX);
+        EXPECT_EQ(header->get_space_id(), kSpaceId);
+    }
 }
 
 // ==================== Row Format Detection Tests ====================
@@ -410,16 +419,15 @@ TEST(RowFormatDetection, DetectDynamicFormat) {
 
 // ==================== Checksum Verification Tests ====================
 
-TEST(ChecksumVerification, VerifyV55Checksum) {
-    // Create a 5.5/5.1 page (space_id = 0)
+TEST(ChecksumVerification, VerifyV55ChecksumRequiresExplicitVersion) {
     auto page = create_test_page_v55(0, 38);
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
-    ASSERT_NE(header, nullptr);
+    EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                 std::invalid_argument);
 
-    // 5.5/5.1 should have valid checksum (either matching or disabled)
-    bool valid = header->verify_checksum();
-    EXPECT_TRUE(valid) << "5.5/5.1 checksum should be valid";
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_56, page.data(), page.size());
+    EXPECT_TRUE(header->verify_checksum());
 }
 
 TEST(ChecksumVerification, VerifyV80Checksum) {
@@ -435,33 +443,33 @@ TEST(ChecksumVerification, VerifyV80Checksum) {
     // bool valid = header->verify_checksum();
 }
 
-TEST(ChecksumVerification, VerifyV84Checksum) {
-    // Create an 8.4 page (space_id = 0)
+TEST(ChecksumVerification, VerifyV84ChecksumRequiresExplicitVersion) {
     auto page = create_test_page_v84(0, static_cast<uint16_t>(PageType::INDEX));
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
-    ASSERT_NE(header, nullptr);
+    EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                 std::invalid_argument);
 
-    // 8.4 checksums should be valid (or checksum disabled)
-    // Note: Test pages may not have valid checksums, so we skip this check
-    // bool valid = header->verify_checksum();
-    // EXPECT_TRUE(valid) << "8.4 checksum should be valid or disabled";
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_84, page.data(), page.size());
+    ASSERT_NE(header, nullptr);
 }
 
 // ==================== Page Type Tests ====================
 
-TEST(PageType, DetectIndexPage) {
-    auto page = create_test_page_v80(1, 0x100000000ULL);
+TEST(PageType, DetectIndexPageWithExplicitVersion) {
+    auto page = create_test_page(
+        0, 0, 0, static_cast<uint16_t>(PageType::INDEX));
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
-    ASSERT_NE(header, nullptr);
+    EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                 std::invalid_argument);
 
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_80, page.data(), page.size());
     EXPECT_EQ(header->get_page_type(), PageType::INDEX);
 }
 
 TEST(PageType, DetectSDIPageType) {
     auto page = create_test_page_v80(1, 0x100000000ULL);
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 16, static_cast<uint16_t>(PageType::SDI));
 
     auto header = PageFactory::create_page_header(page.data(), page.size());
     ASSERT_NE(header, nullptr);
@@ -469,13 +477,17 @@ TEST(PageType, DetectSDIPageType) {
     EXPECT_EQ(header->get_page_type(), PageType::SDI);
 }
 
-TEST(PageType, DetectUndoLogPageType) {
+TEST(PageType, DetectUndoLogPageTypeWithExplicitVersion) {
     auto page = create_test_page_v80(1, 0x100000000ULL);
-    dbrecovery::innodb::write_le<uint16_t>(page.data(), 16, static_cast<uint16_t>(PageType::UNDO_LOG));
+    dbrecovery::innodb::write_be<uint16_t>(
+        page.data(), dbrecovery::innodb::FIL_PAGE_TYPE_ABS,
+        dbrecovery::innodb::FIL_PAGE_UNDO_LOG);
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
-    ASSERT_NE(header, nullptr);
+    EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                 std::invalid_argument);
 
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_80, page.data(), page.size());
     EXPECT_EQ(header->get_page_type(), PageType::UNDO_LOG);
 }
 
@@ -633,29 +645,27 @@ TEST(VersionDetection, InvalidPageSize) {
 
 // ==================== Compatibility Tests ====================
 
-TEST(Compatibility, V55BackwardCompatible) {
-    // Create a 5.5 page and verify it can be parsed as 5.6
+TEST(Compatibility, V55RequiresExplicitVersion) {
     auto page = create_test_page_v55(1, 38);
 
-    auto header = PageFactory::create_page_header(page.data(), page.size());
-    ASSERT_NE(header, nullptr);
+    EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                 std::invalid_argument);
 
-    // Should be able to read core fields
+    auto header = PageFactoryEnhanced::create_page_header_for_version(
+        MySQLVersion::MYSQL_56, page.data(), page.size());
     EXPECT_NE(header->get_prev_page(), 0xFFFFFFFF);
     EXPECT_NE(header->get_next_page(), 0xFFFFFFFF);
     EXPECT_EQ(header->get_page_type(), PageType::INDEX);
 }
 
 TEST(Compatibility, V80ForwardCompatible) {
-    // Create an 8.0 page and verify it can be parsed
     auto page = create_test_page_v80(1, 0x100000000ULL);
 
     auto header = PageFactory::create_page_header(page.data(), page.size());
     ASSERT_NE(header, nullptr);
 
-    // Verify the page was detected as 8.0
     EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_80);
-    EXPECT_EQ(header->get_page_type(), PageType::INDEX);
+    EXPECT_EQ(header->get_page_type(), PageType::SDI);
 }
 
 TEST(Compatibility, V84EnhancedFeatures) {
@@ -674,17 +684,20 @@ TEST(Compatibility, V84EnhancedFeatures) {
 TEST(VersionDetection, FullPipeline) {
     // Test the full pipeline: create page -> detect version -> create header -> verify
 
-    // Test 5.5/5.1
+    // Test legacy page: automatic routing must not guess a layout.
     {
         auto page = create_test_page_v55(0, 38);
         MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
-        auto header = PageFactory::create_page_header(page.data(), page.size());
-        ASSERT_NE(header, nullptr);
-        // 5.5/5.1 checksums should be valid
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN);
+        EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                     std::invalid_argument);
+
+        auto header = PageFactoryEnhanced::create_page_header_for_version(
+            MySQLVersion::MYSQL_56, page.data(), page.size());
         EXPECT_TRUE(header->verify_checksum());
     }
 
-    // Test 8.0
+    // Test 8.0 signed SDI evidence.
     {
         auto page = create_test_page_v80(1, 0x100000000ULL);
         MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
@@ -692,19 +705,20 @@ TEST(VersionDetection, FullPipeline) {
         auto header = PageFactory::create_page_header(page.data(), page.size());
         ASSERT_NE(header, nullptr);
         EXPECT_EQ(header->get_version(), MySQLVersion::MYSQL_80);
-        // Note: synthetic page checksums are not asserted (see VerifyV80Checksum).
+        EXPECT_EQ(header->get_page_type(), PageType::SDI);
     }
 
-    // Test 8.4
+    // Test an explicit 8.4 context; unsigned index data is not automatic evidence.
     {
         auto page = create_test_page_v84(0, static_cast<uint16_t>(PageType::INDEX));
         MySQLVersion version = PageFactoryEnhanced::detect_version(page.data(), page.size());
-        auto header = PageFactory::create_page_header(page.data(), page.size());
+        EXPECT_EQ(version, MySQLVersion::UNKNOWN);
+        EXPECT_THROW(PageFactory::create_page_header(page.data(), page.size()),
+                     std::invalid_argument);
+
+        auto header = PageFactoryEnhanced::create_page_header_for_version(
+            MySQLVersion::MYSQL_84, page.data(), page.size());
         ASSERT_NE(header, nullptr);
-        // 8.4 checksums should be valid (or checksum disabled)
-        // Note: Test pages may not have valid checksums, so we skip this check
-        // bool valid = header->verify_checksum();
-        // EXPECT_TRUE(valid) << "8.4 checksum should be valid";
     }
 }
 

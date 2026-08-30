@@ -37,7 +37,7 @@ std::optional<PhysicalLayoutAnalyzer::LayoutInfo> PhysicalLayoutAnalyzer::analyz
     if (!page_data || page_size < 100) return std::nullopt;
 
     // Check FIL header page type (offset 24, big-endian, 2 bytes)
-    uint16_t page_type = (static_cast<uint16_t>(page_data[24]) << 8) | page_data[25];
+    const uint16_t page_type = innodb::read_be<uint16_t>(page_data, innodb::FIL_PAGE_TYPE_ABS);
     if (page_type != innodb::FIL_PAGE_INDEX) return std::nullopt;
 
     // Read PAGE_N_RECS from page header (offset 54, big-endian)
