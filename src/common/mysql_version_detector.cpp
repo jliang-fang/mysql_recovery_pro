@@ -246,7 +246,9 @@ int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_
     //   bit 5  : ATOMIC_BLOBS（MySQL 5.7+，原子BLOB指针）
     //   bit 6  : PAGE_COMPRESSION
     // 仅对FSP_HDR页（page 0）有效；非FSP页无法判断，返回0（不确定）
-    if (page_size < 42) return 0;
+    // read_be32 at FSP_SPACE_FLAGS_OFFSET (42) requires 46 bytes; the old
+    // < 42 check allowed out-of-bounds reads on 42..45 byte buffers.
+    if (page_size < innodb::FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t)) return 0;
 
     uint16_t page_type = endian::read_be16(page_data, innodb::FIL_PAGE_TYPE_ABS);
     if (page_type != innodb::FIL_PAGE_TYPE_FSP_HDR) {

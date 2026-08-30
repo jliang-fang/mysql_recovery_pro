@@ -6,6 +6,8 @@
 #include "dbrecovery/recovery/ext4_recovery.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/common/mysql_version_detector.hpp"
+#include "dbrecovery/common/version_compat.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -814,11 +816,17 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
         }
 
         // Read block bitmap to identify freed blocks
-        if (config_.scan_freed_blocks) {
+        if (config_.scan_freed_blocks || config_.scan_allocated_innodb_blocks) {
             std::vector<uint8_t> bitmap = read_block_bitmap(group_index);
             if (!bitmap.empty()) {
                 // Scan freed blocks
-                scan_freed_blocks(group_index, bitmap);
+                if (config_.scan_freed_blocks) {
+                    scan_freed_blocks(group_index, bitmap);
+                }
+                // Scan allocated blocks for InnoDB INDEX pages (DELETE recovery)
+                if (config_.scan_allocated_innodb_blocks) {
+                    scan_allocated_blocks(group_index, bitmap);
+                }
             }
         }
 
@@ -881,16 +889,14 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
     uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group * block_size;
 
     // InnoDB pages are 16KB, spanning multiple ext4 blocks.
-    // Since InnoDB pages within a file are at 16KB offsets, but the file
-    // may start at any block boundary, we scan at page_size steps but
-    // also at N offsets within each page_size window to catch misaligned pages.
-    // For 1024-byte blocks: scan at 1KB step within 16KB windows.
-    // For 4096-byte blocks: scan at 4KB step (already page-aligned since 16384/4096=4).
+    // We must read at 16KB-aligned boundaries, so step by blocks_per_page.
+    uint32_t blocks_per_page = config_.page_size / block_size;
+    if (blocks_per_page == 0) blocks_per_page = 16;
 
-    uint32_t scan_step = block_size;
+    uint32_t scan_step = blocks_per_page;  // Step by InnoDB page size
     uint32_t max_offsets = (blocks_per_group > 524288) ? 524288 : blocks_per_group;
 
-    for (uint32_t blk = 0; blk < max_offsets; blk++) {
+    for (uint32_t blk = 0; blk < max_offsets; blk += blocks_per_page) {
         // Only scan blocks that are freed (bit=0 in bitmap)
         uint32_t byte_idx = blk / 8;
         uint32_t bit_idx = blk % 8;
@@ -964,6 +970,96 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
                         block_info.disk_offset = disk_offset;
                         block_info.block_group = group_index;
                         block_info.is_freed = true;
+                        block_info.data = std::move(page_data);
+
+                        // Thread-safe: push to queue, merge later in main thread
+                        std::lock_guard<std::mutex> lock(result_mutex_);
+                        result_queue_.push({index_id, std::move(block_info)});
+                        blocks_found_.fetch_add(1);
+                    }
+                }
+            }
+        }
+    }
+
+    close(fd);
+#endif
+}
+
+// ==================== Allocated Block Scanning (DELETE recovery) ====================
+
+void Ext4Recovery::scan_allocated_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap) {
+#ifdef __linux__
+    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+        return;
+    }
+
+    // Use cached values (thread-safe)
+    uint32_t block_size = block_size_;
+    uint32_t blocks_per_group = blocks_per_group_;
+    uint32_t group_count = group_count_;
+
+    // Safety check: ensure we don't read beyond device
+    uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group * block_size;
+
+    // InnoDB pages are 16KB, spanning multiple ext4 blocks.
+    // We must read at 16KB-aligned boundaries, so step by blocks_per_page.
+    uint32_t blocks_per_page = config_.page_size / block_size;
+    if (blocks_per_page == 0) blocks_per_page = 16;
+
+    uint32_t max_offsets = (blocks_per_group > 524288) ? 524288 : blocks_per_group;
+
+    for (uint32_t blk = 0; blk < max_offsets; blk += blocks_per_page) {
+        // Only scan blocks that are allocated (bit=1 in bitmap)
+        uint32_t byte_idx = blk / 8;
+        uint32_t bit_idx = blk % 8;
+        if (byte_idx < bitmap.size() && (bitmap[byte_idx] & (1 << bit_idx)) == 0) {
+            continue;  // Skip freed blocks
+        }
+
+        uint64_t disk_offset = static_cast<uint64_t>(group_index) * blocks_per_group * block_size
+                              + static_cast<uint64_t>(blk) * block_size;
+
+        // Safety check: don't read beyond device
+        if (disk_offset + config_.page_size > max_offset) break;
+
+        // Read full page (16KB)
+        std::vector<uint8_t> page_data(config_.page_size);
+        ssize_t bytes_read = pread(fd, page_data.data(), config_.page_size, disk_offset);
+
+        if (bytes_read == static_cast<ssize_t>(config_.page_size)) {
+            blocks_scanned_.fetch_add(1);
+
+            // Check for InnoDB page type at offset 24
+            if (page_data.size() >= 38) {
+                uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+
+                // Only accept FIL_PAGE_INDEX (0x45BF) for allocated block scanning
+                // Allocated blocks with other page types are not useful for DELETE recovery
+                if (page_type == 0x45BF) {
+                    uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+
+                    if (index_id > 0 && index_id < 1000000000000) {
+                        // Filter system tables if configured
+                        if (config_.exclude_system_tables) {
+                            if ((index_id > 0 && index_id <= 100) ||
+                                index_id >= 0xFFFF0000ULL) {
+                                continue;
+                            }
+                        }
+                        // Filter to only target index IDs if specified
+                        if (!config_.target_index_ids.empty() &&
+                            std::find(config_.target_index_ids.begin(),
+                                      config_.target_index_ids.end(),
+                                      index_id) == config_.target_index_ids.end()) {
+                            continue;
+                        }
+                        Ext4BlockInfo block_info;
+                        block_info.block_number = disk_offset / block_size;
+                        block_info.disk_offset = disk_offset;
+                        block_info.block_group = group_index;
+                        block_info.is_freed = false;
                         block_info.data = std::move(page_data);
 
                         // Thread-safe: push to queue, merge later in main thread
@@ -1279,7 +1375,20 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
 
             try {
                 dbrecovery::innodb::InnoDBIndexParser parser;
+                parser.set_recover_deleted(true);
+                parser.set_bad_page_mode(2);  // Try aggressive recovery for potentially corrupted pages
                 uint32_t page_no = static_cast<uint32_t>(page.disk_offset / config_.page_size);
+
+                // Detect MySQL version from page data
+                dbrecovery::MySQLVersion version = dbrecovery::MySQLVersionDetector::detect(
+                    page.data.data(), page.data.size());
+                if (version != dbrecovery::MySQLVersion::UNKNOWN) {
+                    uint32_t version_int = dbrecovery::mysql_version_to_number(version);
+                    parser.set_mysql_version(version_int);
+                } else {
+                    // Default to MySQL 8.0 if version cannot be detected
+                    parser.set_mysql_version(80000);
+                }
 
                 if (use_schema) {
                     // Schema-aware parsing

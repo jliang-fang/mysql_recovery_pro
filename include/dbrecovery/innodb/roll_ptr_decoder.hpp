@@ -8,12 +8,14 @@
  * DB_ROLL_PTR appears in three distinct formats:
  *
  * 1. Internal format (used throughout the recovery engine):
- *    uint64_t with bits [31:0] = page_no, bits [47:32] = offset, bits [55:48] = flags
+ *    uint64_t with bits [31:0] = page_no, bits [49:32] = offset (18 bits),
+ *    bits [55:50] = flags (6 bits)
  *    decode()/encode() convert between this uint64_t and (page_no, offset, flags)
  *
  * 2. Storage format (undo page header, big-endian at offset+14):
  *    MySQL 5.6/5.7: 6 bytes BE, page_no = val >> 20, offset = val & 0x3FFFF
- *    MySQL 8.0+: 7 bytes BE, same encoding with an extra flags byte at the top
+ *    MySQL 8.0+: 7 bytes BE, same encoding; the extra byte carries 4 flags
+ *    bits in its upper nibble (bits [55:52] of the full value)
  *    decode_storage() reads directly from page data
  *
  * 3. Field data format (undo field data, little-endian):
@@ -141,10 +143,12 @@ public:
     //   MySQL 8.0+: 7 bytes big-endian
     //
     // Encoding: page_no = val >> 20, offset = val & 0x3FFFF
-    //   For 6 bytes (48 bits): 28 bits page_no, 18 bits offset, 2 bits unused
-    //   For 7 bytes (56 bits): 36 bits page_no, 18 bits offset, 2 bits flags
+    //   6 bytes (48 bits): 28 bits page_no, 18 bits offset, 2 bits unused
+    //   7 bytes (56 bits): 28 bits page_no, 18 bits offset, 2 bits unused,
+    //                      4 bits flags + 4 bits unused in the top byte
     //
-    // The 7th byte (8.0+) encodes flags in the upper nibble:
+    // In the 8.0+ 7-byte encoding the flags occupy the upper nibble of the
+    // most significant stored byte:
     //   bits [55:52] = flags, bits [51:48] = unused
 
     /**

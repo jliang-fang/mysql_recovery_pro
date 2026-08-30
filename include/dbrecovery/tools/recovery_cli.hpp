@@ -230,6 +230,8 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "                                 XFS recovery uses AG scanning and free inode btree traversal\n";
     std::cout << "  \033[1m--target-index-ids=<ids>\033[0m    Only recover specified index IDs (comma-separated)\n";
     std::cout << "                                 Example: --target-index-ids=1001,1002,1003\n";
+    std::cout << "  \033[1m--scan-allocated\033[0m           Scan allocated blocks for InnoDB INDEX pages\n";
+    std::cout << "                                 (required for DELETE recovery where blocks stay allocated)\n";
     std::cout << "  \033[1m--exclude-system-tables\033[0m     Exclude MySQL system tables from recovery\n";
     std::cout << "  \033[1m--system-tablespace=<path>\033[0m Path to system tablespace (ibdata1/mysql.ibd)\n";
     std::cout << "                                 Required for undo log recovery (MySQL 5.6/5.7)\n";
@@ -2038,31 +2040,111 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Time: " << std::fixed << std::setprecision(2)
                   << pt_stats.recovery_time_ms << "ms\n";
 
-        if (!records.empty()) {
+        // Fail-closed export gate: structured partition CSV is only written
+        // when the schema is known, records were recovered, and every
+        // partition succeeded. Any failed partition means the tablespace set
+        // is incomplete or inconsistent — emit forensic/evidence JSON instead.
+        const bool pt_schema_known = pt_schema.has_value();
+        const bool pt_export_ok = pt_schema_known && !records.empty() &&
+                                  pt_stats.recovered_partitions > 0 &&
+                                  pt_stats.failed_partitions == 0;
+
+        if (pt_export_ok) {
             fs::create_directories(output_dir);
             std::string out_path = output_dir + "/" + table_name + "_recovered.csv";
             std::ofstream out(out_path);
-            if (!records.empty()) {
-                // Write header
-                auto& first_row = records[0];
-                bool first_col = true;
-                for (const auto& col : first_row) {
+            if (!out) {
+                std::cerr << "[ERROR] Cannot write partition CSV: " << out_path << "\n";
+                if (!write_result_json({
+                        {"mode","partition_recovery"},{"success",false},
+                        {"classification","forensic_evidence"},
+                        {"structured_rows",0},
+                        {"evidence_fragments",records.size()},
+                        {"schema_source", pt_schema_known ? "FILE" : "EVIDENCE_ONLY"},
+                        {"schema_trust_level", pt_schema_known ? "AUTHORITATIVE" : "EVIDENCE_ONLY"},
+                        {"recovery_method","partition"},
+                        {"export_success",false},
+                        {"export_rejection_reason","cannot open output CSV: "+out_path},
+                        {"importable",false},
+                        {"reason","structured export refused; output CSV could not be created"},
+                        {"partitions",pt_stats.total_partitions},
+                        {"recovered_partitions",pt_stats.recovered_partitions},
+                        {"failed_partitions",pt_stats.failed_partitions}})) {
+                    return 1;
+                }
+                return 1;
+            }
+            // Write header
+            auto& first_row = records[0];
+            bool first_col = true;
+            for (const auto& col : first_row) {
+                if (!first_col) out << ",";
+                out << col.first;
+                first_col = false;
+            }
+            out << "\n";
+            for (const auto& row : records) {
+                first_col = true;
+                for (const auto& col : row) {
                     if (!first_col) out << ",";
-                    out << col.first;
+                    out << escape_csv_field(col.second);
                     first_col = false;
                 }
                 out << "\n";
-                for (const auto& row : records) {
-                    first_col = true;
-                    for (const auto& col : row) {
-                        if (!first_col) out << ",";
-                        out << escape_csv_field(col.second);
-                        first_col = false;
-                    }
-                    out << "\n";
+            }
+            if (!out) {
+                std::cerr << "[ERROR] Failed writing partition CSV: " << out_path << "\n";
+                if (!write_result_json({
+                        {"mode","partition_recovery"},{"success",false},
+                        {"classification","forensic_evidence"},
+                        {"structured_rows",0},
+                        {"evidence_fragments",records.size()},
+                        {"schema_source", pt_schema_known ? "FILE" : "EVIDENCE_ONLY"},
+                        {"schema_trust_level", pt_schema_known ? "AUTHORITATIVE" : "EVIDENCE_ONLY"},
+                        {"recovery_method","partition"},
+                        {"export_success",false},
+                        {"export_rejection_reason","partial write to output CSV: "+out_path},
+                        {"importable",false},
+                        {"reason","structured export refused; CSV write failed mid-stream"},
+                        {"partitions",pt_stats.total_partitions},
+                        {"recovered_partitions",pt_stats.recovered_partitions},
+                        {"failed_partitions",pt_stats.failed_partitions}})) {
+                    return 1;
                 }
+                return 1;
             }
             std::cout << "[INFO] Output written to: " << out_path << "\n";
+        } else {
+            // No structured export. Recovered rows (if any) are forensic
+            // evidence only; never publish a CSV that could be imported.
+            std::string rejection = "schema file missing";
+            if (pt_schema_known && records.empty()) rejection = "no records recovered";
+            else if (pt_schema_known && !records.empty() &&
+                     pt_stats.recovered_partitions == 0) rejection = "no partition produced structured rows";
+            else if (pt_schema_known && !records.empty() &&
+                     pt_stats.recovered_partitions > 0 &&
+                     pt_stats.failed_partitions > 0) rejection =
+                "recovered=" + std::to_string(pt_stats.recovered_partitions) +
+                " failed=" + std::to_string(pt_stats.failed_partitions) +
+                "; partition set incomplete, structured export refused";
+            std::cout << "[WARN] Partition structured export skipped: " << rejection << "\n";
+            if (!write_result_json({
+                    {"mode","partition_recovery"},{"success",false},
+                    {"classification","forensic_evidence"},
+                    {"structured_rows",0},
+                    {"evidence_fragments",records.size()},
+                    {"schema_source", pt_schema_known ? "FILE" : "EVIDENCE_ONLY"},
+                    {"schema_trust_level", pt_schema_known ? "AUTHORITATIVE" : "EVIDENCE_ONLY"},
+                    {"recovery_method","partition"},
+                    {"export_success",false},
+                    {"export_rejection_reason",rejection},
+                    {"importable",false},
+                    {"reason","partition rows are forensic evidence only; structured export requires schema plus a fully recovered partition set"},
+                    {"partitions",pt_stats.total_partitions},
+                    {"recovered_partitions",pt_stats.recovered_partitions},
+                    {"failed_partitions",pt_stats.failed_partitions}})) {
+                return 1;
+            }
         }
 
         return 0;
@@ -2539,10 +2621,43 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Time: " << std::fixed << std::setprecision(2)
                   << rstats.rescue_time_ms << "ms\n";
 
-        if (!rows.empty()) {
+        // Fail-closed export gate: structured secondary rescue is only
+        // exported when every rescued row was identity-verified against the
+        // target index. Any unverified row or identity-mismatch page means the
+        // output could mix rows from a different index — emit evidence JSON.
+        const bool sec_identity_ok = !rows.empty() &&
+                                     rstats.identity_mismatch_pages == 0 &&
+                                     std::all_of(rows.begin(), rows.end(),
+                                                 [](const dbrecovery::innodb::RescuedRow& r) {
+                                                     return r.identity_verified;
+                                                 });
+
+        if (sec_identity_ok) {
             fs::create_directories(output_dir);
             std::string out_path = output_dir + "/rescued_from_secondary.csv";
             std::ofstream out(out_path);
+            if (!out) {
+                std::cerr << "[ERROR] Cannot write secondary CSV: " << out_path << "\n";
+                if (!write_result_json({
+                        {"mode","secondary_rescue"},{"success",false},
+                        {"classification","forensic_evidence"},
+                        {"structured_rows",0},
+                        {"evidence_fragments",rows.size()},
+                        {"schema_source","FILE"},
+                        {"schema_trust_level","AUTHORITATIVE"},
+                        {"recovery_method","secondary_rescue"},
+                        {"export_success",false},
+                        {"export_rejection_reason","cannot open output CSV: "+out_path},
+                        {"importable",false},
+                        {"reason","structured export refused; output CSV could not be created"},
+                        {"rescued_rows",rstats.rescued_rows},
+                        {"merged_rows",rstats.merged_rows},
+                        {"identity_verified_pages",rstats.identity_verified_pages},
+                        {"identity_mismatch_pages",rstats.identity_mismatch_pages}})) {
+                    return 1;
+                }
+                return 1;
+            }
 
             // Header from first row
             bool first_col = true;
@@ -2565,6 +2680,28 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 out << "," << std::fixed << std::setprecision(2) << row.completeness
                     << "," << row.source << "\n";
             }
+            if (!out) {
+                std::cerr << "[ERROR] Failed writing secondary CSV: " << out_path << "\n";
+                if (!write_result_json({
+                        {"mode","secondary_rescue"},{"success",false},
+                        {"classification","forensic_evidence"},
+                        {"structured_rows",0},
+                        {"evidence_fragments",rows.size()},
+                        {"schema_source","FILE"},
+                        {"schema_trust_level","AUTHORITATIVE"},
+                        {"recovery_method","secondary_rescue"},
+                        {"export_success",false},
+                        {"export_rejection_reason","partial write to output CSV: "+out_path},
+                        {"importable",false},
+                        {"reason","structured export refused; CSV write failed mid-stream"},
+                        {"rescued_rows",rstats.rescued_rows},
+                        {"merged_rows",rstats.merged_rows},
+                        {"identity_verified_pages",rstats.identity_verified_pages},
+                        {"identity_mismatch_pages",rstats.identity_mismatch_pages}})) {
+                    return 1;
+                }
+                return 1;
+            }
             std::cout << "[INFO] Output written to: " << out_path << "\n";
 
             // Show completeness distribution
@@ -2578,7 +2715,32 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                       << ", 40-80%: " << partial
                       << ", <40%: " << minimal << "\n";
         } else {
-            std::cout << "[WARN] No data could be rescued from secondary indexes\n";
+            // Structured rescue refused: rows are forensic evidence only.
+            std::string rejection = "no rows rescued";
+            if (!rows.empty() && rstats.identity_mismatch_pages > 0) rejection =
+                "identity mismatch on " + std::to_string(rstats.identity_mismatch_pages) +
+                " page(s); rows may belong to a different index";
+            else if (!rows.empty() && rstats.identity_mismatch_pages == 0) rejection =
+                "unverified rows present; target index identity not established for all rows";
+            std::cout << "[WARN] Secondary rescue structured export skipped: " << rejection << "\n";
+            if (!write_result_json({
+                    {"mode","secondary_rescue"},{"success",false},
+                    {"classification","forensic_evidence"},
+                    {"structured_rows",0},
+                    {"evidence_fragments",rows.size()},
+                    {"schema_source","FILE"},
+                    {"schema_trust_level","AUTHORITATIVE"},
+                    {"recovery_method","secondary_rescue"},
+                    {"export_success",false},
+                    {"export_rejection_reason",rejection},
+                    {"importable",false},
+                    {"reason","secondary rescue rows are forensic evidence only; structured export requires full target-index identity verification"},
+                    {"rescued_rows",rstats.rescued_rows},
+                    {"merged_rows",rstats.merged_rows},
+                    {"identity_verified_pages",rstats.identity_verified_pages},
+                    {"identity_mismatch_pages",rstats.identity_mismatch_pages}})) {
+                return 1;
+            }
         }
 
         return 0;
@@ -3027,6 +3189,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             ext4_config.verbose = verbose;
             ext4_config.scan_freed_blocks = true;
             ext4_config.scan_deleted_inodes = true;
+            ext4_config.scan_allocated_innodb_blocks = parser_.get_bool_option("scan-allocated", false);
             ext4_config.exclude_system_tables = exclude_system_tables;
 
             // Parse target index IDs
@@ -5403,6 +5566,26 @@ inline void RecoveryCLI::generate_recovery_report(
                           parser_.has_option("schema-file") ? "MANUAL" : "NONE";
     input.has_undo_logs = parser_.has_option("system-tablespace") ||
                           parser_.has_option("undo-tablespace");
+    // Get source file/device size
+    if (!input.source_path.empty()) {
+        struct stat st;
+        if (stat(input.source_path.c_str(), &st) == 0) {
+            if (S_ISBLK(st.st_mode)) {
+                // Block device - use blockdev to get size
+                std::string cmd = "blockdev --getsize64 " + input.source_path + " 2>/dev/null";
+                FILE* pipe = popen(cmd.c_str(), "r");
+                if (pipe) {
+                    char buf[64];
+                    if (fgets(buf, sizeof(buf), pipe)) {
+                        input.source_size_bytes = std::strtoull(buf, nullptr, 10);
+                    }
+                    pclose(pipe);
+                }
+            } else {
+                input.source_size_bytes = st.st_size;
+            }
+        }
+    }
     builder.set_input(input);
 
     StrategyInfo strategy;
@@ -5439,6 +5622,17 @@ inline void RecoveryCLI::generate_recovery_report(
     OutputInfo output;
     output.output_directory = output_dir;
     output.format = parser_.get_option("format", "csv");
+    // Scan output directory for files and calculate total size
+    try {
+        if (fs::exists(output_dir) && fs::is_directory(output_dir)) {
+            for (const auto& entry : fs::directory_iterator(output_dir)) {
+                if (entry.is_regular_file() && entry.path().extension() == ".csv") {
+                    output.output_files.push_back(entry.path().string());
+                    output.total_output_size_bytes += entry.file_size();
+                }
+            }
+        }
+    } catch (...) {}
     builder.set_output(output);
 
     auto report = builder.build();

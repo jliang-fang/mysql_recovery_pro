@@ -122,6 +122,38 @@ TEST(MultiPageEvidenceTest, CorroboratingOnlyPagesAreRejected) {
     EXPECT_FALSE(result.is_known());
 }
 
+// ==================== FSP flags boundary safety (P0 regression) ====================
+
+/// @brief Truncate a canonical 16 KiB FSP_HDR page to `size` bytes.
+std::vector<uint8_t> truncate_page(size_t size) {
+    auto page = build_page(innodb::FIL_PAGE_INDEX, 0, 1);
+    set_fsp_flags(page, innodb::FSP_FLAGS_POST_ANTELOPE | innodb::FSP_FLAGS_ATOMIC_BLOBS);
+    page.resize(size);
+    return page;
+}
+
+TEST(MultiPageEvidenceTest, FspFlagsRejectsTruncatedBuffers) {
+    // read_be32 at FSP_SPACE_FLAGS_OFFSET (42) requires 46 bytes. Any buffer
+    // shorter than that must return "indeterminate" (0) and must not read
+    // past the end. Regression for the old `< 42` check that allowed
+    // out-of-bounds reads on 42..45 byte pages.
+    EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(41).data(), 41), 0);
+    EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(42).data(), 42), 0);
+    EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(45).data(), 45), 0);
+}
+
+TEST(MultiPageEvidenceTest, FspFlagsReadsAtCanonicalBoundary) {
+    // A full FSP_HDR page with modern flags must produce the positive
+    // corroborating score: the boundary fix must not change fail-closed
+    // behavior on valid pages.
+    auto page = build_page(innodb::FIL_PAGE_INDEX, 0, 1);
+    set_fsp_flags(page, innodb::FSP_FLAGS_POST_ANTELOPE | innodb::FSP_FLAGS_ATOMIC_BLOBS);
+    EXPECT_GT(MySQLVersionDetector::check_fsp_flags(page.data(), page.size()), 0);
+
+    // Exactly 46 bytes carries the complete 4-byte flags field.
+    EXPECT_GT(MySQLVersionDetector::check_fsp_flags(truncate_page(46).data(), 46), 0);
+}
+
 // ==================== Insufficient / empty evidence ====================
 
 TEST(MultiPageEvidenceTest, EmptyInputIsInsufficient) {

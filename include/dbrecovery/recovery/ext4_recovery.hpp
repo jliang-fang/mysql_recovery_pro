@@ -234,6 +234,7 @@ struct Ext4Config {
     uint32_t num_workers = 8;             // Worker threads
     bool scan_freed_blocks = true;        // Scan recently freed blocks
     bool scan_deleted_inodes = true;      // Scan deleted inode slots
+    bool scan_allocated_innodb_blocks = false; // Scan allocated blocks for InnoDB INDEX pages (for DELETE recovery)
     bool verbose = false;
     uint64_t progress_interval_ms = 500;
     std::vector<uint64_t> target_index_ids;
@@ -398,6 +399,9 @@ private:
 
     // Scan freed blocks in block bitmap
     void scan_freed_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap);
+
+    // Scan allocated blocks for InnoDB INDEX pages (for DELETE recovery)
+    void scan_allocated_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap);
 
     // Safe inode scanning with bounds checking
     void scan_deleted_inodes_safe(uint32_t group_index, const std::vector<uint8_t>& inode_bitmap);

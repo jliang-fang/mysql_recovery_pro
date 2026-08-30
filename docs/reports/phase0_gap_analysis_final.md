@@ -1,8 +1,15 @@
 # MySQL Recovery Pro Phase 0 生产级差距分析报告
 
 > 生成日期: 2026-08-27
+> 更新日期: 2026-08-30 (P0 边界修复与导出资格门已落地，隔离验证通过)
 > 范围: 源码、CMake、CLI、测试和隔离构建结果的交叉审计
 > 方法: 对 Phase 0 修复后的实际实现进行静态审查，并以 `/app/mysql_recovery_test` 隔离验证为准
+
+> **基线缺失说明（Phase 0 定稿前提）：** 指定的 `docs/ARCHITECTURE_v2_BEYOND_ODU.md`
+> 仍不可用。本报告继续以 `docs/architecture_v2_blueprint.md` 作为**明确标注的临时替代基线**；
+> 因此 P0–P4 声明到实现的映射只能以蓝图为准，`BEYOND_ODU` 文档加入后的补充映射必须在
+> 该文档就位后重新核对。在 `ARCHITECTURE_v2_BEYOND_ODU.md` 提供前，以下所有 "映射/能力"
+> 判定均受此限制。
 
 ---
 
@@ -67,28 +74,15 @@
 
 #### 1a. 9.0 检测路径缺失？（旧报告 P0.5）
 
-**状态：✅ 已修复**
+**状态：✅ 已收敛为保守策略（旧声称的返回路径已删除）**
 
-`decide_version()` L339-340 有明确的 9.0 返回路径：
-```cpp
-if (page_version_score >= 15) {
-    return MySQLVersion::MYSQL_90;  // 9.0 (page_version >= 3)
-}
-```
-提交 `1d0567f`。
+旧报告声称 `decide_version()` L339-340 存在 `page_version >= 3 → MYSQL_90` 返回路径。**当前源码中该路径已不存在**：`decide_version()` 现位于 `src/common/mysql_version_detector.cpp:316-338`，仅当 SDI 签名命中时返回 `MYSQL_80`，其余一律 `UNKNOWN`。`check_page_version_field()` 已收敛为 stub（L226-232，恒返回 0）。9.0 仅保留在 `version_features_` 能力表（L30）与 `DetailedVersionDetector::get_supported_versions()` 中，不参与自动版本选择。
 
 #### 1b. 5.x 无条件返回 5.6？（旧报告 P0.6）
 
-**状态：✅ 已修复**
+**状态：✅ 已收敛为保守策略（旧声称的分支已整体删除）**
 
-`decide_version()` L346-360 中 5.x 分支在仅有 checksum 证据时返回 `UNKNOWN`，非旧报告的盲目返回 5.6：
-```cpp
-if (checksum_score >= 8) {
-    if (fsp_score > 0) return MySQLVersion::MYSQL_57;
-    if (undo_score >= 8) return MySQLVersion::MYSQL_57;
-    return MySQLVersion::UNKNOWN;  // 不再盲目返回 5.6
-}
-```
+旧报告 L346-360 声称存在 5.x checksum 分支。**当前源码中该分支已整体删除**：`decide_version()` 对 5.x 一律返回 `UNKNOWN`（除非 SDI 命中 8.0+）。FSP flags/LSN/undo 都只是佐证（下界）证据，不唯一决定版本；因此不存在任何 "返回 5.7/5.6" 的自动路径，彻底消除旧报告的盲目回退风险。
 
 #### 1c. 多页投票非确定性（旧报告 P1.8）
 
@@ -98,11 +92,9 @@ if (checksum_score >= 8) {
 
 #### 1d. page_version 偏移冲突（旧报告 MEDIUM）
 
-**状态：⚠️ 部分缓解**
+**状态：✅ 已消除 — 读取路径收敛为 stub**
 
-`page_defs.hpp:214` 定义 `FIL_PAGE_PAGE_VERSION_OFFSET = FIL_HEADER_SIZE` (38)。`check_page_version_field()` L234-236 添加了 **page-type guard**：仅在 `FIL_PAGE_INDEX` 页面读取 offset 38。非 INDEX 页面返回 0。
-
-**残余风险：** 极低。在 INDEX 页面上 offset 38 在 5.6/5.7 中确实是 `PAGE_N_DIR_SLOTS`，但 `page_version > 0` 检测几乎总是 false（PAGE_N_DIR_SLOTS 通常为 0 或很小值）。
+`page_defs.hpp:214` 仍定义 `FIL_PAGE_PAGE_VERSION_OFFSET = FIL_HEADER_SIZE` (38)，但 `check_page_version_field()`（`mysql_version_detector.cpp:226-232`）已收敛为恒返回 0 的 stub，不再读取 offset 38，注释明确 "Offset 38 belongs to the page header and overlaps PAGE_N_DIR_SLOTS ... Not server-version evidence." 旧报告所称 "page-type guard（L234-236）" 已过时：现在任何页面类型都不读取该偏移，冲突彻底消除。
 
 #### 1e. FLUSH_LSN 信号不可靠（旧报告 MEDIUM）
 
@@ -114,9 +106,27 @@ if (checksum_score >= 8) {
 
 #### 1f. 校验和启发式仅检查大小（旧报告 LOW）
 
-**状态：⚠️ 仍存在**
+**状态：⚠️ 仍存在（行号已更新）**
 
-`check_checksum_type()` L250-254 返回 0（无实际验证）。注释明确说明"checksum value alone does not identify an algorithm"。
+`check_checksum_type()`（`mysql_version_detector.cpp:234-239`）返回 0（无实际验证）。注释明确说明"checksum value alone does not identify an algorithm"。
+
+#### 1g. FSP flags 截断页越界读取（本次 P0 缺陷，已修复）
+
+**状态：✅ 已修复并由边界 regression 覆盖**
+
+`check_fsp_flags()`（`src/common/mysql_version_detector.cpp:241-274`）修复前使用 `if (page_size < 42) return 0;`，但随后 `endian::read_be32(page_data, innodb::FSP_SPACE_FLAGS_OFFSET)`（offset 42）实际需要 46 bytes；42–45 bytes 缓冲区会触发 4-byte 越界读取。
+
+**修复：** 最小缓冲区判断替换为
+```cpp
+if (page_size < innodb::FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t)) return 0;
+```
+即以 46-byte 为下限，复用 `page_defs.hpp` 中 canonical `FSP_SPACE_FLAGS_OFFSET`（= FIL_HEADER_SIZE + 4 = 42）模式，无硬编码魔数。版本证据策略（佐证证据、不唯一决定版本）保持不变。
+
+**回归测试：** `tests/test_version_evidence.cpp`
+- `FspFlagsRejectsTruncatedBuffers`：41/42/45 bytes → 返回 0（不确定）且不越界读取
+- `FspFlagsReadsAtCanonicalBoundary`：46 bytes + FSP_HDR + POST_ANTELOPE/ATOMIC_BLOBS → 正向佐证分数
+
+隔离验证：`test_version_evidence` 12/12 PASS（`/app/mysql_recovery_test/build/tests/`）。
 
 ---
 
@@ -124,11 +134,14 @@ if (checksum_score >= 8) {
 
 **文件：** `include/dbrecovery/innodb/roll_ptr_decoder.hpp`
 
-**状态：✅ 无问题**
+**状态：✅ 文档一致性已修复；物理 wire-format/page-width 仍缺独立真实 MySQL fixture**
 
-- 位布局正确：掩码 `0x3FFFF`（18-bit offset）和 `0x3F`（6-bit flags）
-- 6-byte BE（5.6/5.7）vs 7-byte BE（8.0+）存储格式正确处理
-- 测试确认最大值的无损往返
+本次 Phase 0 修正了文档与实现不一致：
+- internal 编码实际为 `bits [31:0]=page_no`、`bits [49:32]=offset（18-bit，掩码 0x3FFFF）`、`bits [55:50]=flags（6-bit，掩码 0x3F）`，文档已统一为该布局，消除了旧文档中 "36-bit page_no"、"offset bits [47:32]" 等矛盾描述
+- 7-byte BE storage 实际只在最高有效存储字节的高半字节存放 **4 个 flags bits**（bits [55:52]），文档不再称其为独立的 "第七个字节"，并注明低 4 位 unused
+- 本次仅修正注释，未改动 `uint32_t` API、bit shift、serialize/decode 行为；`test_roll_ptr_decoder` 38/38、P0 regression roll-pointer cases 通过，确认无行为漂移
+
+**残余风险（fixture gap）：** 6/7-byte wire-format 与 page-width 的物理字节序仍未通过独立真实 MySQL undo fixture 验证。此条属于**未验证能力**，不得描述为已证明的数据恢复缺陷；只有真实 fixture 才能将该编码从 "internal unit-tested" 升级为 "on-disk verified"。
 
 ---
 
@@ -163,6 +176,23 @@ if (checksum_score >= 8) {
 - `TraceVersionChainNullFieldContinuesViaHeader`（L1443）：空字段通过头继续
 - `TraceVersionChainUnresolvedProfileRejects`（L1507）：UNRESOLVED fail-closed
 - `TraceVersionChainInvalidContinuationBreaks`（L1470）：无效延续中断
+
+#### 3d. Undo 页头偏移冲突（未解决的高优先级 fixture gap）
+
+**状态：⚠️ 未解决 — 本次 commit 不修改 constants**
+
+`src/innodb/deep_undo_analyzer.cpp` 的匿名命名空间定义 `TRX_UNDO_PAGE_N_RECS = 32`（L42）与 `TRX_UNDO_PAGE_HDR_SIZE = 40`（L43）。这里存在两个需要真实 fixture 仲裁的疑点：
+
+1. **TRX_UNDO_PAGE_N_RECS = 32 vs 官方 34：** `scan_records()`（L825-839）在 `read_le<uint16_t>(page_data.data(), TRX_UNDO_PAGE_N_RECS)`（L836）以 offset 32 读取 record count。InnoDB 的 undo 页头（`trx0undo.h`）中 `TRX_UNDO_PAGE_N_RECS` 字段位于 trxn/max（offset 34）还是 trxn/slot（offset 32）因版本/页头布局而异；offset 32 与 34 落在 undo 页头的不同 word 上，任何一侧错误都会使 record-count 解读整体错误。
+2. **TRX_UNDO_PAGE_HDR_SIZE = 40：** 该值决定 `parse_verified_undo_record()` / `read_undo_record_at()` 的最小合法偏移（L348、L360、L553），若页头实际更大，合法记录会被误判；若更小，则可能把页头残留解读为记录。
+
+**路径与行号证据（保留）：**
+- `deep_undo_analyzer.cpp:42-43` — 两个有争议的常量定义
+- `deep_undo_analyzer.cpp:348, 360, 553` — HDR_SIZE 用于最小偏移门槛
+- `deep_undo_analyzer.cpp:836` — N_RECS 读取点
+- `deep_undo_analyzer.cpp:838` — TRX_UNDO_PAGE_START(28) 起始读取
+
+**处置：** 本次 commit 不修改任何 constants（计划明确排除）。该冲突保持为高优先级 fixture gap：只有真实 MySQL 5.6/5.7/8.0+ undo 页（可控事务、已知记录数）才能裁定 32 还是 34，以及 40 是否足以覆盖目标版本的页头布局。当前所有 `test_deep_undo_analyzer` 通过仅证明**内部一致性**（测试与实现共享同一常量），不代表对齐官方 on-disk 布局。
 
 ---
 
@@ -330,13 +360,16 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 
 | 编号 | 描述 | 文件 | 提交 | 验证 |
 |------|------|------|------|------|
+| P0.0 | FSP flags 截断页越界读取（42–45B OOB） | `mysql_version_detector.cpp:251` | 本次 commit | 46-byte 下限 + 边界回归（1g） |
 | P0.1 | SDI inflateInit → inflateInit2(-15) | `sdi_manager.hpp:90` | `833d1fc` | `inflateInit2(&strm, -15)` 确认 |
 | P0.2 | extract_sdi_payload 无安全限制 | `sdi_manager.hpp:66-78` | `833d1fc` | 16MB/20:1 限制确认 |
 | P0.3 | is_page_encrypted 偏移 0→38 | `tde_decryptor.hpp:264` | `1d0567f` | `data[38]` 读取确认 |
 | P0.4 | p0_regression_results 构建路径 | `CMakeLists.txt:275` | `833d1fc` | 路径正确 |
-| P0.5 | 添加 9.0 检测路径 | `mysql_version_detector.cpp:339` | `1d0567f` | `page_version >= 3` 确认 |
-| P0.6 | 修复 5.7 非 FSP 检测 | `mysql_version_detector.cpp:346-360` | `1d0567f` | 返回 UNKNOWN 非 5.6 |
+| P0.5 | 9.0 检测路径 | `mysql_version_detector.cpp:316-338` | （已收敛） | 行号过期 — 现无该路径，见 1a |
+| P0.6 | 5.x 回退 | `mysql_version_detector.cpp:316-338` | （已收敛） | 行号过期 — 现已整体删除，见 1b |
 | P0.7 | RecoveryEngine → DeepUndoAnalyzer | `engine.cpp:946-986` | `8b47d2a` | 使用 FlashbackGenerator |
+
+**P0.5/P0.6 行号·声明已过时：** 表中 `mysql_version_detector.cpp:339/346-360` 对应于旧 `decide_version()` 布局，其后已重构收敛为 SDI-only（L316-338）。以"发现 1"（1a/1b）的当前源码描述为准。
 
 ### 剩余问题
 
@@ -346,9 +379,10 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 | MEDIUM | 1 | RedoLogReplayer schema 参数死代码 | `redo_log_replayer.cpp:39` |
 | LOW | 1 | 共享表空间缓存缺失 | `shared_tablespace_recovery.hpp` |
 | LOW | 1 | KeyringFile XOR 占位符（主路径已用 OfflineKeyringParser） | `tde_decryptor.hpp:358-360` |
-| LOW | 1 | 校验和启发式仅检查大小 | `mysql_version_detector.cpp:250-254` |
+| LOW | 1 | 校验和启发式仅检查大小 | `mysql_version_detector.cpp:234-239` |
 | NOT VERIFIED | 1 | compressed/TDE/native keyring 缺少真实 MySQL fixture 验证，生产路径保持 unsupported 或 candidate-only | `unified_recovery.cpp`, `encrypted_table_recovery.cpp`, `offline_keyring_parser.cpp` |
 | NOT VERIFIED | 1 | 分布式恢复未实现 | 能力矩阵外 |
+| HIGH (fixture) | 1 | Undo 页头偏移冲突：TRX_UNDO_PAGE_N_RECS 32 vs 34、HDR_SIZE 40 未裁定 | `deep_undo_analyzer.cpp:42-43,348,360,553,836` |
 
 ### 已过时需移除的条目
 
@@ -366,10 +400,28 @@ decrypted_key[i] = encrypted_key[i] ^ xor_key[i % xor_key_len];
 
 已完成的 P0 边界修复均保持 fail-closed；这不等同于 compressed/TDE/keyring 获得真实 MySQL fixture 认证。
 
+### 导出资格门（本次已落地）
+
+分区与二级索引特殊路径的 CSV 导出已增加 fail-closed 资格门（`include/dbrecovery/tools/recovery_cli.hpp`）：
+
+| 路径 | 条件（不满足则拒绝结构化导出） | 拒绝输出 |
+|------|------|------|
+| Partition `*_recovered.csv` | schema 已知 && records 非空 && `recovered_partitions>0` && `failed_partitions==0` | forensic/evidence JSON：`structured_rows=0`、`evidence_fragments=records.size()`、`export_success=false`、明确 `export_rejection_reason`、`importable=false`；含 partitions/recovered/failed 计数 |
+| Secondary `rescued_from_secondary.csv` | rows 非空 && `identity_mismatch_pages==0` && 所有 `RescuedRow::identity_verified==true` | 同上 forensic JSON + rescued/merged/verified/mismatch 计数 |
+
+**负例验收条件（已并入测试/报告）：**
+- 任一 `failed_partitions>0` → 不创建 CSV，JSON 非 importable，候选数进入 evidence count
+- 任一 identity mismatch 或存在未验证 row → 不创建 CSV，JSON 非 importable
+- CSV open 失败或 mid-stream 写失败 → 中止成功状态并输出同类拒绝 JSON
+- 全部条件满足时保留原有 CSV 行为（identity-verified 二级索引成功仍导出）
+
+说明：`RecoveryCLI::run()` 无可注入的单元测试入口，资格门以 CLI 集成验证 + 静态审查覆盖，未创建虚假的 parser test。
+
 ### 建议优先修复（P1）
 
 | 优先级 | 问题 | 原因 |
 |-------|------|------|
+| P1.0 | Undo 页头偏移冲突（N_RECS 32 vs 34、HDR_SIZE 40）经真实 fixture 裁定 | 若偏移错误，undo 记录数与合法偏移门槛会整体解读错误，直接影响 flashback/版本链 |
 | P1.1 | PartitionTableRecovery SDI 集成 | 功能缺口，影响分区表恢复 |
 | P1.2 | RedoLogReplayer schema 死参数 | 维护负担，API 误导 |
 
