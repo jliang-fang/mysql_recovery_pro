@@ -2,8 +2,23 @@
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/salvage/evidence_serializer.hpp"
 #include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <stdexcept>
 
 using namespace dbrecovery::recovery;
+
+namespace {
+
+std::string test_tmp_path(const char* name) {
+    const char* test_tmpdir = std::getenv("DBREC_TEST_TMPDIR");
+    if (test_tmpdir == nullptr || *test_tmpdir == '\0') {
+        throw std::runtime_error("DBREC_TEST_TMPDIR must be set");
+    }
+    return (std::filesystem::path(test_tmpdir) / name).string();
+}
+
+}  // namespace
 
 TEST(L3L4Isolation, NotInCsvExport) {
     SalvagedRow r;
@@ -12,7 +27,7 @@ TEST(L3L4Isolation, NotInCsvExport) {
     SalvagedRow s;
     s.salvage_level = SalvageLevel::STRING_ONLY;
     s.fields = {"str"}; s.confidence = 0.3;
-    std::string p1 = "/tmp/l3_l4_iso_csv1.csv";
+    std::string p1 = test_tmp_path("l3_l4_iso_csv1.csv");
     std::remove(p1.c_str());
     EXPECT_FALSE(SalvageEngine::export_csv(p1, {r}));
     std::remove(p1.c_str());
@@ -50,7 +65,7 @@ TEST(L3L4Isolation, IncludeFragmentsFlagStillNotInCsv) {
     auto res = eng.salvage_pages(pages);
     for (auto &row : res.rows) EXPECT_EQ(row.salvage_level, SalvageLevel::STRUCTURED);
     for (auto &f : res.evidence_fragments) EXPECT_NE(f.salvage_level, SalvageLevel::STRUCTURED);
-    std::string p2 = "/tmp/l3_l4_iso_csv2.csv";
+    std::string p2 = test_tmp_path("l3_l4_iso_csv2.csv");
     std::remove(p2.c_str());
     if (!res.evidence_fragments.empty()) {
         EXPECT_FALSE(SalvageEngine::export_csv(p2, res.evidence_fragments));
@@ -69,7 +84,7 @@ TEST(L3L4Isolation, EvidenceSerializerRejectsStructuredRows) {
     fragment.salvage_level = SalvageLevel::FRAGMENT;
     fragment.fields = {"fragment"};
 
-    std::string path = "/tmp/l3_l4_structured_evidence.json";
+    std::string path = test_tmp_path("l3_l4_structured_evidence.json");
     std::remove(path.c_str());
     EXPECT_TRUE(ser.to_json({structured, fragment}).empty());
     EXPECT_FALSE(ser.write_evidence(path, {structured, fragment}));
@@ -81,7 +96,7 @@ TEST(L3L4Isolation, ExportRejected) {
     structured.fields = {"a","b"}; structured.confidence = 0.9; structured.field_count = 2;
     SalvagedRow frag; frag.salvage_level = SalvageLevel::FRAGMENT;
     frag.fields = {"x"}; frag.confidence = 0.4;
-    std::string pp = "/tmp/l3_l4_iso_reject.csv";
+    std::string pp = test_tmp_path("l3_l4_iso_reject.csv");
     std::remove(pp.c_str());
     std::vector<SalvagedRow> mixed = {structured, frag};
     EXPECT_FALSE(SalvageEngine::export_csv(pp, mixed));

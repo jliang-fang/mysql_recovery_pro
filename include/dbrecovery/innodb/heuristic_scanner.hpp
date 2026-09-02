@@ -6,6 +6,7 @@
 #include <map>
 #include <optional>
 #include <sstream>
+#include <algorithm>
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_scanner.hpp"

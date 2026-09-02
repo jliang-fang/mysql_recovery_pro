@@ -53,6 +53,9 @@ constexpr uint16_t TYPE_OFFSET          = FIL_PAGE_TYPE_ABS;
 constexpr uint16_t FIL_PAGE_OFFSET      = 4;
 /// @brief Absolute offset of LSN within a page (offset 16-23 in FIL header)
 constexpr uint16_t FIL_PAGE_LSN_ABS     = 16;  // Corrected: LSN is at offset 16-23
+/// @brief Absolute offset of FIL_PAGE_FILE_FLUSH_LSN within a page (offset 24-31 in FIL header)
+/// Only present in ibdata1 system tablespace pages
+constexpr uint16_t FIL_PAGE_FILE_FLUSH_LSN = 24;  // 8 bytes, big-endian
 
 /// @brief Offset of FIL_PAGE_PREV within FIL Header (relative to page start)
 constexpr uint16_t FIL_PAGE_PREV_ABS    = 8;   // Previous page in page chain (offset 8-11)
@@ -87,8 +90,13 @@ constexpr uint16_t FIL_PAGE_TYPE_BLOB   = 17853; // 0x45BD — BLOB page (same a
 constexpr uint16_t FIL_PAGE_COMPRESSED  = 17845; // 0x45B5 — Compressed page
 /// @brief Compressed AND Encrypted page type (0x45B7 = 17847)
 constexpr uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 17847; // 0x45B7 — Compressed+Encrypted page
-/// @brief FSP_HDR (File Space Header) page type — Page 0 of every tablespace (0x45B8 = 17848)
+/// @brief FSP_HDR (File Space Header) page types — Page 0 of every tablespace.
+constexpr uint16_t FIL_PAGE_TYPE_FSP_HDR_LEGACY = 0x0008;
 constexpr uint16_t FIL_PAGE_TYPE_FSP_HDR = 17848; // 0x45B8 — FSP header page
+
+inline bool is_fsp_header_page_type(uint16_t type) {
+    return type == FIL_PAGE_TYPE_FSP_HDR || type == FIL_PAGE_TYPE_FSP_HDR_LEGACY;
+}
 
 inline std::optional<FSPCompressionMetadata> parse_fsp_compression_metadata(
     const uint8_t* page0, size_t available_bytes, size_t logical_page_size) {
@@ -98,7 +106,7 @@ inline std::optional<FSPCompressionMetadata> parse_fsp_compression_metadata(
          logical_page_size != 16384 && logical_page_size != 32768 &&
          logical_page_size != 65536) ||
         available_bytes < logical_page_size ||
-        read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS) != FIL_PAGE_TYPE_FSP_HDR) {
+        !is_fsp_header_page_type(read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS))) {
         return std::nullopt;
     }
 

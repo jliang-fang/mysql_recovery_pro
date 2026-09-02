@@ -217,10 +217,10 @@ uint16_t PageHeaderV55::get_header_version() const {
 }
 
 uint32_t PageHeaderV55::get_file_flush_lsn() const {
-    // FIL_PAGE_FILE_FLUSH_LSN: offset 24-31 (8 bytes)
+    // FIL_PAGE_FILE_FLUSH_LSN: canonical big-endian at FIL_PAGE_FILE_FLUSH_LSN (8 bytes)
     // Only present in ibdata1 system tablespace
-    if (page_size_ < 32) return 0;
-    return dbrecovery::innodb::read_le<uint32_t>(data_.get(), 24);
+    if (page_size_ < dbrecovery::innodb::FIL_PAGE_FILE_FLUSH_LSN + sizeof(uint64_t)) return 0;
+    return static_cast<uint32_t>(dbrecovery::innodb::read_be<uint64_t>(data_.get(), dbrecovery::innodb::FIL_PAGE_FILE_FLUSH_LSN));
 }
 
 std::string PageHeaderV55::to_string() const {
@@ -447,7 +447,7 @@ MySQLVersion PageFactoryExtended::detect_version_extended(
     }
 
     // Step 2: Check for SDI page (MySQL 8.0+)
-    uint16_t page_type = dbrecovery::innodb::read_le<uint16_t>(page_data, 16);
+    uint16_t page_type = dbrecovery::innodb::read_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS);
     if (page_type == static_cast<uint16_t>(PageType::SDI)) {
         return MySQLVersion::MYSQL_80;
     }
@@ -472,8 +472,8 @@ MySQLVersion PageFactoryExtended::detect_version_extended(
     }
 
     // Step 5: Check FIL_PAGE_FILE_FLUSH_LSN (8 bytes in 8.0+)
-    if (page_size >= 32) {
-        uint64_t flush_lsn = dbrecovery::innodb::read_le<uint64_t>(page_data, 24);
+    if (page_size >= dbrecovery::innodb::FIL_PAGE_FILE_FLUSH_LSN + sizeof(uint64_t)) {
+        uint64_t flush_lsn = dbrecovery::innodb::read_be<uint64_t>(page_data, dbrecovery::innodb::FIL_PAGE_FILE_FLUSH_LSN);
         if (flush_lsn > 0xFFFFFFFF) {
             return MySQLVersion::MYSQL_80;
         }
@@ -505,8 +505,8 @@ MySQLVersion PageFactoryExtended::detect_version_extended(
     }
 
     // Step 8: Check space ID
-    if (page_size >= 22) {
-        uint32_t space_id = dbrecovery::innodb::read_le<uint16_t>(page_data, 18);
+    if (page_size >= dbrecovery::innodb::FIL_PAGE_SPACE_ID + sizeof(uint32_t)) {
+        uint32_t space_id = dbrecovery::innodb::read_be<uint32_t>(page_data, dbrecovery::innodb::FIL_PAGE_SPACE_ID);
         // 8.0+ typically has non-zero space ID for user tables
         if (space_id > 0 && page_type == static_cast<uint16_t>(PageType::INDEX)) {
             return MySQLVersion::MYSQL_80;

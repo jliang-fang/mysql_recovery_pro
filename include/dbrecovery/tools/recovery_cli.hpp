@@ -40,6 +40,7 @@
 #include "dbrecovery/innodb/redo_log.hpp"
 #include "dbrecovery/innodb/redo_log_replayer.hpp"
 #include "dbrecovery/innodb/schema_inferrer.hpp"
+#include "dbrecovery/tools/mysql_version_parser.hpp"
 #include "dbrecovery/tools/interactive_schema_builder.hpp"
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
@@ -547,16 +548,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // Phase 7: --capability-report — print and exit
     if (parser_.has_option("capability-report")) {
         std::string ver_str = parser_.get_option("mysql-version", "");
-        MySQLVersion version = MySQLVersion::UNKNOWN;
-        // Map version string to enum
-        if (ver_str == "5.6") version = MySQLVersion::MYSQL_56;
-        else if (ver_str == "5.7") version = MySQLVersion::MYSQL_57;
-        else if (ver_str == "8.0") version = MySQLVersion::MYSQL_80;
-        else if (ver_str == "8.1") version = MySQLVersion::MYSQL_81;
-        else if (ver_str == "8.2") version = MySQLVersion::MYSQL_82;
-        else if (ver_str == "8.3") version = MySQLVersion::MYSQL_83;
-        else if (ver_str == "8.4") version = MySQLVersion::MYSQL_84;
-        else if (ver_str == "9.0") version = MySQLVersion::MYSQL_90;
+        const auto parsed_version = parse_mysql_version(ver_str);
+        const MySQLVersion version = parsed_version ? parsed_version->version : MySQLVersion::UNKNOWN;
         if (version == MySQLVersion::UNKNOWN && !ver_str.empty()) {
             std::cerr << "[WARN] Unknown version '" << ver_str << "', using UNKNOWN\n";
         }
@@ -640,16 +633,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // must explicitly check mysql_version_explicit and reject unknown values.
     // Non-sensitive paths (scan, basic recovery) use auto-detection from page data.
 
-    // Index ID filtering options
-    dbrecovery::MySQLVersion sdi_version = dbrecovery::MySQLVersion::UNKNOWN;
-    if (mysql_version == "5.6") sdi_version = dbrecovery::MySQLVersion::MYSQL_56;
-    else if (mysql_version == "5.7") sdi_version = dbrecovery::MySQLVersion::MYSQL_57;
-    else if (mysql_version == "8.0") sdi_version = dbrecovery::MySQLVersion::MYSQL_80;
-    else if (mysql_version == "8.1") sdi_version = dbrecovery::MySQLVersion::MYSQL_81;
-    else if (mysql_version == "8.2") sdi_version = dbrecovery::MySQLVersion::MYSQL_82;
-    else if (mysql_version == "8.3") sdi_version = dbrecovery::MySQLVersion::MYSQL_83;
-    else if (mysql_version == "8.4") sdi_version = dbrecovery::MySQLVersion::MYSQL_84;
-    else if (mysql_version == "9.0") sdi_version = dbrecovery::MySQLVersion::MYSQL_90;
+    const auto parsed_mysql_version = parse_mysql_version(mysql_version);
+    dbrecovery::MySQLVersion sdi_version = parsed_mysql_version ?
+        parsed_mysql_version->version : dbrecovery::MySQLVersion::UNKNOWN;
 
     std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
     bool exclude_system_tables = parser_.has_option("exclude-system-tables");
@@ -956,10 +942,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (!mysql_version_explicit || mysql_version.empty()) {
                 return reject("--undo-history requires explicit --mysql-version");
             }
-            const bool version_known = mysql_version == "5.6" || mysql_version == "5.7" ||
-                mysql_version == "8.0" || mysql_version == "8.1" || mysql_version == "8.2" ||
-                mysql_version == "8.3" || mysql_version == "8.4" || mysql_version == "9.0";
-            if (!version_known) return reject("unsupported --mysql-version for --undo-history");
+            if (!parsed_mysql_version) return reject("unsupported --mysql-version for --undo-history");
             if (system_tablespace.empty() && undo_tablespace.empty()) {
                 return reject("--undo-history requires --system-tablespace or --undo-tablespace");
             }
@@ -1321,17 +1304,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return 1;
         }
 
-        // Also validate the version value — reject unknown/invalid version strings
-        {
-            bool version_known = (mysql_version == "5.6" || mysql_version == "5.7" ||
-                                  mysql_version == "8.0" || mysql_version == "8.1" ||
-                                  mysql_version == "8.2" || mysql_version == "8.3" ||
-                                  mysql_version == "8.4" || mysql_version == "9.0");
-            if (!version_known) {
-                std::cerr << "[ERROR] Unsupported --mysql-version '" << mysql_version
-                          << "' for flashback. Supported: 5.6, 5.7, 8.0, 8.1, 8.2, 8.3, 8.4, 9.0\n";
-                return 1;
-            }
+        if (!parsed_mysql_version) {
+            std::cerr << "[ERROR] Unsupported --mysql-version '" << mysql_version
+                      << "' for flashback. Supported: 5.6, 5.7, 8.0, 8.1, 8.2, 8.3, 8.4, 9.0\n";
+            return 1;
         }
 
         if (flashback_format != "sql" && flashback_format != "csv" && flashback_format != "json") {
@@ -1358,7 +1334,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::FlashbackGenerator generator;
         generator.set_ibdata_path(sys_ts);
         generator.set_page_size(page_size);
-        generator.set_mysql_version(mysql_version);
+        generator.set_mysql_version(parsed_mysql_version->family);
 
         auto parse_time_str = [](const std::string& s, std::chrono::system_clock::time_point& out) -> bool {
             if (s.empty()) return false;
@@ -1804,7 +1780,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         salvage_config.include_evidence_fragments = include_evidence_fragments;
         salvage_config.verbose = verbose;
         salvage_config.min_string_len = 4;
-        salvage_config.min_record_fields = 1;
+        salvage_config.min_record_fields = 2;
         double damage_threshold = 0.15;
         if (!damage_threshold_str.empty()) {
             try {

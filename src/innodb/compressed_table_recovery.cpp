@@ -302,7 +302,7 @@ CompressionStatus CompressedTableRecovery::classify(const std::string& file_path
         // flags themselves are corrupted (invalid zip_ssize, etc.).
         // Otherwise page 0 is not a recognizable InnoDB FSP_HDR page.
         const uint16_t page_type = read_be<uint16_t>(page0.data(), FIL_PAGE_TYPE_ABS);
-        if (page_type == FIL_PAGE_TYPE_FSP_HDR) {
+        if (is_fsp_header_page_type(page_type)) {
             return CompressionStatus::CORRUPTED_METADATA;
         }
         return CompressionStatus::MALFORMED;

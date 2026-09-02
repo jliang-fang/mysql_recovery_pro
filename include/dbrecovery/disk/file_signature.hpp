@@ -16,6 +16,7 @@
 #include <map>
 #include <memory>
 #include <cstring>
+#include <algorithm>
 
 namespace dbrecovery {
 namespace disk {

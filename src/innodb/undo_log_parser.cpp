@@ -11,6 +11,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/roll_ptr_decoder.hpp"
 #include <cstring>
+#include <algorithm>
 #include <iostream>
 #include <fstream>
 #include <vector>

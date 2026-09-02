@@ -71,11 +71,12 @@ std::vector<uint8_t> read_page0(const std::string& path, size_t page_size) {
  */
 std::vector<uint8_t> make_compressed_ibd(size_t logical_page_size,
                                          size_t physical_page_size,
-                                         size_t file_bytes) {
+                                         size_t file_bytes,
+                                         uint16_t fsp_page_type = FIL_PAGE_TYPE_FSP_HDR) {
     std::vector<uint8_t> data(file_bytes, 0);
     uint8_t* p0 = data.data();
 
-    write_be16(p0 + FIL_PAGE_TYPE_ABS, FIL_PAGE_TYPE_FSP_HDR);
+    write_be16(p0 + FIL_PAGE_TYPE_ABS, fsp_page_type);
 
     // ZIP_SSIZE = log2(logical/physical), encoded in flags bits 1-4.
     uint32_t ratio = static_cast<uint32_t>(logical_page_size / physical_page_size);
@@ -141,6 +142,28 @@ TEST_F(CompressedRoutingTest, ClassifyUncompressedFlagsIsNotCompressed) {
 
     CompressedTableRecovery reco(logical);
     EXPECT_EQ(reco.classify(path, logical), CompressionStatus::NOT_COMPRESSED);
+}
+
+TEST_F(CompressedRoutingTest, ClassifyLegacyUncompressedFlagsIsNotCompressed) {
+    const std::string path = dir_ + "/legacy_uncompressed.ibd";
+    const size_t logical = 16384;
+    write_ibd_file(path, make_compressed_ibd(logical, logical, logical * 8,
+                                              FIL_PAGE_TYPE_FSP_HDR_LEGACY));
+
+    CompressedTableRecovery reco(logical);
+    EXPECT_EQ(reco.classify(path, logical), CompressionStatus::NOT_COMPRESSED);
+}
+
+TEST_F(CompressedRoutingTest, InvalidLegacyFlagsReturnsCorruptedMetadata) {
+    const std::string path = dir_ + "/legacy_invalid_flags.ibd";
+    const size_t logical = 16384;
+    std::vector<uint8_t> data(logical * 8, 0);
+    write_be16(data.data() + FIL_PAGE_TYPE_ABS, FIL_PAGE_TYPE_FSP_HDR_LEGACY);
+    write_be32(data.data() + FSP_SPACE_FLAGS_OFFSET, static_cast<uint32_t>(5) << 1);
+    write_ibd_file(path, data);
+
+    CompressedTableRecovery reco(logical);
+    EXPECT_EQ(reco.classify(path, logical), CompressionStatus::CORRUPTED_METADATA);
 }
 
 TEST_F(CompressedRoutingTest, InvalidFlagsReturnsCorruptedMetadata) {

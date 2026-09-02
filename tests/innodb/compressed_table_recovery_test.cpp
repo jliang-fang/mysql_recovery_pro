@@ -23,10 +23,10 @@ void write_be32(uint8_t* data, uint32_t value) {
     data[3] = static_cast<uint8_t>(value);
 }
 
-std::vector<uint8_t> make_fsp_page(size_t page_size, uint8_t zip_ssize) {
+std::vector<uint8_t> make_fsp_page(size_t page_size, uint8_t zip_ssize,
+                                   uint16_t page_type = dbrecovery::innodb::FIL_PAGE_TYPE_FSP_HDR) {
     std::vector<uint8_t> page(page_size, 0);
-    write_be16(page.data() + dbrecovery::innodb::FIL_PAGE_TYPE_ABS,
-               dbrecovery::innodb::FIL_PAGE_TYPE_FSP_HDR);
+    write_be16(page.data() + dbrecovery::innodb::FIL_PAGE_TYPE_ABS, page_type);
     write_be32(page.data() + dbrecovery::innodb::FSP_SPACE_FLAGS_OFFSET,
                static_cast<uint32_t>(zip_ssize) << 1);
     return page;
@@ -87,6 +87,18 @@ TEST(FSPCompressionMetadataTest, AcceptsValidUncompressedTablespace) {
     ASSERT_TRUE(metadata.has_value());
     EXPECT_FALSE(metadata->is_compressed());
     EXPECT_EQ(metadata->physical_page_size, 8192u);
+}
+
+TEST(FSPCompressionMetadataTest, AcceptsLegacyUncompressedTablespace) {
+    const auto page = make_fsp_page(
+        16384, 0, dbrecovery::innodb::FIL_PAGE_TYPE_FSP_HDR_LEGACY);
+
+    const auto metadata = dbrecovery::innodb::parse_fsp_compression_metadata(
+        page.data(), page.size(), 16384);
+
+    ASSERT_TRUE(metadata.has_value());
+    EXPECT_FALSE(metadata->is_compressed());
+    EXPECT_EQ(metadata->physical_page_size, 16384u);
 }
 
 TEST(FSPCompressionMetadataTest, RejectsMalformedMetadata) {

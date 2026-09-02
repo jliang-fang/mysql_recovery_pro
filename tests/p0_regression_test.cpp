@@ -34,6 +34,7 @@
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/common/endian_compat.hpp"
 #include "dbrecovery/common/version_compat.hpp"
+#include "dbrecovery/tools/mysql_version_parser.hpp"
 #include "dbrecovery/validate/unified_validator.hpp"
 #include "dbrecovery/report/recovery_report.hpp"
 #include "dbrecovery/engine/drop_table_recovery.hpp"
@@ -49,6 +50,37 @@ using namespace innodb;
 // Disambiguate: `using namespace innodb` would otherwise shadow dbrecovery::MySQLVersion
 // (innodb::page_types_v2.hpp defines its own distinct MySQLVersion enum).
 using dbrecovery::MySQLVersion;
+
+TEST(MySQLVersionParsingTest, AcceptsCanonicalAndProvenanceVersions) {
+    struct ExpectedVersion {
+        const char* input;
+        const char* family;
+        MySQLVersion version;
+    };
+    const ExpectedVersion cases[] = {
+        {"5.6", "5.6", MySQLVersion::MYSQL_56},
+        {"5.6.51", "5.6", MySQLVersion::MYSQL_56},
+        {"5.7", "5.7", MySQLVersion::MYSQL_57},
+        {"5.7.44", "5.7", MySQLVersion::MYSQL_57},
+        {"8.0", "8.0", MySQLVersion::MYSQL_80},
+        {"8.0.46", "8.0", MySQLVersion::MYSQL_80},
+        {"8.4.3", "8.4", MySQLVersion::MYSQL_84},
+        {"9.0.1", "9.0", MySQLVersion::MYSQL_90},
+    };
+
+    for (const auto& test : cases) {
+        const auto parsed = tools::parse_mysql_version(test.input);
+        ASSERT_TRUE(parsed.has_value()) << test.input;
+        EXPECT_EQ(parsed->family, test.family);
+        EXPECT_EQ(parsed->version, test.version);
+    }
+}
+
+TEST(MySQLVersionParsingTest, RejectsMalformedAndUnsupportedVersions) {
+    for (const char* input : {"", "80", "8", "8.", ".0", "8.0.x", "8.0.46.1", "8.5.1", "10.0.1"}) {
+        EXPECT_FALSE(tools::parse_mysql_version(input).has_value()) << input;
+    }
+}
 
 // ======================================================================
 // P0.1: FIL Header Endianness
