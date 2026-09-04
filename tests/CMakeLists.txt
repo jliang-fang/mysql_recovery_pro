@@ -388,13 +388,18 @@ add_executable(test_salvage_accuracy test_salvage_accuracy.cpp)
 target_link_libraries(test_salvage_accuracy PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_salvage_accuracy)
 
+# Test confinement: these suites only write under DBREC_TEST_TMPDIR (see
+# test_tmp_path() in the sources); the helper throws if the variable is unset.
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_tmp)
+set(DBREC_TEST_TMPDIR_VALUE "${CMAKE_CURRENT_BINARY_DIR}/test_tmp")
+
 add_executable(test_l3_l4_isolation test_l3_l4_isolation.cpp)
 target_link_libraries(test_l3_l4_isolation PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
-gtest_discover_tests(test_l3_l4_isolation)
+gtest_discover_tests(test_l3_l4_isolation PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
 add_executable(test_export_rejection test_export_rejection.cpp)
 target_link_libraries(test_export_rejection PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
-gtest_discover_tests(test_export_rejection)
+gtest_discover_tests(test_export_rejection PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
 add_executable(test_recovery_idempotency test_recovery_idempotency.cpp)
 target_link_libraries(test_recovery_idempotency PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
