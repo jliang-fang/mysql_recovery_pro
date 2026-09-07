@@ -232,23 +232,20 @@ EOF
     rm -f "$temp_sql"
 }
 
-# Generate ground truth hashes for test data
-generate_ground_truth() {
+# Generate a non-authoritative client-text observation
+record_client_text_observation() {
     local version=$1
     local container_name="${CONTAINER_PREFIX}_${version//./_}"
-    
-    log_info "Generating ground truth hashes for MySQL $version..."
-    
-    # Get data directory
-    local data_dir=$(docker exec "$container_name" mysql -uroot -ptest123 -N -e "SHOW VARIABLES LIKE 'datadir'" | cut -f2)
-    
-    # Export table data
-    docker exec "$container_name" mysql -uroot -ptest123 testdb -e "SELECT * FROM test_users ORDER BY id" > "/tmp/test_data_$version.csv"
-    
-    # Generate hash
-    local hash=$(sha256sum "/tmp/test_data_$version.csv" | cut -d' ' -f1)
-    
-    echo "$hash"
+    local observation_path="$RESULTS_DIR/client_text_observation_$version.txt"
+
+    log_warn "Generating non-authoritative client-text observation for MySQL $version"
+    mkdir -p "$RESULTS_DIR"
+    docker exec "$container_name" mysql -uroot -ptest123 testdb \
+        -e "SELECT * FROM test_users ORDER BY id" \
+        > "$observation_path"
+
+    sha256sum "$observation_path"
+    log_warn "This text hash is not typed ground truth and cannot establish recovery accuracy"
 }
 
 # Execute SQL in MySQL container
@@ -303,11 +300,11 @@ main() {
             local num_records=${3:-100000}
             
             local container_name="${CONTAINER_PREFIX}_${version//./_}"
-            inject_test_data "$version" "$container_name" "$num_records"
+            inject_test_data "$version" "$num_records"
             ;;
         "hash")
             local version=${2:-"8.0"}
-            generate_ground_truth "$version"
+            record_client_text_observation "$version"
             ;;
         "status")
             log_info "MySQL container status:"

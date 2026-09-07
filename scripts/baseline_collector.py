@@ -1,189 +1,164 @@
 #!/usr/bin/env python3
-"""
-Baseline Collector for MySQL 8.0 IBD Files
-Extracts metadata and generates SHA-256 hashes for recovery validation
+"""Collect conservative InnoDB page evidence.
+
+This tool deliberately does not claim row-level ground truth. Use
+``disaster_harness.ground_truth`` for typed MySQL exports.
 """
 
-import os
-import sys
-import struct
+import argparse
 import hashlib
 import json
-import argparse
-from typing import Dict, List, Any, Optional, Tuple
+import struct
 from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+FIL_PAGE_PREV_ABS = 8
+FIL_PAGE_NEXT_ABS = 12
+FIL_PAGE_LSN_ABS = 16
+FIL_PAGE_TYPE_ABS = 24
+FIL_PAGE_OFFSET_ABS = 4
+FIL_PAGE_SPACE_ID_ABS = 34
+FIL_HEADER_SIZE = 38
+FIL_PAGE_INDEX = 17855
+FIL_PAGE_UNDO_LOG = 17842
+FIL_PAGE_SDI = 17854
+FIL_PAGE_SDI_ZIP = 17853
+FIL_PAGE_FSP_HDR = 17848
+FIL_PAGE_XDES = 17849
+FIL_PAGE_ALLOCATED = 0
+VALID_PAGE_TYPES = {
+    FIL_PAGE_INDEX, FIL_PAGE_UNDO_LOG, FIL_PAGE_SDI, FIL_PAGE_SDI_ZIP,
+    FIL_PAGE_FSP_HDR, FIL_PAGE_XDES, FIL_PAGE_ALLOCATED,
+}
+
+
+def be16(data: bytes, offset: int) -> int:
+    return struct.unpack_from(">H", data, offset)[0]
+
+
+def be32(data: bytes, offset: int) -> int:
+    return struct.unpack_from(">I", data, offset)[0]
+
+
+def be64(data: bytes, offset: int) -> int:
+    return struct.unpack_from(">Q", data, offset)[0]
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def page_type_name(page_type: int) -> str:
+    return {
+        FIL_PAGE_INDEX: "INDEX",
+        FIL_PAGE_UNDO_LOG: "UNDO_LOG",
+        FIL_PAGE_SDI: "SDI",
+        FIL_PAGE_SDI_ZIP: "SDI_ZIP_OR_BLOB",
+        FIL_PAGE_FSP_HDR: "FSP_HDR",
+        FIL_PAGE_XDES: "XDES",
+        FIL_PAGE_ALLOCATED: "ALLOCATED",
+    }.get(page_type, "UNKNOWN")
 
 
 class BaselineCollector:
     def __init__(self, page_size: int = 16384):
         self.page_size = page_size
         self.baseline: Dict[str, Any] = {
+            "evidence_status": "EVIDENCE_ONLY",
+            "row_level_ground_truth": False,
             "file_info": {},
-            "schema": {},
             "page_info": [],
-            "row_hashes": []
+            "row_hashes": [],
         }
-    
+
     def read_page(self, data: bytes, page_no: int) -> Optional[bytes]:
-        """Read a specific page from the file data"""
         start = page_no * self.page_size
         end = start + self.page_size
-        if end > len(data):
-            return None
-        return data[start:end]
-    
-    def parse_page_header(self, page: bytes) -> Dict[str, Any]:
-        """Parse InnoDB page header (offset 0-37)"""
-        header = page[:38]
+        return data[start:end] if 0 <= start and end <= len(data) else None
+
+    def parse_page_header(self, page: bytes, page_no: int = -1) -> Dict[str, Any]:
+        if len(page) < FIL_HEADER_SIZE:
+            return {"page_no": page_no, "status": "TRUNCATED"}
+        page_type = be16(page, FIL_PAGE_TYPE_ABS)
         return {
-            "page_offset": page_no,
-            "page_type": struct.unpack(">H", header[0:2])[0] if len(header) >= 2 else 0,
-            "page_level": struct.unpack(">H", header[38:40])[0] if len(header) >= 40 else 0,
-            "record_count": struct.unpack(">H", header[54:56])[0] if len(header) >= 56 else 0,
-            "next_page": struct.unpack(">I", header[26:30])[0] if len(header) >= 30 else 0,
-            "prev_page": struct.unpack(">I", header[30:34])[0] if len(header) >= 34 else 0,
-            "free_space": struct.unpack(">H", header[10:12])[0] if len(header) >= 12 else 0,
-            "garbage_space": struct.unpack(">H", header[12:14])[0] if len(header) >= 14 else 0
+            "page_no": page_no,
+            "stored_page_no": be32(page, FIL_PAGE_OFFSET_ABS),
+            "space_id": be32(page, FIL_PAGE_SPACE_ID_ABS),
+            "page_type": page_type,
+            "page_type_name": page_type_name(page_type),
+            "page_lsn": be64(page, FIL_PAGE_LSN_ABS),
+            "prev_page": be32(page, FIL_PAGE_PREV_ABS),
+            "next_page": be32(page, FIL_PAGE_NEXT_ABS),
+            "identity_valid": be32(page, FIL_PAGE_OFFSET_ABS) == page_no and page_type in VALID_PAGE_TYPES,
+            "page_sha256": sha256(page),
         }
-    
-    def parse_sdi_page(self, page: bytes) -> Dict[str, Any]:
-        """Parse SDI (Serialized Dictionary Information) page"""
-        result = {
-            "page_type": "SDI",
-            "sdi_version": 0,
-            "seq_id": 0,
-            "object_type": "",
-            "object_def": ""
+
+    def parse_sdi_page(self, page: bytes, page_no: int = -1) -> Dict[str, Any]:
+        header = self.parse_page_header(page, page_no)
+        return {
+            "page_no": page_no,
+            "page_type": header.get("page_type_name"),
+            "sdi_header_offset": FIL_HEADER_SIZE,
+            "sdi_header_sha256": sha256(page[FIL_HEADER_SIZE:FIL_HEADER_SIZE + 32])
+            if len(page) >= FIL_HEADER_SIZE + 32 else None,
+            "status": "RAW_PAGE_EVIDENCE_ONLY",
         }
-        
-        # SDI header starts at offset 38
-        if len(page) < 100:
-            return result
-        
-        # SDI format: version (2), seq_id (4), crc32 (4), flags (2), object_type_len (2), object_def_len (8)
-        sdi_version = struct.unpack(">H", page[38:40])[0] if len(page) >= 40 else 0
-        seq_id = struct.unpack(">I", page[40:44])[0] if len(page) >= 44 else 0
-        
-        result["sdi_version"] = sdi_version
-        result["seq_id"] = seq_id
-        
-        return result
-    
+
     def extract_record_hashes(self, data: bytes) -> List[Dict[str, Any]]:
-        """Extract all records and compute SHA-256 hashes"""
-        hashes = []
-        
-        # Read all data pages (skipFSP header, IBUF bitmap, SDI pages initially)
-        total_pages = len(data) // self.page_size
-        
-        for page_no in range(10, min(total_pages, 500)):  # Skip first pages, sample up to 500
-            page = self.read_page(data, page_no)
-            if not page:
-                continue
-            
-            page_type = struct.unpack(">H", page[0:2])[0] if len(page) >= 2 else 0
-            
-            # InnoDB data pages have type 0x45BC (17852) for B+Tree leaf
-            if page_type == 0x45BC or page_type == 0x26F1:
-                header_info = self.parse_page_header(page)
-                
-                # Try to extract record offsets from infimum/supremum
-                # InnoDB record heap starts at offset 96 for newer versions
-                if len(page) >= 120:
-                    heap_top = struct.unpack("<H", page[96:98])[0] if len(page) >= 98 else 0
-                    
-                    # Extract records between infimum (96) and heap_top
-                    record_start = 96
-                    record_count = 0
-                    
-                    while record_start < heap_top and record_start + 20 < len(page):
-                        # Record header: next_rec (2), extra_size (1), fields_mask (varies)
-                        if page[record_start] == 0x00 and page[record_start + 1] == 0x00:
-                            record_start += 2
-                            continue
-                        
-                        # Compute record hash from bytes
-                        rec_start = record_start
-                        rec_len = min(256, len(page) - record_start)
-                        
-                        if rec_len > 0:
-                            record_data = page[rec_start:rec_start + rec_len]
-                            record_hash = hashlib.sha256(record_data).hexdigest()
-                            
-                            hashes.append({
-                                "page_no": page_no,
-                                "record_offset": record_start,
-                                "record_size": rec_len,
-                                "sha256": record_hash
-                            })
-                            record_count += 1
-                            record_start += rec_len + 5  # Move to next potential record
-                        
-                        if record_count > 100:  # Limit records per page
-                            break
-        
-        return hashes
-    
+        """Return no pseudo-records; raw page hashes are not row hashes."""
+        self.baseline["record_extraction_note"] = (
+            "disabled: page byte windows cannot establish record boundaries, "
+            "types, primary keys, NULL values, or field equality"
+        )
+        return []
+
     def collect(self, filepath: str) -> Dict[str, Any]:
-        """Collect baseline information from IBD file"""
-        with open(filepath, 'rb') as f:
-            data = f.read()
-        
+        path = Path(filepath)
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"IBD input must be a regular non-symlink file: {path}")
+        data = path.read_bytes()
+        total_pages, remainder = divmod(len(data), self.page_size)
         self.baseline["file_info"] = {
-            "path": filepath,
+            "path": str(path.resolve()),
             "size": len(data),
-            "total_pages": len(data) // self.page_size,
-            "md5": hashlib.md5(data).hexdigest(),
-            "sha256": hashlib.sha256(data).hexdigest()
+            "total_pages": total_pages,
+            "trailing_bytes": remainder,
+            "sha256": sha256(data),
         }
-        
-        # Read key pages
-        for page_no in [0, 1, 2, 3, 4, 5]:  # FSP, IBUF, ISI, SDI, etc.
+        page_types = {}
+        for page_no in range(total_pages):
             page = self.read_page(data, page_no)
-            if page:
-                page_type = struct.unpack(">H", page[0:2])[0] if len(page) >= 2 else 0
-                self.baseline["page_info"].append({
-                    "page_no": page_no,
-                    "page_type": f"0x{page_type:04X}",
-                    "page_type_decimal": page_type
-                })
-                
-                # Special handling for SDI page (page 3 or similar)
-                if page_type == 0x45BD or page_no == 3:  # SDI page type
-                    sdi_info = self.parse_sdi_page(page)
-                    self.baseline["sdi_info"] = sdi_info
-        
-        # Extract record hashes
+            evidence = self.parse_page_header(page, page_no)
+            self.baseline["page_info"].append(evidence)
+            name = evidence["page_type_name"]
+            page_types[name] = page_types.get(name, 0) + 1
+            if evidence.get("page_type") in (FIL_PAGE_SDI, FIL_PAGE_SDI_ZIP):
+                self.baseline.setdefault("sdi_pages", []).append(self.parse_sdi_page(page, page_no))
         self.baseline["row_hashes"] = self.extract_record_hashes(data)
-        
-        # Summary statistics
         self.baseline["summary"] = {
             "total_files": 1,
-            "total_pages": len(data) // self.page_size,
-            "total_records_sampled": len(self.baseline["row_hashes"]),
-            "unique_hash_count": len(set(h["sha256"] for h in self.baseline["row_hashes"]))
+            "total_pages": total_pages,
+            "valid_identity_pages": sum(item.get("identity_valid", False) for item in self.baseline["page_info"]),
+            "page_types": page_types,
+            "raw_page_hash_count": len(self.baseline["page_info"]),
+            "row_hash_count": 0,
         }
-        
         return self.baseline
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Collect baseline information from MySQL IBD file")
-    parser.add_argument("--ibd", required=True, help="Path to .ibd file")
-    parser.add_argument("--output", default="baseline.json", help="Output JSON file")
-    parser.add_argument("--page-size", type=int, default=16384, help="Page size (default: 16384)")
-    
+    parser = argparse.ArgumentParser(description="Collect conservative InnoDB page evidence")
+    parser.add_argument("--ibd", required=True)
+    parser.add_argument("--output", default="baseline.json")
+    parser.add_argument("--page-size", type=int, default=16384)
     args = parser.parse_args()
-    
-    collector = BaselineCollector(page_size=args.page_size)
-    baseline = collector.collect(args.ibd)
-    
-    with open(args.output, 'w') as f:
-        json.dump(baseline, f, indent=2)
-    
-    print(f"Baseline collected: {args.output}")
-    print(f"Total records sampled: {baseline['summary']['total_records_sampled']}")
-    print(f"Unique hashes: {baseline['summary']['unique_hash_count']}")
+    baseline = BaselineCollector(args.page_size).collect(args.ibd)
+    output = Path(args.output)
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite baseline: {output}")
+    output.write_text(json.dumps(baseline, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    print(f"Evidence baseline saved: {output}")
+    print(f"Valid identity pages: {baseline['summary']['valid_identity_pages']}")
 
 
 if __name__ == "__main__":
