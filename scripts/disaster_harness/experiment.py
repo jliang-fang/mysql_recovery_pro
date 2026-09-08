@@ -15,6 +15,7 @@ import shutil
 import stat
 import subprocess
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -101,16 +102,28 @@ class OfflineSpec:
 
 
 @dataclass(frozen=True)
+class MutationSpec:
+    """A declared mutation applied only inside a disposable datadir clone."""
+    relative_path: Path
+    role: str
+    scope: str
+    source: Optional[Path] = None
+    action: str = "replace"
+
+
+@dataclass(frozen=True)
 class ExperimentSpec:
     workspace: Path
     pristine_datadir: Path
-    damaged_input: Path
-    damaged_relative_path: Path
+    damaged_input: Optional[Path]
+    damaged_relative_path: Optional[Path]
     ground_truth: Path
     native: NativeSpec
     offline: OfflineSpec
     levels: tuple[int, ...] = tuple(range(7))
     source_hash: Optional[str] = None
+    mutations: tuple[MutationSpec, ...] = ()
+    offline_input: Optional[Path] = None
 
 
 Runner = Callable[..., CommandResult]
@@ -175,25 +188,74 @@ def _clone_tree(source: Path, target: Path) -> None:
     shutil.copytree(source, target, symlinks=False)
 
 
-def _replace_damaged_input(datadir: Path, damaged_input: Path, relative_path: Path) -> Path:
-    target = (datadir / relative_path).resolve()
+def _mutation_target(datadir: Path, relative_path: Path) -> Path:
+    if relative_path.is_absolute() or not relative_path.parts or any(part in ("", ".", "..")
+                                                               for part in relative_path.parts):
+        raise SafetyError(f"invalid mutation relative path: {relative_path}")
     root = datadir.resolve()
+    target = (root / relative_path).resolve()
     try:
         target.relative_to(root)
     except ValueError as error:
-        raise SafetyError("damaged path escapes cloned datadir") from error
-    if target.is_symlink() or not target.parent.is_dir():
-        raise SafetyError(f"invalid damaged target: {target}")
-    if target.suffix.lower() != ".ibd":
-        raise SafetyError(f"damaged target must be an .ibd tablespace: {target}")
-    if not target.exists():
-        raise SafetyError(f"damaged target does not exist in pristine datadir: {target}")
-    if not target.is_file():
-        raise SafetyError(f"damaged target is not a regular file: {target}")
-    shutil.copyfile(damaged_input, target)
-    if sha256_file(target) != sha256_file(damaged_input):
-        raise SafetyError(f"damaged input clone hash mismatch: {target}")
+        raise SafetyError("mutation path escapes cloned datadir") from error
+    if target.is_symlink() or not target.exists() or not target.is_file():
+        raise SafetyError(f"mutation target must be an existing regular file: {target}")
     return target
+
+
+def _apply_mutations(datadir: Path, mutations: Sequence[MutationSpec]) -> list[dict]:
+    if not mutations:
+        raise SafetyError("at least one declared mutation is required")
+    seen = set()
+    records = []
+    for mutation in mutations:
+        if mutation.role not in {"tablespace", "redo", "server_dictionary", "table_sdi"}:
+            raise SafetyError(f"unsupported mutation role: {mutation.role}")
+        if mutation.scope not in {"level1", "level2", "level3_table_sdi", "level3_server_dictionary"}:
+            raise SafetyError(f"unsupported mutation scope: {mutation.scope}")
+        target = _mutation_target(datadir, Path(mutation.relative_path))
+        key = str(target)
+        if key in seen:
+            raise SafetyError(f"duplicate mutation target: {target}")
+        seen.add(key)
+        before = sha256_file(target)
+        if mutation.action == "replace":
+            if mutation.source is None:
+                raise SafetyError("replacement mutation requires a source file")
+            source = validate_source(mutation.source)
+            shutil.copyfile(source, target)
+            expected = sha256_file(source)
+        elif mutation.action == "remove":
+            if mutation.source is not None:
+                raise SafetyError("removal mutation must not include a source file")
+            target.unlink()
+            expected = None
+        else:
+            raise SafetyError(f"unsupported mutation action: {mutation.action}")
+        after = sha256_file(target) if target.exists() else None
+        if after != expected:
+            raise SafetyError(f"mutation verification failed: {target}")
+        records.append({
+            "path": str(Path(mutation.relative_path)),
+            "role": mutation.role,
+            "scope": mutation.scope,
+            "action": mutation.action,
+            "before_sha256": before,
+            "after_sha256": after,
+            "source_sha256": expected,
+        })
+    return records
+
+
+def _legacy_mutation(spec: ExperimentSpec) -> MutationSpec:
+    if spec.damaged_input is None or spec.damaged_relative_path is None:
+        raise SafetyError("legacy mutation requires damaged input and relative path")
+    return MutationSpec(
+        source=spec.damaged_input,
+        relative_path=spec.damaged_relative_path,
+        role="tablespace",
+        scope="level2",
+    )
 
 
 def _mysql_command(spec: NativeSpec, level: int, datadir: Path, run_dir: Path, name: str) -> List[str]:
@@ -225,23 +287,27 @@ def _mysql_command(spec: NativeSpec, level: int, datadir: Path, run_dir: Path, n
 
 def _typed_export_command(spec: NativeSpec, name: str) -> List[str]:
     return [
-        spec.container_engine, "exec", name,
+        spec.container_engine, "exec", "-i", name,
         spec.python_bin, "-m", "disaster_harness.native_export",
         "--socket", spec.socket_path,
         "--database", spec.database,
         "--table", spec.table,
         "--output", spec.result_container_path,
         "--user", "root",
-        "--password", spec.root_password,
+        "--password-stdin",
     ]
 
 
 def _mysql_ping_command(spec: NativeSpec, name: str) -> List[str]:
     return [
-        spec.container_engine, "exec", name, "mysqladmin",
+        spec.container_engine, "exec", "-i", name, "mysqladmin",
         "--protocol=socket", f"--socket={spec.socket_path}",
-        "-uroot", f"-p{spec.root_password}", "ping",
+        "-uroot", "-p", "ping",
     ]
+
+
+def _password_input(password: str) -> str:
+    return password + "\n"
 
 
 def _native_result_host_path(spec: NativeSpec, run_dir: Path) -> Path:
@@ -285,32 +351,44 @@ def _native_result_document(level: int, command: CommandResult, query: CommandRe
 
 def run_native_level(spec: NativeSpec, level: int, datadir: Path, run_dir: Path,
                      runner: Runner = run_command) -> dict:
-    name = f"dbrec-native-{os.getpid()}-{level}"
+    name = f"dbrec-native-{os.getpid()}-{level}-{uuid.uuid4().hex[:12]}"
     startup = runner(_mysql_command(spec, level, datadir, run_dir, name), spec.startup_timeout)
     query = CommandResult([], None, "", "not executed", 0.0, spawn_error="startup not ready")
     shutdown = CommandResult([], None, "", "not executed", 0.0, spawn_error="startup not ready")
     result_document = None
     ping = None
-    if startup.status == "EXITED_0":
-        deadline = time.monotonic() + spec.startup_timeout
-        while time.monotonic() < deadline:
-            ping = runner(_mysql_ping_command(spec, name), min(5.0, max(1.0, deadline - time.monotonic())))
-            if ping.status == "EXITED_0":
-                break
-        if ping is None or ping.status != "EXITED_0":
-            query = CommandResult([], None, "", "mysql did not become ready", 0.0,
-                                  spawn_error="startup not ready")
-        else:
-            query = runner(_typed_export_command(spec, name), spec.query_timeout)
-            candidate = _native_result_host_path(spec, run_dir)
-            if candidate.is_file():
-                result_document = json.loads(candidate.read_text(encoding="utf-8"))
-        logs = runner([spec.container_engine, "logs", name], spec.shutdown_timeout)
-        (run_dir / "mysqld.log").write_text(
-            f"# stdout\n{logs.stdout}\n# stderr\n{logs.stderr}\n", encoding="utf-8")
-        shutdown = runner([spec.container_engine, "stop", "-t", str(int(spec.shutdown_timeout)), name],
-                          spec.shutdown_timeout)
-        runner([spec.container_engine, "rm", "-f", name], spec.shutdown_timeout)
+    try:
+        if startup.status == "EXITED_0":
+            deadline = time.monotonic() + spec.startup_timeout
+            while time.monotonic() < deadline:
+                ping = runner(
+                    _mysql_ping_command(spec, name),
+                    min(5.0, max(1.0, deadline - time.monotonic())),
+                    _password_input(spec.root_password),
+                )
+                if ping.status == "EXITED_0":
+                    break
+                time.sleep(0.25)
+            if ping is None or ping.status != "EXITED_0":
+                query = CommandResult([], None, "", "mysql did not become ready", 0.0,
+                                      spawn_error="startup not ready")
+            else:
+                query = runner(
+                    _typed_export_command(spec, name),
+                    spec.query_timeout,
+                    _password_input(spec.root_password),
+                )
+                candidate = _native_result_host_path(spec, run_dir)
+                if candidate.is_file():
+                    result_document = _load_typed_result(candidate, "native_export")
+            logs = runner([spec.container_engine, "logs", name], spec.shutdown_timeout)
+            (run_dir / "mysqld.log").write_text(
+                f"# stdout\n{logs.stdout}\n# stderr\n{logs.stderr}\n", encoding="utf-8")
+    finally:
+        if startup.status == "EXITED_0":
+            shutdown = runner([spec.container_engine, "stop", "-t", str(int(spec.shutdown_timeout)), name],
+                              spec.shutdown_timeout)
+            runner([spec.container_engine, "rm", "-f", name], spec.shutdown_timeout)
     _write_json(run_dir / "native_execution.json", {
         "force_recovery": level,
         "startup": startup.as_dict(),
@@ -321,12 +399,47 @@ def run_native_level(spec: NativeSpec, level: int, datadir: Path, run_dir: Path,
     return _native_result_document(level, startup, query, shutdown, result_document)
 
 
-def run_offline(spec: OfflineSpec, damaged_input: Path, run_dir: Path,
+def _load_typed_result(path: Path, evidence_level: str) -> dict:
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        return {
+            "status": "NOT_COMPUTABLE",
+            "reason": f"invalid structured result: {type(error).__name__}",
+            "excluded_evidence_levels": [evidence_level],
+        }
+    required = {"database", "table", "schema", "schema_fingerprint", "rows"}
+    if not isinstance(result, dict) or not required.issubset(result) or not isinstance(result["rows"], list):
+        return {
+            "status": "NOT_COMPUTABLE",
+            "reason": "result is not a typed canonical dataset",
+            "excluded_evidence_levels": [evidence_level],
+            "result_artifact": str(path),
+        }
+    return result
+
+
+def _offline_not_computable(run_dir: Path, reason: str) -> dict:
+    result = {
+        "status": "NOT_COMPUTABLE",
+        "reason": reason,
+        "excluded_evidence_levels": ["offline_export"],
+    }
+    _write_json(run_dir / "offline_execution.json", {
+        "status": "NOT_EXECUTED",
+        "reason": reason,
+    })
+    return result
+
+
+def run_offline(spec: OfflineSpec, offline_input: Optional[Path], run_dir: Path,
                 runner: Runner = run_command) -> dict:
+    if offline_input is None:
+        return _offline_not_computable(run_dir, "no offline comparison input declared")
     output_dir = run_dir / "output"
     output_dir.mkdir()
-    expected_result = output_dir / f"{Path(damaged_input).stem}_result.json"
-    argv = [str(spec.binary), f"--{spec.ibd_arg}", str(damaged_input),
+    expected_result = output_dir / f"{Path(offline_input).stem}_result.json"
+    argv = [str(spec.binary), f"--{spec.ibd_arg}", str(offline_input),
             "--output", str(output_dir), "--format", spec.format]
     argv.extend(spec.extra_args)
     command = runner(argv, spec.timeout)
@@ -340,7 +453,7 @@ def run_offline(spec: OfflineSpec, damaged_input: Path, run_dir: Path,
             "reason": "offline structured result missing",
             "excluded_evidence_levels": ["offline_export"],
         }
-    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result = _load_typed_result(result_path, "offline_export")
     result["execution"] = command.as_dict()
     result["result_artifact"] = str(result_path.relative_to(run_dir))
     return result
@@ -349,15 +462,32 @@ def run_offline(spec: OfflineSpec, damaged_input: Path, run_dir: Path,
 def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
     workspace = require_workspace(spec.workspace)
     pristine = _validate_tree(spec.pristine_datadir, "pristine datadir")
-    damaged = validate_source(spec.damaged_input)
+    damaged = validate_source(spec.damaged_input) if spec.damaged_input is not None else None
+    if spec.source_hash and damaged is None:
+        raise SafetyError("sealed source hash requires a damaged input")
     ground_truth = load_ground_truth(spec.ground_truth)
-    damaged_hash = sha256_file(damaged)
-    source_hash = spec.source_hash or damaged_hash
+    damaged_hash = sha256_file(damaged) if damaged is not None else None
     if spec.source_hash and spec.source_hash != damaged_hash:
         raise SafetyError("damaged input does not match the sealed source hash")
+    offline_input = (validate_source(spec.offline_input)
+                     if spec.offline_input is not None else None)
+    if offline_input is None and damaged is not None and damaged.suffix.lower() == ".ibd":
+        offline_input = damaged
+    offline_input_hash = sha256_file(offline_input) if offline_input is not None else None
     if not spec.levels or any(level not in range(7) for level in spec.levels):
         raise ValueError("native levels must be a non-empty subset of 0..6")
     binary = validate_source(spec.offline.binary)
+    if spec.mutations:
+        mutations = spec.mutations
+    elif damaged is not None and spec.damaged_relative_path is not None:
+        mutations = (_legacy_mutation(spec),)
+    else:
+        raise SafetyError("mutation plan is required when no legacy damaged input is declared")
+    for mutation in mutations:
+        if mutation.source is not None:
+            validate_source(mutation.source)
+    if offline_input is not None and offline_input.suffix.lower() != ".ibd":
+        raise SafetyError("offline comparison input must be an .ibd tablespace")
 
     experiment_dir = workspace / "experiment"
     if experiment_dir.exists():
@@ -365,11 +495,19 @@ def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
     experiment_dir.mkdir()
     _write_json(experiment_dir / "experiment_spec.json", {
         "levels": list(spec.levels),
-        "damaged_input_sha256": damaged_hash,
+        "offline_input": str(offline_input) if offline_input else None,
+        "offline_input_sha256": offline_input_hash,
         "pristine_datadir": str(pristine),
         "ground_truth": str(spec.ground_truth),
         "native_image": spec.native.image,
         "offline_binary_sha256": sha256_file(binary),
+        "mutations": [{
+            "relative_path": str(mutation.relative_path),
+            "role": mutation.role,
+            "scope": mutation.scope,
+            "action": mutation.action,
+            "source_sha256": sha256_file(mutation.source) if mutation.source else None,
+        } for mutation in mutations],
     })
 
     native_results = {}
@@ -378,17 +516,19 @@ def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
         level_dir.mkdir()
         datadir = level_dir / "datadir"
         _clone_tree(pristine, datadir)
-        target = _replace_damaged_input(datadir, damaged, spec.damaged_relative_path)
+        mutation_records = _apply_mutations(datadir, mutations)
         _write_json(level_dir / "input.json", {
-            "path": str(target.relative_to(level_dir)),
-            "sha256": sha256_file(target),
-            "matches_damaged_input": sha256_file(target) == damaged_hash,
+            "mutations": mutation_records,
+            "offline_input": str(offline_input) if offline_input else None,
+            "offline_input_sha256": offline_input_hash,
+            "source_unchanged": (verify_source_immutable(damaged, damaged_hash)
+                                  if damaged is not None else None),
         })
         native_results[str(level)] = run_native_level(spec.native, level, datadir, level_dir, runner)
 
     offline_dir = experiment_dir / "offline"
     offline_dir.mkdir()
-    offline_result = run_offline(spec.offline, damaged, offline_dir, runner)
+    offline_result = run_offline(spec.offline, offline_input, offline_dir, runner)
     comparison = {
         str(level): compare_three_way(ground_truth, native_results[str(level)], offline_result)
         for level in spec.levels
@@ -400,8 +540,12 @@ def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
         "status": "SEALED_READY" if all(item["status"] == "NOT_COMPUTABLE" or
                                           item["status"] == "COMPARABLE"
                                           for item in comparison.values()) else "INCOMPLETE",
-        "damaged_input_sha256": damaged_hash,
-        "source_unchanged_sha256": sha256_file(damaged),
+        "offline_input_sha256": offline_input_hash,
+        "source_unchanged_sha256": (sha256_file(damaged) if damaged is not None else None),
+        "mutation_source_unchanged": all(
+            mutation.source is None or verify_source_immutable(mutation.source, sha256_file(mutation.source))
+            for mutation in mutations
+        ),
         "offline_binary_sha256": sha256_file(binary),
     })
     write_manifest(experiment_dir, manifest)
@@ -421,8 +565,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run sealed disposable native/offline recovery experiments")
     parser.add_argument("--workspace", type=Path, required=True)
     parser.add_argument("--pristine-datadir", type=Path, required=True)
-    parser.add_argument("--damaged-input", type=Path, required=True)
-    parser.add_argument("--damaged-relative-path", type=Path, required=True)
+    parser.add_argument("--damaged-input", type=Path)
+    parser.add_argument("--damaged-relative-path", type=Path)
+    parser.add_argument("--offline-input", type=Path)
     parser.add_argument("--ground-truth", type=Path, required=True)
     parser.add_argument("--image", required=True)
     parser.add_argument("--offline-binary", type=Path, required=True)
@@ -437,6 +582,7 @@ def main() -> None:
         pristine_datadir=args.pristine_datadir,
         damaged_input=args.damaged_input,
         damaged_relative_path=args.damaged_relative_path,
+        offline_input=args.offline_input,
         ground_truth=args.ground_truth,
         native=NativeSpec(image=args.image, database=args.database, table=args.table,
                            export_sql=args.export_sql),

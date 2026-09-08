@@ -25,6 +25,8 @@ def export_table(socket_path: str, database: str, table: str, output: Path,
         user=user,
         password=password,
         use_pure=True,
+        charset="utf8mb4",
+        collation="utf8mb4_0900_ai_ci",
         connection_timeout=30,
     )
     try:
@@ -52,11 +54,17 @@ def main() -> int:
     parser.add_argument("--table", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--user", default="root")
-    parser.add_argument("--password", default="root")
+    parser.add_argument("--password", default=None)
+    parser.add_argument("--password-stdin", action="store_true")
     args = parser.parse_args()
+    password = args.password
+    if args.password_stdin:
+        password = sys.stdin.readline().rstrip("\n")
+    if password is None:
+        password = ""
     try:
         document = export_table(args.socket, args.database, args.table,
-                                Path(args.output), args.user, args.password)
+                                Path(args.output), args.user, password)
     except Exception as error:  # noqa: BLE001 - surfaced as a failed export
         sys.stderr.write(f"native_export_failed: {type(error).__name__}: {error}\n")
         return 1

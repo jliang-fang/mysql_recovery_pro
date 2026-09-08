@@ -22,6 +22,7 @@ from scripts.disaster_harness.comparator import compare, compare_three_way
 from scripts.disaster_harness.experiment import (
     CommandResult,
     ExperimentSpec,
+    MutationSpec,
     NativeSpec,
     OfflineSpec,
     run_experiment,
@@ -122,6 +123,10 @@ class ManifestTests(unittest.TestCase):
     def test_canonical_json_is_stable(self):
         self.assertEqual(canonical_json({"b": 2, "a": 1}), '{"a":1,"b":2}')
 
+    def test_connector_export_requires_utf8mb4(self):
+        source = Path(__file__).parents[1] / "scripts" / "disaster_harness" / "native_export.py"
+        self.assertIn('charset="utf8mb4"', source.read_text(encoding="utf-8"))
+
 
 class GroundTruthTests(unittest.TestCase):
     def setUp(self):
@@ -200,9 +205,40 @@ class ComparatorTests(unittest.TestCase):
         result = compare(self.expected, actual, "test")
         self.assertEqual(result["field_mismatches"][0]["fields"], ["name"])
         self.assertEqual(result["correct_rows"], 1)
+        self.assertFalse(result["strict_pass"])
         missing = compare(self.expected, None, "missing")
         self.assertEqual(missing["status"], "NOT_COMPUTABLE")
         self.assertIsNone(missing["precision"])
+        self.assertFalse(missing["strict_pass"])
+
+    def test_duplicate_primary_keys_are_not_collapsed_or_computable(self):
+        duplicate = build_ground_truth(
+            "db", "t", self.expected["schema"],
+            [{"id": 1, "name": "one"}, {"id": 1, "name": "different"}],
+        )
+        result = compare(self.expected, duplicate, "duplicate")
+        self.assertEqual(result["status"], "NOT_COMPUTABLE")
+        self.assertIsNone(result["precision"])
+        self.assertEqual(result["actual_rows"], 2)
+        self.assertEqual(result["duplicate_actual"], [{
+            "pk": [{"type": "int", "value": 1}], "count": 2,
+        }])
+        self.assertFalse(result["strict_pass"])
+
+    def test_identity_and_version_mismatches_are_not_computable(self):
+        other_table = build_ground_truth("db", "other", self.expected["schema"],
+                                         [{"id": 1, "name": "one"}, {"id": 2, "name": "two"}], "9.0.1")
+        expected = build_ground_truth("db", "t", self.expected["schema"],
+                                      [{"id": 1, "name": "one"}, {"id": 2, "name": "two"}], "9.0.2")
+        result = compare(expected, other_table, "identity")
+        self.assertEqual(result["status"], "NOT_COMPUTABLE")
+        self.assertEqual(result["prerequisites"], ["mysql_version_mismatch", "table_mismatch"])
+        self.assertFalse(result["strict_pass"])
+
+    def test_exact_match_is_strict_pass(self):
+        result = compare(self.expected, self.expected, "exact")
+        self.assertEqual(result["status"], "COMPARABLE")
+        self.assertTrue(result["strict_pass"])
 
     def test_three_way_reports_incomplete_member(self):
         report = compare_three_way(self.expected, self.expected, None)
@@ -385,5 +421,159 @@ class ExperimentTests(unittest.TestCase):
             self.assertEqual(len(set(clone_hashes)), 3)
             self.assertEqual(sum(1 for call in calls if len(call[0]) > 1 and call[0][1] == "run"), 3)
             self.assertEqual(sum(1 for call in calls if len(call[0]) > 1 and call[0][1] == "stop"), 3)
+
+    def test_run_experiment_uses_explicit_offline_input(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = init_workspace(root / "workspace", "independent offline input")
+            pristine = root / "pristine"
+            (pristine / "db").mkdir(parents=True)
+            (pristine / "db" / "table.ibd").write_bytes(b"pristine")
+            damaged = root / "damaged.ibd"
+            damaged.write_bytes(b"damaged")
+            offline_input = root / "offline.ibd"
+            offline_input.write_bytes(b"offline")
+            binary = root / "offline-tool"
+            binary.write_bytes(b"binary")
+            ground_truth = root / "ground_truth.json"
+            document = self._document()
+            ground_truth.write_text(canonical_json(document) + "\n", encoding="utf-8")
+            offline_argv = []
+
+            def runner(argv, timeout, input_text=""):
+                if len(argv) > 1 and argv[1] == "run":
+                    return CommandResult(list(argv), 0, "container-id", "", 0.0)
+                if len(argv) > 1 and argv[1] == "exec" and "mysqladmin" in argv:
+                    return CommandResult(list(argv), 0, "alive", "", 0.0)
+                if len(argv) > 1 and argv[1] == "exec":
+                    run_dir = Path(argv[argv.index("-v") + 1].split(":", 1)[0]) if "-v" in argv else None
+                    if run_dir:
+                        (run_dir / "native_result.json").write_text(
+                            canonical_json(document) + "\n", encoding="utf-8")
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                if len(argv) > 1 and argv[1] in {"stop", "logs", "rm"}:
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                offline_argv.extend(argv)
+                output_dir = Path(argv[argv.index("--output") + 1])
+                (output_dir / "offline_result.json").write_text(
+                    canonical_json(document) + "\n", encoding="utf-8")
+                return CommandResult(list(argv), 0, "", "", 0.0)
+
+            result = run_experiment(ExperimentSpec(
+                workspace=workspace,
+                pristine_datadir=pristine,
+                damaged_input=damaged,
+                damaged_relative_path=Path("db/table.ibd"),
+                offline_input=offline_input,
+                ground_truth=ground_truth,
+                native=NativeSpec(image="mysql:test"),
+                offline=OfflineSpec(binary=binary, ibd_arg="ibd"),
+                levels=(0,),
+            ), runner)
+
+            self.assertEqual(offline_argv[offline_argv.index("--ibd") + 1], str(offline_input))
+            self.assertEqual(json.loads((Path(result["experiment_dir"]) / "experiment_spec.json").read_text())["offline_input_sha256"], sha256_file(offline_input))
+
+    def test_run_experiment_without_offline_input_is_not_computable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = init_workspace(root / "workspace", "native only")
+            pristine = root / "pristine"
+            (pristine / "#innodb_redo").mkdir(parents=True)
+            (pristine / "#innodb_redo" / "redo.log").write_bytes(b"redo")
+            replacement = root / "damaged.redo"
+            replacement.write_bytes(b"damaged")
+            binary = root / "offline-tool"
+            binary.write_bytes(b"binary")
+            ground_truth = root / "ground_truth.json"
+            ground_truth.write_text(canonical_json(self._document()) + "\n", encoding="utf-8")
+            offline_calls = []
+
+            def runner(argv, timeout, input_text=""):
+                if len(argv) > 1 and argv[1] == "run":
+                    return CommandResult(list(argv), 0, "container-id", "", 0.0)
+                if len(argv) > 1 and argv[1] == "exec" and "mysqladmin" in argv:
+                    return CommandResult(list(argv), 0, "alive", "", 0.0)
+                if len(argv) > 1 and argv[1] == "exec":
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                if len(argv) > 1 and argv[1] in {"stop", "logs", "rm"}:
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                offline_calls.append(argv)
+                return CommandResult(list(argv), 0, "", "", 0.0)
+
+            result = run_experiment(ExperimentSpec(
+                workspace=workspace,
+                pristine_datadir=pristine,
+                damaged_input=None,
+                damaged_relative_path=None,
+                ground_truth=ground_truth,
+                native=NativeSpec(image="mysql:test"),
+                offline=OfflineSpec(binary=binary, ibd_arg="ibd"),
+                levels=(0,),
+                mutations=(MutationSpec(Path("#innodb_redo/redo.log"), "redo", "level1", replacement),),
+            ), runner)
+
+            offline = json.loads((Path(result["experiment_dir"]) / "offline" / "offline_execution.json").read_text())
+            self.assertEqual(offline["status"], "NOT_EXECUTED")
+            self.assertEqual(offline_calls, [])
+            self.assertEqual(result["comparison"]["0"]["status"], "NOT_COMPUTABLE")
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = init_workspace(root / "workspace", "mutation plan")
+            pristine = root / "pristine"
+            (pristine / "db").mkdir(parents=True)
+            (pristine / "db" / "table.ibd").write_bytes(b"pristine")
+            (pristine / "#innodb_redo").mkdir()
+            (pristine / "#innodb_redo" / "redo.log").write_bytes(b"redo-pristine")
+            damaged = root / "damaged.ibd"
+            damaged.write_bytes(b"damaged")
+            damaged_redo = root / "damaged.redo"
+            damaged_redo.write_bytes(b"damaged-redo")
+            binary = root / "offline"
+            binary.write_bytes(b"binary")
+            document = self._document()
+            ground_truth = root / "ground_truth.json"
+            ground_truth.write_text(canonical_json(document) + "\n", encoding="utf-8")
+            datadirs = {}
+
+            def runner(argv, timeout, input_text=""):
+                if len(argv) > 1 and argv[1] == "run":
+                    name = argv[argv.index("--name") + 1]
+                    mount = argv[argv.index("-v") + 1]
+                    datadirs[name] = Path(mount.split(":", 1)[0])
+                    return CommandResult(list(argv), 0, "container-id", "", 0.0)
+                if len(argv) > 1 and argv[1] == "exec" and "mysqladmin" in argv:
+                    return CommandResult(list(argv), 0, "mysqld is alive", "", 0.0)
+                if len(argv) > 1 and argv[1] == "exec":
+                    name = argv[3] if argv[2] == "-i" else argv[2]
+                    (datadirs[name].parent / "native_result.json").write_text(
+                        canonical_json(document) + "\n", encoding="utf-8")
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                if len(argv) > 1 and argv[1] in {"stop", "logs", "rm"}:
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                output_dir = Path(argv[argv.index("--output") + 1])
+                (output_dir / "damaged_result.json").write_text(canonical_json(document) + "\n", encoding="utf-8")
+                return CommandResult(list(argv), 0, "", "", 0.0)
+
+            result = run_experiment(ExperimentSpec(
+                workspace=workspace,
+                pristine_datadir=pristine,
+                damaged_input=damaged,
+                damaged_relative_path=Path("db/table.ibd"),
+                ground_truth=ground_truth,
+                native=NativeSpec(image="mysql:test", export_sql="SELECT 1"),
+                offline=OfflineSpec(binary=binary, ibd_arg="ibd"),
+                levels=(0,),
+                mutations=(
+                    MutationSpec(Path("db/table.ibd"), "tablespace", "level2", damaged),
+                    MutationSpec(Path("#innodb_redo/redo.log"), "redo", "level1", damaged_redo),
+                ),
+            ), runner)
+            level_dir = Path(result["experiment_dir"]) / "native_0"
+            input_record = json.loads((level_dir / "input.json").read_text())
+            self.assertEqual(len(input_record["mutations"]), 2)
+            self.assertEqual((level_dir / "datadir" / "#innodb_redo" / "redo.log").read_bytes(), b"damaged-redo")
+            self.assertTrue(verify_seal(Path(result["experiment_dir"])))
 
 

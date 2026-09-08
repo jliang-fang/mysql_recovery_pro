@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 """Three-way comparison for sealed typed recovery results."""
 
-from collections import Counter
-from typing import Any, Dict, Iterable, Optional
+from collections import defaultdict
+from typing import Any, Dict, Optional
 
-from .manifest import canonical_json, sha256_bytes
+from .manifest import canonical_json
 
 
 def _index(document: Optional[Dict[str, Any]]):
     rows = document.get("rows", []) if document else []
-    keys = [canonical_json(row["pk"]) for row in rows]
-    duplicates = sorted(key for key, count in Counter(keys).items() if count > 1)
-    return {key: row for key, row in zip(keys, rows)}, duplicates
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[canonical_json(row["pk"])].append(row)
+    duplicates = [
+        {"pk": grouped[key][0]["pk"], "count": len(grouped[key])}
+        for key in sorted(grouped)
+        if len(grouped[key]) > 1
+    ]
+    return grouped, duplicates
 
 
 def _prerequisites(document: Optional[Dict[str, Any]]) -> list:
     if not document:
         return ["missing_result"]
-    required = ["schema_fingerprint", "schema", "rows"]
+    required = ["database", "table", "schema_fingerprint", "schema", "rows"]
     missing = [field for field in required if field not in document]
     if document.get("status") not in (None, "SEALED_READY", "COMPLETE"):
         missing.append("result_not_comparable")
@@ -28,10 +34,34 @@ def _prerequisites(document: Optional[Dict[str, Any]]) -> list:
     return sorted(set(missing))
 
 
-def compare(expected: Dict[str, Any], actual: Dict[str, Any], label: str) -> Dict[str, Any]:
+def _identity_prerequisites(expected: Optional[Dict[str, Any]],
+                            actual: Optional[Dict[str, Any]]) -> list:
+    if not expected or not actual:
+        return []
+    prerequisites = []
+    for field in ("database", "table"):
+        if expected.get(field) != actual.get(field):
+            prerequisites.append(f"{field}_mismatch")
+    expected_version = expected.get("mysql_version", "")
+    actual_version = actual.get("mysql_version", "")
+    if expected_version and actual_version and expected_version != actual_version:
+        prerequisites.append("mysql_version_mismatch")
+    return prerequisites
+
+
+def compare(expected: Optional[Dict[str, Any]], actual: Optional[Dict[str, Any]],
+            label: str) -> Dict[str, Any]:
     prerequisites = _prerequisites(expected) + _prerequisites(actual)
-    expected_rows, expected_duplicates = _index(expected)
-    actual_rows, actual_duplicates = _index(actual)
+    expected_groups, expected_duplicates = _index(expected)
+    actual_groups, actual_duplicates = _index(actual)
+    if expected_duplicates:
+        prerequisites.append("duplicate_expected_rows")
+    if actual_duplicates:
+        prerequisites.append("duplicate_actual_rows")
+    prerequisites.extend(_identity_prerequisites(expected, actual))
+
+    expected_rows = {key: rows[0] for key, rows in expected_groups.items()}
+    actual_rows = {key: rows[0] for key, rows in actual_groups.items()}
     expected_keys = set(expected_rows)
     actual_keys = set(actual_rows)
     common = expected_keys & actual_keys
@@ -48,24 +78,27 @@ def compare(expected: Dict[str, Any], actual: Dict[str, Any], label: str) -> Dic
     correct = len(common) - len(field_mismatches)
     false_negatives = expected_keys - actual_keys
     false_positives = actual_keys - expected_keys
-    if expected.get("schema_fingerprint") != (actual or {}).get("schema_fingerprint"):
+    if expected and expected.get("schema_fingerprint") != (actual or {}).get("schema_fingerprint"):
         prerequisites.append("schema_mismatch")
     prerequisites = sorted(set(prerequisites))
+    comparable = not prerequisites
+    strict_pass = comparable and not false_negatives and not false_positives and not field_mismatches
     result = {
         "label": label,
-        "status": "COMPARABLE" if not prerequisites else "NOT_COMPUTABLE",
+        "status": "COMPARABLE" if comparable else "NOT_COMPUTABLE",
         "prerequisites": prerequisites,
-        "expected_rows": len(expected_rows),
-        "actual_rows": len(actual_rows),
-        "correct_rows": correct if not prerequisites else None,
+        "expected_rows": sum(len(rows) for rows in expected_groups.values()),
+        "actual_rows": sum(len(rows) for rows in actual_groups.values()),
+        "correct_rows": correct if comparable else None,
         "false_negatives": [expected_rows[key]["pk"] for key in sorted(false_negatives)],
         "false_positives": [actual_rows[key]["pk"] for key in sorted(false_positives)],
         "duplicate_expected": expected_duplicates,
         "duplicate_actual": actual_duplicates,
         "field_mismatches": field_mismatches,
         "excluded_evidence_levels": (actual or {}).get("excluded_evidence_levels", []),
+        "strict_pass": strict_pass,
     }
-    if not prerequisites:
+    if comparable:
         result["precision"] = correct / len(actual_rows) if actual_rows else 1.0 if not expected_rows else 0.0
         result["recall"] = correct / len(expected_rows) if expected_rows else 1.0
     else:
@@ -79,10 +112,12 @@ def compare_three_way(ground_truth: Dict[str, Any], native: Optional[Dict[str, A
     gt_native = compare(ground_truth, native, "ground_truth_vs_native")
     gt_offline = compare(ground_truth, offline, "ground_truth_vs_offline")
     native_offline = compare(native, offline, "native_vs_offline")
+    comparisons = (gt_native, gt_offline, native_offline)
     return {
-        "comparison_version": 1,
-        "status": "COMPARABLE" if all(item["status"] == "COMPARABLE" for item in
-                                      (gt_native, gt_offline, native_offline)) else "NOT_COMPUTABLE",
+        "comparison_version": 2,
+        "status": "COMPARABLE" if all(item["status"] == "COMPARABLE" for item in comparisons)
+        else "NOT_COMPUTABLE",
+        "strict_pass": all(item["strict_pass"] for item in comparisons),
         "comparisons": {
             "ground_truth_vs_native": gt_native,
             "ground_truth_vs_offline": gt_offline,

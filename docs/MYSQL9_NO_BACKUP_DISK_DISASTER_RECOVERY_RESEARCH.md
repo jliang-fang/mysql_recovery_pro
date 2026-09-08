@@ -12,13 +12,13 @@
 
 ## 摘要
 
-针对MySQL 9.0在无逻辑备份、无物理备份或原始实例无法启动条件下的数据抢救问题，提出一种只读、分层、可审计的磁盘级恢复逻辑。方法以磁盘镜像保护为入口，依次完成故障分级、InnoDB页面身份校验、SDI或外部schema解析、B+Tree记录提取、有限Undo/Redo证据关联及一致性检查，并按结构化结果、片段和原始证据分级输出。针对Redo损坏、局部数据页损坏和独立数据字典损坏三类故障，分别设计处理分支和失败转移机制。现有MySQL 9.0系列工具侧fixture记录了rm-rf、schema-aware和deep carve路径各48行输出；本轮进一步封存了一个局部数据页损坏的Level II同输入实验，但原生查询和离线输出均未达到可比较条件。因此，本文不以候选数量或测试通过率替代恢复率，强调物理证据、schema可信度和ground truth比较的约束作用。结果表明，该方法适合作为应急抢救和取证辅助方案，不能替代备份、binlog及容灾体系。
+针对MySQL 9.0在无逻辑备份、无物理备份或原始实例无法启动条件下的数据抢救问题，提出一种只读、分层、可审计的磁盘级恢复逻辑。方法以磁盘镜像保护为入口，依次完成故障分级、InnoDB页面身份校验、SDI或外部schema解析、B+Tree记录提取、有限Undo/Redo证据关联及一致性检查，并按结构化结果、片段和原始证据分级输出。针对Redo损坏、局部数据页损坏和独立数据字典损坏三类故障，分别设计处理分支和失败转移机制。现有MySQL 9.0系列工具侧fixture记录了rm-rf、schema-aware和deep carve路径各48行输出；历史实验封存了一个局部数据页损坏的Level II同输入试验（预期5行，原生与离线均未达到可比较条件，比较状态均为NOT_COMPUTABLE）；2026年9月8日进一步采集并固化了MySQL 9.0.1全字段基线镜像与规范化ground truth（7页、114688字节，3行），构建了隔离的原生innodb_force_recovery=0..6与离线对照脚手架。本文不以候选数量、启动就绪或测试通过率替代恢复率，强调物理证据、schema可信度和严格ground truth比较的约束作用。结果表明，该方法适合作为应急抢救和取证辅助方案，不能替代备份、binlog及容灾体系。
 
 **关键词：** MySQL 9.0；磁盘级恢复；InnoDB；证据分级
 
 ## Abstract
 
-To recover data from MySQL 9.0 when logical and physical backups are unavailable or the original instance cannot start, this paper proposes a read-only, layered, and auditable disk-level recovery method. The method protects the source evidence first, classifies damage, validates InnoDB page identity, extracts SDI or externally constrained schema information, parses B+Tree records, associates limited Undo/Redo evidence, and performs consistency checks before producing tiered results. Three branches are defined for damaged Redo logs, partially damaged data pages, and damaged independent data-dictionary tablespaces. Existing MySQL 9.0-series tool fixtures recorded 48 output rows for each of rm-rf recovery, schema-aware recovery, and deep carving, but no disaster experiment has yet provided a fair comparison with native recovery under identical inputs and ground truth. Therefore, candidate counts and test pass rates are not treated as recovery rates. The method is positioned as an emergency salvage and forensic aid rather than a replacement for backups, binlogs, or disaster-recovery systems.
+To recover data from MySQL 9.0 when logical and physical backups are unavailable or the original instance cannot start, this paper proposes a read-only, layered, and auditable disk-level recovery method. The method protects the source evidence first, classifies damage, validates InnoDB page identity, extracts SDI or externally constrained schema information, parses B+Tree records, associates limited Undo/Redo evidence, and performs consistency checks before producing tiered results. Three branches are defined for damaged Redo logs, partially damaged data pages, and damaged independent data-dictionary tablespaces. Existing MySQL 9.0-series tool fixtures recorded 48 output rows for each of rm-rf recovery, schema-aware recovery, and deep carving. A sealed historical Level II experiment demonstrated that native force-recovery (0..6) failed upon querying corrupted pages while offline recovery was safely blocked due to insufficient schema confidence, both yielding NOT_COMPUTABLE without speculative recovery rate claims. A fresh MySQL 9.0.1 full-type baseline (7 pages, 114,688 bytes, 3 rows) and a reproducible evaluation harness have been established for upcoming Level I/II/III disaster matrices. Candidate counts and test pass rates are strictly not treated as recovery rates. The method is positioned as an emergency salvage and forensic aid rather than a replacement for backups, binlogs, or disaster-recovery systems.
 
 **Key words:** MySQL 9.0; disk-level recovery; InnoDB; evidence grading
 
@@ -142,6 +142,8 @@ L4 RAW         ← 仅确认原始字节、偏移或页面候选
 
 现有MySQL 9.0系列fixture为`testdb.all_types_test`，页大小16384字节，文件大小114688字节，共7页、4行，DYNAMIC行格式，覆盖整数、浮点、DECIMAL、日期时间、字符、TEXT、BLOB、ENUM、SET、BIT和JSON等类型。fixture记录的`server_version`为9.0.1，镜像字段为未锁定的`mysql:9.0`；容器编排使用`mysql:9.0.0`。因此本文将其称为“MySQL 9.0系列fixture”，不把这些版本标识视为同一锁定环境。
 
+2026年9月8日进一步采集并固化了独立的MySQL 9.0.1全字段基线：`testdb.all_types_test`，页大小16384字节，文件大小114688字节，共7页、3行，DYNAMIC行格式，覆盖bigint、varchar(32)、decimal(12,4)、blob、datetime(6)、json、enum、set和bit(8)等类型。该基线镜像digest为`sha256:92dc869678019f65d761155dacac660a904f6245bfe1b7997da0a73b2bfc68c9`，schema fingerprint为`8e3b759d8105b15e716a074a81af46a91faba80e115d1479e6616fef9bccdcd6`，规范化ground truth dataset SHA-256为`bfa7586b36ee8aa46c53d2d9604c794f4e8c6a6cdaf404892a81f78635c4b2ff`。该3行独立数据集与仓库既有4行fixture属于不同采集，二者不得混淆。
+
 配置材料明确给出`innodb_file_per_table=1`、utf8mb4、3 GB buffer pool、2 GB redo log、128 MB log buffer、6 GB内存限制和3.0 CPU限制，同时使用`innodb_flush_log_at_trx_commit=0`、`sync_binlog=0`及ROW格式binlog。仓库没有提供宿主机CPU型号、物理内存、磁盘型号、挂载参数、虚拟化平台和块设备状态，故这些信息不作为实验结论。
 
 ### 3.2 工具侧验证结果
@@ -167,10 +169,10 @@ L4 RAW         ← 仅确认原始字节、偏移或页面候选
 | 故障等级 | 方案A：原生`innodb_force_recovery` | 方案B：离线恢复 | 当前状态 |
 |---|---|---|---|
 | Ⅰ级：Redo损坏，字典和表空间主要完好 | 待实测启动、读取、导出边界及错误信息 | 待实测页面身份、Redo inventory、有限关联和结构化结果 | 本轮未执行，暂无同输入对照 |
-| Ⅱ级：局部数据页损坏，字典基本完好 | 7个独立副本均启动和就绪检查成功；访问受损表时查询均返回137，日志指向space=2/page=4并记录损坏处理失败；不形成可信导出 | 离线命令正常退出，但仅产生1条`EVIDENCE_ONLY`结构化证据；schema可信度不足，CSV为空，导出被阻断 | 已封存：`/tmp/dbrec_ws_l2_valid/experiment`；manifest seal=`8a541f1252d0ab038f76445463932892f8b0d0a4bfc193a30ca08b38c7730078`；损坏输入SHA-256=`8ecfc6cf364c18afe87b3dd733585108b7f185079751f135e1602fe2354f1c3e`；7个比较均为`NOT_COMPUTABLE` |
+| Ⅱ级：局部数据页损坏，字典基本完好 | 7个独立副本均启动和就绪检查成功；访问受损表时查询均返回137，日志指向space=2/page=4并记录损坏处理失败；不形成可信导出 | 离线命令正常退出，但仅产生1条`EVIDENCE_ONLY`结构化证据；schema可信度不足，CSV为空，导出被阻断 | 历史封存工件：`/tmp/dbrec_ws_l2_valid/experiment`；数据集为`demo.disaster_t`，预期5行；manifest seal=`8a541f1252d0ab038f76445463932892f8b0d0a4bfc193a30ca08b38c7730078`；损坏输入SHA-256=`8ecfc6cf364c18afe87b3dd733585108b7f185079751f135e1602fe2354f1c3e`；7个比较均为`NOT_COMPUTABLE` |
 | Ⅲ级：数据字典相关证据损坏，`.ibd`尚存 | 待实测字典损坏后的启动、表识别和查询边界 | 待实测SDI、外部schema、页证据和冲突处理 | 本轮未执行，暂无同输入对照 |
 
-截至本文定稿，Level II已封存同输入灾难镜像、独立原生副本、离线运行结果和比较报告；Level I、Level III仍未执行，且Level II尚未形成可信灾难后逐行逐字段输出。因此，本文的Level II结果是可审计的非可比较实验结果，不是恢复率结论；Level I和Level III仍属于可复现实验方案。当前已有的REAL_MYSQL测试只读取既有fixture并验证结构和流水线行为，不等同于对Redo或数据字典实施破坏后的恢复实验。
+截至本文定稿，Level II已封存同输入灾难镜像、独立原生副本、离线运行结果和比较报告（数据集为`demo.disaster_t`，预期5行， manifest seal=`8a541f1252d0ab038f76445463932892f8b0d0a4bfc193a30ca08b38c7730078`）；Level I、Level III仍未执行，且Level II尚未形成可信灾难后逐行逐字段输出。因此，本文的Level II结果是可审计的非可比较实验结果，不是恢复率结论；Level I和Level III仍属于可复现实验方案。2026年9月8日已采集并固化MySQL 9.0.1全字段未破坏基线（`testdb.all_types_test`，3行，7页，114688字节，schema fingerprint `8e3b759d...`，dataset SHA-256 `bfa7586b...`）并构建隔离的原生`innodb_force_recovery=0..6`与离线对照脚手架，但新一轮Level I/II/III真实破坏矩阵尚未落盘。当前已有的REAL_MYSQL测试只读取既有fixture并验证结构和流水线行为，不等同于对Redo或数据字典实施破坏后的恢复实验。
 
 ### 3.4 评价指标与讨论
 
