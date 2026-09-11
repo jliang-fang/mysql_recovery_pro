@@ -13,7 +13,8 @@ from typing import Any, Dict, Iterable, List, Optional
 
 from .manifest import canonical_json, sha256_bytes
 
-GROUND_TRUTH_VERSION = 1
+GROUND_TRUTH_VERSION = 2
+TYPED_ENCODING_VERSION = 2
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -73,7 +74,13 @@ def canonical_value(value: Any, declared_type: str = "") -> Dict[str, Any]:
     if normalized_type == "enum":
         return {"type": "enum", "value": str(value)}
     if normalized_type == "set":
-        return {"type": "set", "value": str(value)}
+        if isinstance(value, (set, frozenset)):
+            if not all(isinstance(item, str) for item in value):
+                raise TypeError("SET members must be strings")
+            return {"type": "set", "values": sorted(value)}
+        if isinstance(value, str):
+            return {"type": "set", "values": sorted(value.split(",")) if value else []}
+        raise TypeError(f"unsupported SET value type: {type(value).__name__}")
     if isinstance(value, int) and not isinstance(value, bool):
         return {"type": "int", "value": value}
     if isinstance(value, float):
@@ -141,6 +148,7 @@ def build_ground_truth(database: str, table: str, schema: Dict[str, Any], rows: 
     if not schema["primary_key"]:
         return {
             "ground_truth_version": GROUND_TRUTH_VERSION,
+            "typed_encoding_version": TYPED_ENCODING_VERSION,
             "database": database,
             "table": table,
             "mysql_version": mysql_version,
@@ -171,6 +179,7 @@ def build_ground_truth(database: str, table: str, schema: Dict[str, Any], rows: 
     valid = bool(schema["primary_key"]) and not duplicate_keys
     document = {
         "ground_truth_version": GROUND_TRUTH_VERSION,
+        "typed_encoding_version": TYPED_ENCODING_VERSION,
         "database": database,
         "table": table,
         "mysql_version": mysql_version,

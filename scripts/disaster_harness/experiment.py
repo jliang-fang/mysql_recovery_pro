@@ -820,8 +820,16 @@ def main() -> None:
     parser.add_argument("--database", default="")
     parser.add_argument("--table", default="")
     parser.add_argument("--export-sql", required=True)
+    parser.add_argument("--harness-host-path", type=Path, required=True,
+                        help="read-only host directory containing disaster_harness")
+    parser.add_argument("--site-packages-host-path", type=Path, required=True,
+                        help="read-only host site-packages directory containing mysql.connector")
     parser.add_argument("--levels", type=_parse_levels, default=tuple(range(7)))
     args = parser.parse_args()
+    if not args.harness_host_path.is_dir():
+        parser.error("--harness-host-path must be an existing directory")
+    if not args.site_packages_host_path.is_dir():
+        parser.error("--site-packages-host-path must be an existing directory")
     result = run_experiment(ExperimentSpec(
         workspace=args.workspace,
         pristine_datadir=args.pristine_datadir,
@@ -830,7 +838,9 @@ def main() -> None:
         offline_input=args.offline_input,
         ground_truth=args.ground_truth,
         native=NativeSpec(image=args.image, database=args.database, table=args.table,
-                           export_sql=args.export_sql),
+                          export_sql=args.export_sql,
+                          harness_host_path=args.harness_host_path,
+                          site_packages_host_path=args.site_packages_host_path),
         offline=OfflineSpec(binary=args.offline_binary, ibd_arg=args.offline_ibd_arg),
         levels=args.levels,
     ))

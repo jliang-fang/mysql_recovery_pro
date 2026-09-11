@@ -40,6 +40,12 @@ def _identity_prerequisites(expected: Optional[Dict[str, Any]],
     if not expected or not actual:
         return []
     prerequisites = []
+    expected_encoding = expected.get("typed_encoding_version")
+    actual_encoding = actual.get("typed_encoding_version")
+    if expected_encoding is None or actual_encoding is None:
+        prerequisites.append("missing_typed_encoding_version")
+    elif expected_encoding != actual_encoding:
+        prerequisites.append("typed_encoding_version_mismatch")
     for field in ("database", "table"):
         if expected.get(field) != actual.get(field):
             prerequisites.append(f"{field}_mismatch")

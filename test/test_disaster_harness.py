@@ -30,6 +30,7 @@ from scripts.disaster_harness.experiment import (
     _mutation_fingerprint,
     _mutation_scope_for_level,
     _mutations_for_scope,
+    _mysql_command,
     _validate_mutation_spec,
 )
 from scripts.disaster_harness.ground_truth import (
@@ -158,6 +159,28 @@ class GroundTruthTests(unittest.TestCase):
         self.assertEqual(canonical_value({"z": 2, "a": [True, None]}, "json"),
                          {"type": "json", "value": {"a": [True, None], "z": 2}})
 
+        self.assertEqual(canonical_value({"z", "a"}, "set"),
+                         {"type": "set", "values": ["a", "z"]})
+        self.assertEqual(canonical_value("z,a", "set"),
+                         {"type": "set", "values": ["a", "z"]})
+        with self.assertRaises(TypeError):
+            canonical_value({"a", 1}, "set")
+
+    def test_set_values_are_deterministic_across_ground_truth_documents(self):
+        schema = {
+            "columns": [
+                {"name": "id", "ordinal": 0, "type": "int", "nullable": False},
+                {"name": "flags", "ordinal": 1, "type": "set('a','c')", "nullable": False},
+            ],
+            "primary_key": ["id"],
+        }
+        first = build_ground_truth("db", "t", schema, [{"id": 1, "flags": {"a", "c"}}])
+        second = build_ground_truth("db", "t", schema, [{"id": 1, "flags": {"c", "a"}}])
+        self.assertEqual(first["typed_encoding_version"], 2)
+        self.assertEqual(first["dataset_sha256"], second["dataset_sha256"])
+        self.assertEqual(first["rows"][0]["row_hash"], second["rows"][0]["row_hash"])
+        self.assertTrue(compare(first, second, "set-order")["strict_pass"])
+
     def test_ground_truth_is_comparable_and_deterministic(self):
         rows = [{
             "id": 1,
@@ -239,6 +262,13 @@ class ComparatorTests(unittest.TestCase):
         self.assertEqual(result["prerequisites"], ["mysql_version_mismatch", "table_mismatch"])
         self.assertFalse(result["strict_pass"])
 
+    def test_typed_encoding_mismatch_is_not_computable(self):
+        actual = dict(self.expected)
+        actual["typed_encoding_version"] = self.expected["typed_encoding_version"] + 1
+        result = compare(self.expected, actual, "encoding")
+        self.assertEqual(result["status"], "NOT_COMPUTABLE")
+        self.assertIn("typed_encoding_version_mismatch", result["prerequisites"])
+
     def test_exact_match_is_strict_pass(self):
         result = compare(self.expected, self.expected, "exact")
         self.assertEqual(result["status"], "COMPARABLE")
@@ -256,6 +286,7 @@ class ComparatorTests(unittest.TestCase):
             "schema": self.expected["schema"],
             "schema_fingerprint": self.expected["schema_fingerprint"],
             "mysql_version": "9.0",
+            "typed_encoding_version": self.expected["typed_encoding_version"],
             "status": "SEALED_READY",
             "rows": self.expected["rows"],
             "input_identity": input_identity,
@@ -383,6 +414,28 @@ class ExperimentTests(unittest.TestCase):
             self.assertEqual(result["excluded_evidence_levels"], ["native_export"])
             self.assertTrue((run_dir / "native_execution.json").is_file())
             self.assertTrue(any(item[2] == "" for item in calls))
+
+    def test_mysql_command_mounts_harness_and_site_packages_read_only(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            datadir = root / "datadir"
+            run_dir = root / "run_dir"
+            harness = root / "harness"
+            libs = root / "libs"
+            for path in (datadir, run_dir, harness, libs):
+                path.mkdir()
+            spec = NativeSpec(
+                image="mysql:9.0",
+                harness_host_path=harness,
+                site_packages_host_path=libs,
+            )
+            command = _mysql_command(spec, 3, datadir, run_dir, "test-container")
+            self.assertIn("-v", command)
+            self.assertIn(f"{harness.resolve()}:/opt/dbrec-harness:ro", command)
+            self.assertIn(f"{libs.resolve()}:/opt/dbrec-libs:ro", command)
+            self.assertIn("-e", command)
+            self.assertIn("PYTHONPATH=/opt/dbrec-harness:/opt/dbrec-libs", command)
+            self.assertIn("--innodb-force-recovery=3", command)
 
     def test_run_experiment_rejects_non_tablespace_target(self):
         with tempfile.TemporaryDirectory() as temp:
