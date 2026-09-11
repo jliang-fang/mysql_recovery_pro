@@ -1293,7 +1293,9 @@ std::string TupleParser::decode_field_data(
             break;
 
         case mt::JSON: {
-            // Use binary JSON decoder for proper JSON parsing
+            // Use binary JSON decoder for proper JSON parsing. Unparsable payloads
+            // return the sentinel and are rejected by the caller before the record
+            // can be treated as structured output.
             value = decode_json_binary(data, offset, data_size);
             offset += data_size;
             break;

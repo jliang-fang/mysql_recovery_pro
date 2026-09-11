@@ -9,8 +9,7 @@
  *
  * Gating:
  *   - All tests are labelled REAL_MYSQL in CMakeLists.txt
- *   - Default: ctest -E REAL_MYSQL (skipped)
- *   - Enable:  DBREC_REAL_FIXTURES=1 ctest -L REAL_MYSQL
+ *   - Selected by: ctest -L REAL_MYSQL (excluded via ctest -LE REAL_MYSQL)
  *   - Missing fixture → GTEST_SKIP() (never PASS, never FAIL)
  */
 

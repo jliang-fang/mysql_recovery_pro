@@ -41,6 +41,10 @@ constexpr uint8_t JSON_TYPE_UINT64 = 0x0A;
 constexpr uint8_t JSON_TYPE_DOUBLE = 0x0B;
 constexpr uint8_t JSON_TYPE_STRING = 0x0C;
 
+// Marker returned when binary JSON cannot be fully parsed; callers must treat
+// the record as evidence and never emit this into structured export.
+constexpr const char* JSON_UNPARSABLE = "__JSON_UNPARSABLE__";
+
 // Variable length field size encoding constant
 // For is_big columns (BLOB, JSON): byte > 127 means 2-byte encoding
 // Note: REC_N_FIELDS_ONE_BYTE_MAX is now defined in page_defs.hpp
@@ -67,23 +71,22 @@ inline uint64_t read_json_le64(const uint8_t* data, size_t offset) {
 
 // 解析 JSON 字符串
 std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len) {
-    if (offset >= max_len) return "\"\"";
+    if (offset >= max_len) return JSON_UNPARSABLE;
     // 读取可变长度
     uint8_t first = data[offset];
     size_t str_len = 0;
     size_t len_bytes = 1;
     if (first & 0x80) {
         // 两字节长度
-        if (offset + 1 >= max_len) return "\"\"";
+        if (offset + 1 >= max_len) return JSON_UNPARSABLE;
         str_len = ((first & 0x7F) | (data[offset + 1] << 7));
         len_bytes = 2;
     } else {
         str_len = first;
     }
     // Sanity check: str_len should be reasonable
-    if (str_len > 65535 || offset + len_bytes + str_len > max_len) {
-        str_len = max_len > offset + len_bytes ? max_len - offset - len_bytes : 0;
-        if (str_len > 1000) str_len = 1000;  // Cap at 1KB
+    if (str_len > 65535 || len_bytes > max_len - offset || str_len > max_len - offset - len_bytes) {
+        return JSON_UNPARSABLE;
     }
     std::string result(reinterpret_cast<const char*>(data + offset + len_bytes), str_len);
     // 转义特殊字符
@@ -104,9 +107,8 @@ std::string parse_json_string(const uint8_t* data, size_t offset, size_t max_len
 std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_size,
                                 size_t element_count, bool is_object, size_t entry_size) {
     if (element_count == 0) return is_object ? "{}" : "[]";
-    if (element_count > 100) {
-        // 防止解析过大JSON导致性能问题，但显示部分元素
-        element_count = 10;  // Cap at 10 elements for display
+    if (element_count > 1000) {
+        return JSON_UNPARSABLE;
     }
 
     std::string result = is_object ? "{" : "[";
@@ -134,8 +136,7 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
         // 读取VALUE_ENTRY: TYPE(1) + OFFSET/VALUE
         size_t ve_pos = value_entry_offset + i * value_entry_size;
         if (ve_pos + value_entry_size > data_size) {
-            result += "null";
-            continue;
+            return JSON_UNPARSABLE;
         }
 
         uint8_t val_type = data[ve_pos];  // TYPE是第一个字节
@@ -185,25 +186,24 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
         if (is_object) {
             // 解析键: KEY_ENTRY = KEY_OFFSET(2/4) + KEY_LENGTH(2)
             size_t ke_pos = key_entry_offset + i * key_entry_size;
-            if (ke_pos + key_entry_size > data_size) {
-                result += "\"key\":";
-            } else {
-                uint16_t key_offset_val = (entry_size == 2) ?
-                    read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
-                uint16_t key_length = read_json_le16(data, ke_pos + entry_size);
-
-                if (key_offset_val + key_length <= data_size && key_length > 0 && key_length < 256) {
-                    std::string key(reinterpret_cast<const char*>(data + key_offset_val), key_length);
-                    result += "\"" + key + "\":";
-                } else {
-                    result += "\"key\":";
-                }
+            if (ke_pos > data_size || key_entry_size > data_size - ke_pos) {
+                return JSON_UNPARSABLE;
             }
+            size_t key_offset_val = (entry_size == 2) ?
+                read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
+            size_t key_length = read_json_le16(data, ke_pos + entry_size);
+            if (key_offset_val > data_size || key_length > data_size - key_offset_val ||
+                key_length == 0 || key_length >= 256) {
+                return JSON_UNPARSABLE;
+            }
+            std::string key(reinterpret_cast<const char*>(data + key_offset_val), key_length);
+            result += "\"" + key + "\":";
         }
 
         // 解析值
         size_t consumed = 0;
         std::string value = parse_json_value(data, val_offset, data_size, val_type, consumed);
+        if (value == JSON_UNPARSABLE) return JSON_UNPARSABLE;
         result += value;
     }
 
@@ -214,50 +214,50 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
 // 解析 JSON 值
 std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_size, uint8_t type, size_t& consumed) {
     consumed = 0;
-    if (offset >= data_size) return "null";
+    if (offset >= data_size) return JSON_UNPARSABLE;
 
     switch (type) {
         case JSON_TYPE_LITERAL: {
-            if (offset >= data_size) return "null";
+            if (offset >= data_size) return JSON_UNPARSABLE;
             uint8_t literal = data[offset];
             consumed = 1;
             if (literal == 0) return "null";
             if (literal == 1) return "true";
             if (literal == 2) return "false";
-            return "null";
+            return JSON_UNPARSABLE;
         }
         case JSON_TYPE_INT16: {
-            if (offset + 2 > data_size) return "0";
+            if (offset > data_size || data_size - offset < 2) return JSON_UNPARSABLE;
             int16_t val = static_cast<int16_t>(read_json_le16(data, offset));
             consumed = 2;
             return std::to_string(val);
         }
         case JSON_TYPE_UINT16: {
-            if (offset + 2 > data_size) return "0";
+            if (offset > data_size || data_size - offset < 2) return JSON_UNPARSABLE;
             uint16_t val = read_json_le16(data, offset);
             consumed = 2;
             return std::to_string(val);
         }
         case JSON_TYPE_INT32: {
-            if (offset + 4 > data_size) return "0";
+            if (offset > data_size || data_size - offset < 4) return JSON_UNPARSABLE;
             int32_t val = static_cast<int32_t>(read_json_le32(data, offset));
             consumed = 4;
             return std::to_string(val);
         }
         case JSON_TYPE_UINT32: {
-            if (offset + 4 > data_size) return "0";
+            if (offset > data_size || data_size - offset < 4) return JSON_UNPARSABLE;
             uint32_t val = read_json_le32(data, offset);
             consumed = 4;
             return std::to_string(val);
         }
         case JSON_TYPE_INT64: {
-            if (offset + 8 > data_size) return "0";
+            if (offset > data_size || data_size - offset < 8) return JSON_UNPARSABLE;
             int64_t val = static_cast<int64_t>(read_json_le64(data, offset));
             consumed = 8;
             return std::to_string(val);
         }
         case JSON_TYPE_UINT64: {
-            if (offset + 8 > data_size) return "0";
+            if (offset > data_size || data_size - offset < 8) return JSON_UNPARSABLE;
             uint64_t val = read_json_le64(data, offset);
             consumed = 8;
             return std::to_string(val);
@@ -273,7 +273,7 @@ std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_siz
             return buf;
         }
         case 0x0f: {  // OPAQUE
-            return "null";  // Opaque types handled in main decode_json_binary
+            return JSON_UNPARSABLE;  // Opaque types require a validated decoder
         }
         case JSON_TYPE_STRING: {
             return parse_json_string(data, offset, data_size);
@@ -282,25 +282,25 @@ std::string parse_json_value(const uint8_t* data, size_t offset, size_t data_siz
         case JSON_TYPE_LARGE_OBJECT:
         case JSON_TYPE_SMALL_ARRAY:
         case JSON_TYPE_LARGE_ARRAY: {
-            // 复杂类型：简化处理，返回原始数据的字符串表示
             bool is_object = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT);
             bool is_small = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_SMALL_ARRAY);
             size_t entry_size = is_small ? 2 : 4;
 
-            if (offset + entry_size * 2 > data_size) return is_object ? "{}" : "[]";
+            if (offset + entry_size * 2 > data_size) return JSON_UNPARSABLE;
 
             size_t element_count = is_small ? read_json_le16(data, offset) : read_json_le32(data, offset);
             size_t total_size = is_small ? read_json_le16(data, offset + entry_size) : read_json_le32(data, offset + entry_size);
 
             if (element_count == 0) return is_object ? "{}" : "[]";
-            if (element_count > 1000) return is_object ? "{\"...\":\"truncated\"}" : "[\"truncated\"]";
+            if (element_count > 1000) return JSON_UNPARSABLE;
 
-            // 简化输出：返回包含元素数量的占位符
-            if (is_object) {
-                return "{\"_count\":" + std::to_string(element_count) + "}";
-            } else {
-                return "[\"_count\":" + std::to_string(element_count) + "]";
+            // 完整解析元素；部分解析结果仍可能不可信，越界即 fail-closed
+            std::string parsed = parse_json_elements(data, offset, data_size,
+                                                     element_count, is_object, entry_size);
+            if (parsed.find(JSON_UNPARSABLE) != std::string::npos) {
+                return JSON_UNPARSABLE;
             }
+            return parsed;
         }
         default:
             return "null";
@@ -315,7 +315,7 @@ std::string parse_json_elements(const uint8_t* data, size_t offset, size_t data_
 // JSON数据格式: [TYPE] + [COUNT(ssize)] + [SIZE(ssize)] + [KEY_ENTRIES] + [VALUE_ENTRIES] + [KEYS] + [VALUES]
 // 注意: 数据不包含长度前缀，field_size就是JSON数据大小
 std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_size, uint8_t type_override = 0xff) {
-    if (field_size < 1) return "null";
+    if (!data || field_size == 0) return JSON_UNPARSABLE;
 
     // JSON数据从offset开始，第一个字节是TYPE
     uint8_t type = (type_override != 0xff) ? type_override : data[offset];
@@ -330,9 +330,9 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
     // For top-level, data starts at offset + 1 (after TYPE byte)
     bool is_nested = (type_override != 0xff);
     size_t data_start = is_nested ? offset : offset + 1;
-
-    if (data_start + ssize * 2 > offset + field_size) {
-        return type <= 0x01 ? "{}" : "[]";
+    size_t data_end = offset + field_size;
+    if (data_start < offset || data_start > data_end || data_end - data_start < ssize * 2) {
+        return JSON_UNPARSABLE;
     }
 
     // 读取element_count和total_size (从data_start开始)
@@ -341,18 +341,15 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
 
     // 验证total_size
     if (total_size != field_size) {
-        // size不匹配，可能是数据损坏或格式不同
-        // 继续尝试解析，使用实际field_size
-        total_size = field_size;
+        return JSON_UNPARSABLE;
     }
 
     if (element_count == 0) {
         return (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT) ? "{}" : "[]";
     }
 
-    if (element_count > 100) {
-        // Cap at 10 elements for display instead of showing error
-        element_count = 10;
+    if (element_count > 1000) {
+        return JSON_UNPARSABLE;
     }
 
     // KEY_ENTRIES和VALUE_ENTRIES开始位置
@@ -366,9 +363,19 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
     // OBJECT: KEY_ENTRIES + VALUE_ENTRIES
     // ARRAY: 只有VALUE_ENTRIES
     bool is_object = (type == JSON_TYPE_SMALL_OBJECT || type == JSON_TYPE_LARGE_OBJECT);
+    size_t entry_area_size = is_object ? key_entry_size : value_entry_size;
+    if (element_count > (data_end - key_entry_start) / entry_area_size) {
+        return JSON_UNPARSABLE;
+    }
+
     size_t value_entry_start;
     if (is_object) {
-        value_entry_start = key_entry_start + element_count * key_entry_size;
+        size_t key_bytes = element_count * key_entry_size;
+        if (key_bytes > data_end - key_entry_start) return JSON_UNPARSABLE;
+        value_entry_start = key_entry_start + key_bytes;
+        if (element_count > (data_end - value_entry_start) / value_entry_size) {
+            return JSON_UNPARSABLE;
+        }
     } else {
         value_entry_start = key_entry_start;  // Array没有KEY_ENTRY
         key_entry_start = 0;  // 标记为无效
@@ -383,202 +390,209 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
         // 解析KEY (仅对object)
         if (is_object) {
             size_t ke_pos = key_entry_start + i * key_entry_size;
-            if (ke_pos + key_entry_size <= offset + field_size) {
-                // KEY_OFFSET和KEY_LENGTH
-                // KEY_OFFSET是相对于TYPE字节之后的数据的偏移
-                size_t key_offset_val = ssize == 2 ? read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
-                size_t key_length = read_json_le16(data, ke_pos + ssize);
-
-                // KEY_OFFSET是相对于data_start的偏移
-                size_t key_abs_offset = data_start + key_offset_val;
-                if (key_abs_offset + key_length <= offset + field_size && key_length > 0 && key_length < 256) {
-                    std::string key(reinterpret_cast<const char*>(data + key_abs_offset), key_length);
-                    result += "\"" + key + "\":";
-                } else {
-                    result += "\"_key\":";
-                }
+            if (ke_pos > offset + field_size || key_entry_size > offset + field_size - ke_pos) {
+                return JSON_UNPARSABLE;
             }
+            size_t key_offset_val = ssize == 2 ? read_json_le16(data, ke_pos) : read_json_le32(data, ke_pos);
+            size_t key_length = read_json_le16(data, ke_pos + ssize);
+            size_t key_abs_offset = data_start + key_offset_val;
+            if (key_abs_offset < data_start || key_abs_offset > offset + field_size ||
+                key_length > offset + field_size - key_abs_offset || key_length == 0 || key_length >= 256) {
+                return JSON_UNPARSABLE;
+            }
+            std::string key(reinterpret_cast<const char*>(data + key_abs_offset), key_length);
+            result += "\"" + key + "\":";
         }
 
         // 解析VALUE
         size_t ve_pos = value_entry_start + i * value_entry_size;
-        if (ve_pos + value_entry_size <= offset + field_size) {
-            uint8_t val_type = data[ve_pos];
-            size_t val_offset = ssize == 2 ? read_json_le16(data, ve_pos + 1) : read_json_le32(data, ve_pos + 1);
+        if (ve_pos > data_end || value_entry_size > data_end - ve_pos) {
+            return JSON_UNPARSABLE;
+        }
+        uint8_t val_type = data[ve_pos];
+        size_t val_offset = ssize == 2 ? read_json_le16(data, ve_pos + 1) : read_json_le32(data, ve_pos + 1);
 
-            // 根据类型处理值
-            // val_offset是相对于data_start的偏移
-            size_t val_abs_offset = data_start + val_offset;
+        // 根据类型处理值
+        // val_offset是相对于data_start的偏移
+        if (val_offset > data_end - data_start) return JSON_UNPARSABLE;
+        size_t val_abs_offset = data_start + val_offset;
 
-            if (val_type == 0x0c) {  // STRING
-                if (val_abs_offset < offset + field_size) {
-                    // 读取变长字符串
-                    size_t str_len = data[val_abs_offset];
-                    size_t str_start = val_abs_offset + 1;
-                    if (str_len >= 128) {
-                        // 2字节长度编码
-                        str_len = (data[val_abs_offset + 1] << 7) | (str_len & 0x7f);
-                        str_start = val_abs_offset + 2;
-                    }
-                    if (str_start + str_len <= offset + field_size) {
-                        std::string str_val(reinterpret_cast<const char*>(data + str_start), str_len);
-                        result += "\"" + str_val + "\"";
-                    } else {
-                        result += "\"_str\"";
-                    }
-                }
-            } else if (val_type == 0x04) {  // LITERAL
-                if (val_offset == 1) result += "true";
-                else if (val_offset == 2) result += "false";
-                else result += "null";
-            } else if (val_type >= 0x05 && val_type <= 0x06) {  // INT16 inline
-                result += std::to_string(val_offset);
-            } else if (val_type >= 0x07 && val_type <= 0x08) {  // INT32/UINT32
-                if (val_abs_offset + 4 <= offset + field_size) {
-                    int32_t int_val = static_cast<int32_t>(read_json_le32(data, val_abs_offset));
-                    result += std::to_string(int_val);
-                }
-            } else if (val_type == 0x0b) {  // DOUBLE
-                if (val_abs_offset + 8 <= offset + field_size) {
-                    uint64_t bits = read_json_le64(data, val_abs_offset);
-                    double dbl_val;
-                    std::memcpy(&dbl_val, &bits, 8);
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%.15g", dbl_val);
-                    result += buf;
-                }
-            } else if (val_type == 0x0f) {  // OPAQUE (custom MySQL data type)
-                // Format: [mysql_type(1B)] [precision(1B)] [unknown(1B)] [scale(1B)] [sign(1B)] [value...]
-                // Note: In MySQL 8.0's JSON binary, the opaque decimal format has
-                // an extra byte between precision and scale compared to decimal2bin.
-                // We read: type, precision, _, scale, sign, then groups.
-                if (val_abs_offset + 5 <= offset + field_size) {
-                    uint8_t opaque_type = data[val_abs_offset];
-                    uint8_t opaque_prec = data[val_abs_offset + 1];
-                    // uint8_t opaque_unknown = data[val_abs_offset + 2];  // always 0x0a
-                    uint8_t opaque_scale = data[val_abs_offset + 3];
-                    uint8_t opaque_sign = data[val_abs_offset + 4];
-                    size_t val_start = val_abs_offset + 5;
-                    size_t max_avail = (offset + field_size > val_start) ? (offset + field_size - val_start) : 0;
-
-                    // Compute actual value length from precision and scale
-                    auto count_decimal_bytes = [](uint32_t prec, uint32_t scale) -> size_t {
-                        if (prec < scale) return 0;
-                        uint32_t int_digits = prec - scale;
-                        auto group_bytes = [](uint32_t digits) -> size_t {
-                            size_t bytes = 0;
-                            int full = digits / 9;
-                            int rem = digits % 9;
-                            bytes += full * 4;
-                            if (rem > 0) {
-                                bytes += (rem < 7) ? (rem + 1) / 2 : 4;
-                            }
-                            return bytes;
-                        };
-                        return group_bytes(int_digits) + group_bytes(scale);
-                    };
-
-                    // For DECIMAL (246): decode the packed decimal value
-                    if (opaque_type == 246) {
-                        size_t expected_len = count_decimal_bytes(opaque_prec, opaque_scale);
-                        size_t val_len = std::min(expected_len, max_avail);
-
-                        if (val_len > 0 && val_len <= 20) {
-                        // DECIMAL encoding: groups for int_part and frac_part
-                        // sign byte is at val_start-1 (opaque_sign)
-                        uint32_t int_digits = opaque_prec - opaque_scale;
-                        bool is_neg = (opaque_sign & 0x80) == 0;
-
-                        // Use calc_groups with reversed p1 for correct on-disk order
-                        auto groups_int = [](uint32_t d) -> std::vector<std::pair<int,int>> {
-                            std::vector<std::pair<int,int>> g;
-                            int full = d / 9, rem = d % 9;
-                            for (int i = 0; i < full; i++) g.push_back({4, 9});
-                            if (rem > 0) {
-                                int bytes = (rem < 7) ? (rem + 1) / 2 : 4;
-                                g.push_back({bytes, rem});
-                            }
-                            std::reverse(g.begin(), g.end());
-                            return g;
-                        };
-                        auto groups_frac = [](uint32_t d) -> std::vector<std::pair<int,int>> {
-                            std::vector<std::pair<int,int>> g;
-                            int full = d / 9, rem = d % 9;
-                            for (int i = 0; i < full; i++) g.push_back({4, 9});
-                            if (rem > 0) {
-                                int bytes = (rem < 7) ? (rem + 1) / 2 : 4;
-                                g.push_back({bytes, rem});
-                            }
-                            return g;
-                        };
-
-                        auto p1 = groups_int(int_digits);
-                        auto p2 = groups_frac(opaque_scale);
-
-                        std::vector<uint8_t> dec_data(data + val_start, data + val_start + val_len);
-                        if (is_neg) {
-                            for (auto& b : dec_data) b = ~b;
-                        }
-
-                        size_t ro = 0;
-                        std::string int_str, frac_str;
-                        for (const auto& [psz, pzf] : p1) {
-                            if (ro + psz > dec_data.size()) break;
-                            uint64_t gv = 0;
-                            for (int j = 0; j < psz; j++) gv = (gv << 8) | dec_data[ro + j];
-                            ro += psz;
-                            std::string gs = std::to_string(gv);
-                            while (gs.length() < (size_t)pzf) gs = "0" + gs;
-                            int_str += gs;
-                        }
-                        for (const auto& [psz, pzf] : p2) {
-                            if (ro + psz > dec_data.size()) break;
-                            uint64_t gv = 0;
-                            for (int j = 0; j < psz; j++) gv = (gv << 8) | dec_data[ro + j];
-                            ro += psz;
-                            std::string gs = std::to_string(gv);
-                            while (gs.length() < (size_t)pzf) gs = "0" + gs;
-                            frac_str += gs;
-                        }
-                        try {
-                            uint64_t iv = std::stoull(int_str.empty() ? "0" : int_str);
-                            int_str = std::to_string(iv);
-                        } catch (...) {}
-
-                        result += (is_neg ? "-" : "") + (int_str.empty() ? "0" : int_str) + "." + frac_str;
-                    } else {
-                        // Unknown opaque type: output as hex
-                        char buf[8];
-                        snprintf(buf, sizeof(buf), "0x%02x", opaque_type);
-                        result += buf;
-                    }
-                }
-                }
-            } else if (val_type <= 0x03) {  // 嵌套JSON对象/数组
-                // For nested values, data at val_abs_offset starts with COUNT, then SIZE
-                // The TYPE is determined by the VALUE_ENTRY type, not a separate byte
-                // e.g., {"user": {"age": 30}} -> VALUE_ENTRY type=0x00 (small object)
-                //   and data at val_abs_offset = [02 00 1f 00...] where 02 00 is COUNT
-                size_t nested_ssize = (val_type == JSON_TYPE_SMALL_OBJECT || val_type == JSON_TYPE_SMALL_ARRAY ||
-                                       val_type == 0x00 || val_type == 0x02) ? 2 : 4;
-                if (val_abs_offset + nested_ssize * 2 <= offset + field_size) {
-                    size_t nested_size = nested_ssize == 2 ?
-                        read_json_le16(data, val_abs_offset + nested_ssize) :
-                        read_json_le32(data, val_abs_offset + nested_ssize);
-                    // nested_size is total bytes from val_abs_offset to end
-                    if (val_abs_offset + nested_size <= offset + field_size) {
-                        result += decode_json_binary(data, val_abs_offset, nested_size, val_type);
-                    } else {
-                        result += val_type <= 0x01 ? "{}" : "[]";
-                    }
-                } else {
-                    result += val_type <= 0x01 ? "{}" : "[]";
-                }
-            } else {
-                result += "null";
+        if (val_type == 0x0c) {  // STRING
+            if (val_abs_offset >= data_end) return JSON_UNPARSABLE;
+            size_t remaining = data_end - val_abs_offset;
+            size_t first_len = data[val_abs_offset];
+            size_t len_bytes = first_len >= 128 ? 2 : 1;
+            if (remaining < len_bytes) return JSON_UNPARSABLE;
+            size_t str_len = first_len >= 128
+                ? ((static_cast<size_t>(data[val_abs_offset + 1]) << 7) | (first_len & 0x7f))
+                : first_len;
+            size_t str_start = val_abs_offset + len_bytes;
+            if (str_start > data_end || str_len > data_end - str_start) {
+                return JSON_UNPARSABLE;
             }
+            std::string str_val(reinterpret_cast<const char*>(data + str_start), str_len);
+            result += "\"" + str_val + "\"";
+        } else if (val_type == 0x04) {  // LITERAL
+            if (val_offset == 1) result += "true";
+            else if (val_offset == 2) result += "false";
+            else if (val_offset == 0) result += "null";
+            else return JSON_UNPARSABLE;
+        } else if (val_type >= 0x05 && val_type <= 0x06) {  // INT16/UINT16 inline
+            result += std::to_string(val_offset);
+        } else if (val_type >= 0x07 && val_type <= 0x08) {  // INT32/UINT32
+            if (val_abs_offset > data_end || data_end - val_abs_offset < 4) {
+                return JSON_UNPARSABLE;
+            }
+            int32_t int_val = static_cast<int32_t>(read_json_le32(data, val_abs_offset));
+            result += std::to_string(int_val);
+        } else if (val_type >= 0x09 && val_type <= 0x0a) {  // INT64/UINT64
+            if (val_abs_offset > data_end || data_end - val_abs_offset < 8) {
+                return JSON_UNPARSABLE;
+            }
+            uint64_t raw = read_json_le64(data, val_abs_offset);
+            if (val_type == 0x09) {
+                result += std::to_string(static_cast<int64_t>(raw));
+            } else {
+                result += std::to_string(raw);
+            }
+        } else if (val_type == 0x0b) {  // DOUBLE
+            if (val_abs_offset > data_end || data_end - val_abs_offset < 8) {
+                return JSON_UNPARSABLE;
+            }
+            uint64_t bits = read_json_le64(data, val_abs_offset);
+            double dbl_val;
+            std::memcpy(&dbl_val, &bits, 8);
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.15g", dbl_val);
+            result += buf;
+        } else if (val_type == 0x0f) {  // OPAQUE (custom MySQL data type)
+            // Format: [mysql_type(1B)] [precision(1B)] [unknown(1B)] [scale(1B)] [sign(1B)] [value...]
+            // Note: In MySQL 8.0's JSON binary, the opaque decimal format has
+            // an extra byte between precision and scale compared to decimal2bin.
+            if (val_abs_offset > data_end || data_end - val_abs_offset < 5) {
+                return JSON_UNPARSABLE;
+            }
+            uint8_t opaque_type = data[val_abs_offset];
+            uint8_t opaque_prec = data[val_abs_offset + 1];
+            uint8_t opaque_scale = data[val_abs_offset + 3];
+            uint8_t opaque_sign = data[val_abs_offset + 4];
+            size_t val_start = val_abs_offset + 5;
+            size_t max_avail = data_end - val_start;
+
+            // Only DECIMAL (246) has a defined, verifiable layout here. Any other
+            // opaque sub-type cannot be decoded without a validated spec, so it is
+            // refused instead of emitting a placeholder token.
+            if (opaque_type != 246) {
+                return JSON_UNPARSABLE;
+            }
+
+            auto group_bytes = [](uint32_t digits) -> size_t {
+                size_t bytes = 0;
+                int full = static_cast<int>(digits / 9);
+                int rem = static_cast<int>(digits % 9);
+                bytes += static_cast<size_t>(full) * 4;
+                if (rem > 0) {
+                    bytes += (rem < 7) ? (rem + 1) / 2 : 4;
+                }
+                return bytes;
+            };
+
+            if (opaque_prec < opaque_scale) {
+                return JSON_UNPARSABLE;
+            }
+            size_t expected_len = group_bytes(opaque_prec - opaque_scale) +
+                                  group_bytes(opaque_scale);
+            if (expected_len == 0 || expected_len > max_avail || expected_len > 20) {
+                return JSON_UNPARSABLE;
+            }
+
+            uint32_t int_digits = opaque_prec - opaque_scale;
+            bool is_neg = (opaque_sign & 0x80) == 0;
+
+            auto groups_int = [](uint32_t d) -> std::vector<std::pair<int,int>> {
+                std::vector<std::pair<int,int>> g;
+                int full = static_cast<int>(d / 9), rem = static_cast<int>(d % 9);
+                for (int i = 0; i < full; i++) g.push_back({4, 9});
+                if (rem > 0) {
+                    int bytes = (rem < 7) ? (rem + 1) / 2 : 4;
+                    g.push_back({bytes, rem});
+                }
+                std::reverse(g.begin(), g.end());
+                return g;
+            };
+            auto groups_frac = [](uint32_t d) -> std::vector<std::pair<int,int>> {
+                std::vector<std::pair<int,int>> g;
+                int full = static_cast<int>(d / 9), rem = static_cast<int>(d % 9);
+                for (int i = 0; i < full; i++) g.push_back({4, 9});
+                if (rem > 0) {
+                    int bytes = (rem < 7) ? (rem + 1) / 2 : 4;
+                    g.push_back({bytes, rem});
+                }
+                return g;
+            };
+
+            auto p1 = groups_int(int_digits);
+            auto p2 = groups_frac(opaque_scale);
+
+            std::vector<uint8_t> dec_data(data + val_start, data + val_start + expected_len);
+            if (is_neg) {
+                for (auto& b : dec_data) b = static_cast<uint8_t>(~b);
+            }
+
+            size_t ro = 0;
+            std::string int_str, frac_str;
+            for (const auto& grp : p1) {
+                size_t psz = static_cast<size_t>(grp.first);
+                int pzf = grp.second;
+                if (ro + psz > dec_data.size()) return JSON_UNPARSABLE;
+                uint64_t gv = 0;
+                for (size_t j = 0; j < psz; j++) gv = (gv << 8) | dec_data[ro + j];
+                ro += psz;
+                std::string gs = std::to_string(gv);
+                while (gs.length() < static_cast<size_t>(pzf)) gs = "0" + gs;
+                int_str += gs;
+            }
+            for (const auto& grp : p2) {
+                size_t psz = static_cast<size_t>(grp.first);
+                int pzf = grp.second;
+                if (ro + psz > dec_data.size()) return JSON_UNPARSABLE;
+                uint64_t gv = 0;
+                for (size_t j = 0; j < psz; j++) gv = (gv << 8) | dec_data[ro + j];
+                ro += psz;
+                std::string gs = std::to_string(gv);
+                while (gs.length() < static_cast<size_t>(pzf)) gs = "0" + gs;
+                frac_str += gs;
+            }
+            try {
+                uint64_t iv = std::stoull(int_str.empty() ? "0" : int_str);
+                int_str = std::to_string(iv);
+            } catch (...) {
+                return JSON_UNPARSABLE;
+            }
+
+            result += (is_neg ? "-" : "") + (int_str.empty() ? "0" : int_str) + "." + frac_str;
+        } else if (val_type <= 0x03) {  // 嵌套JSON对象/数组
+            // For nested values, data at val_abs_offset starts with COUNT, then SIZE
+            // The TYPE is determined by the VALUE_ENTRY type, not a separate byte
+            // e.g., {"user": {"age": 30}} -> VALUE_ENTRY type=0x00 (small object)
+            //   and data at val_abs_offset = [02 00 1f 00...] where 02 00 is COUNT
+            size_t nested_ssize = (val_type == JSON_TYPE_SMALL_OBJECT || val_type == JSON_TYPE_SMALL_ARRAY ||
+                                   val_type == 0x00 || val_type == 0x02) ? 2 : 4;
+            size_t nested_header = nested_ssize * 2;
+            if (val_abs_offset > data_end || data_end - val_abs_offset < nested_header) {
+                return JSON_UNPARSABLE;
+            }
+            size_t nested_size = nested_ssize == 2
+                ? read_json_le16(data, val_abs_offset + nested_ssize)
+                : read_json_le32(data, val_abs_offset + nested_ssize);
+            if (nested_size == 0 || nested_size > data_end - val_abs_offset) {
+                return JSON_UNPARSABLE;
+            }
+            std::string nested = decode_json_binary(data, val_abs_offset, nested_size, val_type);
+            if (nested == JSON_UNPARSABLE) return JSON_UNPARSABLE;
+            result += nested;
         } else {
-            result += "null";
+            return JSON_UNPARSABLE;
         }
     }
 
@@ -2758,6 +2772,12 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::STRING_VAL;
             if (field_size > 0) {
                 val.str_value = decode_json_binary(data, offset, field_size);
+                if (val.str_value == JSON_UNPARSABLE) {
+                    // 未能完整解析的 JSON 降级为原始证据字节，不进入结构化文本
+                    val.type = IndexFieldValue::Type::UNKNOWN_VAL;
+                    val.raw_bytes.assign(data + offset, data + offset + field_size);
+                    val.str_value.clear();
+                }
             } else {
                 val.str_value = "null";
             }

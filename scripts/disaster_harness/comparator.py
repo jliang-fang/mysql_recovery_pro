@@ -35,7 +35,8 @@ def _prerequisites(document: Optional[Dict[str, Any]]) -> list:
 
 
 def _identity_prerequisites(expected: Optional[Dict[str, Any]],
-                            actual: Optional[Dict[str, Any]]) -> list:
+                            actual: Optional[Dict[str, Any]],
+                            require_input_identity: bool = False) -> list:
     if not expected or not actual:
         return []
     prerequisites = []
@@ -46,11 +47,22 @@ def _identity_prerequisites(expected: Optional[Dict[str, Any]],
     actual_version = actual.get("mysql_version", "")
     if expected_version and actual_version and expected_version != actual_version:
         prerequisites.append("mysql_version_mismatch")
+    expected_input = expected.get("input_identity")
+    actual_input = actual.get("input_identity")
+    if require_input_identity and (not expected_input or not actual_input):
+        prerequisites.append("missing_input_identity")
+    if expected_input and actual_input:
+        if expected_input.get("tablespace_sha256") != actual_input.get("tablespace_sha256"):
+            prerequisites.append("native_offline_input_mismatch")
+        if expected_input.get("mutation_fingerprint") != actual_input.get("mutation_fingerprint"):
+            prerequisites.append("native_offline_mutation_mismatch")
+        if expected_input.get("mutation_scope") != actual_input.get("mutation_scope"):
+            prerequisites.append("native_offline_scope_mismatch")
     return prerequisites
 
 
 def compare(expected: Optional[Dict[str, Any]], actual: Optional[Dict[str, Any]],
-            label: str) -> Dict[str, Any]:
+            label: str, require_input_identity: bool = False) -> Dict[str, Any]:
     prerequisites = _prerequisites(expected) + _prerequisites(actual)
     expected_groups, expected_duplicates = _index(expected)
     actual_groups, actual_duplicates = _index(actual)
@@ -58,7 +70,8 @@ def compare(expected: Optional[Dict[str, Any]], actual: Optional[Dict[str, Any]]
         prerequisites.append("duplicate_expected_rows")
     if actual_duplicates:
         prerequisites.append("duplicate_actual_rows")
-    prerequisites.extend(_identity_prerequisites(expected, actual))
+    prerequisites.extend(_identity_prerequisites(
+        expected, actual, require_input_identity=require_input_identity))
 
     expected_rows = {key: rows[0] for key, rows in expected_groups.items()}
     actual_rows = {key: rows[0] for key, rows in actual_groups.items()}
@@ -111,7 +124,7 @@ def compare_three_way(ground_truth: Dict[str, Any], native: Optional[Dict[str, A
                       offline: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     gt_native = compare(ground_truth, native, "ground_truth_vs_native")
     gt_offline = compare(ground_truth, offline, "ground_truth_vs_offline")
-    native_offline = compare(native, offline, "native_vs_offline")
+    native_offline = compare(native, offline, "native_vs_offline", require_input_identity=True)
     comparisons = (gt_native, gt_offline, native_offline)
     return {
         "comparison_version": 2,

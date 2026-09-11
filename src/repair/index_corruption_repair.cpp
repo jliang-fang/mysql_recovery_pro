@@ -60,7 +60,7 @@ std::vector<IndexCorruption> IndexCorruptionRepairer::analyze(const uint8_t* fil
                     << ", expected " << main_index_id;
                 c.description = oss.str();
                 c.confidence = 0.85f;
-                c.repairable = true;
+                c.repairable = false;
                 corruptions.push_back(c);
             }
         }
@@ -78,7 +78,7 @@ std::vector<IndexCorruption> IndexCorruptionRepairer::analyze(const uint8_t* fil
         c.page_no = 0;
         c.description = "Cannot detect root page from INODE or infer from structure";
         c.confidence = 0.90f;
-        c.repairable = true;
+        c.repairable = false;
         corruptions.push_back(c);
     }
 
@@ -124,7 +124,7 @@ std::vector<IndexCorruption> IndexCorruptionRepairer::analyze(const uint8_t* fil
                     << ", expected " << (int)expected_level;
                 c.description = oss.str();
                 c.confidence = 0.85f;
-                c.repairable = true;
+                c.repairable = false;
                 corruptions.push_back(c);
             }
 
@@ -146,7 +146,7 @@ std::vector<IndexCorruption> IndexCorruptionRepairer::analyze(const uint8_t* fil
                 c.page_no = current_page;
                 c.description = "Leaf page has child pointers";
                 c.confidence = 0.90f;
-                c.repairable = true;
+                c.repairable = false;
                 corruptions.push_back(c);
             }
 
@@ -188,7 +188,7 @@ std::vector<IndexCorruption> IndexCorruptionRepairer::analyze(const uint8_t* fil
         oss << loop.front();
         c.description = oss.str();
         c.confidence = 0.95f;
-        c.repairable = true;
+        c.repairable = false;
         corruptions.push_back(c);
     }
 
@@ -249,32 +249,37 @@ std::optional<uint32_t> IndexCorruptionRepairer::infer_root_page(const uint8_t* 
         return std::nullopt;
     }
 
-    // 收集所有页的层级信息
     auto all_pages = get_all_page_info(file_data, file_size);
-
-    // 找出层级最大的页（应该是根页）
-    uint32_t max_level_page = 0;
     uint8_t max_level = 0;
+    std::optional<uint32_t> root;
+    bool found_non_leaf = false;
 
     for (const auto& [page_no, info] : all_pages) {
-        if (info.is_valid && !info.is_leaf && info.level > max_level) {
+        if (!info.is_valid || info.is_leaf) {
+            continue;
+        }
+        if (!found_non_leaf || info.level > max_level) {
+            found_non_leaf = true;
             max_level = info.level;
-            max_level_page = page_no;
+            root = page_no;
+        } else if (info.level == max_level) {
+            return std::nullopt;
         }
     }
 
-    if (max_level > 0) {
-        return max_level_page;
+    if (root) {
+        return root;
     }
 
-    // 如果没有非叶节点，返回第一个有效的 INDEX 页
     for (const auto& [page_no, info] : all_pages) {
         if (info.is_valid) {
-            return page_no;
+            if (root) {
+                return std::nullopt;
+            }
+            root = page_no;
         }
     }
-
-    return std::nullopt;
+    return root;
 }
 
 bool IndexCorruptionRepairer::repair_node_pointer(uint8_t* file_data, uint32_t page_no, uint32_t expected_child) {
@@ -291,70 +296,26 @@ bool IndexCorruptionRepairer::repair_node_pointer(uint8_t* file_data, uint32_t p
 }
 
 bool IndexCorruptionRepairer::repair_level_mismatch(uint8_t* file_data, uint32_t page_no, uint8_t correct_level) {
-    if (!file_data) {
-        return false;
-    }
-
-    uint8_t* page = file_data + page_no * page_size_;
-
-    // level 存储在 PAGE_HEADER 的 offset 38 + 4 = 42 (BTR_N_LEVELS_ABS)
-    dbrecovery::innodb::write_be<uint16_t>(page, 42, correct_level);
-
-    return true;
+    (void)file_data;
+    (void)page_no;
+    (void)correct_level;
+    last_error_ = "Level repair requires verified B-tree context and checksum reconstruction";
+    return false;
 }
 
 bool IndexCorruptionRepairer::repair_index_id_mismatch(uint8_t* file_data, uint32_t page_no, uint32_t correct_index_id) {
-    if (!file_data) {
-        return false;
-    }
-
-    uint8_t* page = file_data + page_no * page_size_;
-
-    // index_id 存储在 offset 38 + 6 = 44 (BTR_IND_PAGE_OFFSET_ABS)
-    dbrecovery::innodb::write_be<uint32_t>(page, 44, correct_index_id);
-
-    return true;
+    (void)file_data;
+    (void)page_no;
+    (void)correct_index_id;
+    last_error_ = "Index ID repair requires verified dictionary and page ownership";
+    return false;
 }
 
 bool IndexCorruptionRepairer::rebuild_page_chain(uint8_t* file_data, size_t file_size) {
-    if (!file_data || file_size < page_size_) {
-        return false;
-    }
-
-    auto all_pages = get_all_page_info(file_data, file_size);
-
-    // 按层级分组
-    std::map<uint8_t, std::vector<uint32_t>> pages_by_level;
-    for (const auto& [page_no, info] : all_pages) {
-        if (info.is_valid) {
-            pages_by_level[info.level].push_back(page_no);
-        }
-    }
-
-    // 对每个层级的页按某种顺序排序并重建链
-    for (auto& [level, pages] : pages_by_level) {
-        std::sort(pages.begin(), pages.end());
-
-        for (size_t i = 0; i < pages.size(); ++i) {
-            uint8_t* page = file_data + pages[i] * page_size_;
-
-            // 设置 prev_page
-            if (i == 0) {
-                dbrecovery::innodb::write_be<uint32_t>(page, 8, 0xFFFFFFFF);
-            } else {
-                dbrecovery::innodb::write_be<uint32_t>(page, 8, pages[i - 1]);
-            }
-
-            // 设置 next_page
-            if (i == pages.size() - 1) {
-                dbrecovery::innodb::write_be<uint32_t>(page, 12, 0xFFFFFFFF);
-            } else {
-                dbrecovery::innodb::write_be<uint32_t>(page, 12, pages[i + 1]);
-            }
-        }
-    }
-
-    return true;
+    (void)file_data;
+    (void)file_size;
+    last_error_ = "Page-chain reconstruction requires verified logical ordering";
+    return false;
 }
 
 bool IndexCorruptionRepairer::rebuild_page_chain_by_content(
@@ -542,11 +503,12 @@ std::vector<std::vector<uint32_t>> IndexCorruptionRepairer::detect_page_chain_lo
 }
 
 std::optional<BTreePageInfo> IndexCorruptionRepairer::get_page_info(const uint8_t* file_data, size_t file_size, uint32_t page_no) const {
-    if (!file_data || file_size < (page_no + 1) * page_size_) {
+    if (!file_data || page_size_ == 0 || page_no > file_size / page_size_ ||
+        static_cast<size_t>(page_no) >= file_size / page_size_) {
         return std::nullopt;
     }
 
-    const uint8_t* page = file_data + page_no * page_size_;
+    const uint8_t* page = file_data + static_cast<size_t>(page_no) * page_size_;
     return parse_page_header(page);
 }
 
@@ -685,7 +647,7 @@ std::vector<IndexCorruption> InodePageRepairer::detect_corruptions(const uint8_t
         c.page_no = 2;
         c.description = "Page 2 is not an INODE page";
         c.confidence = 0.95f;
-        c.repairable = true;
+        c.repairable = false;
         corruptions.push_back(c);
     }
 
@@ -693,14 +655,9 @@ std::vector<IndexCorruption> InodePageRepairer::detect_corruptions(const uint8_t
 }
 
 bool InodePageRepairer::repair(uint8_t* page_data, size_t page_size) {
-    if (!page_data) {
-        return false;
-    }
-
-    // 设置页类型为 INODE
-    dbrecovery::innodb::write_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS, 0x45BB);
-
-    return true;
+    (void)page_data;
+    (void)page_size;
+    return false;
 }
 
 std::optional<uint32_t> InodePageRepairer::extract_root_page(const uint8_t* page_data, size_t page_size) const {
@@ -737,21 +694,11 @@ bool InodePageRepairer::write_root_page(uint8_t* page_data, size_t page_size, ui
 
 bool InodePageRepairer::rebuild_inode(uint8_t* page_data, size_t page_size,
                                        const std::vector<uint32_t>& root_pages) {
-    if (!page_data || root_pages.empty()) {
-        return false;
-    }
-
-    // 重建 INODE 页
-    // 设置页类型
-    dbrecovery::innodb::write_be<uint16_t>(page_data, dbrecovery::innodb::FIL_PAGE_TYPE_ABS, 0x45BB);
-
-    // 清零其他部分
-    std::memset(page_data + 38, 0, page_size - 38 - 8);
-
-    // 写入根页信息
-    // 实际实现需要完整重建 INODE 结构
-
-    return true;
+    (void)page_data;
+    (void)page_size;
+    (void)root_pages;
+    last_error_ = "INODE page rebuild requires verified segment and fragment descriptors";
+    return false;
 }
 
 // ==================== IndexStructureHandler ====================

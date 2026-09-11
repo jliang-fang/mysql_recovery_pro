@@ -408,12 +408,14 @@ gtest_discover_tests(test_recovery_idempotency)
 # ==================== Real Fixture Gating (Phase C2) ====================
 # Real-fixture tests validate against .ibd/undo files produced by real MySQL
 # Podman containers under /app/mysql_recovery_test/fixtures. They are labelled
-# REAL_MYSQL so the default suite (`ctest -E REAL_MYSQL`) excludes them, and
-# they only run when DBREC_REAL_FIXTURES=1 is exported. A missing fixture must
-# produce GTEST_SKIP() inside the test, never a PASS and never a FAIL.
+# REAL_MYSQL so operators can select them with `ctest -L REAL_MYSQL` or
+# exclude them with `ctest -LE REAL_MYSQL`. The executable gate is fixture
+# availability: each test calls GTEST_SKIP() when its fixture path is absent,
+# so a missing fixture is reported as skipped, never a PASS and never a FAIL.
+# DBREC_REAL_FIXTURES is documentation only; no test reads that variable.
 #
-#   ctest --test-dir build --output-on-failure -E REAL_MYSQL          # default
-#   DBREC_REAL_FIXTURES=1 ctest --test-dir build -L REAL_MYSQL        # fixtures
+#   ctest --test-dir build --output-on-failure -LE REAL_MYSQL         # exclude
+#   ctest --test-dir build -L REAL_MYSQL                              # fixtures
 
 # test_compressed_table_fixture loads real compressed .ibd files from
 # /app/mysql_recovery_test/fixtures/compressed and GTEST_SKIP()s when the
@@ -433,3 +435,4 @@ add_executable(test_real_recovery_pipeline real_recovery_pipeline_test.cpp)
 target_link_libraries(test_real_recovery_pipeline PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
 add_test(NAME test_real_recovery_pipeline COMMAND test_real_recovery_pipeline)
 set_tests_properties(test_real_recovery_pipeline PROPERTIES LABELS "REAL_MYSQL")
+

@@ -12,6 +12,7 @@ Produces a comprehensive HTML/JSON report.
 """
 
 import argparse
+import html
 import json
 import os
 import subprocess
@@ -86,12 +87,9 @@ def run_cmd(test_bin: str, timeout: int = 60) -> dict:
             capture_output=True, text=True, timeout=timeout
         )
         result["output"] = proc.stdout + proc.stderr
-        if proc.returncode == 0 and "PASSED" in proc.stdout:
-            result["passed"] = True
-            result["details"] = "All tests passed"
-        else:
-            result["details"] = "Some tests failed"
-            # Extract failed test names
+        result["passed"] = proc.returncode == 0
+        result["details"] = "All tests passed" if result["passed"] else "Some tests failed"
+        if not result["passed"]:
             for line in proc.stdout.split("\n"):
                 if "FAILED" in line:
                     result["details"] += f"\n  {line.strip()}"
@@ -105,7 +103,7 @@ def run_cmd(test_bin: str, timeout: int = 60) -> dict:
 def check_build(build_dir: str) -> list:
     """Verify all required binaries exist."""
     required = [
-        "libdbrecovery_innodb.so",
+        "libdbrecovery_innodb.a",
         "mysql_recovery_pro",
         "tests/test_p0_regression",
         "tests/test_p1_salvage_fuzz",
@@ -123,6 +121,44 @@ def check_build(build_dir: str) -> list:
             "details": f"{size:,} bytes" if exists else "Missing",
         })
     return results
+
+
+def _matrix_entries(matrix_data):
+    if isinstance(matrix_data, list):
+        return matrix_data
+    if isinstance(matrix_data, dict):
+        for key in ("comparisons", "results", "scenarios", "entries"):
+            value = matrix_data.get(key)
+            if isinstance(value, list):
+                return value
+    return []
+
+
+def _matrix_outcome(entry: dict) -> tuple:
+    status = str(entry.get("status", "")).upper()
+    classification = str(entry.get("classification", "")).upper()
+    trust = str(entry.get("trust", "")).upper()
+    strict_pass = entry.get("strict_pass") is True
+    export_eligible = entry.get("export_eligible")
+    if export_eligible is None:
+        export_eligible = entry.get("structured_export_eligible")
+    comparable = entry.get("comparable")
+    if comparable is None:
+        comparable = status == "COMPARABLE"
+    if strict_pass and comparable and export_eligible is not False:
+        return "PASS", True
+    reasons = []
+    if status and status != "COMPARABLE":
+        reasons.append(status)
+    if classification:
+        reasons.append(classification)
+    if trust:
+        reasons.append(f"trust={trust}")
+    if entry.get("strict_pass") is False:
+        reasons.append("strict_pass=false")
+    if export_eligible is False:
+        reasons.append("structured export blocked")
+    return "FAIL", "; ".join(reasons) or "not strictly comparable"
 
 
 def generate_report(build_dir: str, test_results: list, matrix_results: str = None, output: str = "validation_report.html") -> str:
@@ -152,65 +188,89 @@ def generate_report(build_dir: str, test_results: list, matrix_results: str = No
 
     # Build verification
     build_results = check_build(build_dir)
+    build_failed = not all(b["passed"] for b in build_results)
     build_rows = ""
     for b in build_results:
         rc = "pass-row" if b["passed"] else "fail-row"
         rsc = "pass" if b["passed"] else "fail"
-        build_rows += ROW_TEMPLATE.format(row_class=rc, name=b["name"], result_class=rsc, result=b["passed"], details=b["details"])
+        build_rows += ROW_TEMPLATE.format(
+            row_class=rc, name=b["name"], result_class=rsc,
+            result="PASS" if b["passed"] else "FAIL", details=b["details"])
     content += SECTION_TEMPLATE.format(
         title="Build Verification",
-        status_class="pass" if all(b["passed"] for b in build_results) else "fail",
-        status="PASS" if all(b["passed"] for b in build_results) else "FAIL",
+        status_class="fail" if build_failed else "pass",
+        status="FAIL" if build_failed else "PASS",
         details=TABLE_TEMPLATE.format(rows=build_rows),
     )
 
     # Test results
+    tests_ran = passed + failed
+    tests_failed = failed > 0 or tests_ran == 0
     content += SECTION_TEMPLATE.format(
         title="Test Suite Results",
-        status_class="pass" if failed == 0 else "fail",
-        status="PASS" if failed == 0 else "FAIL",
-        details=TABLE_TEMPLATE.format(rows=rows_html),
+        status_class="fail" if tests_failed else "pass",
+        status="FAIL" if tests_failed else "PASS",
+        details=TABLE_TEMPLATE.format(rows=rows_html or ROW_TEMPLATE.format(
+            row_class="fail-row", name="No test results", result_class="fail",
+            result="FAIL", details="No test suites executed")),
     )
 
     # Matrix results
+    matrix_failed = True
     if matrix_results and os.path.exists(matrix_results):
         try:
             with open(matrix_results) as f:
                 matrix = json.load(f)
             matrix_rows = ""
-            for entry in matrix:
-                ver = entry.get("mysql_version", "?")
-                sce = entry.get("scenario", "?")
-                fs = entry.get("filesystem", "?")
-                rows = entry.get("recovered_rows", 0)
+            matrix_failed = False
+            for entry in _matrix_entries(matrix):
+                ver = html.escape(str(entry.get("mysql_version", "?")))
+                sce = html.escape(str(entry.get("scenario", "?")))
+                fs = html.escape(str(entry.get("filesystem", "?")))
+                rows = entry.get("recovered_rows", entry.get("correct_rows", "?"))
                 ms = entry.get("elapsed_ms", 0)
+                outcome, details = _matrix_outcome(entry)
+                if outcome != "PASS":
+                    matrix_failed = True
                 name = f"{ver} / {sce} / {fs}"
                 matrix_rows += ROW_TEMPLATE.format(
-                    row_class="pass-row",
+                    row_class="pass-row" if outcome == "PASS" else "fail-row",
                     name=name,
-                    result_class="pass",
-                    result=rows,
-                    details=f"{ms} ms",
+                    result_class="pass" if outcome == "PASS" else "fail",
+                    result=html.escape(str(outcome)),
+                    details=html.escape(f"rows={rows}; {details}; {ms} ms"),
                 )
+            matrix_status = "PASS" if not matrix_failed else "FAIL"
             content += SECTION_TEMPLATE.format(
                 title="Disaster Recovery Matrix",
-                status_class="pass",
-                status=f"{len(matrix)} tests",
-                details=TABLE_TEMPLATE.format(rows=matrix_rows),
+                status_class="pass" if not matrix_failed else "fail",
+                status=matrix_status,
+                details=TABLE_TEMPLATE.format(rows=matrix_rows or ROW_TEMPLATE.format(
+                    row_class="fail-row", name="No matrix entries", result_class="fail",
+                    result="FAIL", details="No comparable matrix results found")),
             )
+            matrix_failed = matrix_failed or not _matrix_entries(matrix)
         except (json.JSONDecodeError, IOError) as e:
+            matrix_failed = True
             content += SECTION_TEMPLATE.format(
                 title="Disaster Recovery Matrix",
                 status_class="fail",
                 status="ERROR",
                 details=f"<p>Could not load matrix results: {e}</p>",
             )
+    else:
+        content += SECTION_TEMPLATE.format(
+            title="Disaster Recovery Matrix",
+            status_class="fail",
+            status="NOT VERIFIED",
+            details="<p>No disaster matrix results supplied; recovery outcome cannot be claimed.</p>",
+        )
 
     total_tests = passed + failed
-    overall_status = "PASS" if failed == 0 else "FAIL"
-    overall_class = "pass" if failed == 0 else "fail"
+    overall_status = "PASS" if not tests_failed and not matrix_failed and not build_failed else "FAIL"
+    overall_class = "pass" if overall_status == "PASS" else "fail"
 
-    html = REPORT_TEMPLATE.format(
+    html_doc = REPORT_TEMPLATE_HTML.format(
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         overall_status=overall_status,
         overall_class=overall_class,
@@ -221,7 +281,7 @@ def generate_report(build_dir: str, test_results: list, matrix_results: str = No
     )
 
     with open(output, "w") as f:
-        f.write(html)
+        f.write(html_doc)
     print(f"Report written to {output}")
 
     # Also write JSON version

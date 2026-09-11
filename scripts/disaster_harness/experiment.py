@@ -30,6 +30,7 @@ from .manifest import (
     init_workspace,
     require_workspace,
     seal_run,
+    sha256_bytes,
     sha256_file,
     validate_source,
     verify_source_immutable,
@@ -124,6 +125,9 @@ class ExperimentSpec:
     source_hash: Optional[str] = None
     mutations: tuple[MutationSpec, ...] = ()
     offline_input: Optional[Path] = None
+    mutation_scope: Optional[str] = None
+    mutation_scopes: Optional[dict[int, Optional[str]]] = None
+    offline_mutation_scope: Optional[str] = None
 
 
 Runner = Callable[..., CommandResult]
@@ -203,16 +207,31 @@ def _mutation_target(datadir: Path, relative_path: Path) -> Path:
     return target
 
 
+def _validate_mutation_spec(mutation: MutationSpec) -> None:
+    if mutation.role not in {"tablespace", "redo", "server_dictionary", "table_sdi"}:
+        raise SafetyError(f"unsupported mutation role: {mutation.role}")
+    if mutation.scope not in {"level1", "level2", "level3_table_sdi", "level3_server_dictionary"}:
+        raise SafetyError(f"unsupported mutation scope: {mutation.scope}")
+    relative_path = Path(mutation.relative_path)
+    if relative_path.is_absolute() or not relative_path.parts or any(
+        part in ("", ".", "..") for part in relative_path.parts
+    ):
+        raise SafetyError(f"invalid mutation relative path: {relative_path}")
+    if mutation.action == "replace" and mutation.source is None:
+        raise SafetyError("replacement mutation requires a source file")
+    if mutation.action == "remove" and mutation.source is not None:
+        raise SafetyError("removal mutation must not include a source file")
+    if mutation.action not in {"replace", "remove"}:
+        raise SafetyError(f"unsupported mutation action: {mutation.action}")
+
+
 def _apply_mutations(datadir: Path, mutations: Sequence[MutationSpec]) -> list[dict]:
     if not mutations:
-        raise SafetyError("at least one declared mutation is required")
+        return []
     seen = set()
     records = []
     for mutation in mutations:
-        if mutation.role not in {"tablespace", "redo", "server_dictionary", "table_sdi"}:
-            raise SafetyError(f"unsupported mutation role: {mutation.role}")
-        if mutation.scope not in {"level1", "level2", "level3_table_sdi", "level3_server_dictionary"}:
-            raise SafetyError(f"unsupported mutation scope: {mutation.scope}")
+        _validate_mutation_spec(mutation)
         target = _mutation_target(datadir, Path(mutation.relative_path))
         key = str(target)
         if key in seen:
@@ -220,18 +239,12 @@ def _apply_mutations(datadir: Path, mutations: Sequence[MutationSpec]) -> list[d
         seen.add(key)
         before = sha256_file(target)
         if mutation.action == "replace":
-            if mutation.source is None:
-                raise SafetyError("replacement mutation requires a source file")
             source = validate_source(mutation.source)
             shutil.copyfile(source, target)
             expected = sha256_file(source)
-        elif mutation.action == "remove":
-            if mutation.source is not None:
-                raise SafetyError("removal mutation must not include a source file")
+        else:
             target.unlink()
             expected = None
-        else:
-            raise SafetyError(f"unsupported mutation action: {mutation.action}")
         after = sha256_file(target) if target.exists() else None
         if after != expected:
             raise SafetyError(f"mutation verification failed: {target}")
@@ -256,6 +269,103 @@ def _legacy_mutation(spec: ExperimentSpec) -> MutationSpec:
         role="tablespace",
         scope="level2",
     )
+
+
+def _mutation_fingerprint(records: Sequence[dict]) -> str:
+    return sha256_bytes(canonical_json(records).encode("utf-8"))
+
+
+def _mutations_for_scope(
+    mutations: Sequence[MutationSpec],
+    scope: Optional[str],
+) -> tuple[MutationSpec, ...]:
+    if scope is None:
+        return tuple(mutations)
+    return tuple(mutation for mutation in mutations if mutation.scope == scope)
+
+
+def _validate_mutation_scope(scope: Optional[str]) -> Optional[str]:
+    if scope is not None and scope not in {
+        "level1", "level2", "level3_table_sdi", "level3_server_dictionary"
+    }:
+        raise SafetyError(f"unsupported mutation scope: {scope}")
+    return scope
+
+
+def _mutation_scope_for_level(spec: ExperimentSpec, mutations: Sequence[MutationSpec],
+                              level: int) -> tuple[Optional[str], bool]:
+    if spec.mutation_scopes is not None:
+        keys = spec.mutation_scopes.keys()
+        if any(type(key) is not int for key in keys):
+            raise SafetyError("mutation_scopes keys must be native levels")
+        unexpected = sorted(set(keys) - set(spec.levels))
+        if unexpected:
+            raise SafetyError(f"mutation scope declared for unrequested native levels: {unexpected}")
+        missing = [item for item in spec.levels if item not in spec.mutation_scopes]
+        if missing:
+            raise SafetyError(f"mutation scope missing for native levels: {missing}")
+        return _validate_mutation_scope(spec.mutation_scopes[level]), True
+    if spec.mutation_scope is not None:
+        return _validate_mutation_scope(spec.mutation_scope), True
+    scopes = {_validate_mutation_scope(mutation.scope) for mutation in mutations}
+    if len(scopes) <= 1:
+        return next(iter(scopes), None), False
+    raise SafetyError(
+        "multiple mutation scopes require explicit mutation_scopes or mutation_scope"
+    )
+
+
+def _experiment_mutation_scope(spec: ExperimentSpec, mutations: Sequence[MutationSpec]) -> Optional[str]:
+    scopes = {
+        _mutation_scope_for_level(spec, mutations, level)[0]
+        for level in spec.levels
+    }
+    return next(iter(scopes)) if len(scopes) == 1 else None
+
+
+def _mutations_for_level(
+    mutations: Sequence[MutationSpec],
+    scope: Optional[str],
+) -> tuple[MutationSpec, ...]:
+    return _mutations_for_scope(mutations, scope)
+
+
+def _offline_relative_path(spec: ExperimentSpec, mutations: Sequence[MutationSpec]) -> Optional[Path]:
+    candidates = [Path(mutation.relative_path) for mutation in mutations
+                  if mutation.role in {"tablespace", "table_sdi"}
+                  and str(mutation.relative_path).lower().endswith(".ibd")]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _stage_offline_input(source: Path, destination: Path) -> Path:
+    if destination.exists() or destination.is_symlink():
+        raise SafetyError(f"refusing to overwrite offline input artifact: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, destination)
+    if sha256_file(source) != sha256_file(destination):
+        raise SafetyError(f"offline input staging verification failed: {destination}")
+    return destination
+
+
+def _input_identity(tablespace: Optional[Path], mutation_fingerprint: str,
+                    source_clone: Path, mutation_scope: Optional[str] = None) -> dict:
+    return {
+        "tablespace_sha256": sha256_file(tablespace) if tablespace is not None else None,
+        "mutation_fingerprint": mutation_fingerprint,
+        "mutation_scope": mutation_scope,
+        "source_clone": str(source_clone),
+    }
+
+
+def _source_matches(path: Optional[Path], expected_sha256: Optional[str]) -> bool:
+    if path is None or expected_sha256 is None:
+        return path is None and expected_sha256 is None
+    try:
+        return verify_source_immutable(path, expected_sha256)
+    except OSError:
+        return False
 
 
 def _mysql_command(spec: NativeSpec, level: int, datadir: Path, run_dir: Path, name: str) -> List[str]:
@@ -329,34 +439,43 @@ def _write_json(path: Path, value: Any) -> None:
 
 
 def _native_result_document(level: int, command: CommandResult, query: CommandResult,
-                            shutdown: CommandResult, output: Optional[dict]) -> dict:
+                            shutdown: CommandResult, output: Optional[dict],
+                            input_identity: Optional[dict] = None,
+                            cleanup: Optional[CommandResult] = None) -> dict:
     if output is None:
-        return {
+        result = {
             "status": "NOT_COMPUTABLE",
             "reason": "native structured export missing",
             "force_recovery": level,
             "excluded_evidence_levels": ["native_export"],
         }
-    if output.get("status") not in (None, "SEALED_READY", "COMPLETE"):
-        output = dict(output)
-        output.setdefault("excluded_evidence_levels", []).append("native_export")
-    output["execution"] = {
+    else:
+        result = output
+        if result.get("status") not in (None, "SEALED_READY", "COMPLETE"):
+            result = dict(result)
+            result.setdefault("excluded_evidence_levels", []).append("native_export")
+    if input_identity is not None:
+        result["input_identity"] = input_identity
+    result["execution"] = {
         "force_recovery": level,
         "startup": command.as_dict(),
         "query": query.as_dict(),
         "shutdown": shutdown.as_dict(),
+        "cleanup": cleanup.as_dict() if cleanup else None,
     }
-    return output
+    return result
 
 
 def run_native_level(spec: NativeSpec, level: int, datadir: Path, run_dir: Path,
-                     runner: Runner = run_command) -> dict:
+                     runner: Runner = run_command,
+                     input_identity: Optional[dict] = None) -> dict:
     name = f"dbrec-native-{os.getpid()}-{level}-{uuid.uuid4().hex[:12]}"
     startup = runner(_mysql_command(spec, level, datadir, run_dir, name), spec.startup_timeout)
     query = CommandResult([], None, "", "not executed", 0.0, spawn_error="startup not ready")
     shutdown = CommandResult([], None, "", "not executed", 0.0, spawn_error="startup not ready")
     result_document = None
     ping = None
+    cleanup = None
     try:
         if startup.status == "EXITED_0":
             deadline = time.monotonic() + spec.startup_timeout
@@ -386,17 +505,24 @@ def run_native_level(spec: NativeSpec, level: int, datadir: Path, run_dir: Path,
                 f"# stdout\n{logs.stdout}\n# stderr\n{logs.stderr}\n", encoding="utf-8")
     finally:
         if startup.status == "EXITED_0":
-            shutdown = runner([spec.container_engine, "stop", "-t", str(int(spec.shutdown_timeout)), name],
-                              spec.shutdown_timeout)
-            runner([spec.container_engine, "rm", "-f", name], spec.shutdown_timeout)
+            shutdown = runner(
+                [spec.container_engine, "stop", "-t", str(int(spec.shutdown_timeout)), name],
+                spec.shutdown_timeout,
+            )
+        cleanup = runner(
+            [spec.container_engine, "rm", "-f", name],
+            spec.shutdown_timeout,
+        )
     _write_json(run_dir / "native_execution.json", {
         "force_recovery": level,
         "startup": startup.as_dict(),
         "readiness": ping.as_dict() if ping else None,
         "query": query.as_dict(),
         "shutdown": shutdown.as_dict(),
+        "cleanup": cleanup.as_dict() if cleanup else None,
     })
-    return _native_result_document(level, startup, query, shutdown, result_document)
+    return _native_result_document(level, startup, query, shutdown, result_document,
+                                   input_identity, cleanup)
 
 
 def _load_typed_result(path: Path, evidence_level: str) -> dict:
@@ -433,7 +559,8 @@ def _offline_not_computable(run_dir: Path, reason: str) -> dict:
 
 
 def run_offline(spec: OfflineSpec, offline_input: Optional[Path], run_dir: Path,
-                runner: Runner = run_command) -> dict:
+                runner: Runner = run_command,
+                input_identity: Optional[dict] = None) -> dict:
     if offline_input is None:
         return _offline_not_computable(run_dir, "no offline comparison input declared")
     output_dir = run_dir / "output"
@@ -448,12 +575,17 @@ def run_offline(spec: OfflineSpec, offline_input: Optional[Path], run_dir: Path,
     result_path = expected_result if expected_result.is_file() else (
         result_paths[0] if len(result_paths) == 1 else None)
     if result_path is None:
-        return {
+        result = {
             "status": "NOT_COMPUTABLE",
             "reason": "offline structured result missing",
             "excluded_evidence_levels": ["offline_export"],
         }
+        if input_identity is not None:
+            result["input_identity"] = input_identity
+        return result
     result = _load_typed_result(result_path, "offline_export")
+    if input_identity is not None:
+        result["input_identity"] = input_identity
     result["execution"] = command.as_dict()
     result["result_artifact"] = str(result_path.relative_to(run_dir))
     return result
@@ -478,14 +610,37 @@ def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
         raise ValueError("native levels must be a non-empty subset of 0..6")
     binary = validate_source(spec.offline.binary)
     if spec.mutations:
-        mutations = spec.mutations
+        mutations = tuple(spec.mutations)
     elif damaged is not None and spec.damaged_relative_path is not None:
         mutations = (_legacy_mutation(spec),)
     else:
         raise SafetyError("mutation plan is required when no legacy damaged input is declared")
+    mutation_paths = [str(Path(mutation.relative_path)) for mutation in mutations]
+    if len(set(mutation_paths)) != len(mutation_paths):
+        raise SafetyError("duplicate mutation relative path")
+    mutation_source_hashes = []
     for mutation in mutations:
+        _validate_mutation_spec(mutation)
         if mutation.source is not None:
-            validate_source(mutation.source)
+            source = validate_source(mutation.source)
+            source_hash = sha256_file(source)
+        else:
+            source_hash = None
+        mutation_source_hashes.append({
+            "relative_path": str(mutation.relative_path),
+            "sha256": source_hash,
+        })
+    mutation_scope = _experiment_mutation_scope(spec, mutations)
+    mutation_scopes = {}
+    for level in spec.levels:
+        mutation_scopes[str(level)] = _mutation_scope_for_level(spec, mutations, level)[0]
+    offline_mutation_scope = _validate_mutation_scope(spec.offline_mutation_scope)
+    if offline_input is not None and offline_mutation_scope is None:
+        selected_scopes = set(mutation_scopes.values())
+        if len(selected_scopes) == 1:
+            offline_mutation_scope = next(iter(selected_scopes))
+    if spec.offline_mutation_scope is not None and spec.offline_mutation_scope not in mutation_scopes.values():
+        raise SafetyError("offline mutation scope does not match any native level")
     if offline_input is not None and offline_input.suffix.lower() != ".ibd":
         raise SafetyError("offline comparison input must be an .ibd tablespace")
 
@@ -495,45 +650,131 @@ def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
     experiment_dir.mkdir()
     _write_json(experiment_dir / "experiment_spec.json", {
         "levels": list(spec.levels),
+        "mutation_scope": mutation_scope,
+        "mutation_scopes": mutation_scopes,
+        "offline_mutation_scope": offline_mutation_scope,
         "offline_input": str(offline_input) if offline_input else None,
         "offline_input_sha256": offline_input_hash,
         "pristine_datadir": str(pristine),
         "ground_truth": str(spec.ground_truth),
         "native_image": spec.native.image,
         "offline_binary_sha256": sha256_file(binary),
+        "damaged_input_sha256": damaged_hash,
+        "mutation_source_hashes": mutation_source_hashes,
         "mutations": [{
             "relative_path": str(mutation.relative_path),
             "role": mutation.role,
             "scope": mutation.scope,
             "action": mutation.action,
-            "source_sha256": sha256_file(mutation.source) if mutation.source else None,
-        } for mutation in mutations],
+            "source_sha256": source_hash,
+        } for mutation, source_hash in zip(
+            mutations, (item["sha256"] for item in mutation_source_hashes)
+        )],
     })
 
     native_results = {}
+    mutation_fingerprints_by_scope: dict[Optional[str], set[str]] = {}
     for level in spec.levels:
+        level_mutation_scope = mutation_scopes[str(level)]
+        selected_mutations = _mutations_for_level(mutations, level_mutation_scope)
         level_dir = experiment_dir / f"native_{level}"
         level_dir.mkdir()
         datadir = level_dir / "datadir"
         _clone_tree(pristine, datadir)
-        mutation_records = _apply_mutations(datadir, mutations)
+        source_unchanged = (
+            _source_matches(damaged, damaged_hash)
+            and all(_source_matches(
+                mutation.source,
+                source_hash,
+            ) for mutation, source_hash in zip(
+                mutations, (item["sha256"] for item in mutation_source_hashes)
+            ) if mutation.source is not None)
+        )
+        if not source_unchanged:
+            raise SafetyError("evidence source changed during experiment")
+        mutation_records = _apply_mutations(datadir, selected_mutations)
+        mutation_fingerprint = _mutation_fingerprint(mutation_records)
+        mutation_fingerprints_by_scope.setdefault(level_mutation_scope, set()).add(mutation_fingerprint)
+        tablespace_relative = _offline_relative_path(spec, selected_mutations)
+        tablespace = (datadir / tablespace_relative
+                      if tablespace_relative is not None
+                      and (datadir / tablespace_relative).is_file() else None)
+        input_identity = _input_identity(datadir / tablespace_relative
+                                         if tablespace is not None else None,
+                                         mutation_fingerprint, datadir,
+                                         level_mutation_scope)
         _write_json(level_dir / "input.json", {
+            "mutation_scope": level_mutation_scope,
             "mutations": mutation_records,
+            "mutation_fingerprint": mutation_fingerprint,
+            "input_identity": input_identity,
             "offline_input": str(offline_input) if offline_input else None,
             "offline_input_sha256": offline_input_hash,
-            "source_unchanged": (verify_source_immutable(damaged, damaged_hash)
-                                  if damaged is not None else None),
+            "source_baseline_sha256": damaged_hash,
+            "source_unchanged": source_unchanged,
+            "mutation_source_hashes": mutation_source_hashes,
         })
-        native_results[str(level)] = run_native_level(spec.native, level, datadir, level_dir, runner)
+        native_results[str(level)] = run_native_level(
+            spec.native,
+            level,
+            datadir,
+            level_dir,
+            runner,
+            input_identity,
+        )
 
+    if any(len(fingerprints) != 1 for fingerprints in mutation_fingerprints_by_scope.values()):
+        raise SafetyError("selected mutation plan is not deterministic within a scope")
     offline_dir = experiment_dir / "offline"
     offline_dir.mkdir()
-    offline_result = run_offline(spec.offline, offline_input, offline_dir, runner)
+    offline_identity = None
+    if offline_input is not None and offline_mutation_scope is not None:
+        offline_fingerprints = mutation_fingerprints_by_scope.get(offline_mutation_scope, set())
+        if len(offline_fingerprints) != 1:
+            raise SafetyError("offline mutation scope has no deterministic native identity")
+        offline_identity = {
+            "tablespace_sha256": offline_input_hash,
+            "mutation_fingerprint": next(iter(offline_fingerprints)),
+            "mutation_scope": offline_mutation_scope,
+            "source_clone": str(offline_input),
+        }
+    offline_result = run_offline(
+        spec.offline,
+        offline_input,
+        offline_dir,
+        runner,
+        offline_identity,
+    )
     comparison = {
         str(level): compare_three_way(ground_truth, native_results[str(level)], offline_result)
         for level in spec.levels
     }
     _write_json(experiment_dir / "comparison.json", comparison)
+
+    def observed_hash(path: Optional[Path]) -> Optional[str]:
+        if path is None:
+            return None
+        try:
+            return sha256_file(path)
+        except OSError:
+            return None
+
+    final_damaged_hash = observed_hash(damaged)
+    final_mutation_source_hashes = []
+    for mutation in mutations:
+        final_mutation_source_hashes.append({
+            "relative_path": str(mutation.relative_path),
+            "sha256": observed_hash(mutation.source),
+        })
+    final_offline_input_hash = observed_hash(offline_input)
+    source_unchanged = _source_matches(damaged, damaged_hash)
+    mutation_sources_unchanged = all(
+        item["sha256"] == baseline["sha256"]
+        for item, baseline in zip(final_mutation_source_hashes, mutation_source_hashes)
+    )
+    offline_input_unchanged = _source_matches(offline_input, offline_input_hash)
+    if not source_unchanged or not mutation_sources_unchanged or not offline_input_unchanged:
+        raise SafetyError("evidence source changed during experiment")
     files = [file_entry(path, "artifact", experiment_dir) for path in experiment_dir.rglob("*")
              if path.is_file() and path.name not in {"manifest.json", "manifest.seal"}]
     manifest = build_manifest(experiment_dir, files, {
@@ -541,11 +782,15 @@ def run_experiment(spec: ExperimentSpec, runner: Runner = run_command) -> dict:
                                           item["status"] == "COMPARABLE"
                                           for item in comparison.values()) else "INCOMPLETE",
         "offline_input_sha256": offline_input_hash,
-        "source_unchanged_sha256": (sha256_file(damaged) if damaged is not None else None),
-        "mutation_source_unchanged": all(
-            mutation.source is None or verify_source_immutable(mutation.source, sha256_file(mutation.source))
-            for mutation in mutations
-        ),
+        "offline_input_final_sha256": final_offline_input_hash,
+        "offline_input_unchanged": offline_input_unchanged,
+        "source_baseline_sha256": damaged_hash,
+        "source_final_sha256": final_damaged_hash,
+        "source_unchanged_sha256": damaged_hash,
+        "source_unchanged": source_unchanged,
+        "mutation_source_hashes": mutation_source_hashes,
+        "mutation_source_final_hashes": final_mutation_source_hashes,
+        "mutation_source_unchanged": mutation_sources_unchanged,
         "offline_binary_sha256": sha256_file(binary),
     })
     write_manifest(experiment_dir, manifest)

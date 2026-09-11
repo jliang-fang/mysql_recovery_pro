@@ -162,36 +162,10 @@ std::optional<dbrecovery::innodb::BlobPointer> Repairer::get_blob_info_from_sdi(
 
     try {
         // 从 SDI 页面解析表结构
-        catalog::TableSchema schema;
-        
-        // 简化实现：直接从页数据中提取 SDI payload 并解析
-        if (page_size >= 58) {
-            const uint8_t* sdi_payload = page + 38;
-            auto sdi_json_opt = dbrecovery::innodb::SDIManager::extract_sdi_json(
-                sdi_payload, page_size - 38
-            );
-            
-            if (sdi_json_opt.has_value()) {
-                auto j = nlohmann::json::parse(sdi_json_opt.value());
-                if (j.contains("table") && j["table"].contains("columns")) {
-                    for (const auto& col : j["table"]["columns"]) {
-                        if (col.contains("type")) {
-                            uint32_t type_id = col["type"].get<uint32_t>();
-                            if (type_id == dbrecovery::innodb::mysql_types::BLOB) {
-                                // 返回一个默认的 BLOB 指针
-                                dbrecovery::innodb::BlobPointer bp;
-                                bp.space_id = 0;
-                                bp.page_no = 100;
-                                bp.offset = 0;
-                                bp.len = 4096;
-                                bp.total_len = 4096;
-                                return bp;
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // schema 单独不能推导真实 external storage pointer；BLOB 指针必须来自
+        // 记录内证据，这里明确拒绝而不是返回猜测值。
+        (void)page;
+        (void)page_size;
     } catch (...) {
         // 忽略异常，返回空
     }
@@ -260,29 +234,10 @@ bool Repairer::fix_blob_pointer(uint8_t* page, size_t page_size) {
 
         // 校验原始指针有效性
         if (!blob_ptr.has_value() || !is_blob_pointer_safe(*blob_ptr)) {
-            // 尝试从邻居页获取
-            std::vector<uint8_t> dummy_data(page_size * 3);
-            auto neighbor_blob_info = get_blob_info_from_neighbor_pages(
-                page, page_size, 0, dummy_data
-            );
-
-            if (neighbor_blob_info && is_blob_pointer_safe(*neighbor_blob_info)) {
-                const auto& valid_ptr = *neighbor_blob_info;
-
-                // 使用小端序写入
-                dbrecovery::innodb::write_le<uint32_t>(page + blob_ptr_offset, 0, valid_ptr.space_id);
-                dbrecovery::innodb::write_le<uint32_t>(page + blob_ptr_offset, 4, valid_ptr.page_no);
-                dbrecovery::innodb::write_le<uint32_t>(page + blob_ptr_offset, 8, valid_ptr.offset);
-                dbrecovery::innodb::write_le<uint32_t>(page + blob_ptr_offset, 12, valid_ptr.len);
-                dbrecovery::innodb::write_le<uint32_t>(page + blob_ptr_offset, 16, valid_ptr.total_len);
-
-                return true;
-            }
-
-            // 若所有恢复尝试均失败，不修改原始数据
+            // 没有真实文件上下文时不能从虚构的邻居页猜测指针；保持原页不变。
             return false;
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         // 记录错误但不破坏原页
         return false;
     }

@@ -27,6 +27,10 @@ from scripts.disaster_harness.experiment import (
     OfflineSpec,
     run_experiment,
     run_native_level,
+    _mutation_fingerprint,
+    _mutation_scope_for_level,
+    _mutations_for_scope,
+    _validate_mutation_spec,
 )
 from scripts.disaster_harness.ground_truth import (
     build_ground_truth,
@@ -244,6 +248,56 @@ class ComparatorTests(unittest.TestCase):
         report = compare_three_way(self.expected, self.expected, None)
         self.assertEqual(report["status"], "NOT_COMPUTABLE")
         self.assertEqual(report["comparisons"]["ground_truth_vs_native"]["status"], "COMPARABLE")
+
+    def _native_document(self, input_identity):
+        return {
+            "database": "db",
+            "table": "t",
+            "schema": self.expected["schema"],
+            "schema_fingerprint": self.expected["schema_fingerprint"],
+            "mysql_version": "9.0",
+            "status": "SEALED_READY",
+            "rows": self.expected["rows"],
+            "input_identity": input_identity,
+        }
+
+    def test_native_offline_missing_identity_fails_closed(self):
+        native = self._native_document(None)
+        offline = self._native_document(None)
+        report = compare_three_way(self.expected, native, offline)
+        self.assertEqual(report["status"], "NOT_COMPUTABLE")
+        self.assertIn(
+            "missing_input_identity",
+            report["comparisons"]["native_vs_offline"]["prerequisites"],
+        )
+
+    def test_native_offline_identity_scope_mismatch_fails_closed(self):
+        identity = {
+            "tablespace_sha256": "a" * 64,
+            "mutation_fingerprint": "b" * 64,
+            "mutation_scope": "level1",
+        }
+        native = self._native_document(identity)
+        offline_identity = dict(identity)
+        offline_identity["mutation_fingerprint"] = "c" * 64
+        offline_identity["mutation_scope"] = "level2"
+        offline = self._native_document(offline_identity)
+        report = compare_three_way(self.expected, native, offline)
+        comparison = report["comparisons"]["native_vs_offline"]
+        self.assertEqual(report["status"], "NOT_COMPUTABLE")
+        self.assertIn("native_offline_mutation_mismatch", comparison["prerequisites"])
+        self.assertIn("native_offline_scope_mismatch", comparison["prerequisites"])
+
+    def test_native_offline_matching_identity_is_computable(self):
+        identity = {
+            "tablespace_sha256": "a" * 64,
+            "mutation_fingerprint": "b" * 64,
+            "mutation_scope": "level1",
+        }
+        report = compare_three_way(
+            self.expected, self._native_document(identity), self._native_document(identity))
+        self.assertEqual(report["status"], "COMPARABLE")
+        self.assertTrue(report["strict_pass"])
 
 
 class CorruptionTests(unittest.TestCase):
@@ -565,6 +619,7 @@ class ExperimentTests(unittest.TestCase):
                 native=NativeSpec(image="mysql:test", export_sql="SELECT 1"),
                 offline=OfflineSpec(binary=binary, ibd_arg="ibd"),
                 levels=(0,),
+                mutation_scope="level1",
                 mutations=(
                     MutationSpec(Path("db/table.ibd"), "tablespace", "level2", damaged),
                     MutationSpec(Path("#innodb_redo/redo.log"), "redo", "level1", damaged_redo),
@@ -572,8 +627,225 @@ class ExperimentTests(unittest.TestCase):
             ), runner)
             level_dir = Path(result["experiment_dir"]) / "native_0"
             input_record = json.loads((level_dir / "input.json").read_text())
-            self.assertEqual(len(input_record["mutations"]), 2)
-            self.assertEqual((level_dir / "datadir" / "#innodb_redo" / "redo.log").read_bytes(), b"damaged-redo")
+            self.assertEqual(input_record["mutation_scope"], "level1")
+            self.assertEqual(len(input_record["mutations"]), 1)
+            self.assertEqual(input_record["mutations"][0]["role"], "redo")
+            self.assertEqual(
+                (level_dir / "datadir" / "#innodb_redo" / "redo.log").read_bytes(),
+                b"damaged-redo",
+            )
+            self.assertEqual(
+                (level_dir / "datadir" / "db" / "table.ibd").read_bytes(),
+                b"pristine",
+            )
+            self.assertEqual(
+                input_record["input_identity"]["mutation_fingerprint"],
+                input_record["mutation_fingerprint"],
+            )
+            self.assertTrue(input_record["input_identity"]["tablespace_sha256"] is None)
             self.assertTrue(verify_seal(Path(result["experiment_dir"])))
+
+    def test_startup_failure_still_runs_cleanup_and_records_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = root / "native_0"
+            run_dir.mkdir()
+            datadir = root / "datadir"
+            datadir.mkdir()
+            spec = NativeSpec(image="mysql: test", startup_timeout=0.01)
+            calls = []
+
+            def runner(argv, timeout, input_text=""):
+                calls.append((list(argv), timeout, input_text))
+                if len(argv) > 1 and argv[1] == "run":
+                    return CommandResult(list(argv), 1, "", "port busy", 0.0)
+                if len(argv) > 1 and argv[1] == "rm":
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                return CommandResult(list(argv), 0, "", "", 0.0)
+
+            result = run_native_level(spec, 0, datadir, run_dir, runner)
+
+            self.assertEqual(result["status"], "NOT_COMPUTABLE")
+            execution = json.loads((run_dir / "native_execution.json").read_text())
+            self.assertEqual(execution["startup"]["status"], "EXITED_NONZERO")
+            self.assertEqual(execution["cleanup"]["status"], "EXITED_0")
+            self.assertIsNone(result["execution"]["shutdown"]["returncode"])
+            self.assertIsNotNone(result["execution"]["cleanup"])
+            rm_calls = [call for call in calls if len(call[0]) > 1 and call[0][1] == "rm"]
+            self.assertEqual(len(rm_calls), 1)
+            self.assertFalse(any(len(call[0]) > 1 and call[0][1] == "stop" for call in calls))
+
+    def test_startup_timeout_still_runs_shutdown_and_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = root / "native_0"
+            run_dir.mkdir()
+            datadir = root / "datadir"
+            datadir.mkdir()
+            spec = NativeSpec(image="mysql: test", startup_timeout=0.01)
+            calls = []
+
+            def runner(argv, timeout, input_text=""):
+                calls.append((list(argv), timeout, input_text))
+                if len(argv) > 1 and argv[1] == "run":
+                    return CommandResult(list(argv), 0, "container-id", "", 0.0)
+                if len(argv) > 1 and argv[1] == "mysqladmin":
+                    return CommandResult(list(argv), 0, "", "timeout", 0.0, timed_out=True)
+                if len(argv) > 1 and argv[1] == "stop":
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                if len(argv) > 1 and argv[1] == "rm":
+                    return CommandResult(list(argv), 0, "", "", 0.0)
+                return CommandResult(list(argv), 0, "", "", 0.0)
+
+            result = run_native_level(spec, 0, datadir, run_dir, runner)
+
+            self.assertEqual(result["status"], "NOT_COMPUTABLE")
+            execution = json.loads((run_dir / "native_execution.json").read_text())
+            self.assertIn("readiness", execution)
+            self.assertEqual(execution["cleanup"]["status"], "EXITED_0")
+            stop_calls = [call for call in calls if len(call[0]) > 1 and call[0][1] == "stop"]
+            rm_calls = [call for call in calls if len(call[0]) > 1 and call[0][1] == "rm"]
+            self.assertEqual(len(stop_calls), 1)
+            self.assertEqual(len(rm_calls), 1)
+
+    def test_mutation_scope_for_level_validates_keys_and_values(self):
+        spec = ExperimentSpec(
+            workspace=Path("/w"),
+            pristine_datadir=Path("/p"),
+            damaged_input=None,
+            damaged_relative_path=None,
+            ground_truth=Path("/g"),
+            native=NativeSpec(image="mysql:test"),
+            offline=OfflineSpec(binary=Path("/b"), ibd_arg="ibd"),
+            levels=(0, 2),
+            mutation_scopes={0: "level1", 2: "level2"},
+        )
+        scope, explicit = _mutation_scope_for_level(spec, (), 0)
+        self.assertEqual(scope, "level1")
+        self.assertTrue(explicit)
+        scope, explicit = _mutation_scope_for_level(spec, (), 2)
+        self.assertEqual(scope, "level2")
+        self.assertTrue(explicit)
+
+    def test_mutation_scope_rejects_unknown_level_or_scope(self):
+        spec = ExperimentSpec(
+            workspace=Path("/w"),
+            pristine_datadir=Path("/p"),
+            damaged_input=None,
+            damaged_relative_path=None,
+            ground_truth=Path("/g"),
+            native=NativeSpec(image="mysql:test"),
+            offline=OfflineSpec(binary=Path("/b"), ibd_arg="ibd"),
+            levels=(0, 1),
+            mutation_scopes={0: "level1", "1": "level2"},
+        )
+        with self.assertRaises(SafetyError):
+            _mutation_scope_for_level(spec, (), 0)
+        spec2 = ExperimentSpec(
+            workspace=Path("/w"),
+            pristine_datadir=Path("/p"),
+            damaged_input=None,
+            damaged_relative_path=None,
+            ground_truth=Path("/g"),
+            native=NativeSpec(image="mysql:test"),
+            offline=OfflineSpec(binary=Path("/b"), ibd_arg="ibd"),
+            levels=(0, 1),
+            mutation_scopes={0: "level1", 1: "level9"},
+        )
+        with self.assertRaises(SafetyError):
+            _mutation_scope_for_level(spec2, (), 1)
+        spec3 = ExperimentSpec(
+            workspace=Path("/w"),
+            pristine_datadir=Path("/p"),
+            damaged_input=None,
+            damaged_relative_path=None,
+            ground_truth=Path("/g"),
+            native=NativeSpec(image="mysql:test"),
+            offline=OfflineSpec(binary=Path("/b"), ibd_arg="ibd"),
+            levels=(0, 1),
+            mutation_scopes={0: "level1"},
+        )
+        with self.assertRaises(SafetyError):
+            _mutation_scope_for_level(spec3, (), 1)
+
+    def test_mutation_scope_for_level_infers_single_scope(self):
+        spec = ExperimentSpec(
+            workspace=Path("/w"),
+            pristine_datadir=Path("/p"),
+            damaged_input=None,
+            damaged_relative_path=None,
+            ground_truth=Path("/g"),
+            native=NativeSpec(image="mysql:test"),
+            offline=OfflineSpec(binary=Path("/b"), ibd_arg="ibd"),
+            levels=(0, 1),
+        )
+        mutation = MutationSpec(Path("db/table.ibd"), "tablespace", "level2")
+        scope, explicit = _mutation_scope_for_level(spec, (mutation,), 0)
+        self.assertEqual(scope, "level2")
+        self.assertFalse(explicit)
+
+    def test_mutation_scope_rejects_multiple_implicit_scopes(self):
+        spec = ExperimentSpec(
+            workspace=Path("/w"),
+            pristine_datadir=Path("/p"),
+            damaged_input=None,
+            damaged_relative_path=None,
+            ground_truth=Path("/g"),
+            native=NativeSpec(image="mysql:test"),
+            offline=OfflineSpec(binary=Path("/b"), ibd_arg="ibd"),
+            levels=(0,),
+        )
+        mutations = (
+            MutationSpec(Path("db/table.ibd"), "tablespace", "level2"),
+            MutationSpec(Path("#innodb_redo/redo.log"), "redo", "level1"),
+        )
+        with self.assertRaises(SafetyError):
+            _mutation_scope_for_level(spec, mutations, 0)
+
+    def test_mutation_fingerprint_is_scope_local_and_deterministic(self):
+        first = [
+            {"path": "db/table.ibd", "role": "tablespace", "scope": "level2",
+             "action": "replace", "before_sha256": "a" * 64,
+             "after_sha256": "b" * 64, "source_sha256": "b" * 64},
+        ]
+        second = [
+            {"path": "db/table.ibd", "role": "tablespace", "scope": "level8",
+             "action": "replace", "before_sha256": "a" * 64,
+             "after_sha256": "b" * 64, "source_sha256": "b" * 64},
+        ]
+        self.assertEqual(_mutation_fingerprint(first), _mutation_fingerprint(first))
+        self.assertNotEqual(_mutation_fingerprint(first), _mutation_fingerprint(second))
+
+    def test_mutations_for_scope_filters_and_accepts_none(self):
+        mutations = (
+            MutationSpec(Path("db/table.ibd"), "tablespace", "level2"),
+            MutationSpec(Path("#innodb_redo/redo.log"), "redo", "level1"),
+        )
+        self.assertEqual(len(_mutations_for_scope(mutations, "level1")), 1)
+        self.assertEqual(len(_mutations_for_scope(mutations, "level2")), 1)
+        self.assertEqual(_mutations_for_scope(mutations, None), mutations)
+
+    def test_validate_mutation_spec_rejects_invalid_combinations(self):
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "unknown", "level2"))
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "tablespace", "level9"))
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("../escape.ibd"), "tablespace", "level2"))
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("/abs.ibd"), "tablespace", "level2"))
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "tablespace", "level2",
+                                                 action="replace", source=None))
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "tablespace", "level2",
+                                                 action="remove", source=Path("/x")))
+        with self.assertRaises(SafetyError):
+            _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "tablespace", "level2",
+                                                 action="rewrite", source=Path("/x")))
+        _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "tablespace", "level2",
+                                             action="replace", source=Path("/x")))
+        _validate_mutation_spec(MutationSpec(Path("db/table.ibd"), "table_sdi", "level3_table_sdi",
+                                             action="remove"))
 
 

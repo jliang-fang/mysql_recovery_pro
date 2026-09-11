@@ -296,33 +296,7 @@ bool PhysicalCorruptionRepairer::repair_bit_flip(uint8_t* page_data, const Physi
         return false;
     }
 
-    // 对于页类型的比特翻转，直接恢复原始值
-    if (corruption.offset % page_size_ == dbrecovery::innodb::FIL_PAGE_TYPE_ABS) {
-        // 获取期望的有效页类型
-        uint16_t valid_types[] = {
-            dbrecovery::innodb::FIL_PAGE_INDEX,
-            dbrecovery::innodb::FIL_PAGE_SDI,
-            dbrecovery::innodb::FIL_PAGE_UNDO_LOG,
-            dbrecovery::innodb::FIL_PAGE_TYPE_BLOB
-        };
-
-        uint16_t corrupted_type = dbrecovery::innodb::read_be<uint16_t>(page_data, corruption.offset);
-
-        for (uint16_t valid_type : valid_types) {
-            uint16_t xor_value = corrupted_type ^ valid_type;
-            int bit_diff = __builtin_popcount(xor_value);
-
-            if (bit_diff <= 2) {
-                // 修复比特翻转
-                dbrecovery::innodb::write_be<uint16_t>(page_data, corruption.offset, valid_type);
-
-                // 重新计算校验和
-                // (由 HeaderRepairer 处理)
-                return true;
-            }
-        }
-    }
-
+    last_error_ = "Bit-flip repair requires independent redundancy and checksum validation";
     return false;
 }
 
@@ -369,15 +343,7 @@ std::vector<uint8_t> PhysicalCorruptionRepairer::handle_truncation(const uint8_t
     // 复制完整的数据
     result.assign(file_data, file_data + complete_size);
 
-    // 如果有期望大小且小于当前大小，进行填充
-    if (expected_size && *expected_size > complete_size) {
-        size_t padding_needed = *expected_size - complete_size;
-        result.resize(*expected_size, 0);
-
-        std::cout << "[INFO] Truncated file: recovered " << complete_size << " bytes, "
-                  << "padded " << padding_needed << " bytes" << std::endl;
-    }
-
+    // 截断文件只返回仍然存在的完整页；缺失尾部不是可恢复数据。
     return result;
 }
 
