@@ -705,9 +705,9 @@ TEST_F(DeepUndoAnalyzerVersionTest, RollPtrSizeConsistency) {
     EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_80),
               UndoFormatProfile::MYSQL8_7BYTE);
     EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_84),
-              UndoFormatProfile::UNRESOLVED);
+              UndoFormatProfile::MYSQL8_7BYTE);
     EXPECT_EQ(undo_format_profile_for_version(MySQLVersion::MYSQL_90),
-              UndoFormatProfile::UNRESOLVED);
+              UndoFormatProfile::MYSQL8_7BYTE);
 
     // Also verify that RollPtrDecoder::decode_storage with null data does not crash
     auto decoded_6 = RollPtrDecoder::decode_storage(nullptr, 6);

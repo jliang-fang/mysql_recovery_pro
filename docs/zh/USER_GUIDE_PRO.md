@@ -100,12 +100,20 @@ sudo make install
 # 最简单的用法：从 .ibd 文件恢复数据
 ./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/path/to/output/
 
+# 推荐：指定 MySQL 目标版本（支持 5.6, 5.7, 8.0, 8.4, 9.0）
+./mysql_recovery_pro --ibd=/path/to/table.ibd --mysql-version=9.0 --output=/path/to/output/
+
+# 导出全格式审计报告（包含 JSON、HTML 可视化界面、纯文本）
+./mysql_recovery_pro --ibd=/path/to/table.ibd --output=/path/to/output/ --report-format=json,html,text
+
 # 输出文件说明
 ls /path/to/output/
-# recovered.csv  - 恢复的 CSV 格式数据
-# recovered.json - 恢复的 JSON 格式数据（使用 --format=json）
-# schema.json    - 表结构信息
-# stats.txt      - 恢复统计报告
+# recovered.csv          - 恢复的 CSV 格式数据
+# recovered.json         - 恢复的 JSON 格式数据（使用 --format=json）
+# schema.json            - 表结构信息
+# recovery_report.html   - 可视化恢复评估报告（使用 --report-format=html）
+# recovery_report.json   - 机器可读恢复统计与损伤分析报告
+# stats.txt              - 恢复统计报告
 ```
 
 ### 2. 使用手动 Schema 恢复

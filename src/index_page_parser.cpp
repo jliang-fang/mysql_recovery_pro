@@ -339,8 +339,10 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
     size_t element_count = ssize == 2 ? read_json_le16(data, data_start) : read_json_le32(data, data_start);
     size_t total_size = ssize == 2 ? read_json_le16(data, data_start + ssize) : read_json_le32(data, data_start + ssize);
 
-    // 验证total_size
-    if (total_size != field_size) {
+    // 验证total_size。SIZE字段统计的是TYPE字节之后的数据长度：
+    // 顶层值含TYPE字节，故 field_size == total_size + 1；嵌套值无独立TYPE字节。
+    size_t expected_size = is_nested ? field_size : field_size - 1;
+    if (total_size != expected_size) {
         return JSON_UNPARSABLE;
     }
 
@@ -413,8 +415,10 @@ std::string decode_json_binary(const uint8_t* data, size_t offset, size_t field_
         size_t val_offset = ssize == 2 ? read_json_le16(data, ve_pos + 1) : read_json_le32(data, ve_pos + 1);
 
         // 根据类型处理值
-        // val_offset是相对于data_start的偏移
-        if (val_offset > data_end - data_start) return JSON_UNPARSABLE;
+        // val_offset是相对于data_start的偏移；但LITERAL(0x04)/INT16(0x05)/UINT16(0x06)
+        // 为内联类型，该字段直接存放字面值本身，不能当作偏移做边界校验。
+        const bool inline_value = (val_type == 0x04 || val_type == 0x05 || val_type == 0x06);
+        if (!inline_value && val_offset > data_end - data_start) return JSON_UNPARSABLE;
         size_t val_abs_offset = data_start + val_offset;
 
         if (val_type == 0x0c) {  // STRING

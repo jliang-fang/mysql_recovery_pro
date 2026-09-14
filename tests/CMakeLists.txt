@@ -436,3 +436,17 @@ target_link_libraries(test_real_recovery_pipeline PRIVATE dbrecovery_innodb GTes
 add_test(NAME test_real_recovery_pipeline COMMAND test_real_recovery_pipeline)
 set_tests_properties(test_real_recovery_pipeline PROPERTIES LABELS "REAL_MYSQL")
 
+# real_fixture_multiversion_test (Phase 4 P1-1): full pipeline parity checks
+# across all 5 real fixture versions (5.6–9.0): sha256 integrity, SDI page
+# presence, ground-truth row counts, partition naming, undo fixture gating.
+add_executable(test_real_fixture_multiversion real_fixture_multiversion_test.cpp)
+target_link_libraries(test_real_fixture_multiversion PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
+add_test(NAME test_real_fixture_multiversion COMMAND test_real_fixture_multiversion)
+set_tests_properties(test_real_fixture_multiversion PROPERTIES LABELS "REAL_MYSQL")
+
+# Recovery report & UnifiedValidator tests (P1-3)
+add_executable(test_recovery_report test_recovery_report.cpp)
+target_link_libraries(test_recovery_report PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
+gtest_discover_tests(test_recovery_report PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
+

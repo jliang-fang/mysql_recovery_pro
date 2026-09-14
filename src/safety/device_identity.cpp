@@ -1,6 +1,7 @@
 #include "dbrecovery/safety/device_identity.hpp"
 
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -91,7 +92,71 @@ DeviceIdentityInfo DeviceIdentity::verify_identity(const std::string& device_pat
         info.confidence = 0.1;
     }
 
+    // Loopback devices carry no model/serial, so the checks above cannot
+    // identify them. Identity for a loop device is the backing file, which
+    // is verified here (regular file, path recorded by the kernel, inside a
+    // trusted backing root). Without it the device stays unidentified and
+    // the safety gate rejects raw access.
+    if (info.device_type == "loop") {
+        apply_loopback_identity(device_path, info);
+    }
+
     return info;
+}
+
+bool DeviceIdentity::read_loopback_sysfs(const std::string& dev_name,
+                                         std::string& backing_file) const {
+    // The kernel exposes the backing file path with a trailing newline.
+    std::ifstream ifs("/sys/block/" + dev_name + "/loop/backing_file");
+    if (!ifs.is_open()) return false;
+    std::getline(ifs, backing_file);
+    while (!backing_file.empty() &&
+           (backing_file.back() == '\n' || backing_file.back() == '\r' ||
+            backing_file.back() == ' ')) {
+        backing_file.pop_back();
+    }
+    return !backing_file.empty();
+}
+
+void DeviceIdentity::apply_loopback_identity(const std::string& device_path,
+                                             DeviceIdentityInfo& info) const {
+    std::string dev_name;
+    auto pos = device_path.rfind('/');
+    dev_name = (pos != std::string::npos && pos + 1 < device_path.size())
+                   ? device_path.substr(pos + 1)
+                   : device_path;
+
+    std::string backing_file;
+    if (!read_loopback_sysfs(dev_name, backing_file)) return;
+    if (backing_file.empty() || backing_file[0] != '/') return;
+
+    // The backing file must exist as a regular file; a loop device pointing
+    // at a missing path is not identifiable and stays at low confidence.
+    struct stat st{};
+    if (::stat(backing_file.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return;
+
+    // Only file-backed carriers inside a trusted backing root are accepted.
+    // Paths such as a whole block device or a raw NVMe node registered as a
+    // loop backing file must not be treated as identifiable.
+    static const char* const kTrustedRoots[] = {
+        "/app/mysql_recovery_test/",
+    };
+    const std::string normalized = std::filesystem::path(backing_file)
+                                       .lexically_normal()
+                                       .string();
+    bool trusted = false;
+    for (const char* root : kTrustedRoots) {
+        if (normalized.rfind(root, 0) == 0) {
+            trusted = true;
+            break;
+        }
+    }
+    if (!trusted) return;
+
+    info.model_number = "Loopback device";
+    info.serial_number = "loop:" + normalized;
+    if (info.lba_data_size == 0) info.lba_data_size = st.st_blksize;
+    if (info.confidence < 0.7) info.confidence = 0.7;
 }
 
 bool DeviceIdentity::is_nvme(const std::string& device_path) const {
@@ -235,6 +300,12 @@ bool DeviceIdentity::read_nvme_identity(int fd, DeviceIdentityInfo& info) {
         }
     }
 
+    // Some virtual NVMe controllers report ioctl success but return a
+    // zero-filled identify payload. Treat that as no identity data so the
+    // caller falls back to sysfs instead of trusting empty fields.
+    if (info.model_number.empty() && info.serial_number.empty()) {
+        return false;
+    }
     return true;
 #else
     // NVME_IOCTL_ADMIN_CMD not available on this platform

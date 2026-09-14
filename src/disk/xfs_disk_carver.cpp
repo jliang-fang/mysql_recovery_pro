@@ -2487,6 +2487,8 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
 
     std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_cols;
     for (const auto& [ordinal, col] : schema.columns) {
+        // physical_pos may be 0-based (first column = 0) or 1-based; normalize
+        // to 1-based so ordinal 1 never collides with physical_pos 0.
         uint32_t phys_pos = col.physical_pos > 0 ? col.physical_pos : ordinal;
         sorted_cols.push_back({phys_pos, col});
     }
@@ -2496,8 +2498,8 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
     for (const auto& [phys_pos, col] : sorted_cols) {
         innodb::IndexColumnDef col_def;
         col_def.name = col.name;
-        // CRITICAL: Convert MySQL server type ID to InnoDB storage type ID
-        col_def.col_type = mysql_type_to_innodb(col.mysql_type_id);
+        // Schema files store InnoDB storage type IDs directly — do not re-map
+        col_def.col_type = static_cast<uint8_t>(col.mysql_type_id);
         col_def.col_length = col.column_length;
         col_def.is_nullable = col.is_nullable;
         col_def.is_unsigned = !col.is_signed;
@@ -2517,6 +2519,25 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
             col_def.mb_maxlen = 3;
         } else {
             col_def.mb_maxlen = 1;  // latin1 and others
+        }
+
+        // Mirror recovery_cli.hpp FRM semantics: is_big gates 2-byte var-size
+        // encoding; is_binary keeps CHAR-vs-BINARY (type 29) fixed-length.
+        // Type 27 is shared by BLOB and TEXT, so binary-ness must come from the
+        // collation (63 = binary); otherwise TEXT is hex-encoded.
+        if (col.mysql_type_id == 24 || col.mysql_type_id == 25 ||
+            col.mysql_type_id == 26 || col.mysql_type_id == 27 ||
+            col.mysql_type_id == 31) {
+            col_def.is_big = true;
+            if (col.mysql_type_id == 27) {
+                col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63);
+            }
+        } else if (col.mysql_type_id == 16 || col.mysql_type_id == 29) {
+            col_def.is_big = (col.column_length * col_def.mb_maxlen > 255);
+            // BINARY vs CHAR: both type 29; BINARY columns use charset-63 and
+            // resolve fixed-length via mb_maxlen==1, but mark explicitly when
+            // collation is binary and the column is not JSON.
+            col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63);
         }
 
         columns.push_back(col_def);

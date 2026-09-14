@@ -36,6 +36,12 @@ cmake --build build -j$(nproc)
 # Basic recovery from .ibd file
 ./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/
 
+# Specify MySQL version explicitly (recommended for 5.6/5.7/8.4/9.0)
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --mysql-version=9.0 --output=/recovery/
+
+# Generate multi-format professional recovery reports (JSON, HTML, Text)
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/ --report-format=json,html,text
+
 # Disk carving recovery (block device)
 ./build/mysql_recovery_pro --disk-carving --device-path=/dev/sda1 --output=/recovery/
 
@@ -86,6 +92,12 @@ cmake --build build -j$(nproc)
 
 # 从 .ibd 文件恢复
 ./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/
+
+# 显式指定 MySQL 版本（推荐用于 5.6/5.7/8.4/9.0 表空间）
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --mysql-version=9.0 --output=/recovery/
+
+# 生成多格式恢复报告（JSON, HTML 可视化报告, 终端文本）
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/ --report-format=json,html,text
 
 # 磁盘雕刻恢复 (块设备)
 ./build/mysql_recovery_pro --disk-carving --device-path=/dev/sda1 --output=/recovery/

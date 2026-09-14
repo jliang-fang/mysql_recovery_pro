@@ -109,6 +109,23 @@ private:
     bool read_sysfs_identity(const std::string& device_path, DeviceIdentityInfo& info);
 
     /**
+     * @brief Read loopback backing file path from sysfs (/sys/block/<dev>/loop/backing_file).
+     *
+     * @param dev_name Short device name (e.g., "loop0").
+     * @param backing_file Output populated with trimmed backing file path.
+     * @return true if backing file was read non-empty.
+     */
+    bool read_loopback_sysfs(const std::string& dev_name, std::string& backing_file) const;
+
+    /**
+     * @brief Apply verified loopback identity based on regular-file backing within trusted root.
+     *
+     * @param device_path Path to the block device.
+     * @param info Output parameter to populate.
+     */
+    void apply_loopback_identity(const std::string& device_path, DeviceIdentityInfo& info) const;
+
+    /**
      * @brief Resolve the major number for a device path using stat().
      *
      * @param device_path Path to the device.

@@ -58,6 +58,8 @@
 #include "dbrecovery/carve/page_identity_engine.hpp"
 #include "dbrecovery/salvage/data_correlation.hpp"
 #include "dbrecovery/salvage/evidence_serializer.hpp"
+#include "dbrecovery/salvage/damaged_page_handler.hpp"
+#include "dbrecovery/salvage/row_salvage_scanner.hpp"
 #include "dbrecovery/innodb/compressed_table_recovery.hpp"
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 
@@ -782,6 +784,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         std::cout << "[INFO] v2.0 Page Reassembly Mode\n";
+        std::cout << "[WARN] Reassembly mode is experimental and excluded from official version support matrix\n";
         std::cout << "[INFO] Device: " << device_path << "\n";
         std::cout << "[INFO] Output: " << output_dir << "\n";
 
@@ -819,6 +822,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         if (!write_result_json({
                 {"mode", "reassemble"},
+                {"experimental", true},
                 {"classification", "forensic_evidence"},
                 {"structured_rows", 0},
                 {"evidence_fragments", reassembly_stats.total_pages_used},
@@ -1889,6 +1893,41 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                   << " structured rows, " << result.evidence_fragments.size()
                   << " evidence fragments\n";
 
+        // P0-1: Run secondary analysis via DamagedPageHandler + RowSalvageScanner
+        // to diagnose page repairability and surface fine-grained damage distribution.
+        // Existing SalvageEngine path and result contract remain authoritative.
+        nlohmann::json repair_pipeline_report = nlohmann::json::object();
+        try {
+            dbrecovery::salvage::DamagedPageHandler page_handler;
+            page_handler.set_page_size(page_size);
+            page_handler.set_min_confidence(damage_threshold);
+            page_handler.set_enable_repair(true);
+
+            std::vector<std::pair<std::vector<uint8_t>, uint32_t>> indexed_pages;
+            indexed_pages.reserve(page_buffers.size());
+            for (uint32_t idx = 0; idx < page_buffers.size(); ++idx) {
+                indexed_pages.push_back({page_buffers[idx], idx});
+            }
+
+            page_handler.handle_pages(indexed_pages);
+            const auto& handler_stats = page_handler.get_stats();
+
+            repair_pipeline_report["pages_handled"] = handler_stats.pages_handled;
+            repair_pipeline_report["pages_repaired"] = handler_stats.pages_repaired;
+            repair_pipeline_report["pages_salvaged"] = handler_stats.pages_salvaged;
+            repair_pipeline_report["structured_exportable_records"] = handler_stats.structured_exportable_records;
+            repair_pipeline_report["evidence_only_records"] = handler_stats.evidence_only_records;
+            repair_pipeline_report["repair_attempts"] = handler_stats.repair_attempts;
+            repair_pipeline_report["repair_successes"] = handler_stats.repair_successes;
+
+            std::cout << "[INFO] DamagedPageHandler scanned " << handler_stats.pages_handled
+                      << " pages (repaired=" << handler_stats.pages_repaired
+                      << ", salvaged=" << handler_stats.pages_salvaged << ")\n";
+        } catch (const std::exception& ex) {
+            std::cout << "[WARN] DamagedPageHandler pass encountered error: " << ex.what() << "\n";
+            repair_pipeline_report["error"] = ex.what();
+        }
+
         // Write damage report if --damage-log specified
         std::string damage_log = damage_log_path.empty() ? output_dir + "/damage_report.json" : damage_log_path;
         if (fs::exists(damage_log)) {
@@ -1939,6 +1978,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 {"importable", false},
                 {"reason", "salvage output is forensic evidence only; structured export requires explicit schema and integrity validation"},
                 {"source_inputs", {{"ibd", ibd_path}}},
+                {"repair_pipeline", repair_pipeline_report},
                 {"artifacts", salvage_artifacts},
                 {"evidence_empty", salvage_evidence_count == 0}})) {
             return 1;
@@ -2233,6 +2273,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         std::cout << "[INFO] Detecting DDL change chain in: " << ibd_path << "\n";
+        std::cout << "[WARN] DDL change detection is experimental (historical DDL schema tracking excluded from support matrix)\n";
 
         dbrecovery::innodb::DDLChangeChainDetector detector(page_size);
         auto analysis = detector.detect(ibd_path);
@@ -2736,6 +2777,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // tde_decryptor.hpp and encrypted_table_recovery.cpp:188-193.
     if (!keyring_file.empty()) {
         std::cout << "[INFO] Loading keyring: " << keyring_file << "\n";
+        std::cout << "[WARN] Offline keyring parsing is experimental (native MySQL binary keyring excluded from support matrix)\n";
 
         dbrecovery::innodb::OfflineKeyringParser keyring_parser;
 
@@ -3944,6 +3986,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 输出零结构化行，绝不假装成功。
     auto run_compressed_recovery = [&](const std::string& ibd,
                                        const dbrecovery::innodb::FSPCompressionMetadata& compression) -> bool {
+        std::cout << "[WARN] Compressed table recovery is experimental and excluded from official version support matrix\n";
         dbrecovery::innodb::CompressedTableRecovery comp_rec(compression.logical_page_size);
         comp_rec.set_compressed_page_size(compression.physical_page_size);
         comp_rec.set_file_path(ibd);
@@ -3971,6 +4014,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // 不支持加密 keyring 密码 — 需密码的 keyring 由上层 CLI 处理（见 ~line 1608）。
     auto run_encrypted_recovery = [&](const std::string& ibd, uint32_t page_sz) -> bool {
         std::cout << "[INFO] Encrypted tablespace detected — routing to EncryptedTableRecovery\n";
+        std::cout << "[WARN] Encrypted table recovery is experimental (native TDE excluded from official version support matrix)\n";
         dbrecovery::innodb::EncryptedTableRecovery enc_rec(page_sz);
         enc_rec.set_file_path(ibd);
         enc_rec.set_schema(resolve_table_schema(ibd, table_id, page_sz, sdi_version));
@@ -5453,7 +5497,8 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
                 }
 
                 col_info.is_nullable = col.value("is_nullable", col.value("nullable", true));
-                col_info.column_length = col.value("length", col.value("column_length", 0));
+                col_info.column_length = col.value("length",
+                    col.value("column_length", col.value("char_length", 0)));
 
                 // Handle is_unsigned from separate field if present
                 if (col.contains("is_unsigned")) {
@@ -5465,12 +5510,34 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
                 // Parse DECIMAL precision/scale
                 if (col.contains("precision")) {
                     col_info.numeric_precision = col["precision"].get<int>();
+                } else if (col.contains("numeric_precision")) {
+                    col_info.numeric_precision = col["numeric_precision"].get<int>();
                 }
                 if (col.contains("scale")) {
                     col_info.numeric_scale = col["scale"].get<int>();
+                } else if (col.contains("numeric_scale")) {
+                    col_info.numeric_scale = col["numeric_scale"].get<int>();
+                }
+                if (col.contains("datetime_precision")) {
+                    col_info.datetime_precision = col["datetime_precision"].get<uint32_t>();
                 }
 
-                // Parse ENUM/SET values
+                // Charset/collation drive multi-byte length handling: CHAR on a
+                // multi-byte charset (utf8/utf8mb4) is stored variable-length,
+                // while BINARY (collation 63) stays fixed-length. Dropping these
+                // makes CHAR look fixed-length and misaligns every later field.
+                if (col.contains("charset_id")) {
+                    col_info.charset_id = col["charset_id"].get<uint32_t>();
+                } else if (col.contains("collation_id")) {
+                    col_info.charset_id = col["collation_id"].get<uint32_t>();
+                }
+                if (col.contains("collation_id")) {
+                    col_info.collation_id = col["collation_id"].get<uint32_t>();
+                } else if (col.contains("charset_id")) {
+                    col_info.collation_id = col["charset_id"].get<uint32_t>();
+                }
+
+                // Parse ENUM/SET values (plain strings or SDI base64 elements)
                 if (col.contains("values") && col["values"].is_array()) {
                     std::vector<std::string>* target_values =
                         (col_info.mysql_type_id == 23) ? &col_info.set_values : &col_info.enum_values;
@@ -5480,9 +5547,35 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
                         }
                     }
                 }
+                if (col.contains("elements") && col["elements"].is_array()) {
+                    static const std::string b64_chars =
+                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                    std::vector<std::string>* target_values =
+                        (col_info.mysql_type_id == 23) ? &col_info.set_values : &col_info.enum_values;
+                    std::vector<int> T(256, -1);
+                    for (int i = 0; i < 64; i++) T[(unsigned char)b64_chars[i]] = i;
+                    for (const auto& elem : col["elements"]) {
+                        if (elem.contains("name")) {
+                            std::string encoded = elem["name"].get<std::string>();
+                            std::string decoded;
+                            int val = 0, valb = -8;
+                            for (unsigned char c : encoded) {
+                                if (T[c] == -1) break;
+                                val = (val << 6) + T[c];
+                                valb += 6;
+                                if (valb >= 0) {
+                                    decoded.push_back(char((val >> valb) & 0xFF));
+                                    valb -= 8;
+                                }
+                            }
+                            target_values->push_back(decoded);
+                        }
+                    }
+                }
 
                 col_info.ordinal = ordinal;
-                col_info.physical_pos = ordinal;
+                col_info.physical_pos = col.value("physical_pos",
+                    col.value("ordinal_position", ordinal));
 
                 // Skip system columns
                 if (col_info.name == "DB_TRX_ID" ||
@@ -5505,6 +5598,20 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
         if (schema.columns.empty()) {
             std::cerr << "[WARN] Schema file contains no columns\n";
             return std::nullopt;
+        }
+
+        // Normalize physical_pos to 1-based. Schema files may store it 0-based
+        // (id -> 0) or 1-based; downstream consumers treat 0 as "absent" and
+        // fall back to the ordinal, which collides columns. Shifting every
+        // value when the minimum is 0 preserves the relative storage order.
+        uint32_t min_phys = UINT32_MAX;
+        for (const auto& [ordinal, col] : schema.columns) {
+            min_phys = std::min(min_phys, col.physical_pos);
+        }
+        if (min_phys == 0) {
+            for (auto& [ordinal, col] : schema.columns) {
+                col.physical_pos += 1;
+            }
         }
 
         std::cout << "[INFO] Loaded schema from file: " << schema.table_name
