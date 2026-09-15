@@ -14,6 +14,13 @@
 #include <map>
 #include <nlohmann/json.hpp>
 
+#ifdef __linux__
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
+
 #include "dbrecovery/innodb.h"
 #include "dbrecovery/innodb/recovery_engine.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
@@ -5653,16 +5660,16 @@ inline void RecoveryCLI::generate_recovery_report(
         struct stat st;
         if (stat(input.source_path.c_str(), &st) == 0) {
             if (S_ISBLK(st.st_mode)) {
-                // Block device - use blockdev to get size
-                std::string cmd = "blockdev --getsize64 " + input.source_path + " 2>/dev/null";
-                FILE* pipe = popen(cmd.c_str(), "r");
-                if (pipe) {
-                    char buf[64];
-                    if (fgets(buf, sizeof(buf), pipe)) {
-                        input.source_size_bytes = std::strtoull(buf, nullptr, 10);
+#ifdef __linux__
+                int fd = ::open(input.source_path.c_str(), O_RDONLY | O_CLOEXEC);
+                if (fd >= 0) {
+                    uint64_t device_size = 0;
+                    if (::ioctl(fd, BLKGETSIZE64, &device_size) == 0) {
+                        input.source_size_bytes = device_size;
                     }
-                    pclose(pipe);
+                    ::close(fd);
                 }
+#endif
             } else {
                 input.source_size_bytes = st.st_size;
             }

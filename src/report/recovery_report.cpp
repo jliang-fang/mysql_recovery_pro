@@ -9,11 +9,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <nlohmann/json.hpp>
 #include <sstream>
+#include <unordered_set>
 
 namespace dbrecovery {
 namespace report {
@@ -446,27 +448,32 @@ std::string RecoveryReport::to_html() const {
 std::vector<std::string> RecoveryReport::write_files(
     const std::string& base_path, const std::string& formats) const {
     std::vector<std::string> written;
-    std::string fmt_lower = formats;
-    for (auto& c : fmt_lower) c = std::tolower(c);
+    std::string format;
+    std::unordered_set<std::string> requested;
+    std::istringstream tokens(formats);
+    while (std::getline(tokens, format, ',')) {
+        auto first = format.find_first_not_of(" \t\n\r");
+        auto last = format.find_last_not_of(" \t\n\r");
+        if (first == std::string::npos) continue;
+        format = format.substr(first, last - first + 1);
+        for (auto& c : format) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (format == "json" || format == "text" || format == "html") {
+            requested.insert(format);
+        }
+    }
 
-    if (fmt_lower.find("json") != std::string::npos) {
-        std::string path = base_path + ".json";
-        std::ofstream f(path);
-        f << to_json();
-        written.push_back(path);
-    }
-    if (fmt_lower.find("text") != std::string::npos) {
-        std::string path = base_path + ".txt";
-        std::ofstream f(path);
-        f << to_text();
-        written.push_back(path);
-    }
-    if (fmt_lower.find("html") != std::string::npos) {
-        std::string path = base_path + ".html";
-        std::ofstream f(path);
-        f << to_html();
-        written.push_back(path);
-    }
+    const auto write = [&written](const std::string& path, const std::string& content) {
+        std::ofstream file(path, std::ios::out | std::ios::trunc);
+        if (!file) return;
+        file << content;
+        if (file) written.push_back(path);
+    };
+
+    if (requested.count("json")) write(base_path + ".json", to_json());
+    if (requested.count("text")) write(base_path + ".txt", to_text());
+    if (requested.count("html")) write(base_path + ".html", to_html());
     return written;
 }
 

@@ -1,25 +1,25 @@
 /**
  * @file real_fixture_multiversion_test.cpp
- * @brief Phase 4 (P1-1): full recovery pipeline per MySQL version (5.6–9.0)
- *
- * For each of the 5 real fixture versions, this test:
- *   1. Verifies all_types.ibd SHA-256 against the sidecar digest
- *   2. Detects the MySQL version family from the .ibd pages
- *   3. Builds a version-aware schema from ground-truth.json columns
- *   4. Runs the InnoDBIndexParser recovery pipeline on all_types.ibd
- *   5. Asserts recovered row count matches ground-truth row_count
- *
- * Gating: REAL_MYSQL label; missing fixture -> GTEST_SKIP (never PASS/FAIL).
+ * This test validates fixture integrity, version-family page structure, ground-truth
+ * metadata, partition naming, and undo-fixture presence. It does not run the full
+ * row-recovery pipeline; the REAL_MYSQL label keeps fixture-dependent checks separate.
  */
 
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <openssl/evp.h>
+
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <vector>
+
+#include <sys/stat.h>
 
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
@@ -48,12 +48,56 @@ static std::vector<uint8_t> load_file(const std::string& path) {
     return data;
 }
 
+static std::string sha256_file(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return {};
+
+    EVP_MD_CTX* context = EVP_MD_CTX_new();
+    if (!context || EVP_DigestInit_ex(context, EVP_sha256(), nullptr) != 1) {
+        EVP_MD_CTX_free(context);
+        return {};
+    }
+
+    std::array<unsigned char, 1024 * 1024> buffer{};
+    while (file) {
+        file.read(reinterpret_cast<char*>(buffer.data()),
+                  static_cast<std::streamsize>(buffer.size()));
+        const auto count = file.gcount();
+        if (count > 0 &&
+            EVP_DigestUpdate(context, buffer.data(), static_cast<size_t>(count)) != 1) {
+            EVP_MD_CTX_free(context);
+            return {};
+        }
+    }
+    if (!file.eof()) {
+        EVP_MD_CTX_free(context);
+        return {};
+    }
+
+    unsigned char digest[EVP_MAX_MD_SIZE]{};
+    unsigned int digest_size = 0;
+    const bool finalized = EVP_DigestFinal_ex(context, digest, &digest_size) == 1;
+    EVP_MD_CTX_free(context);
+    if (!finalized) return {};
+
+    std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    for (unsigned int i = 0; i < digest_size; ++i) {
+        hex << std::setw(2) << static_cast<unsigned int>(digest[i]);
+    }
+    return hex.str();
+}
+
 static nlohmann::json load_json(const std::string& path) {
-    if (!file_exists(path)) return nlohmann::json();
-    std::ifstream f(path);
-    nlohmann::json j;
-    f >> j;
-    return j;
+    std::ifstream file(path);
+    if (!file) return nullptr;
+    try {
+        nlohmann::json value;
+        file >> value;
+        return value;
+    } catch (const nlohmann::json::exception&) {
+        return nullptr;
+    }
 }
 
 class RealFixtureMultiVersionTest : public ::testing::Test {
@@ -80,14 +124,8 @@ TEST_F(RealFixtureMultiVersionTest, AllTypesIbdSha256Matches) {
         // Digest file: "<hex>  <filename>"
         expect_hex = expect_hex.substr(0, expect_hex.find(' '));
 
-        auto cmd = "sha256sum " + ibd_path;
-        FILE* pipe = popen(cmd.c_str(), "r");
-        ASSERT_NE(pipe, nullptr);
-        char buf[129] = {};
-        if (fgets(buf, sizeof(buf), pipe) == nullptr) buf[0] = '\0';
-        pclose(pipe);
-        std::string actual_hex(buf);
-        actual_hex = actual_hex.substr(0, actual_hex.find(' '));
+        auto actual_hex = sha256_file(ibd_path);
+        ASSERT_FALSE(actual_hex.empty()) << "Unable to hash fixture: " << ibd_path;
 
         EXPECT_EQ(actual_hex, expect_hex) << ver << " sha256 mismatch";
     }

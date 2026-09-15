@@ -150,19 +150,60 @@ TEST_F(RecoveryReportTest, ToHtmlGeneratesHtmlDocument) {
     EXPECT_NE(html.find("</html>"), std::string::npos);
 }
 
-TEST_F(RecoveryReportTest, WriteFilesWritesAllFormats) {
+TEST_F(RecoveryReportTest, WriteFilesAcceptsOnlyExactDeduplicatedFormats) {
     RecoveryReport report = make_sample_report();
-    std::string base_path = (test_dir_ / "test_recovery_report").string();
+    std::string base_path = (test_dir_ / "exact_formats").string();
 
-    auto files = report.write_files(base_path, "json,text,html");
-    EXPECT_EQ(files.size(), 3);
+    auto files = report.write_files(base_path, " JSON,html,json,unknown,textual,text ");
+    ASSERT_EQ(files.size(), 3);
+    EXPECT_TRUE(std::filesystem::exists(base_path + ".json"));
+    EXPECT_TRUE(std::filesystem::exists(base_path + ".html"));
+    EXPECT_TRUE(std::filesystem::exists(base_path + ".txt"));
+}
 
-    for (const auto& f : files) {
-        EXPECT_TRUE(std::filesystem::exists(f)) << "Missing expected report file: " << f;
-        std::ifstream ifs(f);
-        std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-        EXPECT_FALSE(content.empty());
+TEST_F(RecoveryReportTest, WriteFilesReturnsEmptyForUnwritableBasePath) {
+    RecoveryReport report = make_sample_report();
+    const auto blocker = test_dir_ / "regular_file";
+    {
+        std::ofstream file(blocker);
+        ASSERT_TRUE(file);
+        file << "not a directory";
     }
+
+    auto files = report.write_files((blocker / "report").string(), "json,text,html");
+    EXPECT_TRUE(files.empty());
+}
+
+TEST_F(RecoveryReportTest, WriteFilesOverwritesExistingReport) {
+    RecoveryReport report = make_sample_report();
+    const auto base_path = (test_dir_ / "overwrite").string();
+    ASSERT_EQ(report.write_files(base_path, "text").size(), 1);
+
+    const auto report_path = base_path + ".txt";
+    std::ifstream before(report_path);
+    const std::string initial((std::istreambuf_iterator<char>(before)),
+                              std::istreambuf_iterator<char>());
+
+    report.overall_status = "PARTIAL";
+    ASSERT_EQ(report.write_files(base_path, "text").size(), 1);
+
+    std::ifstream after(report_path);
+    const std::string updated((std::istreambuf_iterator<char>(after)),
+                              std::istreambuf_iterator<char>());
+    EXPECT_NE(updated, initial);
+    EXPECT_NE(updated.find("PARTIAL"), std::string::npos);
+}
+
+TEST_F(RecoveryReportTest, HtmlEscapesUserControlledReportValues) {
+    RecoveryReport report = make_sample_report();
+    report.report_id = "<report>&\"";
+    report.input.source_path = "<input>&\"";
+    report.reconstructed_ddl = {"CREATE TABLE <unsafe> & \"quoted\";"};
+
+    const auto html = report.to_html();
+    EXPECT_NE(html.find("&lt;report&gt;&amp;&quot;"), std::string::npos);
+    EXPECT_NE(html.find("&lt;input&gt;&amp;&quot;"), std::string::npos);
+    EXPECT_NE(html.find("CREATE TABLE &lt;unsafe&gt; &amp; &quot;quoted&quot;;"), std::string::npos);
 }
 
 // ==================== CapabilityReport & UnifiedValidator Tests ====================
