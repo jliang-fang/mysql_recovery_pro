@@ -38,6 +38,7 @@
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
 #include "dbrecovery/recovery/truncate_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/engine/drop_table_recovery.hpp"
 #include "dbrecovery/export/data_exporter.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
@@ -4102,12 +4103,18 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         uint32_t ordinal = 1;  // ordinal_position starts from 1
 
         for (auto& [pos, col] : frm_schema->columns) {
-            dbrecovery::innodb::IndexColumnDef icol;
-            icol.name = col.name;
-            icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
-            icol.col_length = col.column_length;
-            icol.is_nullable = col.is_nullable;
-            icol.is_unsigned = !col.is_signed;
+            std::vector<std::string> diagnostics;
+            auto converted = catalog::build_index_column(
+                col, ordinal, ordinal,
+                catalog::TypeIdDomain::kInnodbParser, diagnostics);
+            if (!converted.has_value()) {
+                for (const auto& d : diagnostics) {
+                    std::cout << "[WARN] FRM schema column rejected: " << d << "\n";
+                }
+                ordinal++;
+                continue;
+            }
+            dbrecovery::innodb::IndexColumnDef icol = *converted;
 
             // Determine mb_maxlen from charset_id (extracted from FRM)
             // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
@@ -4120,32 +4127,26 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             // ✅ 关键：设置 ordinal_position 和 physical_pos
             // 对于 MySQL 5.6/5.7 FRM 文件，physical_pos 通常等于 ordinal_position
-            icol.ordinal_position = ordinal;
-            icol.physical_pos = ordinal;  // For FRM, physical_pos = ordinal_position
             ordinal++;
 
             // Set precision/scale for DECIMAL types (InnoDB type 21)
-            if (col.mysql_type_id == 21 && col.numeric_precision > 0) {
+            if (icol.col_type == 21 && col.numeric_precision > 0) {
                 icol.precision = col.numeric_precision;
                 icol.scale = col.numeric_scale;
             }
 
-            // Transfer ENUM/SET values
-            icol.enum_values = col.enum_values;
-            icol.set_values = col.set_values;
-
             // Set datetime_precision from column length for temporal types
             // InnoDB types: 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2
             // FRM field_length includes fractional seconds display: base + precision + 1
-            if (col.mysql_type_id == 18 || col.mysql_type_id == 19 || col.mysql_type_id == 20) {
-                uint32_t base_len = (col.mysql_type_id == 20) ? 10 : 19;
+            if (icol.col_type == 18 || icol.col_type == 19 || icol.col_type == 20) {
+                uint32_t base_len = (icol.col_type == 20) ? 10 : 19;
                 if (col.column_length > base_len) {
                     icol.datetime_precision = col.column_length - base_len - 1;
                 }
             }
 
             // Determine if variable length based on InnoDB type
-            switch (col.mysql_type_id) {
+            switch (icol.col_type) {
                 case 16:  // VARCHAR
                     icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                     break;
@@ -4962,18 +4963,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 const auto& schema = sdi_schema_opt.value();
                 std::vector<dbrecovery::innodb::IndexColumnDef> columns;
                 for (const auto& [pos, col] : schema.columns) {
-                    dbrecovery::innodb::IndexColumnDef icol;
-                    icol.name = col.name;
-                    icol.col_type = col.mysql_type_id;
-                    icol.col_length = col.column_length;
-                    icol.is_nullable = col.is_nullable;
-                    icol.is_unsigned = !col.is_signed;  // Convert is_signed to is_unsigned
-                    icol.precision = col.numeric_precision;
-                    icol.scale = col.numeric_scale;
-                    icol.ordinal_position = pos;
-                    icol.enum_values = col.enum_values;
-                    icol.set_values = col.set_values;
-                    columns.push_back(icol);
+                    std::vector<std::string> diagnostics;
+                    auto converted = catalog::build_index_column(
+                        col, pos, 0,
+                        catalog::TypeIdDomain::kInnodbParser, diagnostics);
+                    if (!converted.has_value()) {
+                        for (const auto& d : diagnostics) {
+                            std::cout << "[WARN] SDI schema column rejected: " << d << "\n";
+                        }
+                        continue;
+                    }
+                    columns.push_back(*converted);
                 }
                 if (!columns.empty()) {
                     // Debug: print enum/set values being passed

@@ -4,6 +4,7 @@
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
@@ -1339,30 +1340,22 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
         [](const auto& a, const auto& b) { return a.first < b.first; });
 
     for (const auto& [phys_pos, col] : sorted_cols) {
-        innodb::IndexColumnDef col_def;
-        col_def.name = col.name;
-        col_def.col_type = col.mysql_type_id;
-        col_def.col_length = col.column_length;
-        col_def.is_nullable = col.is_nullable;
-        col_def.is_unsigned = !col.is_signed;  // is_signed = true means signed, so is_unsigned = !is_signed
-        col_def.precision = col.numeric_precision;
-        col_def.scale = col.numeric_scale;
-        col_def.datetime_precision = col.datetime_precision;
-        col_def.char_set_id = col.charset_id;
-        col_def.ordinal_position = col.ordinal;
-        col_def.physical_pos = phys_pos;  // CRITICAL: 设置physical_pos
-        col_def.enum_values = col.enum_values;
-        col_def.set_values = col.set_values;
-
-        // 计算mb_maxlen from charset
-        // utf8mb4 = 4, utf8 = 3, latin1 = 1
-        if (col.charset_id == 45 || col.charset_id == 46) {  // utf8mb4
-            col_def.mb_maxlen = 4;
-        } else if (col.charset_id == 33 || col.charset_id == 83) {  // utf8
-            col_def.mb_maxlen = 3;
+        // Schema type IDs are in the InnoDB parser domain; route through the
+        // fail-closed conversion boundary instead of a raw narrowing cast.
+        std::vector<std::string> type_diag;
+        auto converted = catalog::build_index_column(
+            col,
+            /*ordinal_position=*/col.ordinal,
+            /*physical_pos_override=*/phys_pos,
+            catalog::TypeIdDomain::kInnodbParser,
+            type_diag);
+        if (!converted.has_value()) {
+            for (const auto& d : type_diag) {
+                std::cerr << "[WARN] raw-disk schema column rejected: " << d << "\n";
+            }
+            continue;
         }
-
-        columns.push_back(col_def);
+        columns.push_back(std::move(*converted));
     }
 
     // 使用InnoDBIndexParser进行schema-aware解析

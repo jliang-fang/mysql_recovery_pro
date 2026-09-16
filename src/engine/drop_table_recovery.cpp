@@ -11,6 +11,7 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include <fstream>
 #include <sstream>
 #include <algorithm>
@@ -1611,28 +1612,24 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
     }
 
     for (const auto& [idx, col] : schema.columns) {
-        innodb::IndexColumnDef def;
-        def.name = col.name;
-        def.col_type = col.mysql_type_id;
-        def.is_nullable = col.is_nullable;
-        def.is_unsigned = !col.is_signed;
-        def.col_length = col.column_length;
-        def.precision = col.numeric_precision;
-        def.scale = col.numeric_scale;
-        def.datetime_precision = col.datetime_precision;
-        def.enum_values = col.enum_values;
-        def.set_values = col.set_values;
-        def.char_set_id = col.charset_id;
+        std::vector<std::string> diagnostics;
+        auto converted = catalog::build_index_column(
+            col, col.ordinal, col.physical_pos,
+            catalog::TypeIdDomain::kInnodbParser, diagnostics);
+        if (!converted.has_value()) {
+            for (const auto& d : diagnostics) {
+                std::cerr << "[WARN] DROP recovery schema column rejected: " << d << std::endl;
+            }
+            continue;
+        }
+        innodb::IndexColumnDef def = *converted;
+
         def.mb_maxlen = 4;  // utf8mb4 default
         if (col.charset_id == 63) {
             def.mb_maxlen = 1;  // binary charset
         } else if (col.charset_id == 8 || col.charset_id == 83) {
             def.mb_maxlen = 1;  // latin1, utf8
         }
-
-        // CRITICAL: Set physical_pos and ordinal_position for correct InnoDB storage order
-        def.ordinal_position = col.ordinal;
-        def.physical_pos = col.physical_pos;
 
         // Set is_big for variable-length columns
         if (def.is_variable_length()) {

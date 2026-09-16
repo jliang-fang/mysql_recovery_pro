@@ -104,6 +104,11 @@ set(REPORT_SOURCES
     report/recovery_report.cpp
 )
 
+# Add catalog module sources (Phase 2: fail-closed schema type conversion)
+set(CATALOG_SOURCES
+    catalog/schema_type_conversion.cpp
+)
+
 # Add page module sources
 set(PAGE_SOURCES
     page/page_v55.cpp
@@ -169,6 +174,7 @@ target_sources(dbrecovery_innodb PRIVATE
     ${ENTERPRISE_SOURCES}
     ${REPORT_SOURCES}
     ${VALIDATE_SOURCES}
+    ${CATALOG_SOURCES}
     tools/heuristic_inference.cpp
 )
 

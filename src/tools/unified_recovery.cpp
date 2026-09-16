@@ -19,6 +19,7 @@
 #include "dbrecovery/innodb/compressed_table_recovery.hpp"
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/salvage/secondary_index_rescuer.hpp"
 #include "dbrecovery/salvage/evidence_serializer.hpp"
 #include "dbrecovery/innodb.h"
@@ -274,35 +275,31 @@ uint32_t charset_max_length(uint32_t charset_id) {
 
 bool convert_schema(const catalog::TableSchema& schema,
                     std::vector<innodb::IndexColumnDef>& columns,
-                    uint32_t& primary_key_columns) {
+                    uint32_t& primary_key_columns,
+                    std::vector<std::string>* diagnostics = nullptr) {
     columns.clear();
     primary_key_columns = 0;
     for (const auto& entry : schema.columns) {
         const auto& source = entry.second;
         if (source.name == "DB_TRX_ID" || source.name == "DB_ROLL_PTR" ||
             source.name == "DB_ROW_ID") continue;
-        innodb::IndexColumnDef column;
-        column.name = source.name;
-        column.col_type = static_cast<uint8_t>(source.mysql_type_id);
-        column.col_length = source.column_length;
-        column.is_nullable = source.is_nullable;
-        column.is_unsigned = !source.is_signed;
-        column.char_set_id = source.charset_id;
-        column.is_binary = source.charset_id == 63 || source.collation_id == 63;
-        column.precision = source.numeric_precision > 0
-            ? static_cast<uint16_t>(source.numeric_precision) : 0;
-        column.scale = source.numeric_scale > 0
-            ? static_cast<uint16_t>(source.numeric_scale) : 0;
-        column.datetime_precision = source.datetime_precision >= 0
-            ? static_cast<uint8_t>(source.datetime_precision) : 0;
-        column.mb_minlen = 1;
-        column.mb_maxlen = charset_max_length(source.charset_id);
-        column.is_big = column.col_length * column.mb_maxlen > 255;
-        column.enum_values = source.enum_values;
-        column.set_values = source.set_values;
-        column.ordinal_position = source.ordinal ? source.ordinal : entry.first;
-        column.physical_pos = source.physical_pos;
-        columns.push_back(std::move(column));
+        // Schema files (SDI-derived JSON / user schema file) store InnoDB
+        // parser-domain type IDs directly; validate them through the
+        // fail-closed boundary rather than truncating with static_cast.
+        std::vector<std::string> local_diag;
+        auto converted = catalog::build_index_column(
+            source, source.ordinal ? source.ordinal : entry.first,
+            /*physical_pos_override=*/0,
+            catalog::TypeIdDomain::kInnodbParser,
+            local_diag);
+        if (!converted.has_value()) {
+            if (diagnostics) {
+                diagnostics->insert(diagnostics->end(), local_diag.begin(),
+                                    local_diag.end());
+            }
+            continue;
+        }
+        columns.push_back(std::move(*converted));
     }
     if (columns.empty()) return false;
     std::sort(columns.begin(), columns.end(), [](const auto& left, const auto& right) {
@@ -544,11 +541,18 @@ UnifiedRecoveryResult run_unified_recovery(
         if (!have_schema && !schema_file_path.empty()) {
             catalog::TableSchema schema;
             uint32_t n_pk = 0;
+            std::vector<std::string> schema_diag;
             if (load_schema_file(schema_file_path, schema) &&
-                convert_schema(schema, index_columns, n_pk)) {
+                convert_schema(schema, index_columns, n_pk, &schema_diag)) {
                 parser.set_columns(index_columns, false, n_pk);
                 schema_source = "USER";
                 have_schema = true;
+            }
+            if (!have_schema && !schema_diag.empty()) {
+                result.schema_diagnostics.insert(result.schema_diagnostics.end(),
+                                                 schema_diag.begin(), schema_diag.end());
+                result.schema_diagnostics.push_back(
+                    "schema-file column types failed conversion; export blocked");
             }
         }
         // FRM
@@ -558,27 +562,45 @@ UnifiedRecoveryResult run_unified_recovery(
                 std::set<std::string> pk_names;
                 for (auto &idx : frm->indexes) if (idx.is_primary) for (auto &c: idx.columns) pk_names.insert(c);
                 uint32_t n_pk = 0;
+                bool frm_type_rejected = false;
                 for (auto &[pos, col] : frm->columns) {
-                    innodb::IndexColumnDef icol;
-                    icol.name = col.name;
-                    icol.col_type = static_cast<uint8_t>(col.mysql_type_id);
-                    icol.col_length = col.column_length;
-                    icol.is_nullable = col.is_nullable;
-                    icol.is_unsigned = !col.is_signed;
-                    uint8_t cs = static_cast<uint8_t>(col.charset_id);
-                    switch (cs) { case 33: case 83: case 224: icol.mb_maxlen=3; break; case 45: case 94: icol.mb_maxlen=4; break; default: icol.mb_maxlen=1; break; }
+                    // FRMParser already normalizes MySQL server type IDs into
+                    // the InnoDB parser domain; verify through the fail-closed
+                    // boundary rather than truncating with static_cast.
+                    std::vector<std::string> type_diag;
+                    auto converted = catalog::build_index_column(
+                        col,
+                        /*ordinal_position=*/static_cast<uint32_t>(index_columns.size() + 1),
+                        /*physical_pos_override=*/static_cast<uint32_t>(index_columns.size() + 1),
+                        catalog::TypeIdDomain::kInnodbParser,
+                        type_diag);
+                    if (!converted.has_value()) {
+                        frm_type_rejected = true;
+                        for (const auto& d : type_diag) {
+                            result.schema_diagnostics.push_back("FRM " + d);
+                        }
+                        continue;
+                    }
+                    innodb::IndexColumnDef icol = std::move(*converted);
                     icol.is_binary = (col.charset_id==63||col.collation_id==63) && icol.col_type!=31;
-                    if (col.mysql_type_id==21 && col.numeric_precision>0) { icol.precision=col.numeric_precision; icol.scale=col.numeric_scale; }
-                    icol.enum_values=col.enum_values; icol.set_values=col.set_values;
-                    icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
                     if (pk_names.count(col.name)) n_pk++;
-                    icol.physical_pos = static_cast<uint32_t>(index_columns.size()+1);
-                    index_columns.push_back(icol);
+                    index_columns.push_back(std::move(icol));
                 }
-                if (n_pk==0 && !index_columns.empty()) n_pk=1;
-                parser.set_columns(index_columns,false,n_pk);
-                schema_source = "FRM";
-                have_schema = true;
+                if (frm_type_rejected && index_columns.empty()) {
+                    result.trust_level = "EVIDENCE_ONLY";
+                    result.schema_source = "FRM";
+                    result.schema_diagnostics.push_back(
+                        "FRM column types failed conversion; export blocked");
+                }
+                if (index_columns.empty()) {
+                    // No usable columns — do not promote a schema whose every
+                    // column type was rejected by the conversion boundary.
+                } else {
+                    if (n_pk==0) n_pk=1;
+                    parser.set_columns(index_columns,false,n_pk);
+                    schema_source = "FRM";
+                    have_schema = true;
+                }
             }
         }
         // SDI schema extraction is handled by the caller (FRM/schema_str).

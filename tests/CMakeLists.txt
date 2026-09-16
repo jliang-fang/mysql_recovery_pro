@@ -457,3 +457,13 @@ add_dependencies(test_recovery_cli_report mysql_recovery_pro)
 gtest_discover_tests(test_recovery_cli_report PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
 
+
+# Schema type conversion boundary tests
+add_executable(test_schema_type_conversion catalog/schema_type_conversion_test.cpp)
+target_link_libraries(test_schema_type_conversion PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_schema_type_conversion)
+
+# Bounded binary JSON decoder tests
+add_executable(test_index_page_parser_json innodb/index_page_parser_json_test.cpp)
+target_link_libraries(test_index_page_parser_json PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_index_page_parser_json)

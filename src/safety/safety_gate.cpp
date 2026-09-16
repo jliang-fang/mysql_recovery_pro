@@ -12,7 +12,8 @@ bool SafetyGate::permits_read_only_raw_access(const SafetyReport& report) {
     return report.device_identity_verified &&
            report.read_only_confirmed &&
            report.exclusive_access &&
-           report.not_mounted_or_ok;
+           report.not_mounted_or_ok &&
+           (!report.requires_loopback_verification || report.loopback_verified);
 }
 
 void SafetyGate::set_log_callback(LogCallback cb) {
@@ -104,13 +105,24 @@ SafetyReport SafetyGate::verify_device(const std::string& device_path) {
     // Step 4: Loopback Safety Check
     // ---------------------------------------------------------------
     log("[Step 4/4] Checking loopback status...");
-    if (identity.device_type == "loop" || loopback_.is_loopback_device(device_path)) {
-        report.loopback_verified = true;
+    if (identity.device_type == "loop") {
+        report.requires_loopback_verification = true;
         report.backing_file = loopback_.find_backing_file(device_path);
-        if (!report.backing_file.empty()) {
+        // loopback_verified requires a discovered backing file that already
+        // passed the identity policy inside DeviceIdentity (model/serial set
+        // only for verified file-backed loops under a trusted root).
+        if (!report.backing_file.empty() && report.device_identity_verified) {
+            report.loopback_verified = true;
             log("  Loopback device backed by: " + report.backing_file);
+        } else if (!report.backing_file.empty()) {
+            std::string warning =
+                "Loopback backing file failed identity policy: " + report.backing_file;
+            log("  WARNING: " + warning);
+            report.warnings.push_back(warning);
         } else {
-            log("  Loopback device (backing file unknown)");
+            std::string warning = "Loopback device has no discoverable backing file";
+            log("  WARNING: " + warning);
+            report.warnings.push_back(warning);
         }
     } else {
         log("  Not a loopback device - OK");
@@ -124,7 +136,11 @@ SafetyReport SafetyGate::verify_device(const std::string& device_path) {
     log("  Read-only confirmed:      " + std::string(report.read_only_confirmed ? "YES" : "NO"));
     log("  Exclusive access:         " + std::string(report.exclusive_access ? "YES" : "NO"));
     log("  Not mounted:              " + std::string(report.not_mounted_or_ok ? "YES" : "NO"));
-    log("  Loopback verified:        " + std::string(report.loopback_verified ? "YES" : "NO"));
+    if (report.requires_loopback_verification) {
+        log("  Loopback verified:        " + std::string(report.loopback_verified ? "YES" : "NO"));
+    } else {
+        log("  Loopback verified:        N/A (not a loop device)");
+    }
     log("  Confidence:               " + std::to_string(report.confidence));
 
     if (report.warnings.empty()) {

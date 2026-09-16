@@ -63,6 +63,8 @@ For disk carving, acquire a read-only forensic image when possible. A raw block-
 
 The filesystem selector accepts `ext4` or `xfs`. Do not operate on mounted, writable, or otherwise unapproved devices.
 
+The safety gate is fail-closed. Before any raw block device is opened, every mandatory fact must be proven: device identity verified, kernel-level read-only confirmed, exclusive access acquired, and the device not mounted. Loop devices additionally require verified backing-file identity under a trusted root; a loop device without a discoverable, policy-accepted backing file is refused. Regular files and directories do not pass through the block-device gate.
+
 ### Manual schema
 
 When source metadata is unavailable, provide a schema in the supported compact form:
@@ -101,7 +103,7 @@ MySQL Recovery Pro 提供面向 MySQL 5.6 至 9.0 表空间的 MySQL/InnoDB 检�
 
 ### 验证边界
 
-新一轮验证结果待定。既有已验证覆盖包括 **1,544 个排除 `REAL_MYSQL` 的 CTest 测试**，以及 **4 个 `REAL_MYSQL` CTest 套件**。真实 MySQL fixture 套件验证表空间完整性、版本族页面标记、元数据、分区名称和 undo 页面存在性；它们**不**证明端到端行恢复、undo 恢复或闪回恢复。
+新一轮验证已于 2026-09-16 完成：**1,548 个排除 `REAL_MYSQL` 的 CTest 测试**和 **4 个 `REAL_MYSQL` CTest 套件**均通过。真实 MySQL fixture 套件验证表空间完整性、版本族页面标记、元数据、分区名称和 undo 页面存在性；它们**不**证明端到端行恢复、undo 恢复或闪回恢复。
 
 MySQL 8.4 和 9.0 已映射到 `MYSQL8_7BYTE` undo 格式 profile，并有该映射的单元/回归测试覆盖。这不构成真实 MySQL undo 或闪回恢复能力的证明。
 
@@ -151,6 +153,8 @@ cmake --build build -j"$(nproc)"
 ```
 
 文件系统选择器接受 `ext4` 或 `xfs`。不得对已挂载、可写或其他未经批准的设备执行操作。
+
+安全门控采用 fail-closed 策略。任何原始块设备在被打开前，必须满足全部强制条件：设备身份已验证、内核级只读已确认、独占访问已获取、且设备未被挂载。Loop 设备还需在可信根目录下通过 backing 文件身份验证；缺少可发现且符合策略的 backing 文件的 loop 设备将被拒绝。普通文件与目录不经过块设备门控。
 
 ### 手动 Schema
 

@@ -21,7 +21,19 @@ namespace catalog {
 // MySQL 8.0 列定义（完整语义，参考 sql/dd/types/column.h）
 struct ColumnInfo {
     std::string name;
-    uint32_t mysql_type_id;       // 如: MYSQL_TYPE_VARCHAR=15, MYSQL_TYPE_JSON=245
+    /**
+     * Column type ID.
+     *
+     * This field stores an InnoDB parser-domain type ID (1-32), NOT the
+     * MySQL server `enum_field_types` value (0-255). All supported ingestion
+     * paths (SDI/FRM/schema-file/manual) normalize server IDs into parser IDs
+     * before reaching this struct. Values outside the parser domain are
+     * rejected by `validate()`.
+     *
+     * Example parser-domain IDs: LONG=4, VARCHAR=16, NEWDECIMAL=21,
+     * BLOB=27, STRING=29, GEOMETRY=30, JSON=31.
+     */
+    uint32_t mysql_type_id;
     bool is_nullable = true;        // NULL / NOT NULL (default to nullable for safety)
     std::optional<std::string> default_value;  // DEFAULT 'x' 或 DEFAULT NOW()
     uint32_t column_length;       // 字符长度（VARCHAR）或字节长度（INT）
@@ -150,8 +162,10 @@ struct TableSchema {
                 return false;
             }
 
-            // 验证 MySQL 类型
-            if (col.mysql_type_id > 255) {
+            // mysql_type_id is declared to carry the InnoDB parser domain
+            // (1-32). Reject anything outside that range rather than silently
+            // accepting a MySQL server-domain ID or an oversized value.
+            if (col.mysql_type_id == 0 || col.mysql_type_id > 32) {
                 return false;
             }
         }

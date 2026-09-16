@@ -130,23 +130,47 @@ void DeviceIdentity::apply_loopback_identity(const std::string& device_path,
     if (!read_loopback_sysfs(dev_name, backing_file)) return;
     if (backing_file.empty() || backing_file[0] != '/') return;
 
-    // The backing file must exist as a regular file; a loop device pointing
-    // at a missing path is not identifiable and stays at low confidence.
+    // The backing file must exist as a regular file and must be checked via
+    // descriptor-based inspection with O_NOFOLLOW to avoid symlink traversal.
+    int fd = ::open(backing_file.c_str(), O_RDONLY | O_NOFOLLOW);
+    if (fd < 0) return;
     struct stat st{};
-    if (::stat(backing_file.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return;
+    int fstat_res = ::fstat(fd, &st);
+    ::close(fd);
+    if (fstat_res != 0 || !S_ISREG(st.st_mode)) return;
 
-    // Only file-backed carriers inside a trusted backing root are accepted.
-    // Paths such as a whole block device or a raw NVMe node registered as a
-    // loop backing file must not be treated as identifiable.
+    // Resolve the authoritative real path (symlinks resolved, relative parts
+    // stripped) and enforce containment inside a trusted backing root with a
+    // strict component-boundary match (not a raw prefix match, which would
+    // treat /trusted-other as matching /trusted).
+    std::error_code ec;
+    const std::filesystem::path canonical =
+        std::filesystem::canonical(backing_file, ec);
+    if (ec) return;
+
     static const char* const kTrustedRoots[] = {
-        "/app/mysql_recovery_test/",
+        "/app/mysql_recovery_test",
     };
-    const std::string normalized = std::filesystem::path(backing_file)
-                                       .lexically_normal()
-                                       .string();
     bool trusted = false;
-    for (const char* root : kTrustedRoots) {
-        if (normalized.rfind(root, 0) == 0) {
+    for (const char* raw_root : kTrustedRoots) {
+        std::error_code root_ec;
+        const std::filesystem::path canonical_root =
+            std::filesystem::canonical(raw_root, root_ec);
+        const std::filesystem::path root_to_check =
+            root_ec ? std::filesystem::path(raw_root).lexically_normal()
+                    : canonical_root;
+
+        // Check path containment component-by-component.
+        auto it_child = canonical.begin();
+        auto it_root = root_to_check.begin();
+        bool matches = true;
+        for (; it_root != root_to_check.end(); ++it_root, ++it_child) {
+            if (it_child == canonical.end() || *it_child != *it_root) {
+                matches = false;
+                break;
+            }
+        }
+        if (matches) {
             trusted = true;
             break;
         }
@@ -154,7 +178,7 @@ void DeviceIdentity::apply_loopback_identity(const std::string& device_path,
     if (!trusted) return;
 
     info.model_number = "Loopback device";
-    info.serial_number = "loop:" + normalized;
+    info.serial_number = "loop:" + canonical.string();
     if (info.lba_data_size == 0) info.lba_data_size = st.st_blksize;
     if (info.confidence < 0.7) info.confidence = 0.7;
 }

@@ -19,6 +19,7 @@
 #include "dbrecovery/recovery/rmrf_recovery.hpp"
 #include "dbrecovery/recovery/truncate_recovery.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/innodb/tde_decryptor.hpp"
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 #include "dbrecovery/innodb/offline_keyring_parser.hpp"
@@ -1414,23 +1415,38 @@ int main(int argc, char** argv) {
             auto sdi_schema = parse_schema_from_sdi(ibd_path, table_id, tuple_detected);
             if (sdi_schema.has_value()) {
                 std::cout << "[INFO] Schema obtained from SDI\n";
-                // Map catalog::TableSchema to engine::SchemaTemplate
+                // Map catalog::TableSchema to engine::SchemaTemplate through the
+                // fail-closed type conversion boundary; SDI/FRM schema fields
+                // carry InnoDB parser-domain IDs, so validate them as such.
                 schema_template.table_name = sdi_schema->table_name;
                 for (auto& [pos, col] : sdi_schema->columns) {
+                    std::vector<std::string> type_diag;
+                    auto converted = dbrecovery::catalog::build_index_column(
+                        col,
+                        /*ordinal_position=*/col.ordinal,
+                        /*physical_pos_override=*/0,
+                        dbrecovery::catalog::TypeIdDomain::kInnodbParser,
+                        type_diag);
+                    if (!converted.has_value()) {
+                        for (const auto& d : type_diag) {
+                            std::cerr << "[WARN] SDI schema column rejected: " << d << "\n";
+                        }
+                        continue;
+                    }
                     dbrecovery::engine::SchemaTemplate::Column tcol;
-                    tcol.name = col.name;
-                    tcol.mysql_type = static_cast<uint8_t>(col.mysql_type_id);
-                    tcol.is_nullable = col.is_nullable;
+                    tcol.name = converted->name;
+                    tcol.mysql_type = converted->col_type;
+                    tcol.is_nullable = converted->is_nullable;
                     tcol.is_primary_key = (pos == 1);
-                    tcol.enum_values = col.enum_values;
-                    tcol.set_values = col.set_values;
+                    tcol.enum_values = converted->enum_values;
+                    tcol.set_values = converted->set_values;
                     schema_template.columns.push_back(tcol);
                     if (tcol.is_primary_key) {
                         schema_template.primary_key_columns.push_back(
                             static_cast<uint32_t>(schema_template.columns.size() - 1));
                     }
                 }
-                has_schema = true;
+                has_schema = !schema_template.columns.empty();
             } else if (!frm_path.empty()) {
                 // Try to parse schema from .frm file
                 std::cout << "[INFO] Attempting to parse schema from .frm file: " << frm_path << "\n";
@@ -1439,16 +1455,29 @@ int main(int argc, char** argv) {
                     std::cout << "[INFO] Schema obtained from .frm file\n";
                     schema_template.table_name = frm_schema->table_name;
                     for (auto& [pos, col] : frm_schema->columns) {
+                        std::vector<std::string> type_diag;
+                        auto converted = dbrecovery::catalog::build_index_column(
+                            col,
+                            /*ordinal_position=*/pos,
+                            /*physical_pos_override=*/0,
+                            dbrecovery::catalog::TypeIdDomain::kInnodbParser,
+                            type_diag);
+                        if (!converted.has_value()) {
+                            for (const auto& d : type_diag) {
+                                std::cerr << "[WARN] FRM schema column rejected: " << d << "\n";
+                            }
+                            continue;
+                        }
                         dbrecovery::engine::SchemaTemplate::Column tcol;
-                        tcol.name = col.name;
-                        tcol.mysql_type = static_cast<uint8_t>(col.mysql_type_id);
-                        tcol.is_nullable = col.is_nullable;
-                        tcol.max_length = col.column_length;
-                        tcol.enum_values = col.enum_values;
-                        tcol.set_values = col.set_values;
+                        tcol.name = converted->name;
+                        tcol.mysql_type = converted->col_type;
+                        tcol.is_nullable = converted->is_nullable;
+                        tcol.max_length = converted->col_length;
+                        tcol.enum_values = converted->enum_values;
+                        tcol.set_values = converted->set_values;
                         schema_template.columns.push_back(tcol);
                     }
-                    has_schema = true;
+                    has_schema = !schema_template.columns.empty();
                 } else {
                     std::cout << "[INFO] Failed to parse .frm file, using heuristic schema inference\n";
                     schema_template.table_name = table_name.empty() ? "recovered_table" : table_name;
@@ -1791,42 +1820,27 @@ int main(int argc, char** argv) {
                 const auto& schema = schema_opt.value();
                 uint32_t n_pk = 0;
                 for (const auto& [ord, col] : schema.columns) {
-                    dbrecovery::innodb::IndexColumnDef icol;
-                    icol.name = col.name;
-                    icol.col_type = col.mysql_type_id;
-                    icol.col_length = col.column_length;
-                    icol.is_nullable = col.is_nullable;
-                    icol.is_unsigned = col.is_unsigned;
-                    icol.precision = col.numeric_precision;
-                    icol.scale = col.numeric_scale;
-                    icol.datetime_precision = col.datetime_precision;
-                    icol.ordinal_position = col.ordinal_position;
-                    icol.physical_pos = col.physical_pos;  // CRITICAL: InnoDB storage order
-
-                    // Determine mb_maxlen from charset
-                    // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
-                    uint8_t cs_id = static_cast<uint8_t>(col.charset_id);
-                    switch (cs_id) {
-                        case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
-                        case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
-                        default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
+                    // Route the SDI-derived type ID through the fail-closed
+                    // conversion boundary. SDI schema carries InnoDB parser-
+                    // domain IDs; anything else is rejected with a diagnostic.
+                    std::vector<std::string> type_diag;
+                    auto converted = dbrecovery::catalog::build_index_column(
+                        col,
+                        /*ordinal_position=*/ord,
+                        /*physical_pos_override=*/0,
+                        dbrecovery::catalog::TypeIdDomain::kInnodbParser,
+                        type_diag);
+                    if (!converted.has_value()) {
+                        for (const auto& d : type_diag) {
+                            std::cerr << "[WARN] SDI schema column rejected: " << d << "\n";
+                        }
+                        continue;
                     }
-                    icol.is_big = (icol.col_length * icol.mb_maxlen > 255);
-                    icol.enum_values = col.enum_values;
-                    icol.set_values = col.set_values;
-
-                    // CRITICAL FIX: Set is_binary based on charset_id
-                    // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
-                    // EXCEPTION: JSON type (31) also uses binary charset but should NOT be treated as binary data
-                    // JSON is stored in MySQL's internal binary format but is decoded as text
-                    icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
-
-                    // Check if this is a PK column
-                    if (col.column_key == "PRI") {
-                        n_pk++;
-                    }
-
-                    index_columns.push_back(icol);
+                    dbrecovery::innodb::IndexColumnDef icol = std::move(*converted);
+                    // JSON columns use binary charset but must not be treated as
+                    // opaque binary data.
+                    icol.is_binary = icol.is_binary && (icol.col_type != 31);
+                    index_columns.push_back(std::move(icol));
                 }
                 if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
                 index_parser.set_columns(index_columns, false, n_pk);

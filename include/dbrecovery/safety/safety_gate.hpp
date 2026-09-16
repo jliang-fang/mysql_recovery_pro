@@ -21,6 +21,7 @@ struct SafetyReport {
     bool read_only_confirmed = false;
     bool exclusive_access = false;
     bool not_mounted_or_ok = false;
+    bool requires_loopback_verification = false;
     bool loopback_verified = false;
     std::string backing_file;
     std::string model;

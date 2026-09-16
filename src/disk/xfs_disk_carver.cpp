@@ -14,6 +14,7 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
 
 #include <chrono>
@@ -2496,21 +2497,17 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
         [](const auto& a, const auto& b) { return a.first < b.first; });
 
     for (const auto& [phys_pos, col] : sorted_cols) {
-        innodb::IndexColumnDef col_def;
-        col_def.name = col.name;
-        // Schema files store InnoDB storage type IDs directly — do not re-map
-        col_def.col_type = static_cast<uint8_t>(col.mysql_type_id);
-        col_def.col_length = col.column_length;
-        col_def.is_nullable = col.is_nullable;
-        col_def.is_unsigned = !col.is_signed;
-        col_def.precision = col.numeric_precision;
-        col_def.scale = col.numeric_scale;
-        col_def.datetime_precision = col.datetime_precision;
-        col_def.char_set_id = col.charset_id;
-        col_def.ordinal_position = col.ordinal;
-        col_def.physical_pos = phys_pos;
-        col_def.enum_values = col.enum_values;
-        col_def.set_values = col.set_values;
+        std::vector<std::string> diagnostics;
+        auto converted = catalog::build_index_column(
+            col, col.ordinal, phys_pos,
+            catalog::TypeIdDomain::kInnodbParser, diagnostics);
+        if (!converted.has_value()) {
+            for (const auto& d : diagnostics) {
+                std::cerr << "[WARN] XFS schema column rejected: " << d << std::endl;
+            }
+            continue;
+        }
+        innodb::IndexColumnDef col_def = *converted;
 
         // Set mb_maxlen based on charset
         if (col.charset_id == 45 || col.charset_id == 46) {  // utf8mb4
@@ -2525,14 +2522,14 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
         // encoding; is_binary keeps CHAR-vs-BINARY (type 29) fixed-length.
         // Type 27 is shared by BLOB and TEXT, so binary-ness must come from the
         // collation (63 = binary); otherwise TEXT is hex-encoded.
-        if (col.mysql_type_id == 24 || col.mysql_type_id == 25 ||
-            col.mysql_type_id == 26 || col.mysql_type_id == 27 ||
-            col.mysql_type_id == 31) {
+        if (col_def.col_type == 24 || col_def.col_type == 25 ||
+            col_def.col_type == 26 || col_def.col_type == 27 ||
+            col_def.col_type == 31) {
             col_def.is_big = true;
-            if (col.mysql_type_id == 27) {
+            if (col_def.col_type == 27) {
                 col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63);
             }
-        } else if (col.mysql_type_id == 16 || col.mysql_type_id == 29) {
+        } else if (col_def.col_type == 16 || col_def.col_type == 29) {
             col_def.is_big = (col.column_length * col_def.mb_maxlen > 255);
             // BINARY vs CHAR: both type 29; BINARY columns use charset-63 and
             // resolve fixed-length via mb_maxlen==1, but mark explicitly when

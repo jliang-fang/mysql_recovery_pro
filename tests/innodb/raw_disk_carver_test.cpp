@@ -81,6 +81,43 @@ TEST(RawDiskCarverTest, SafetyGateRequiresAllMandatoryFacts) {
     }
 }
 
+TEST(RawDiskCarverTest, SafetyGateRequiresLoopbackVerificationForLoopDevices) {
+    dbrecovery::safety::SafetyReport report;
+    report.device_identity_verified = true;
+    report.read_only_confirmed = true;
+    report.exclusive_access = true;
+    report.not_mounted_or_ok = true;
+
+    // A non-loop report (requires_loopback_verification = false) permits access
+    // even when loopback_verified is false.
+    report.requires_loopback_verification = false;
+    report.loopback_verified = false;
+    EXPECT_TRUE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+
+    // For a loop device, access is denied until loopback_verified is proven.
+    report.requires_loopback_verification = true;
+    EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+
+    report.loopback_verified = true;
+    EXPECT_TRUE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+
+    // Even if loopback_verified is true, failing any base mandatory fact denies access.
+    report.device_identity_verified = false;
+    EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+    report.device_identity_verified = true;
+
+    report.read_only_confirmed = false;
+    EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+    report.read_only_confirmed = true;
+
+    report.exclusive_access = false;
+    EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+    report.exclusive_access = true;
+
+    report.not_mounted_or_ok = false;
+    EXPECT_FALSE(dbrecovery::safety::SafetyGate::permits_read_only_raw_access(report));
+}
+
 TEST(RawDiskCarverTest, SafetyGateDiagnosticsDoNotAuthorize) {
     dbrecovery::safety::SafetyReport report;
     report.confidence = 1.0;

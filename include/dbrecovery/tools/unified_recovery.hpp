@@ -49,6 +49,9 @@ struct UnifiedRecoveryResult {
     std::string compression_rejection_reason;
     uint64_t total_pages_scanned = 0;
     uint64_t skipped_pages = 0;
+    /// Diagnostics emitted while converting schema evidence into parser
+    /// column definitions (fail-closed type-ID conversion boundary).
+    std::vector<std::string> schema_diagnostics;
 };
 
 UnifiedRecoveryResult run_unified_recovery(

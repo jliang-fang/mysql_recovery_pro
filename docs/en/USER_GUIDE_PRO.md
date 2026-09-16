@@ -73,6 +73,8 @@ For disk carving, acquire a read-only forensic image when possible:
 
 The filesystem selector accepts `ext4` or `xfs`. A raw block-device command requires both `--disk-carving` and `--device-path`; privileges do not bypass the safety gate. Do not operate on a mounted, writable, or otherwise unapproved device. Preserve the source, record provenance, and validate all artifacts on a separate target.
 
+The safety gate is fail-closed. Before any raw block device is opened, every mandatory fact must be proven: device identity verified, kernel-level read-only confirmed, exclusive access acquired, and the device not mounted. Loop devices additionally require verified backing-file identity under a trusted root; a loop device without a discoverable, policy-accepted backing file is refused. Regular files and directories do not pass through the block-device gate.
+
 ## Operational workflow
 
 1. Stop writes to the affected data and preserve the source or acquire a forensic image.
