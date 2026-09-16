@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <chrono>
+#include <cctype>
 #include <set>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -177,10 +178,25 @@ private:
     // 从JSON文件加载schema
     std::optional<catalog::TableSchema> load_schema_from_file(const std::string& schema_file_path);
 
+    struct ReportGenerationResult {
+        std::vector<std::string> requested_formats;
+        std::vector<std::string> written_paths;
+        std::string diagnostic;
+
+        bool succeeded() const {
+            return !requested_formats.empty() && !written_paths.empty();
+        }
+    };
+
+    static std::vector<std::string> normalize_report_formats(const std::string& formats);
+    static std::string resolve_report_base_path(const std::string& report_path,
+                                                const std::string& output_dir);
+
     // v2.0: 生成恢复报告
-    void generate_recovery_report(const std::string& report_fmt, const std::string& report_p,
-                                  const std::string& recovery_type, const std::string& output_dir,
-                                  const std::string& mysql_version = "auto-detected");
+    ReportGenerationResult generate_recovery_report(
+        const std::string& report_fmt, const std::string& report_p,
+        const std::string& recovery_type, const std::string& output_dir,
+        const std::string& mysql_version = "auto-detected");
 
     // v2.0: 并行导出
     bool export_parallel(const std::vector<std::map<std::string, std::string>>& records,
@@ -304,10 +320,10 @@ inline void RecoveryCLI::show_help(const char* program_name) {
     std::cout << "  \033[1m--all-indexes=<dir>\033[0m         Scan <dir> for secondary *.ibd files for --auto-salvage/--secondary-rescue\n";
     std::cout << "  \033[1m--deep-carve\033[0m                Deep carve mode — sector-level PageIdentityEngine scanning\n";
     std::cout << "                                 Identifies pages at non-aligned offsets with verification\n";
-    std::cout << "  \033[1m--show-last-report\033[0m          Display the last recovery report from output directory\n";
+    std::cout << "  \033[1m--show-last-report\033[0m          Display the text report at --report-path base or <output>/recovery_report\n";
     std::cout << "  \033[1m--interactive\033[0m               Interactive schema builder (alias for --interactive-schema)\n";
-    std::cout << "  \033[1m--report-format=<fmt>\033[0m      Recovery report format: json,text,html (default: text)\n";
-    std::cout << "  \033[1m--report-path=<path>\033[0m       Path for recovery report file (default: <output>/recovery_report)\n";
+    std::cout << "  \033[1m--report-format=<fmt>\033[0m      Comma-separated json,text,html report formats (default: text)\n";
+    std::cout << "  \033[1m--report-path=<path>\033[0m       Extensionless report base path (default: <output>/recovery_report)\n";
     std::cout << "  \033[1m--partition-recovery\033[0m      Recover all partitions of a partitioned table\n";
     std::cout << "                                 Uses --data-dir to locate partition .ibd files\n";
     std::cout << "  \033[1m--list-partitions\033[0m          List all partition tables found in data directory\n";
@@ -722,6 +738,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     // v2.0: Auto salvage — try all salvage strategies automatically
     bool auto_salvage = parser_.get_bool_option("auto-salvage", false);
 
+    const auto write_recovery_report = [&]() {
+        return generate_recovery_report(
+            report_format, report_path, recovery_type, output_dir, mysql_version).succeeded();
+    };
+
     // v2.0: Show last recovery report
     bool show_last_report = parser_.get_bool_option("show-last-report", false);
 
@@ -737,9 +758,8 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // v2.0: Show last recovery report
     if (show_last_report) {
-        std::string report_dir = output_dir;
-        std::string report_path_str = report_path.empty() ?
-            report_dir + "/recovery_report.txt" : report_path;
+        const std::string report_base = resolve_report_base_path(report_path, output_dir);
+        const std::string report_path_str = report_base + ".txt";
 
         std::ifstream report_file(report_path_str);
         if (report_file) {
@@ -3189,7 +3209,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 stats_.elapsed_seconds = xfs_result.elapsed_seconds;
 
                 std::cout << "\n✅ XFS Recovery completed: " << output_dir << "\n";
-                generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+                if (!write_recovery_report()) return 1;
                 return 0;
             } else {
                 std::cerr << "[ERROR] XFS disk carving failed.\n";
@@ -3391,7 +3411,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 stats_.elapsed_seconds = ext4_result.elapsed_seconds;
 
                 std::cout << "\n✅ ext4 Recovery completed: " << output_dir << "\n";
-                generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+                if (!write_recovery_report()) return 1;
                 return 0;
             } else {
                 std::cerr << "[ERROR] ext4 recovery failed. Falling back to raw disk carving.\n";
@@ -3633,7 +3653,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             stats_.elapsed_seconds = scan_stats.elapsed_seconds;
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
-            generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+            if (!write_recovery_report()) return 1;
             return 0;
         } else {
             std::cerr << "[ERROR] Disk carving failed.\n";
@@ -3694,7 +3714,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
-            generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+            if (!write_recovery_report()) return 1;
             if (!write_result_json({
                     {"mode", "drop_table_recovery"},
                     {"success", false},
@@ -3775,7 +3795,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         show_stats(stats_);
-        generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+        if (!write_recovery_report()) return 1;
         return 0;
     }
 
@@ -3791,7 +3811,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         std::cout << "[INFO] Found " << rebuilder.stats().orphan_pages << " orphan pages\n";
 
         show_stats(stats_);
-        generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+        if (!write_recovery_report()) return 1;
         return 0;
     }
 
@@ -3806,7 +3826,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         show_stats(stats_);
-        generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+        if (!write_recovery_report()) return 1;
         return 0;
     }
 
@@ -5323,7 +5343,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     show_stats(stats_);
     std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
-    generate_recovery_report(report_format, report_path, recovery_type, output_dir, mysql_version);
+    if (!write_recovery_report()) return 1;
 
     if (!write_result_json({
             {"mode", "recovery"},
@@ -5633,10 +5653,41 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
 
 // ==================== Report Generation (v2.0) ====================
 
-inline void RecoveryCLI::generate_recovery_report(
+inline std::vector<std::string> RecoveryCLI::normalize_report_formats(const std::string& formats) {
+    std::set<std::string> normalized;
+    std::istringstream stream(formats);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+        const auto first = token.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos) continue;
+        const auto last = token.find_last_not_of(" \t\r\n");
+        token = token.substr(first, last - first + 1);
+        std::transform(token.begin(), token.end(), token.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (token == "json" || token == "text" || token == "html") {
+            normalized.insert(std::move(token));
+        }
+    }
+    return {normalized.begin(), normalized.end()};
+}
+
+inline std::string RecoveryCLI::resolve_report_base_path(const std::string& report_path,
+                                                         const std::string& output_dir) {
+    return report_path.empty() ? (fs::path(output_dir) / "recovery_report").string() : report_path;
+}
+
+inline RecoveryCLI::ReportGenerationResult RecoveryCLI::generate_recovery_report(
     const std::string& report_fmt, const std::string& report_p,
     const std::string& recovery_type, const std::string& output_dir,
     const std::string& mysql_version) {
+
+    ReportGenerationResult result;
+    result.requested_formats = normalize_report_formats(report_fmt);
+    if (result.requested_formats.empty()) {
+        result.diagnostic = "--report-format must contain at least one of: json, text, html";
+        std::cerr << "[ERROR] " << result.diagnostic << "\n";
+        return result;
+    }
 
     using namespace dbrecovery::report;
 
@@ -5655,7 +5706,6 @@ inline void RecoveryCLI::generate_recovery_report(
                           parser_.has_option("schema-file") ? "MANUAL" : "NONE";
     input.has_undo_logs = parser_.has_option("system-tablespace") ||
                           parser_.has_option("undo-tablespace");
-    // Get source file/device size
     if (!input.source_path.empty()) {
         struct stat st;
         if (stat(input.source_path.c_str(), &st) == 0) {
@@ -5711,21 +5761,25 @@ inline void RecoveryCLI::generate_recovery_report(
     OutputInfo output;
     output.output_directory = output_dir;
     output.format = parser_.get_option("format", "csv");
-    // Scan output directory for files and calculate total size
+    const std::set<std::string> data_extensions = {".csv", ".sql", ".json"};
+    const std::string report_base = resolve_report_base_path(report_p, output_dir);
+    const std::set<std::string> report_paths = {
+        report_base + ".json", report_base + ".txt", report_base + ".html"};
     try {
         if (fs::exists(output_dir) && fs::is_directory(output_dir)) {
             for (const auto& entry : fs::directory_iterator(output_dir)) {
-                if (entry.is_regular_file() && entry.path().extension() == ".csv") {
-                    output.output_files.push_back(entry.path().string());
-                    output.total_output_size_bytes += entry.file_size();
+                if (!entry.is_regular_file() || !data_extensions.count(entry.path().extension().string()) ||
+                    report_paths.count(entry.path().string())) {
+                    continue;
                 }
+                output.output_files.push_back(entry.path().string());
+                output.total_output_size_bytes += entry.file_size();
             }
         }
     } catch (...) {}
     builder.set_output(output);
 
     auto report = builder.build();
-
     std::string report_table = parser_.get_option("table-name", "");
     const std::string report_source = parser_.get_option(
         "ibd", parser_.get_option("device-path", ""));
@@ -5763,13 +5817,23 @@ inline void RecoveryCLI::generate_recovery_report(
             contract_input, report_table, report_source);
     }
 
-    std::string base_path = report_p.empty() ? output_dir + "/recovery_report" : report_p;
-    auto written = report.write_files(base_path, report_fmt);
+    std::ostringstream canonical_formats;
+    for (size_t i = 0; i < result.requested_formats.size(); ++i) {
+        if (i != 0) canonical_formats << ',';
+        canonical_formats << result.requested_formats[i];
+    }
+    result.written_paths = report.write_files(report_base, canonical_formats.str());
+    if (result.written_paths.empty()) {
+        result.diagnostic = "unable to write requested recovery report artifacts at base path: " + report_base;
+        std::cerr << "[ERROR] " << result.diagnostic << "\n";
+        return result;
+    }
 
     std::cout << "\n[REPORT] Recovery report generated:\n";
-    for (const auto& f : written) {
-        std::cout << "  - " << f << "\n";
+    for (const auto& file : result.written_paths) {
+        std::cout << "  - " << file << "\n";
     }
+    return result;
 }
 
 /**

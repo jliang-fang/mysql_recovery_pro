@@ -1,4 +1,4 @@
-# MySQL Recovery Pro - Ultimate Recovery Engine
+# MySQL Recovery Pro
 
 **[English](#english) | [中文](#中文)**
 
@@ -8,56 +8,88 @@
 
 ### Overview
 
-MySQL Recovery Pro is a professional MySQL/InnoDB disaster recovery tool supporting MySQL 5.6-9.0.
+MySQL Recovery Pro provides MySQL/InnoDB inspection, recovery, and recovery-report code paths for tablespaces from MySQL 5.6 through 9.0. Recovery is case-specific: source-media condition, overwrite history, corruption, schema accuracy, and the selected path determine what can be recovered.
 
-**Key Features:**
-- **Multi-version support**: MySQL 5.6, 5.7, 8.0, 8.4, 9.0
-- **All field types**: INT, VARCHAR, TEXT, BLOB, JSON, ENUM, DECIMAL, DATE, DATETIME, etc.
-- **Multiple filesystems**: ext4 (~100% rate), XFS (~98.77% max due to delayed allocation)
-- **Disaster scenarios**: DROP TABLE, TRUNCATE, rm -rf, corruption
+### Validation boundary
 
-### Recovery Validation Results
+Fresh validation completed on 2026-09-16: **1,548 CTest tests excluding `REAL_MYSQL`** and **four `REAL_MYSQL` CTest suites** passed. The real-MySQL fixture suites check tablespace integrity, version-family page markers, metadata, partition names, and undo-page presence. They do **not** demonstrate end-to-end row recovery, undo recovery, or flashback recovery.
 
-| MySQL Version | ext4 Recovery | XFS Recovery | Field Types |
-|---------------|---------------|--------------|-------------|
-| 5.6 | ✅ ~100% | ✅ ~98.77% | All validated |
-| 5.7 | ✅ ~100% | ✅ ~98.77% | All validated |
-| 8.0 | ✅ ~100% | ✅ ~98.77% | All validated |
-| 8.4 | ✅ ~100% | ✅ ~98.77% | All validated |
-| 9.0 | ✅ ~100% | ✅ ~98.77% | All validated |
+MySQL 8.4 and 9.0 route to the `MYSQL8_7BYTE` undo-format profile and have unit/regression coverage for that mapping. This is not evidence of real-MySQL undo or flashback recovery.
 
-### Quick Start
+No filesystem- or version-specific recovery rate is claimed while fresh results are pending.
+
+### Supported code paths
+
+- Tablespace inspection and page scanning for MySQL 5.6, 5.7, 8.0, 8.4, and 9.0 profiles
+- Schema-assisted parsing when compatible metadata or a correct manual schema is available
+- Recovery-report generation in text, JSON, and HTML formats
+- Disk-carving paths for ext4 and XFS sources, subject to raw-device safety approval
+
+Component availability is not a recovery guarantee. Independently validate every recovered artifact against source evidence or known-good data.
+
+### Quick start
 
 ```bash
-# Build
+# Configure and build
 cmake -B build -S .
-cmake --build build -j$(nproc)
+cmake --build build -j"$(nproc)"
 
-# Basic recovery from .ibd file
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/
+# Inspect a copied .ibd file. Output defaults to /tmp/recovered.
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/output
 
-# Specify MySQL version explicitly (recommended for 5.6/5.7/8.4/9.0)
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --mysql-version=9.0 --output=/recovery/
+# Provide an explicit version when automatic detection is ambiguous.
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd \
+  --mysql-version=8.4 --output=/recovery/output
 
-# Generate multi-format professional recovery reports (JSON, HTML, Text)
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/ --report-format=json,html,text
+# Generate report artifacts at /recovery/report.json, .txt, and .html.
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/output \
+  --report-format=json,text,html --report-path=/recovery/report
 
-# Disk carving recovery (block device)
-./build/mysql_recovery_pro --disk-carving --device-path=/dev/sda1 --output=/recovery/
+# Display the text artifact at /recovery/report.txt.
+./build/mysql_recovery_pro --show-last-report --output=/recovery/output \
+  --report-path=/recovery/report
+```
 
-# XFS filesystem recovery
-./build/mysql_recovery_pro --disk-carving --device-path=/dev/nvme0n2 --filesystem=xfs --output=/recovery/
+`--report-path` is an extensionless base path. Allowed `--report-format` values are `json`, `text`, and `html`; the default is `text`.
 
-# With schema parameter
-./build/mysql_recovery_pro --disk-carving --device-path=/dev/sda1 \
-    --schema="id INT PRIMARY KEY, name VARCHAR(100), status ENUM('active','inactive')" \
-    --output=/recovery/
+### Raw-device handling
+
+For disk carving, acquire a read-only forensic image when possible. A raw block-device command requires `--disk-carving` and `--device-path`; privileges alone do not bypass the safety gate.
+
+```bash
+./build/mysql_recovery_pro --disk-carving --device-path=/path/to/image \
+  --filesystem=ext4 --output=/recovery/output
+```
+
+The filesystem selector accepts `ext4` or `xfs`. Do not operate on mounted, writable, or otherwise unapproved devices.
+
+### Manual schema
+
+When source metadata is unavailable, provide a schema in the supported compact form:
+
+```bash
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd \
+  --schema='id:INT:4:pk,name:VARCHAR:100' --output=/recovery/output
+```
+
+A supplied schema is evidence supplied by the operator; verify parsed values independently. Do not assume SQL fragments or `CREATE TABLE` syntax are accepted schema input.
+
+### Verification
+
+```bash
+# Non-fixture suite
+ctest --test-dir build --output-on-failure -LE REAL_MYSQL
+
+# Real-MySQL fixture suite (missing fixtures are skipped)
+ctest --test-dir build --output-on-failure -L REAL_MYSQL
 ```
 
 ### Documentation
 
-- **User Guide**: [docs/en/USER_GUIDE_PRO.md](docs/en/USER_GUIDE_PRO.md)
-- **Disaster Recovery Guide**: [docs/en/DISASTER_RECOVERY_GUIDE.md](docs/en/DISASTER_RECOVERY_GUIDE.md)
+- [English User Guide](docs/en/USER_GUIDE_PRO.md)
+- [中文用户指南](docs/zh/USER_GUIDE_PRO.md)
+- [English Disaster Recovery Guide](docs/en/DISASTER_RECOVERY_GUIDE.md)
+- [中文灾难恢复指南](docs/zh/DISASTER_RECOVERY_GUIDE.md)
 
 ---
 
@@ -65,229 +97,88 @@ cmake --build build -j$(nproc)
 
 ### 概述
 
-MySQL Recovery Pro 是专业的 MySQL/InnoDB 灾难恢复工具，支持 MySQL 5.6-9.0。
+MySQL Recovery Pro 提供面向 MySQL 5.6 至 9.0 表空间的 MySQL/InnoDB 检查、恢复和恢复报告代码路径。恢复结果因具体案例而异，取决于源介质状态、覆写历史、损坏程度、Schema 准确性以及所选路径。
 
-**核心特性:**
-- **多版本支持**: MySQL 5.6, 5.7, 8.0, 8.4, 9.0
-- **全字段类型**: INT, VARCHAR, TEXT, BLOB, JSON, ENUM, DECIMAL, DATE, DATETIME 等
-- **多种文件系统**: ext4 (~100% 恢复率), XFS (~98.77% 最大，受延迟分配限制)
-- **灾难场景**: DROP TABLE, TRUNCATE, rm -rf, 数据损坏
+### 验证边界
 
-### 恢复验证结果
+新一轮验证结果待定。既有已验证覆盖包括 **1,544 个排除 `REAL_MYSQL` 的 CTest 测试**，以及 **4 个 `REAL_MYSQL` CTest 套件**。真实 MySQL fixture 套件验证表空间完整性、版本族页面标记、元数据、分区名称和 undo 页面存在性；它们**不**证明端到端行恢复、undo 恢复或闪回恢复。
 
-| MySQL 版本 | ext4 恢复 | XFS 恢复 | 字段类型 |
-|------------|-----------|----------|----------|
-| 5.6 | ✅ ~100% | ✅ ~98.77% | 全部验证 |
-| 5.7 | ✅ ~100% | ✅ ~98.77% | 全部验证 |
-| 8.0 | ✅ ~100% | ✅ ~98.77% | 全部验证 |
-| 8.4 | ✅ ~100% | ✅ ~98.77% | 全部验证 |
-| 9.0 | ✅ ~100% | ✅ ~98.77% | 全部验证 |
+MySQL 8.4 和 9.0 已映射到 `MYSQL8_7BYTE` undo 格式 profile，并有该映射的单元/回归测试覆盖。这不构成真实 MySQL undo 或闪回恢复能力的证明。
+
+在新结果完成前，不声明按文件系统或版本划分的恢复率。
+
+### 已实现代码路径
+
+- 面向 MySQL 5.6、5.7、8.0、8.4 和 9.0 profile 的表空间检查与页面扫描
+- 在有兼容元数据或正确手动 Schema 时进行 Schema 辅助解析
+- 生成文本、JSON 和 HTML 格式的恢复报告
+- 面向 ext4 与 XFS 源的磁盘雕刻路径，但须通过原始设备安全审批
+
+组件存在不构成恢复保证。应将所有恢复产物与源证据或已知正确的数据独立比对验证。
 
 ### 快速开始
 
 ```bash
-# 编译
+# 配置并编译
 cmake -B build -S .
-cmake --build build -j$(nproc)
+cmake --build build -j"$(nproc)"
 
-# 从 .ibd 文件恢复
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/
+# 检查已复制的 .ibd 文件；默认输出目录为 /tmp/recovered。
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/output
 
-# 显式指定 MySQL 版本（推荐用于 5.6/5.7/8.4/9.0 表空间）
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --mysql-version=9.0 --output=/recovery/
+# 自动识别存在歧义时，显式指定版本。
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd \
+  --mysql-version=8.4 --output=/recovery/output
 
-# 生成多格式恢复报告（JSON, HTML 可视化报告, 终端文本）
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/ --report-format=json,html,text
+# 在 /recovery/report 生成 .json、.txt 和 .html 报告。
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/output \
+  --report-format=json,text,html --report-path=/recovery/report
 
-# 磁盘雕刻恢复 (块设备)
-./build/mysql_recovery_pro --disk-carving --device-path=/dev/sda1 --output=/recovery/
+# 显示 /recovery/report.txt 文本报告。
+./build/mysql_recovery_pro --show-last-report --output=/recovery/output \
+  --report-path=/recovery/report
+```
 
-# XFS 文件系统恢复
-./build/mysql_recovery_pro --disk-carving --device-path=/dev/nvme0n2 --filesystem=xfs --output=/recovery/
+`--report-path` 是不带扩展名的基础路径。`--report-format` 仅接受 `json`、`text` 和 `html`；默认值为 `text`。
 
-# 使用 Schema 参数
-./build/mysql_recovery_pro --disk-carving --device-path=/dev/sda1 \
-    --schema="id INT PRIMARY KEY, name VARCHAR(100), status ENUM('active','inactive')" \
-    --output=/recovery/
+### 原始设备处理
+
+执行磁盘雕刻时，应尽可能先制作只读取证镜像。对原始块设备，必须同时指定 `--disk-carving` 与 `--device-path`；提升权限本身不能绕过安全门控。
+
+```bash
+./build/mysql_recovery_pro --disk-carving --device-path=/path/to/image \
+  --filesystem=ext4 --output=/recovery/output
+```
+
+文件系统选择器接受 `ext4` 或 `xfs`。不得对已挂载、可写或其他未经批准的设备执行操作。
+
+### 手动 Schema
+
+源元数据不可用时，可以使用已支持的紧凑格式提供 Schema：
+
+```bash
+./build/mysql_recovery_pro --ibd=/path/to/table.ibd \
+  --schema='id:INT:4:pk,name:VARCHAR:100' --output=/recovery/output
+```
+
+手动 Schema 是操作人员提供的证据；解析结果必须独立验证。不要假设 SQL 片段或 `CREATE TABLE` 语法可作为 Schema 输入。
+
+### 验证
+
+```bash
+# 非 fixture 测试集
+ctest --test-dir build --output-on-failure -LE REAL_MYSQL
+
+# 真实 MySQL fixture 测试集（fixture 缺失时测试会跳过）
+ctest --test-dir build --output-on-failure -L REAL_MYSQL
 ```
 
 ### 文档
 
-- **用户指南**: [docs/zh/USER_GUIDE_PRO.md](docs/zh/USER_GUIDE_PRO.md)
-- **灾难恢复指南**: [docs/zh/DISASTER_RECOVERY_GUIDE.md](docs/zh/DISASTER_RECOVERY_GUIDE.md)
-
----
-
-## 项目结构
-
-```
-mysql_recovery_pro/
-├── CMakeLists.txt          # CMake 构建配置
-├── README.md               # 本文件
-│
-├── include/                # 头文件目录
-│   └── dbrecovery/
-│       ├── engine/         # 引擎模块
-│       │   ├── raw_disk_engine.hpp              # 基础磁盘 I/O
-│       │   ├── enhanced_raw_disk_engine.hpp     # 增强磁盘 I/O (io_uring)
-│       │   ├── advanced_signature_scraper.hpp   # 签名扫描器
-│       │   └── signature_scraper.hpp             # 基础签名扫描
-│       │
-│       ├── recovery/      # 恢复模块
-│       │   ├── engine.hpp                       # 恢复引擎
-│       │   ├── rmrf_recovery.hpp                 # rm -rf 恢复
-│       │   ├── heuristic_reconstructor.hpp      # 启发式重组器
-│       │   └── enhanced_recovery.hpp             # 增强恢复
-│       │
-│       ├── innodb/        # InnoDB 解析模块
-│       │   ├── page_defs.hpp                    # 页定义
-│       │   ├── page_reader.hpp                   # 页读取器
-│       │   ├── btree.hpp                          # B+Tree 解析
-│       │   ├── heuristic_parser.hpp              # 启发式解析器
-│       │   ├── schema_aware_parser.hpp           # 结构感知解析器
-│       │   ├── schema_inferrer.hpp               # 结构推断器
-│       │   └── blob_parser.hpp                   # BLOB 解析
-│       │
-│       ├── catalog/       # 目录模块
-│       │   └── schema_defs.hpp                   # 结构定义
-│       │
-│       └── repair/        # 修复模块
-│           ├── corruption_detector.hpp          # 损坏检测
-│           └── header_repairer.hpp               # 头修复
-│
-├── src/                    # 源文件目录
-│   ├── engine/             # 引擎实现
-│   ├── recovery/          # 恢复实现
-│   ├── innodb/            # InnoDB 实现
-│   ├── repair/            # 修复实现
-│   ├── page/              # 页解析实现
-│   ├── export/            # 导出实现
-│   ├── utils/             # 工具实现
-│   ├── platform/          # 平台特定实现
-│   └── main.cpp           # 主程序入口
-│
-├── tests/                  # 单元测试
-│   ├── test_extreme_recovery_validation.cpp    # 极端恢复验证测试
-│   ├── test_extreme_scenarios.cpp               # 极端场景测试
-│   ├── test_page_scanner.cpp                    # 页扫描测试
-│   ├── test_btree_traversal.cpp                  # B+Tree 遍历测试
-│   ├── test_heuristic_inference.cpp              # 启发式推断测试
-│   └── ...                                       # 其他测试
-│
-├── tools/                  # 工具脚本
-│   ├── extreme_recovery_test_framework.py       # 极端恢复测试框架
-│   ├── mysql56_container_setup.py               # MySQL 5.6 容器设置
-│   └── quick_validation_test.py                  # 快速验证测试
-│
-├── scripts/                # 构建和测试脚本
-│   ├── build_linux.sh     # Linux 构建
-│   ├── build_macos.sh     # macOS 构建
-│   └── run_tests.py       # 测试运行器
-│
-├── docs/                   # 文档
-│   ├── en/                 # 英文文档
-│   └── zh/                 # 中文文档
-│
-├── examples/              # 示例代码
-│
-├── golden-hashes/         # Golden Hash 基线
-│
-└── build/                  # 构建输出目录
-    ├── mysql_recovery_pro                      # 主可执行文件
-    └── tests/                                   # 测试可执行文件
-```
-
-## 核心模块
-
-### 1. Enhanced Raw Disk I/O Engine
-- io_uring 批量异步读取
-- 内存高效流式扫描
-- Pinned buffer pool（取证安全）
-- 支持 TB 级磁盘扫描
-
-### 2. Signature-Based Scraper (Carver)
-- InnoDB 页签名库（MySQL 5.6/5.7/8.0）
-- PhotoRec 风格双层索引
-- CRC32C + INNODB 双校验和验证
-- 页聚合为文件
-
-### 3. Heuristic Reconstructor
-- LSN 版本选择（TRUNCATE 恢复）
-- 页冲突解决
-- B+Tree 链重建
-- 缺失页推断
-
-### 4. Schema-Aware Parser
-- MySQL 5.6 COMPACT 行格式解析
-- 模板匹配验证
-- 删除记录提取
-- 多格式支持
-
-### 5. Automated Validation Pipeline
-- Podman MySQL 5.6 容器管理
-- 500 万行测试数据生成
-- SHA-256 Hash 基线验证
-- 性能度量
-
-## Build Instructions
-
-```bash
-# Configure (requires CMake 3.16+, GCC 9+ or Clang 10+)
-cmake -B build -S .
-
-# Compile
-cmake --build build -j$(nproc)
-
-# Run tests
-cd build/tests && ctest --output-on-failure
-```
-
-**Build Requirements:**
-- C++17 compiler (GCC 9+ or Clang 10+)
-- CMake 3.16+
-- zlib development library
-
-## Usage
-
-```bash
-# Scan disk (requires root for block devices)
-sudo ./build/mysql_recovery_pro --disk-carving --device-path=/dev/sdb --output=/recovery/
-
-# Recover from .ibd file
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd --output=/recovery/
-
-# Recover TRUNCATE table
-./build/mysql_recovery_pro --truncate-recovery --ibd=table.ibd --output=/recovery/
-
-# XFS filesystem recovery
-sudo ./build/mysql_recovery_pro --disk-carving --device-path=/dev/nvme0n2 --filesystem=xfs --output=/recovery/
-```
-
-## Test Validation
-
-```bash
-# Quick validation
-python3 tools/quick_validation_test.py
-
-# Full test (requires Podman)
-python3 tools/extreme_recovery_test_framework.py --test all
-
-# Unit tests
-cd build/tests && ./test_extreme_scenarios
-```
-
-## Performance Targets
-
-- Scan Speed: ≥ 100 MB/s
-- Memory Usage: < 4 GB (for 100GB disk)
-- Recovery Rate: ext4 ~100%, XFS ~98.77%
-
-## Version Information
-
-- Supported MySQL Versions: 5.6, 5.7, 8.0, 8.4, 9.0
-- Supported InnoDB Row Formats: REDUNDANT, COMPACT, DYNAMIC, COMPRESSED
-- Supported InnoDB Page Sizes: 4K, 8K, 16K, 32K, 64K
-- Supported Filesystems: ext4, XFS
+- [English User Guide](docs/en/USER_GUIDE_PRO.md)
+- [中文用户指南](docs/zh/USER_GUIDE_PRO.md)
+- [English Disaster Recovery Guide](docs/en/DISASTER_RECOVERY_GUIDE.md)
+- [中文灾难恢复指南](docs/zh/DISASTER_RECOVERY_GUIDE.md)
 
 ## License
 

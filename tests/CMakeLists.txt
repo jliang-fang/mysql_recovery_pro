@@ -436,9 +436,10 @@ target_link_libraries(test_real_recovery_pipeline PRIVATE dbrecovery_innodb GTes
 add_test(NAME test_real_recovery_pipeline COMMAND test_real_recovery_pipeline)
 set_tests_properties(test_real_recovery_pipeline PROPERTIES LABELS "REAL_MYSQL")
 
-# real_fixture_multiversion_test (Phase 4 P1-1): full pipeline parity checks
-# across all 5 real fixture versions (5.6–9.0): sha256 integrity, SDI page
-# presence, ground-truth row counts, partition naming, undo fixture gating.
+# real_fixture_multiversion_test validates SHA-256 integrity, version-family page
+# markers and SDI expectations, ground-truth metadata parity, partition filenames,
+# and undo-fixture presence across all five real fixture versions (5.6–9.0).
+# It does not run end-to-end row, undo, or flashback recovery.
 add_executable(test_real_fixture_multiversion real_fixture_multiversion_test.cpp)
 target_link_libraries(test_real_fixture_multiversion PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
 add_test(NAME test_real_fixture_multiversion COMMAND test_real_fixture_multiversion)
@@ -448,5 +449,11 @@ set_tests_properties(test_real_fixture_multiversion PROPERTIES LABELS "REAL_MYSQ
 add_executable(test_recovery_report test_recovery_report.cpp)
 target_link_libraries(test_recovery_report PRIVATE dbrecovery_innodb GTest::GTest GTest::Main nlohmann_json::nlohmann_json)
 gtest_discover_tests(test_recovery_report PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
+add_executable(test_recovery_cli_report test_recovery_cli_report.cpp)
+target_link_libraries(test_recovery_cli_report PRIVATE GTest::GTest GTest::Main)
+target_compile_definitions(test_recovery_cli_report PRIVATE DBRECOVERY_CLI_PATH="$<TARGET_FILE:mysql_recovery_pro>")
+add_dependencies(test_recovery_cli_report mysql_recovery_pro)
+gtest_discover_tests(test_recovery_cli_report PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
 
