@@ -9,6 +9,10 @@
 #include <vector>
 #include <memory>
 #include <functional>
+#include <optional>
+#include <cstdint>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 namespace dbrecovery {
 namespace safety {
@@ -28,6 +32,34 @@ struct SafetyReport {
     std::string serial;
     double confidence = 0.0;
     std::vector<std::string> warnings;
+};
+
+class AuthorizedRawDevice {
+public:
+    AuthorizedRawDevice() = default;
+    ~AuthorizedRawDevice();
+
+    AuthorizedRawDevice(const AuthorizedRawDevice&) = delete;
+    AuthorizedRawDevice& operator=(const AuthorizedRawDevice&) = delete;
+    AuthorizedRawDevice(AuthorizedRawDevice&& other) noexcept;
+    AuthorizedRawDevice& operator=(AuthorizedRawDevice&& other) noexcept;
+
+    bool valid() const { return fd_ >= 0; }
+    int fd() const { return fd_; }
+    int duplicate_fd() const;
+    uint64_t size_bytes() const { return size_bytes_; }
+    const struct stat& device_stat() const { return device_stat_; }
+    const SafetyReport& report() const { return report_; }
+
+private:
+    friend class SafetyGate;
+    AuthorizedRawDevice(int fd, struct stat device_stat, uint64_t size_bytes,
+                        SafetyReport report);
+
+    int fd_ = -1;
+    struct stat device_stat_ {};
+    uint64_t size_bytes_ = 0;
+    SafetyReport report_;
 };
 
 /**
@@ -89,6 +121,15 @@ public:
      * @return SafetyReport with all verification results.
      */
     SafetyReport verify_device(const std::string& device_path);
+
+    /**
+     * @brief Authorize a block device and retain the exact descriptor to scan.
+     *
+     * The caller must use this capability (or a duplicate from it) for all
+     * subsequent reads. Failure returns no descriptor and provides a reason.
+     */
+    std::optional<AuthorizedRawDevice> authorize_read_only_raw_device(
+        const std::string& device_path, std::string* reason = nullptr);
 
 private:
     /**

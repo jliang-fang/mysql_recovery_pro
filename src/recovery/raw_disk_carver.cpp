@@ -342,29 +342,28 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
         return result;
     }
 
-    std::string admission_reason;
-    if (!admit_source(config_.device_path, &admission_reason)) {
-        result.errors.push_back("Raw source rejected: " + admission_reason);
-        return result;
-    }
+    authorized_raw_device_.reset();
 
     // 获取设备/路径大小
     uint64_t device_size = 0;
 
 #ifdef __linux__
-    struct stat st;
+    struct stat st{};
     if (stat(config_.device_path.c_str(), &st) != 0) {
         result.errors.push_back("Cannot access device: " + config_.device_path);
         return result;
     }
 
     if (S_ISBLK(st.st_mode)) {
-        // 块设备 - 使用ioctl获取大小
-        int fd = open(config_.device_path.c_str(), O_RDONLY);
-        if (fd >= 0) {
-            ioctl(fd, BLKGETSIZE64, &device_size);
-            close(fd);
+        dbrecovery::safety::SafetyGate gate;
+        std::string authorization_reason;
+        authorized_raw_device_ = gate.authorize_read_only_raw_device(
+            config_.device_path, &authorization_reason);
+        if (!authorized_raw_device_.has_value()) {
+            result.errors.push_back("Raw source rejected: " + authorization_reason);
+            return result;
         }
+        device_size = authorized_raw_device_->size_bytes();
     } else if (S_ISREG(st.st_mode)) {
         // 普通文件
         device_size = st.st_size;
@@ -506,7 +505,12 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                                    std::function<void(double, const std::string&)> progress) {
     // 使用pread优化：避免ifstream的seekg开销，支持真正的并行IO
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    int fd = -1;
+    if (authorized_raw_device_.has_value()) {
+        fd = authorized_raw_device_->duplicate_fd();
+    } else {
+        fd = open(config_.device_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    }
     if (fd < 0) {
         if (config_.verbose) {
             std::cerr << "[Worker " << worker_id << "] Cannot open device\n";

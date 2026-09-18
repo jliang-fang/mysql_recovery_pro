@@ -62,41 +62,67 @@ DeviceIdentity::DeviceIdentity() {
 }
 
 DeviceIdentityInfo DeviceIdentity::verify_identity(const std::string& device_path) {
+    struct stat device_stat{};
+    if (::stat(device_path.c_str(), &device_stat) != 0 || !S_ISBLK(device_stat.st_mode)) {
+        DeviceIdentityInfo info;
+        info.device_path = device_path;
+        info.device_type = "unknown";
+        return info;
+    }
+
+    const int fd = ::open(device_path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        DeviceIdentityInfo info;
+        info.device_path = device_path;
+        info.device_type = detect_device_type(device_path);
+        return info;
+    }
+
+    auto info = verify_identity(fd, device_path, device_stat);
+    ::close(fd);
+    return info;
+}
+
+DeviceIdentityInfo DeviceIdentity::verify_identity(int fd,
+                                                   const std::string& device_path,
+                                                   const struct stat& device_stat) {
     DeviceIdentityInfo info;
     info.device_path = device_path;
-    info.device_type = detect_device_type(device_path);
-
-    // Try NVMe ioctl first for the most authoritative identity data
-    if (info.device_type == "nvme") {
-        int fd = ::open(device_path.c_str(), O_RDONLY);
-        if (fd >= 0) {
-            if (read_nvme_identity(fd, info)) {
-                info.confidence = 0.95;
-            }
-            ::close(fd);
-        }
+    if (fd < 0 || !S_ISBLK(device_stat.st_mode)) {
+        info.device_type = "unknown";
+        return info;
     }
 
-    // Fallback to sysfs if NVMe identity was not obtained or confidence is low
-    if (info.confidence < 0.5) {
-        if (read_sysfs_identity(device_path, info)) {
-            // Sysfs is less authoritative than NVMe ioctl
-            if (info.confidence < 0.5) {
-                info.confidence = 0.7;
+    const uint32_t major_num = major(device_stat.st_rdev);
+    if (major_num == 7) {
+        info.device_type = "loop";
+    } else {
+        for (const auto& entry : major_map_) {
+            if (entry.first != major_num) continue;
+            if (entry.second.find("nvme") != std::string::npos) {
+                info.device_type = "nvme";
+            } else if (entry.second.find("dm-") != std::string::npos ||
+                       entry.second.find("device-mapper") != std::string::npos) {
+                info.device_type = "device_mapper";
             }
+            break;
         }
+        if (info.device_type.empty()) info.device_type = "unknown";
     }
 
-    // If no identity data could be read, set low confidence
+    if (info.device_type == "nvme" && read_nvme_identity(fd, info)) {
+        info.confidence = 0.95;
+    }
+
+    if (info.confidence < 0.5 && read_sysfs_identity(device_path, info) &&
+        info.confidence < 0.5) {
+        info.confidence = 0.7;
+    }
+
     if (info.model_number.empty() && info.serial_number.empty()) {
         info.confidence = 0.1;
     }
 
-    // Loopback devices carry no model/serial, so the checks above cannot
-    // identify them. Identity for a loop device is the backing file, which
-    // is verified here (regular file, path recorded by the kernel, inside a
-    // trusted backing root). Without it the device stays unidentified and
-    // the safety gate rejects raw access.
     if (info.device_type == "loop") {
         apply_loopback_identity(device_path, info);
     }

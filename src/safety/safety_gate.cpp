@@ -2,11 +2,58 @@
 
 #include <iostream>
 #include <sstream>
+#include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#ifdef __linux__
+#include <linux/fs.h>
+#endif
 
 namespace dbrecovery {
 namespace safety {
 
 SafetyGate::SafetyGate() = default;
+
+AuthorizedRawDevice::AuthorizedRawDevice(int fd, struct stat device_stat,
+                                         uint64_t size_bytes, SafetyReport report)
+    : fd_(fd), device_stat_(device_stat), size_bytes_(size_bytes),
+      report_(std::move(report)) {}
+
+AuthorizedRawDevice::~AuthorizedRawDevice() {
+    if (fd_ >= 0) ::close(fd_);
+}
+
+AuthorizedRawDevice::AuthorizedRawDevice(AuthorizedRawDevice&& other) noexcept
+    : fd_(other.fd_), device_stat_(other.device_stat_), size_bytes_(other.size_bytes_),
+      report_(std::move(other.report_)) {
+    other.fd_ = -1;
+    other.size_bytes_ = 0;
+}
+
+AuthorizedRawDevice& AuthorizedRawDevice::operator=(AuthorizedRawDevice&& other) noexcept {
+    if (this == &other) return *this;
+    if (fd_ >= 0) ::close(fd_);
+    fd_ = other.fd_;
+    device_stat_ = other.device_stat_;
+    size_bytes_ = other.size_bytes_;
+    report_ = std::move(other.report_);
+    other.fd_ = -1;
+    other.size_bytes_ = 0;
+    return *this;
+}
+
+int AuthorizedRawDevice::duplicate_fd() const {
+    if (fd_ < 0) return -1;
+#ifdef F_DUPFD_CLOEXEC
+    return ::fcntl(fd_, F_DUPFD_CLOEXEC, 0);
+#else
+    const int duplicate = ::dup(fd_);
+    if (duplicate >= 0) ::fcntl(duplicate, F_SETFD, FD_CLOEXEC);
+    return duplicate;
+#endif
+}
 
 bool SafetyGate::permits_read_only_raw_access(const SafetyReport& report) {
     return report.device_identity_verified &&
@@ -155,6 +202,84 @@ SafetyReport SafetyGate::verify_device(const std::string& device_path) {
     log("=== End of Safety Gate Verification ===");
 
     return report;
+}
+
+std::optional<AuthorizedRawDevice> SafetyGate::authorize_read_only_raw_device(
+    const std::string& device_path, std::string* reason) {
+    auto reject = [&](const std::string& message) -> std::optional<AuthorizedRawDevice> {
+        if (reason) *reason = message;
+        log("Authorization refused: " + message);
+        return std::nullopt;
+    };
+
+    const int fd = ::open(device_path.c_str(), O_RDONLY | O_EXCL | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) {
+        return reject("could not exclusively open block device read-only: " +
+                      std::string(std::strerror(errno)));
+    }
+
+    struct stat device_stat{};
+    if (::fstat(fd, &device_stat) != 0) {
+        const std::string message = "could not inspect authorized descriptor: " +
+                                    std::string(std::strerror(errno));
+        ::close(fd);
+        return reject(message);
+    }
+    if (!S_ISBLK(device_stat.st_mode)) {
+        ::close(fd);
+        return reject("authorized source is not a block device");
+    }
+
+    SafetyReport report;
+    const DeviceIdentityInfo identity =
+        identity_.verify_identity(fd, device_path, device_stat);
+    report.device_identity_verified = identity.confidence > 0.5;
+    report.model = identity.model_number;
+    report.serial = identity.serial_number;
+    report.confidence = identity.confidence;
+    if (!report.device_identity_verified) {
+        report.warnings.push_back("device identity verification failed");
+    }
+
+#ifdef __linux__
+    int read_only = 0;
+    report.read_only_confirmed = ::ioctl(fd, BLKROGET, &read_only) == 0 && read_only != 0;
+    uint64_t size_bytes = 0;
+    if (::ioctl(fd, BLKGETSIZE64, &size_bytes) != 0 || size_bytes == 0) {
+        const std::string message = "could not determine block-device capacity: " +
+                                    std::string(std::strerror(errno));
+        ::close(fd);
+        return reject(message);
+    }
+#else
+    const uint64_t size_bytes = 0;
+    report.read_only_confirmed = false;
+#endif
+    report.exclusive_access = true;
+
+    const auto mount_points = loopback_.get_mount_points(device_path);
+    report.not_mounted_or_ok = mount_points.empty();
+    if (!report.not_mounted_or_ok) {
+        report.warnings.push_back("device is mounted");
+    }
+
+    if (identity.device_type == "loop") {
+        report.requires_loopback_verification = true;
+        report.backing_file = loopback_.find_backing_file(device_path);
+        report.loopback_verified = !report.backing_file.empty() &&
+                                   report.device_identity_verified;
+        if (!report.loopback_verified) {
+            report.warnings.push_back("loopback backing file failed identity policy");
+        }
+    }
+
+    if (!permits_read_only_raw_access(report)) {
+        ::close(fd);
+        return reject("mandatory raw-device safety facts were not proven");
+    }
+
+    if (reason) reason->clear();
+    return AuthorizedRawDevice(fd, device_stat, size_bytes, std::move(report));
 }
 
 void SafetyGate::log(const std::string& message) {

@@ -16,6 +16,7 @@
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/page_type_inferrer.hpp"
 #include "dbrecovery/carve/page_reassembler.hpp"
+#include "dbrecovery/safety/safety_gate.hpp"
 
 namespace dbrecovery {
 namespace recovery {
@@ -184,6 +185,7 @@ private:
     ScanResult last_scan_result_;
     std::optional<catalog::TableSchema> external_schema_;  // 外部提供的schema
     uint64_t actual_scan_stop_ = 0;  // 实际扫描结束位置
+    std::optional<safety::AuthorizedRawDevice> authorized_raw_device_;
 
     // 进程间共享的原子变量
     std::atomic<uint64_t> current_offset_{0};

@@ -55,6 +55,15 @@ public:
     DeviceIdentityInfo verify_identity(const std::string& device_path);
 
     /**
+     * @brief Verify identity using an already-open block-device descriptor.
+     *
+     * The descriptor is the object that will be authorized for later reads.
+     */
+    DeviceIdentityInfo verify_identity(int fd,
+                                       const std::string& device_path,
+                                       const struct stat& device_stat);
+
+    /**
      * @brief Check if the device at the given path is an NVMe device.
      *
      * Uses stat() + major() and compares against the NVMe major number range (usually 240-259
