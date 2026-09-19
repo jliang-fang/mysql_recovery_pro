@@ -501,7 +501,7 @@ private:
     void raw_data_scan(std::function<void(double, const std::string&)> progress);
 
     // Read data from extent
-    std::vector<uint8_t> read_extent_data(const xfs_extent& ext);
+    std::vector<uint8_t> read_extent_data(int fd, const xfs_extent& ext);
 
     // Calculate disk offset from filesystem block
     uint64_t block_to_disk_offset(uint64_t fsblock) const;

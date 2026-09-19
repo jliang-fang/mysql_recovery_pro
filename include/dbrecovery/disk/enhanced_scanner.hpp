@@ -50,6 +50,9 @@ public:
     // 扫描磁盘/镜像文件
     bool scan(const std::string& disk_path, uint64_t max_scan_size = 0);
 
+    // 接管已授权的只读来源描述符
+    bool adopt_fd(int owned_fd, uint64_t known_size, uint64_t max_scan_size = 0);
+
     // 使用 IBD 签名扫描
     std::vector<FoundIbdBlock> scan_for_ibd_blocks(uint32_t min_pages = 2);
 

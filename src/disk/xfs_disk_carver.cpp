@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <sstream>
 #include <iomanip>
+#include <limits>
 
 #ifdef __linux__
 #include <sys/stat.h>
@@ -53,13 +54,67 @@ constexpr uint16_t FIL_PAGE_COMPRESSED_AND_ENCRYPTED = 0x45B7; // Compressed+Enc
 constexpr size_t FIL_PAGE_TYPE_ABS = 24;
 constexpr size_t FIL_HEADER_SIZE = 38;
 
+namespace {
+
+bool bounded_pread(int fd, uint64_t source_size, void* buffer, size_t size, uint64_t offset) {
+    if (fd < 0 || buffer == nullptr || size == 0 || offset > source_size ||
+        size > source_size - offset) {
+        return false;
+    }
+    return ::pread(fd, buffer, size, static_cast<off_t>(offset)) == static_cast<ssize_t>(size);
+}
+
+int duplicate_read_only_fd(int fd) {
+#ifdef __linux__
+    return ::fcntl(fd, F_DUPFD_CLOEXEC, 3);
+#else
+    (void)fd;
+    return -1;
+#endif
+}
+
+}  // namespace
+
 // FRM file signature
 static constexpr uint8_t FRM_SIGNATURE[] = {0xfe, 0x01, 0x0a, 0x0c, 0x03, 0x00, 0x00, 0x10, 0x01, 0x00};
 
 // ==================== Constructor/Destructor ====================
 
 XfsDiskCarver::XfsDiskCarver() = default;
-XfsDiskCarver::~XfsDiskCarver() = default;
+
+XfsDiskCarver::~XfsDiskCarver() {
+#ifdef __linux__
+    if (source_fd_ >= 0) {
+        ::close(source_fd_);
+    }
+#endif
+}
+
+bool XfsDiskCarver::adopt_fd(int owned_fd, uint64_t known_size) {
+#ifdef __linux__
+    if (owned_fd < 0) {
+        return false;
+    }
+
+    struct stat st {};
+    const int flags = ::fcntl(owned_fd, F_GETFL);
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY || ::fstat(owned_fd, &st) != 0) {
+        ::close(owned_fd);
+        return false;
+    }
+
+    if (source_fd_ >= 0) {
+        ::close(source_fd_);
+    }
+    source_fd_ = owned_fd;
+    source_size_ = known_size;
+    return true;
+#else
+    (void)owned_fd;
+    (void)known_size;
+    return false;
+#endif
+}
 
 void XfsDiskCarver::set_config(const XfsConfig& config) {
     config_ = config;
@@ -186,15 +241,39 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
     XfsScanResult result;
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Validate device path
-    if (config_.device_path.empty()) {
-        result.errors.push_back("Device path not specified");
+    if (source_fd_ < 0) {
+#ifdef __linux__
+        if (config_.device_path.empty()) {
+            result.errors.push_back("Device path not specified");
+            return result;
+        }
+
+        const int fd = ::open(config_.device_path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            result.errors.push_back("Cannot open a regular XFS image source");
+            return result;
+        }
+
+        struct stat st {};
+        if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            ::close(fd);
+            result.errors.push_back("Cannot open a regular XFS image source");
+            return result;
+        }
+
+        if (!adopt_fd(fd, static_cast<uint64_t>(st.st_size))) {
+            result.errors.push_back("Cannot adopt regular XFS image source");
+            return result;
+        }
+#else
+        result.errors.push_back("XFS scanning is only supported on Linux");
         return result;
+#endif
     }
 
-    // Read and validate superblock
-    if (!read_superblock(config_.device_path, superblock_)) {
-        result.errors.push_back("Invalid XFS superblock or cannot read device");
+    if (!bounded_pread(source_fd_, source_size_, &superblock_, sizeof(superblock_), 0) ||
+        be32toh(superblock_.sb_magicnum) != XFS_SB_MAGIC) {
+        result.errors.push_back("Invalid XFS superblock on admitted source");
         return result;
     }
 
@@ -353,7 +432,7 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
 void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
                                      std::function<void(double, const std::string&)> progress) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    int fd = duplicate_read_only_fd(source_fd_);
     if (fd < 0) {
         if (config_.verbose) {
             std::cerr << "[Worker " << worker_id << "] Cannot open device\n";
@@ -383,7 +462,7 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
                              static_cast<uint64_t>(sect_size) * 2;
 
         xfs_agi agi;
-        if (pread(fd, &agi, sizeof(agi), agi_offset) != sizeof(agi)) {
+        if (!bounded_pread(fd, source_size_, &agi, sizeof(agi), agi_offset)) {
             continue;
         }
 
@@ -399,7 +478,7 @@ void XfsDiskCarver::ag_worker_thread(uint32_t worker_id,
                              static_cast<uint64_t>(sect_size);
 
         xfs_agf agf;
-        if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) {
+        if (!bounded_pread(fd, source_size_, &agf, sizeof(agf), agf_offset)) {
             continue;
         }
 
@@ -502,7 +581,7 @@ void XfsDiskCarver::btree_walk_recursive(int fd, uint32_t ag_index, uint32_t blo
                            static_cast<uint64_t>(block_size);
 
     std::vector<uint8_t> block_buffer(block_size);
-    if (pread(fd, block_buffer.data(), block_size, block_offset) != block_size) {
+    if (!bounded_pread(fd, source_size_, block_buffer.data(), block_size, block_offset)) {
         return;
     }
 
@@ -609,7 +688,7 @@ void XfsDiskCarver::process_inode_records(int fd, uint32_t ag_index, const uint8
             inodes_scanned_.fetch_add(1);
 
             // Read inode and try to recover
-            auto extent_info = read_inode(ag_index, ag_inode);
+            auto extent_info = read_inode(fd, ag_index, ag_inode);
             if (extent_info.has_value() && !extent_info->extents.empty()) {
                 process_recovered_inode(fd, ag_index, ag_inode, *extent_info);
             }
@@ -620,9 +699,8 @@ void XfsDiskCarver::process_inode_records(int fd, uint32_t ag_index, const uint8
 
 // ==================== Read Inode ====================
 
-std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32_t ag_inode) {
+std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(int fd, uint32_t ag_index, uint32_t ag_inode) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
     if (fd < 0) {
         return std::nullopt;
     }
@@ -642,12 +720,9 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
 
     // Read inode
     std::vector<uint8_t> inode_data(inode_size);
-    if (pread(fd, inode_data.data(), inode_size, inode_offset) != inode_size) {
-        close(fd);
+    if (!bounded_pread(fd, source_size_, inode_data.data(), inode_size, inode_offset)) {
         return std::nullopt;
     }
-
-    close(fd);
 
     // Parse inode core
     xfs_dinode_core inode_core;
@@ -776,29 +851,25 @@ std::optional<XfsExtentInfo> XfsDiskCarver::read_inode(uint32_t ag_index, uint32
 
             // Read child blocks and extract extent records from leaf nodes
             uint32_t block_size = be32toh(superblock_.sb_blocksize);
-            int fd = open(config_.device_path.c_str(), O_RDONLY);
-            if (fd >= 0) {
-                // Collect child block numbers from pointer array
-                std::vector<uint32_t> child_blocks;
-                for (uint16_t i = 0; i < numrecs; i++) {
-                    uint32_t child = read_be<uint32_t>(inode_data.data(), ptr_offset + i * 4);
-                    if (child != 0 && child < be32toh(superblock_.sb_agblocks)) {
-                        child_blocks.push_back(child);
-                    }
+
+            // Collect child block numbers from pointer array
+            std::vector<uint32_t> child_blocks;
+            for (uint16_t i = 0; i < numrecs; i++) {
+                uint32_t child = read_be<uint32_t>(inode_data.data(), ptr_offset + i * 4);
+                if (child != 0 && child < be32toh(superblock_.sb_agblocks)) {
+                    child_blocks.push_back(child);
                 }
+            }
 
-                // Process each child block (potentially multi-level)
-                for (uint32_t child_block : child_blocks) {
-                    // Calculate disk offset for the child block (AG-relative to absolute)
-                    uint64_t child_disk_offset = static_cast<uint64_t>(ag_index) *
-                        static_cast<uint64_t>(be32toh(superblock_.sb_agblocks)) * block_size +
-                        static_cast<uint64_t>(child_block) * block_size;
+            // Process each child block (potentially multi-level)
+            for (uint32_t child_block : child_blocks) {
+                // Calculate disk offset for the child block (AG-relative to absolute)
+                uint64_t child_disk_offset = static_cast<uint64_t>(ag_index) *
+                    static_cast<uint64_t>(be32toh(superblock_.sb_agblocks)) * block_size +
+                    static_cast<uint64_t>(child_block) * block_size;
 
-                    // Recursively walk btree levels to collect leaf records
-                    collect_extent_leaf_records(fd, child_disk_offset, block_size, level - 1, &info);
-                }
-
-                close(fd);
+                // Recursively walk btree levels to collect leaf records
+                collect_extent_leaf_records(fd, child_disk_offset, block_size, level - 1, &info);
             }
 
             if (!info.extents.empty()) {
@@ -919,7 +990,7 @@ void XfsDiskCarver::follow_unlinked_chain(int fd, uint32_t ag_index, uint32_t st
         }
 
         // Read and process the inode
-        auto extent_info = read_inode(ag_index, ag_inode);
+        auto extent_info = read_inode(fd, ag_index, ag_inode);
         if (extent_info.has_value()) {
             process_recovered_inode(fd, ag_index, ag_inode, *extent_info);
 
@@ -958,7 +1029,7 @@ void XfsDiskCarver::process_recovered_inode(int fd, uint32_t ag_index, uint32_t 
             continue;  // Skip unwritten extents
         }
 
-        std::vector<uint8_t> extent_data = read_extent_data(ext);
+        std::vector<uint8_t> extent_data = read_extent_data(fd, ext);
         if (!extent_data.empty()) {
             auto pages = parse_pages_from_extent(extent_data, extent_info.inode_number);
             for (auto& page : pages) {
@@ -982,34 +1053,37 @@ void XfsDiskCarver::process_recovered_inode(int fd, uint32_t ag_index, uint32_t 
 
 // ==================== Read Extent Data ====================
 
-std::vector<uint8_t> XfsDiskCarver::read_extent_data(const xfs_extent& ext) {
+std::vector<uint8_t> XfsDiskCarver::read_extent_data(int fd, const xfs_extent& ext) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
     if (fd < 0) {
         return {};
     }
 
     uint32_t block_size = be32toh(superblock_.sb_blocksize);
-    uint64_t read_size = ext.block_count * block_size;
+    if (block_size == 0 || ext.block_count > std::numeric_limits<uint64_t>::max() / block_size) {
+        return {};
+    }
+    uint64_t read_size = ext.block_count * static_cast<uint64_t>(block_size);
 
     // Limit read size for safety
     if (read_size > 100 * 1024 * 1024) {  // Max 100MB per extent
         read_size = 100 * 1024 * 1024;
     }
 
-    std::vector<uint8_t> data(read_size);
-    uint64_t disk_offset = block_to_disk_offset(ext.block_offset);
-
-    ssize_t bytes_read = pread(fd, data.data(), read_size, disk_offset);
-    close(fd);
-
-    if (bytes_read < 0) {
+    if (read_size == 0 || read_size > std::numeric_limits<size_t>::max()) {
         return {};
     }
 
-    data.resize(bytes_read);
+    std::vector<uint8_t> data(static_cast<size_t>(read_size));
+    uint64_t disk_offset = block_to_disk_offset(ext.block_offset);
+    if (!bounded_pread(fd, source_size_, data.data(), data.size(), disk_offset)) {
+        return {};
+    }
+
     return data;
 #else
+    (void)fd;
+    (void)ext;
     return {};
 #endif
 }
@@ -1192,7 +1266,7 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
     uint32_t blocks_per_page = page_size / block_size;
     if (blocks_per_page == 0) blocks_per_page = 1;
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    int fd = duplicate_read_only_fd(source_fd_);
     if (fd < 0) return;
 
     std::atomic<uint64_t> blocks_scanned{0};
@@ -1208,7 +1282,7 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                              static_cast<uint64_t>(sect_size);
 
         xfs_agf agf;
-        if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) continue;
+        if (!bounded_pread(fd, source_size_, &agf, sizeof(agf), agf_offset)) continue;
         if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) continue;
 
         uint32_t bno_root = be32toh(agf.agf_roots[0]);
@@ -1238,7 +1312,7 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                                    static_cast<uint64_t>(entry.block_num) * block_size;
 
             std::vector<uint8_t> buf(block_size);
-            if (pread(fd, buf.data(), block_size, block_offset) != static_cast<ssize_t>(block_size)) continue;
+            if (!bounded_pread(fd, source_size_, buf.data(), block_size, block_offset)) continue;
 
             uint32_t magic = read_be<uint32_t>(buf.data(), 0);
             // Check for alloc btree magic (BNO = by block number)
@@ -1292,7 +1366,7 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                 uint64_t disk_offset = fsblock * block_size;
                 std::vector<uint8_t> page_data(page_size);
 
-                if (pread(fd, page_data.data(), page_size, disk_offset) != static_cast<ssize_t>(page_size)) {
+                if (!bounded_pread(fd, source_size_, page_data.data(), page_size, disk_offset)) {
                     continue;
                 }
 
@@ -1403,8 +1477,10 @@ std::vector<xfs_extent> XfsDiskCarver::validate_extents_against_free_space(
     uint64_t agf_offset = ag_offset + sect_size;
 
     xfs_agf agf;
-    if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) return extents;
-    if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) return extents;
+    if (!bounded_pread(fd, source_size_, &agf, sizeof(agf), agf_offset)) {
+        return {};
+    }
+    if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) return {};
 
     uint32_t bno_root = be32toh(agf.agf_roots[0]);
     if (bno_root == 0 || bno_root >= ag_blocks) return extents;
@@ -1451,7 +1527,7 @@ void XfsDiskCarver::free_space_tree_check(
 
     uint64_t block_offset = ag_offset + static_cast<uint64_t>(block_num) * block_size;
     std::vector<uint8_t> buf(block_size);
-    if (pread(fd, buf.data(), block_size, block_offset) != static_cast<ssize_t>(block_size)) return;
+    if (!bounded_pread(fd, source_size_, buf.data(), block_size, block_offset)) return;
 
     uint32_t magic = read_be<uint32_t>(buf.data(), 0);
     if (magic != XFS_ABTB_MAGIC && magic != XFS_ABTB_CRC_MAGIC) return;
@@ -1543,7 +1619,7 @@ void XfsDiskCarver::collect_extent_leaf_records(
     if (level < 0 || level > 10) return;  // Safety limits
 
     std::vector<uint8_t> buf(block_size);
-    if (pread(fd, buf.data(), block_size, block_disk_offset) != static_cast<ssize_t>(block_size)) return;
+    if (!bounded_pread(fd, source_size_, buf.data(), block_size, block_disk_offset)) return;
 
     uint32_t magic = read_be<uint32_t>(buf.data(), 0);
     // Check for BMAP btree magic (CRC or non-CRC)
@@ -1608,26 +1684,11 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
     // Parallel signature-based scan for improved performance
     // Each worker thread scans a portion of the device
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    if (source_fd_ < 0 || source_size_ == 0) {
         return;
     }
 
-    uint64_t device_size = 0;
-    struct stat st;
-    if (fstat(fd, &st) == 0) {
-        if (S_ISBLK(st.st_mode)) {
-            ioctl(fd, BLKGETSIZE64, &device_size);
-        } else {
-            device_size = st.st_size;
-        }
-    }
-
-    close(fd);  // Close main fd, workers will open their own
-
-    if (device_size == 0) {
-        return;
-    }
+    const uint64_t device_size = source_size_;
 
     uint32_t block_size = be32toh(superblock_.sb_blocksize);
     // Use larger chunks (128MB) for better throughput with more workers
@@ -1644,7 +1705,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
 
     // Worker thread function
     auto worker_func = [&](uint32_t worker_id) {
-        int worker_fd = open(config_.device_path.c_str(), O_RDONLY);
+        int worker_fd = duplicate_read_only_fd(source_fd_);
         if (worker_fd < 0) {
             return;
         }
@@ -1658,12 +1719,12 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
             }
 
             uint64_t chunk_end = std::min(chunk_start + scan_chunk, device_size);
-            ssize_t bytes_read = pread(worker_fd, buffer.data(), scan_chunk + config_.page_size, chunk_start);
-            if (bytes_read <= 0) {
+            const size_t read_size = static_cast<size_t>(chunk_end - chunk_start);
+            if (!bounded_pread(worker_fd, source_size_, buffer.data(), read_size, chunk_start)) {
                 break;
             }
 
-            size_t scan_size = bytes_read;
+            size_t scan_size = read_size;
 
             // Scan for pages - check every 512 bytes (sector size) for maximum coverage
             // InnoDB pages may not always be block-aligned after deletion
@@ -1948,15 +2009,16 @@ void XfsDiskCarver::raw_data_scan(std::function<void(double, const std::string&)
         std::cout << "[INFO] Starting raw data pattern scan...\n";
     }
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    if (source_fd_ < 0 || source_size_ == 0) {
+        return;
+    }
+
+    const int fd = duplicate_read_only_fd(source_fd_);
     if (fd < 0) {
         return;
     }
 
-    // Get device size
-    struct stat st;
-    fstat(fd, &st);
-    uint64_t device_size = st.st_size;
+    const uint64_t device_size = source_size_;
 
     // Scan in 1MB chunks
     size_t scan_chunk = 1024 * 1024;
@@ -1976,9 +2038,12 @@ void XfsDiskCarver::raw_data_scan(std::function<void(double, const std::string&)
     std::atomic<uint64_t> bytes_scanned{0};
 
     for (uint64_t offset = 0; offset < device_size; offset += scan_chunk) {
-        size_t to_read = std::min(scan_chunk + config_.page_size, device_size - offset);
-        ssize_t bytes_read = pread(fd, buffer.data(), to_read, offset);
-        if (bytes_read <= 0) break;
+        size_t to_read = static_cast<size_t>(std::min<uint64_t>(
+            scan_chunk + config_.page_size, device_size - offset));
+        if (!bounded_pread(fd, source_size_, buffer.data(), to_read, offset)) {
+            break;
+        }
+        const ssize_t bytes_read = static_cast<ssize_t>(to_read);
 
         bytes_scanned.fetch_add(bytes_read);
 
@@ -2573,43 +2638,36 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
 }
 
 // ==================== AG Header Reading ====================
-bool XfsDiskCarver::read_ag_headers(uint32_t ag_index, xfs_agi& agi, xfs_agf& agf) {
+bool XfsDiskCarver::read_ag_headers(int fd, uint32_t ag_index, xfs_agi& agi, xfs_agf& agf) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
     if (fd < 0) {
         return false;
     }
 
-    uint32_t block_size = be32toh(superblock_.sb_blocksize);
-    uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
-
-    // AGI is at block 2 of each AG (XFS_AGI_BLOCK = 2)
-    uint64_t agi_offset = static_cast<uint64_t>(ag_index) * ag_blocks * block_size + 2 * block_size;
-    if (pread(fd, &agi, sizeof(agi), agi_offset) != sizeof(agi)) {
-        close(fd);
+    const uint32_t block_size = be32toh(superblock_.sb_blocksize);
+    const uint32_t ag_blocks = be32toh(superblock_.sb_agblocks);
+    const uint16_t sect_size = be16toh(superblock_.sb_sectsize);
+    if (block_size == 0 || ag_blocks == 0 || sect_size == 0 ||
+        ag_index >= be32toh(superblock_.sb_agcount)) {
         return false;
     }
 
-    if (be32toh(agi.agi_magicnum) != XFS_AGI_MAGIC) {
-        close(fd);
+    const uint64_t ag_base = static_cast<uint64_t>(ag_index) * ag_blocks * block_size;
+    const uint64_t agf_offset = ag_base + sect_size;
+    const uint64_t agi_offset = ag_base + static_cast<uint64_t>(sect_size) * 2;
+    if (!bounded_pread(fd, source_size_, &agi, sizeof(agi), agi_offset) ||
+        be32toh(agi.agi_magicnum) != XFS_AGI_MAGIC ||
+        !bounded_pread(fd, source_size_, &agf, sizeof(agf), agf_offset) ||
+        be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) {
         return false;
     }
 
-    // AGF is at block 1 of each AG (XFS_AGF_BLOCK = 1)
-    uint64_t agf_offset = static_cast<uint64_t>(ag_index) * ag_blocks * block_size + 1 * block_size;
-    if (pread(fd, &agf, sizeof(agf), agf_offset) != sizeof(agf)) {
-        close(fd);
-        return false;
-    }
-
-    if (be32toh(agf.agf_magicnum) != XFS_AGF_MAGIC) {
-        close(fd);
-        return false;
-    }
-
-    close(fd);
     return true;
 #else
+    (void)fd;
+    (void)ag_index;
+    (void)agi;
+    (void)agf;
     return false;
 #endif
 }
@@ -2619,66 +2677,42 @@ bool XfsDiskCarver::read_ag_headers(uint32_t ag_index, xfs_agi& agi, xfs_agf& ag
 
 bool XfsDiskCarver::validate_extent(const xfs_extent& ext, uint32_t ag_index) {
 #ifdef __linux__
-    // Basic sanity checks first
-    if (ext.block_count == 0) {
+    if (ext.block_count == 0 || source_fd_ < 0) {
         return false;
     }
 
-    uint32_t block_size = be32toh(superblock_.sb_blocksize);
-    uint32_t blocks_per_ag = be32toh(superblock_.sb_agblocks);
-
-    // Check extent is within AG bounds
-    if (ext.block_offset >= blocks_per_ag) {
+    const uint32_t blocks_per_ag = be32toh(superblock_.sb_agblocks);
+    if (blocks_per_ag == 0 || ag_index >= be32toh(superblock_.sb_agcount)) {
         return false;
     }
 
-    if (ext.block_offset + ext.block_count > blocks_per_ag) {
+    const uint64_t ag_base = static_cast<uint64_t>(ag_index) * blocks_per_ag;
+    if (ext.block_offset < ag_base ||
+        ext.block_offset - ag_base >= blocks_per_ag ||
+        ext.block_count > blocks_per_ag - (ext.block_offset - ag_base)) {
         return false;
     }
 
-    // Read AGF to get free space btree root
-    xfs_agi agi;
-    xfs_agf agf;
-    if (!read_ag_headers(ag_index, agi, agf)) {
-        return true;  // Assume valid if we can't check
-    }
-
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    const int fd = duplicate_read_only_fd(source_fd_);
     if (fd < 0) {
-        return true;  // Assume valid if we can't open device
+        return false;
     }
 
-    // Get free space btree root (by block number)
-    // agf_roots[0] = BNO (block number ordered)
-    // agf_roots[1] = CNT (count ordered)
-    uint32_t bno_root = be32toh(agf.agf_roots[0]);  // XFS_BTNUM_BNOi = 0
-    uint32_t bno_level = be32toh(agf.agf_levels[0]);
-
-    if (bno_root == 0) {
-        close(fd);
-        return true;  // No btree, assume valid
+    xfs_agi agi {};
+    xfs_agf agf {};
+    const bool headers_valid = read_ag_headers(fd, ag_index, agi, agf);
+    ::close(fd);
+    if (!headers_valid) {
+        return false;
     }
 
-    // Walk free space btree to check if extent blocks are free
-    // This is a simplified check - full implementation would traverse btree
-    // and check each block of the extent against free space records
-
-    // For now, do a quick heuristic: check if the AG has enough free space
-    uint32_t free_blocks = be32toh(agf.agf_freeblks);
-    uint32_t longest_free = be32toh(agf.agf_longest);
-
-    close(fd);
-
-    // If there's enough contiguous free space, extent might be valid
-    // This is a heuristic - actual implementation would check block-by-block
-    if (ext.block_count <= longest_free) {
-        return true;  // Possibly valid
-    }
-
-    // Extent larger than longest free run - likely partially overwritten
-    return false;
+    const uint32_t bno_root = be32toh(agf.agf_roots[XFS_BTNUM_BNOi]);
+    const uint32_t longest_free = be32toh(agf.agf_longest);
+    return bno_root != 0 && ext.block_count <= longest_free;
 #else
-    return true;  // Non-Linux always returns true
+    (void)ext;
+    (void)ag_index;
+    return false;
 #endif
 }
 

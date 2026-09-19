@@ -89,6 +89,34 @@ TEST_F(MountTopologyTest, RejectsMountedSlaveAndHolderRelations) {
     EXPECT_EQ(report.mount_points[1], "/mnt/holder");
 }
 
+TEST_F(MountTopologyTest, FindsMountsAcrossTransitiveCyclicTopology) {
+    const auto disk = add_device("disk", "8:0");
+    const auto partition = add_device("partition", "8:1", disk);
+    const auto mapper = add_device("mapper", "253:0");
+    const auto md = add_device("md", "9:0");
+    const auto physical = add_device("physical", "8:16");
+
+    add_relation(partition, "holders", mapper);
+    add_relation(mapper, "slaves", md);
+    add_relation(md, "slaves", physical);
+    add_relation(physical, "holders", mapper);
+    add_relation(mapper, "holders", md);
+
+    write_mountinfo("42 1 8:0 / /mnt/parent rw - ext4 /dev/disk rw\n"
+                    "43 1 8:16 / /mnt/physical rw - ext4 /dev/physical rw\n"
+                    "44 1 9:0 / /mnt/md rw - ext4 /dev/md0 rw\n"
+                    "45 1 253:0 / /mnt/mapper rw - ext4 /dev/mapper/test rw\n");
+
+    const auto report = inspect();
+    EXPECT_TRUE(report.complete);
+    ASSERT_EQ(report.related_devices.size(), 5u);
+    ASSERT_EQ(report.mount_points.size(), 4u);
+    EXPECT_EQ(report.mount_points[0], "/mnt/parent");
+    EXPECT_EQ(report.mount_points[1], "/mnt/physical");
+    EXPECT_EQ(report.mount_points[2], "/mnt/md");
+    EXPECT_EQ(report.mount_points[3], "/mnt/mapper");
+}
+
 TEST_F(MountTopologyTest, IgnoresUnrelatedMountAndUnescapesMountPoint) {
     add_device("admitted", "8:1");
     add_device("unrelated", "8:2");
@@ -114,6 +142,42 @@ TEST_F(MountTopologyTest, FailsClosedForMissingTopologyOrMalformedMountinfo) {
     fs::create_directories(test_root_ / "devices" / "admitted" / "holders");
     write_mountinfo("malformed\n");
 
+    report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+}
+
+TEST_F(MountTopologyTest, FailsClosedForIdentityMismatchBrokenRelationAndMissingMountinfo) {
+    const auto admitted = add_device("admitted", "8:1");
+    write_mountinfo("42 1 8:1 / /mnt rw - ext4 /dev/admitted rw\n");
+
+    std::ofstream(admitted / "dev", std::ios::trunc) << "8:2\n";
+    auto report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+
+    std::ofstream(admitted / "dev", std::ios::trunc) << "8:1\n";
+    fs::create_symlink(test_root_ / "devices" / "missing", admitted / "slaves" / "broken");
+    report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+
+    fs::remove(admitted / "slaves" / "broken");
+    fs::remove(test_root_ / "mountinfo");
+    report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+}
+
+TEST_F(MountTopologyTest, FailsClosedForMalformedMountinfoDeviceOrSeparator) {
+    add_device("admitted", "8:1");
+
+    write_mountinfo("42 1 invalid / /mnt rw - ext4 /dev/admitted rw\n");
+    auto report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+
+    write_mountinfo("42 1 8:1 / /mnt rw ext4 /dev/admitted rw\n");
     report = inspect();
     EXPECT_FALSE(report.complete);
     EXPECT_FALSE(report.error.empty());
