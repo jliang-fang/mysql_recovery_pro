@@ -393,6 +393,16 @@ gtest_discover_tests(test_salvage_accuracy)
 file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_tmp)
 set(DBREC_TEST_TMPDIR_VALUE "${CMAKE_CURRENT_BINARY_DIR}/test_tmp")
 
+# FD adoption preserves capability-bound raw reads without pathname reopening.
+add_executable(test_fd_adoption fd_adoption_test.cpp)
+target_link_libraries(test_fd_adoption PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_fd_adoption PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
+# Mount admission resolves descriptor identities, not mutable pathname aliases.
+add_executable(test_mount_topology mount_topology_test.cpp)
+target_link_libraries(test_mount_topology PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_mount_topology PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
 add_executable(test_l3_l4_isolation test_l3_l4_isolation.cpp)
 target_link_libraries(test_l3_l4_isolation PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_l3_l4_isolation PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")

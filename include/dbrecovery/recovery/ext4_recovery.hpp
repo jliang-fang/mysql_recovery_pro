@@ -289,6 +289,11 @@ public:
     Ext4Recovery();
     ~Ext4Recovery();
 
+    Ext4Recovery(const Ext4Recovery&) = delete;
+    Ext4Recovery& operator=(const Ext4Recovery&) = delete;
+
+    bool adopt_fd(int owned_fd, uint64_t known_size);
+
     void set_config(const Ext4Config& config);
 
     // Set external schema for schema-aware recovery
@@ -312,6 +317,8 @@ public:
 
 private:
     Ext4Config config_;
+    int source_fd_ = -1;
+    uint64_t source_size_ = 0;
     ext4_superblock superblock_;
     Ext4ScanResult last_result_;
     std::optional<catalog::TableSchema> external_schema_;  // External schema for schema-aware recovery
@@ -334,13 +341,13 @@ private:
     std::queue<std::pair<uint64_t, Ext4BlockInfo>> result_queue_;
 
     // Read block group descriptor
-    bool read_group_descriptor(uint32_t group_index, ext4_group_desc& desc) const;
+    bool read_group_descriptor(int fd, uint32_t group_index, ext4_group_desc& desc) const;
 
     // Read block bitmap for a group
-    std::vector<uint8_t> read_block_bitmap(uint32_t group_index);
+    std::vector<uint8_t> read_block_bitmap(int fd, uint32_t group_index);
 
     // Read inode bitmap for a group
-    std::vector<uint8_t> read_inode_bitmap(uint32_t group_index);
+    std::vector<uint8_t> read_inode_bitmap(int fd, uint32_t group_index);
 
     /**
      * @brief Check if a block is free in the block bitmap
@@ -386,7 +393,7 @@ private:
     }
 
     // Read inode from inode table
-    std::optional<Ext4InodeInfo> read_inode(uint32_t group_index, uint32_t local_inode);
+    std::optional<Ext4InodeInfo> read_inode(int fd, uint32_t group_index, uint32_t local_inode);
 
     // Parse extents from inode (fd and block_size needed for legacy indirect block mapping)
     std::vector<ext4_extent> parse_extents(int fd, const ext4_inode& inode, uint32_t block_size);
@@ -398,13 +405,14 @@ private:
     std::vector<ext4_extent> traverse_extent_tree_from_inode(int fd, const ext4_inode& inode, uint32_t block_size);
 
     // Scan freed blocks in block bitmap
-    void scan_freed_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap);
+    void scan_freed_blocks(int fd, uint32_t group_index, const std::vector<uint8_t>& bitmap);
 
     // Scan allocated blocks for InnoDB INDEX pages (for DELETE recovery)
-    void scan_allocated_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap);
+    void scan_allocated_blocks(int fd, uint32_t group_index, const std::vector<uint8_t>& bitmap);
 
     // Safe inode scanning with bounds checking
-    void scan_deleted_inodes_safe(uint32_t group_index, const std::vector<uint8_t>& inode_bitmap);
+    void scan_deleted_inodes_safe(int fd, uint32_t group_index,
+                                  const std::vector<uint8_t>& inode_bitmap);
 
     // Worker thread for parallel group scanning
     void group_worker_thread(uint32_t worker_id,
@@ -414,7 +422,9 @@ private:
     uint64_t block_to_disk_offset(uint64_t block) const;
 
     // Calculate disk offset for inode
-    uint64_t inode_to_disk_offset(uint32_t group_index, uint32_t local_inode) const;
+    uint64_t inode_to_disk_offset(int fd, uint32_t group_index, uint32_t local_inode) const;
+
+    int duplicate_source_fd() const;
 };
 
 } // namespace ext4

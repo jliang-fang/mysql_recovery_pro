@@ -130,22 +130,31 @@ SafetyReport SafetyGate::verify_device(const std::string& device_path) {
     // Step 3: Mount Status Check
     // ---------------------------------------------------------------
     log("[Step 3/4] Checking mount status...");
-    auto mount_points = loopback_.get_mount_points(device_path);
-    if (mount_points.empty()) {
-        report.not_mounted_or_ok = true;
-        log("  Device is NOT mounted - OK");
-    } else {
-        std::ostringstream oss;
-        oss << "Device is mounted at:";
-        for (const auto& mp : mount_points) {
-            oss << " " << mp;
-        }
-        std::string warning = oss.str();
+    struct stat device_stat {};
+    const bool inspected_device = ::stat(device_path.c_str(), &device_stat) == 0 &&
+                                  S_ISBLK(device_stat.st_mode);
+    const auto topology = inspected_device
+        ? loopback_.inspect_mount_topology(device_stat)
+        : MountTopologyReport{};
+    report.not_mounted_or_ok = topology.complete && !topology.mounted();
+    if (!topology.complete) {
+        const std::string detail = topology.error.empty()
+            ? "could not inspect a block-device identity"
+            : topology.error;
+        const std::string warning = "could not prove mounted-device topology is safe: " + detail;
         log("  WARNING: " + warning);
         report.warnings.push_back(warning);
-        // not_mounted_or_ok stays false since the device is mounted;
-        // recovery from a mounted device may still be possible but risky
-        report.not_mounted_or_ok = false;
+    } else if (topology.mounted()) {
+        std::ostringstream mounts;
+        mounts << "Device or related block device is mounted at:";
+        for (const auto& mount_point : topology.mount_points) {
+            mounts << " " << mount_point;
+        }
+        const std::string warning = mounts.str();
+        log("  WARNING: " + warning);
+        report.warnings.push_back(warning);
+    } else {
+        log("  Device topology is not mounted - OK");
     }
 
     // ---------------------------------------------------------------
@@ -257,10 +266,18 @@ std::optional<AuthorizedRawDevice> SafetyGate::authorize_read_only_raw_device(
 #endif
     report.exclusive_access = true;
 
-    const auto mount_points = loopback_.get_mount_points(device_path);
-    report.not_mounted_or_ok = mount_points.empty();
-    if (!report.not_mounted_or_ok) {
-        report.warnings.push_back("device is mounted");
+    const auto topology = loopback_.inspect_mount_topology(device_stat);
+    report.not_mounted_or_ok = topology.complete && !topology.mounted();
+    if (!topology.complete) {
+        report.warnings.push_back("could not prove mounted-device topology is safe: " +
+                                  topology.error);
+    } else if (topology.mounted()) {
+        std::ostringstream mounts;
+        mounts << "device or related block device is mounted at:";
+        for (const auto& mount_point : topology.mount_points) {
+            mounts << " " << mount_point;
+        }
+        report.warnings.push_back(mounts.str());
     }
 
     if (identity.device_type == "loop") {

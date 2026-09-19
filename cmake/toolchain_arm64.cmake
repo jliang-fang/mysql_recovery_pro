@@ -132,6 +132,7 @@ set(SOURCES
     src/page/page_v55.cpp
     src/page/page_v84.cpp
     src/innodb/page_parser_v3.cpp
+    src/disk/raw_scanner.cpp
     src/disk/io_uring_scanner.cpp
     # ARM64特定优化
     src/platform/arm64/cpu_optimizations_arm64.cpp

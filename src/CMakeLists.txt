@@ -19,7 +19,6 @@ set(RECOVERY_SOURCES
     recovery/blob_chain_rebuilder.cpp
     recovery/disaster_recovery.cpp
     recovery/truncate_recovery.cpp
-    recovery/disk_scanner.cpp
     recovery/parallel_engine.cpp
 )
 

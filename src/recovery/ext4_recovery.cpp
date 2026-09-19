@@ -47,10 +47,92 @@ constexpr size_t FIL_PAGE_TYPE_ABS = 24;
 // ext4 extent magic
 constexpr uint16_t EXT4_EXTENT_MAGIC = 0xF30A;
 
-// ==================== Constructor/Destructor ====================
+bool read_superblock_from_fd(int fd, uint64_t source_size, ext4_superblock& sb) {
+#ifdef __linux__
+    if (fd < 0 || source_size < EXT4_SUPERBLOCK_OFFSET + sizeof(ext4_superblock)) {
+        return false;
+    }
+
+    auto read_at = [&](uint64_t offset) -> ssize_t {
+        if (offset > source_size || sizeof(ext4_superblock) > source_size - offset) {
+            return -1;
+        }
+        return ::pread(fd, &sb, sizeof(ext4_superblock), offset);
+    };
+
+    ssize_t bytes_read = read_at(EXT4_SUPERBLOCK_OFFSET);
+    if (bytes_read == sizeof(ext4_superblock) &&
+        le16toh(sb.s_magic) == EXT2_SUPER_MAGIC) {
+        return true;
+    }
+
+    std::cerr << "[WARN] Primary ext4 superblock invalid, trying backup superblocks...\n";
+
+    uint32_t block_size = 1024;
+    uint32_t blocks_per_group = 8192;
+    if (bytes_read >= static_cast<ssize_t>(offsetof(ext4_superblock, s_log_block_size) + 8)) {
+        const uint32_t log_block_size = le32toh(sb.s_log_block_size);
+        if (log_block_size <= 6) {
+            block_size = EXT4_SUPERBLOCK_OFFSET << log_block_size;
+        }
+        const uint32_t bpg = le32toh(sb.s_blocks_per_group);
+        if (bpg > 0 && bpg < 100000000) {
+            blocks_per_group = bpg;
+        }
+    }
+
+    for (int backup_group : {1, 3, 5, 7, 9, 25, 27, 32, 49, 64, 81, 100, 125, 128, 243, 256, 343, 512, 625, 729}) {
+        const uint64_t backup_offset = static_cast<uint64_t>(backup_group) *
+                                       static_cast<uint64_t>(blocks_per_group) * block_size +
+                                       EXT4_SUPERBLOCK_OFFSET;
+        bytes_read = read_at(backup_offset);
+        if (bytes_read == sizeof(ext4_superblock) &&
+            le16toh(sb.s_magic) == EXT2_SUPER_MAGIC) {
+            std::cerr << "[INFO] Found valid ext4 superblock in group " << backup_group
+                      << " (offset " << backup_offset << ")\n";
+            return true;
+        }
+    }
+#endif
+    return false;
+}
 
 Ext4Recovery::Ext4Recovery() = default;
-Ext4Recovery::~Ext4Recovery() = default;
+
+Ext4Recovery::~Ext4Recovery() {
+#ifdef __linux__
+    if (source_fd_ >= 0) {
+        ::close(source_fd_);
+        source_fd_ = -1;
+    }
+#endif
+}
+
+bool Ext4Recovery::adopt_fd(int owned_fd, uint64_t known_size) {
+#ifdef __linux__
+    if (owned_fd < 0 || known_size == 0) {
+        if (owned_fd >= 0) ::close(owned_fd);
+        return false;
+    }
+
+    const int flags = ::fcntl(owned_fd, F_GETFL);
+    struct stat status {};
+    if (flags < 0 || (flags & O_ACCMODE) != O_RDONLY ||
+        ::fstat(owned_fd, &status) != 0) {
+        ::close(owned_fd);
+        return false;
+    }
+
+    if (source_fd_ >= 0) ::close(source_fd_);
+    source_fd_ = owned_fd;
+    source_size_ = known_size;
+    return true;
+#else
+    (void)owned_fd;
+    (void)known_size;
+    return false;
+#endif
+}
 
 void Ext4Recovery::set_config(const Ext4Config& config) {
     config_ = config;
@@ -133,240 +215,176 @@ bool Ext4Recovery::read_superblock(const std::string& device_path, ext4_superblo
 
 // ==================== Group Descriptor Reading ====================
 
-bool Ext4Recovery::read_group_descriptor(uint32_t group_index, ext4_group_desc& desc) const {
+bool Ext4Recovery::read_group_descriptor(int fd, uint32_t group_index, ext4_group_desc& desc) const {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    if (fd < 0 || block_size_ == 0 || desc_size_ < 32 ||
+        desc_size_ > sizeof(ext4_group_desc)) {
         return false;
     }
 
-    // Use cached block_size and desc_size (thread-safe)
-    uint32_t block_size = block_size_;
-    uint32_t desc_size = desc_size_;
+    const uint32_t gdb_block = (block_size_ == 1024) ? 2 : 1;
+    const uint64_t desc_offset = static_cast<uint64_t>(gdb_block) * block_size_ +
+                                 static_cast<uint64_t>(group_index) * desc_size_;
+    if (desc_offset > source_size_ || desc_size_ > source_size_ - desc_offset) {
+        return false;
+    }
 
-    // Group descriptor table starts at block 1 (or 2 for 1KB blocks)
-    uint32_t gdb_block = (block_size == 1024) ? 2 : 1;
-
-    // Calculate descriptor offset
-    uint64_t desc_offset = static_cast<uint64_t>(gdb_block) * block_size +
-                         static_cast<uint64_t>(group_index) * desc_size;
-
-    ssize_t bytes_read = pread(fd, &desc, sizeof(ext4_group_desc), desc_offset);
-    close(fd);
-
-    return bytes_read >= static_cast<ssize_t>(desc_size);
+    std::memset(&desc, 0, sizeof(desc));
+    return ::pread(fd, &desc, desc_size_, desc_offset) == desc_size_;
 #else
+    (void)fd;
+    (void)group_index;
+    (void)desc;
     return false;
 #endif
 }
 
 // ==================== Block Bitmap Reading ====================
 
-std::vector<uint8_t> Ext4Recovery::read_block_bitmap(uint32_t group_index) {
+std::vector<uint8_t> Ext4Recovery::read_block_bitmap(int fd, uint32_t group_index) {
 #ifdef __linux__
-    ext4_group_desc desc;
-    if (!read_group_descriptor(group_index, desc)) {
+    ext4_group_desc desc {};
+    if (!read_group_descriptor(fd, group_index, desc)) {
         return {};
     }
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    const uint64_t bitmap_block = static_cast<uint64_t>(le32toh(desc.bg_block_bitmap_lo)) |
+                                  (static_cast<uint64_t>(le32toh(desc.bg_block_bitmap_hi)) << 32);
+    if (bitmap_block == 0 || blocks_per_group_ == 0 || block_size_ == 0) {
         return {};
     }
 
-    // Use cached values (thread-safe)
-    uint32_t block_size = block_size_;
-    uint32_t blocks_per_group = blocks_per_group_;
-
-    // Calculate block bitmap block number (combine lo and hi for 64-bit)
-    uint64_t bitmap_block = static_cast<uint64_t>(le32toh(desc.bg_block_bitmap_lo)) |
-                          (static_cast<uint64_t>(le32toh(desc.bg_block_bitmap_hi)) << 32);
-
-    if (bitmap_block == 0) {
-        close(fd);
+    const size_t bitmap_size = (blocks_per_group_ + 7) / 8;
+    const uint64_t disk_offset = bitmap_block * block_size_;
+    if (disk_offset > source_size_ || bitmap_size > source_size_ - disk_offset) {
         return {};
     }
 
-    // Block bitmap size = blocks_per_group / 8 bytes
-    size_t bitmap_size = (blocks_per_group + 7) / 8;
     std::vector<uint8_t> bitmap(bitmap_size);
-
-    uint64_t disk_offset = bitmap_block * block_size;
-    ssize_t bytes_read = pread(fd, bitmap.data(), bitmap_size, disk_offset);
-    close(fd);
-
-    if (bytes_read != static_cast<ssize_t>(bitmap_size)) {
+    if (::pread(fd, bitmap.data(), bitmap_size, disk_offset) !=
+        static_cast<ssize_t>(bitmap_size)) {
         return {};
     }
-
     return bitmap;
 #else
+    (void)fd;
+    (void)group_index;
     return {};
 #endif
 }
 
 // ==================== Inode Bitmap Reading ====================
 
-std::vector<uint8_t> Ext4Recovery::read_inode_bitmap(uint32_t group_index) {
+std::vector<uint8_t> Ext4Recovery::read_inode_bitmap(int fd, uint32_t group_index) {
 #ifdef __linux__
-    ext4_group_desc desc;
-    if (!read_group_descriptor(group_index, desc)) {
+    ext4_group_desc desc {};
+    if (!read_group_descriptor(fd, group_index, desc)) {
         return {};
     }
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    const uint64_t bitmap_block = static_cast<uint64_t>(le32toh(desc.bg_inode_bitmap_lo)) |
+                                  (static_cast<uint64_t>(le32toh(desc.bg_inode_bitmap_hi)) << 32);
+    if (bitmap_block == 0 || inodes_per_group_ == 0 || block_size_ == 0) {
         return {};
     }
 
-    // Use cached values (thread-safe)
-    uint32_t block_size = block_size_;
-    uint32_t inodes_per_group = inodes_per_group_;
-
-    uint64_t bitmap_block = static_cast<uint64_t>(le32toh(desc.bg_inode_bitmap_lo)) |
-                          (static_cast<uint64_t>(le32toh(desc.bg_inode_bitmap_hi)) << 32);
-
-    if (bitmap_block == 0) {
-        close(fd);
+    const size_t bitmap_size = (inodes_per_group_ + 7) / 8;
+    const uint64_t disk_offset = bitmap_block * block_size_;
+    if (disk_offset > source_size_ || bitmap_size > source_size_ - disk_offset) {
         return {};
     }
 
-    size_t bitmap_size = (inodes_per_group + 7) / 8;
     std::vector<uint8_t> bitmap(bitmap_size);
-
-    uint64_t disk_offset = bitmap_block * block_size;
-    ssize_t bytes_read = pread(fd, bitmap.data(), bitmap_size, disk_offset);
-    close(fd);
-
-    if (bytes_read != static_cast<ssize_t>(bitmap_size)) {
+    if (::pread(fd, bitmap.data(), bitmap_size, disk_offset) !=
+        static_cast<ssize_t>(bitmap_size)) {
         return {};
     }
-
     return bitmap;
 #else
+    (void)fd;
+    (void)group_index;
     return {};
 #endif
 }
 
 // ==================== Inode Reading ====================
 
-uint64_t Ext4Recovery::inode_to_disk_offset(uint32_t group_index, uint32_t local_inode) const {
+uint64_t Ext4Recovery::inode_to_disk_offset(int fd, uint32_t group_index, uint32_t local_inode) const {
 #ifdef __linux__
-    // Safety check: local_inode must be at least 1
-    if (local_inode == 0) {
+    if (local_inode == 0 || local_inode > inodes_per_group_ ||
+        block_size_ == 0 || inode_size_ == 0 || blocks_per_group_ == 0) {
         return 0;
     }
 
-    // Use cached values (thread-safe)
-    uint32_t block_size = block_size_;
-    uint16_t inode_size = inode_size_;
-    uint32_t blocks_per_group = blocks_per_group_;
-
-    if (block_size == 0 || inode_size == 0 || blocks_per_group == 0) {
+    ext4_group_desc desc {};
+    if (!read_group_descriptor(fd, group_index, desc)) {
         return 0;
     }
 
-    ext4_group_desc desc;
-    if (!read_group_descriptor(group_index, desc)) {
-        return 0;
-    }
-
-    uint64_t inode_table_block = static_cast<uint64_t>(le32toh(desc.bg_inode_table_lo)) |
-                                (static_cast<uint64_t>(le32toh(desc.bg_inode_table_hi)) << 32);
-
-    if (inode_table_block == 0) {
-        return 0;
-    }
-
-    // Safety check: inode_table_block should be within the group
-    // Each group has blocks_per_group blocks, starting at group_index * blocks_per_group
-    uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group;
-    uint64_t group_end_block = group_start_block + blocks_per_group;
-
+    const uint64_t inode_table_block = static_cast<uint64_t>(le32toh(desc.bg_inode_table_lo)) |
+                                       (static_cast<uint64_t>(le32toh(desc.bg_inode_table_hi)) << 32);
+    const uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group_;
+    const uint64_t group_end_block = group_start_block + blocks_per_group_;
     if (inode_table_block < group_start_block || inode_table_block >= group_end_block) {
-        // Invalid inode table block - outside group bounds
-        // This can happen with corrupted filesystems
         return 0;
     }
 
-    // Calculate offset within inode table
-    uint64_t table_offset = inode_table_block * block_size;
-    uint64_t inode_offset = static_cast<uint64_t>(local_inode - 1) * inode_size;
-
+    const uint64_t table_offset = inode_table_block * block_size_;
+    const uint64_t inode_offset = static_cast<uint64_t>(local_inode - 1) * inode_size_;
+    if (table_offset > source_size_ || inode_offset > source_size_ - table_offset) {
+        return 0;
+    }
     return table_offset + inode_offset;
 #else
+    (void)fd;
+    (void)group_index;
+    (void)local_inode;
     return 0;
 #endif
 }
 
-std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(uint32_t group_index, uint32_t local_inode) {
+std::optional<Ext4InodeInfo> Ext4Recovery::read_inode(int fd, uint32_t group_index, uint32_t local_inode) {
 #ifdef __linux__
-    // Safety check: ensure cached values are valid
-    if (inode_size_ == 0 || inodes_per_group_ == 0) {
+    if (fd < 0 || inode_size_ == 0 || inode_size_ > sizeof(ext4_inode) ||
+        inodes_per_group_ == 0) {
         return std::nullopt;
     }
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    const uint64_t inode_offset = inode_to_disk_offset(fd, group_index, local_inode);
+    if (inode_offset == 0 || inode_offset > source_size_ ||
+        inode_size_ > source_size_ - inode_offset) {
         return std::nullopt;
     }
 
-    // Use cached values (thread-safe)
-    uint16_t inode_size = inode_size_;
-    uint32_t inodes_per_group = inodes_per_group_;
-
-    uint64_t inode_offset = inode_to_disk_offset(group_index, local_inode);
-
-    if (inode_offset == 0) {
-        close(fd);
+    ext4_inode inode_raw {};
+    if (::pread(fd, &inode_raw, inode_size_, inode_offset) != inode_size_) {
         return std::nullopt;
     }
 
-    ext4_inode inode_raw;
-    memset(&inode_raw, 0, sizeof(inode_raw));
-    ssize_t bytes_read = pread(fd, &inode_raw, inode_size, inode_offset);
-
-    if (bytes_read != inode_size) {
-        close(fd);
-        return std::nullopt;
-    }
-
-    // Parse inode information
     Ext4InodeInfo info;
-    info.inode_number = group_index * inodes_per_group + local_inode;
+    info.inode_number = group_index * inodes_per_group_ + local_inode;
     info.block_group = group_index;
 
-    // Check if inode is deleted (mode = 0 or dtime > 0)
-    uint16_t mode = le16toh(inode_raw.i_mode);
-    uint32_t dtime = le32toh(inode_raw.i_dtime);
-    uint16_t links_count = le16toh(inode_raw.i_links_count);
-
+    const uint16_t mode = le16toh(inode_raw.i_mode);
+    const uint32_t dtime = le32toh(inode_raw.i_dtime);
+    const uint16_t links_count = le16toh(inode_raw.i_links_count);
     info.is_deleted = (mode == 0) || (dtime > 0) || (links_count == 0);
     info.dtime = dtime;
-
-    // Get file size (combine lo and hi)
-    uint64_t size_lo = le32toh(inode_raw.i_size_lo);
-    uint64_t size_hi = static_cast<uint64_t>(le32toh(inode_raw.i_size_hi)) << 32;
-    info.file_size = size_lo | size_hi;
-
+    info.file_size = le32toh(inode_raw.i_size_lo) |
+                     (static_cast<uint64_t>(le32toh(inode_raw.i_size_hi)) << 32);
     if (info.file_size == 0) {
-        close(fd);
-        return std::nullopt;  // Empty inode
+        return std::nullopt;
     }
 
-    // Parse extents — try direct first, then multi-level traversal
     info.extents = parse_extents(fd, inode_raw, block_size_);
     if (info.extents.empty() && info.file_size >= config_.page_size) {
         info.extents = traverse_extent_tree_from_inode(fd, inode_raw, block_size_);
     }
-    close(fd);
-
-    if (info.extents.empty()) {
-        return std::nullopt;  // No data extents
-    }
-
-    return info;
+    return info.extents.empty() ? std::nullopt : std::optional<Ext4InodeInfo>(std::move(info));
 #else
+    (void)fd;
+    (void)group_index;
+    (void)local_inode;
     return std::nullopt;
 #endif
 }
@@ -656,6 +674,14 @@ uint64_t Ext4Recovery::block_to_disk_offset(uint64_t block) const {
 
 // ==================== Main Scan Function ====================
 
+int Ext4Recovery::duplicate_source_fd() const {
+#ifdef __linux__
+    return source_fd_ >= 0 ? ::dup(source_fd_) : -1;
+#else
+    return -1;
+#endif
+}
+
 Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)> progress) {
     Ext4ScanResult result;
     auto start_time = std::chrono::high_resolution_clock::now();
@@ -663,8 +689,8 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     // Debug: Log entry
     if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Ext4Recovery::scan() starting\n" << std::flush;
 
-    if (!read_superblock(config_.device_path, superblock_)) {
-        result.errors.push_back("Invalid ext4 superblock or cannot read device");
+    if (source_fd_ < 0 || !read_superblock_from_fd(source_fd_, source_size_, superblock_)) {
+        result.errors.push_back("Invalid ext4 superblock or cannot read admitted source");
         return result;
     }
 
@@ -680,7 +706,14 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     // Calculate number of block groups
     uint64_t total_blocks = static_cast<uint64_t>(le32toh(superblock_.s_blocks_count_lo)) |
                            (static_cast<uint64_t>(le32toh(superblock_.s_blocks_count_hi)) << 32);
-    result.group_count = total_blocks / result.blocks_per_group;
+    if (result.block_size == 0 || result.inode_size == 0 ||
+        result.inode_size > sizeof(ext4_inode) || result.blocks_per_group == 0 ||
+        result.inodes_per_group == 0 || total_blocks == 0) {
+        result.errors.push_back("Invalid ext4 geometry");
+        return result;
+    }
+    result.group_count = static_cast<uint32_t>((total_blocks + result.blocks_per_group - 1) /
+                                                result.blocks_per_group);
 
     // Cache all superblock values to member variables for thread-safe access
     group_count_ = result.group_count;
@@ -781,9 +814,11 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
 #ifdef __linux__
     if (dbrecovery::innodb::g_verbose)     std::cout << "[DEBUG] Worker " << worker_id << " starting\n" << std::flush;
 
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
+    const int fd = duplicate_source_fd();
     if (fd < 0) {
-        if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Worker " << worker_id << " failed to open device\n" << std::flush;
+        if (dbrecovery::innodb::g_verbose) {
+            std::cout << "[DEBUG] Worker " << worker_id << " could not duplicate admitted source\n" << std::flush;
+        }
         return;
     }
 
@@ -817,15 +852,15 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
 
         // Read block bitmap to identify freed blocks
         if (config_.scan_freed_blocks || config_.scan_allocated_innodb_blocks) {
-            std::vector<uint8_t> bitmap = read_block_bitmap(group_index);
+            std::vector<uint8_t> bitmap = read_block_bitmap(fd, group_index);
             if (!bitmap.empty()) {
                 // Scan freed blocks
                 if (config_.scan_freed_blocks) {
-                    scan_freed_blocks(group_index, bitmap);
+                    scan_freed_blocks(fd, group_index, bitmap);
                 }
                 // Scan allocated blocks for InnoDB INDEX pages (DELETE recovery)
                 if (config_.scan_allocated_innodb_blocks) {
-                    scan_allocated_blocks(group_index, bitmap);
+                    scan_allocated_blocks(fd, group_index, bitmap);
                 }
             }
         }
@@ -834,10 +869,10 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
         // This is now safer with bounds checking in inode_to_disk_offset
         if (config_.scan_deleted_inodes) {
             try {
-                std::vector<uint8_t> inode_bitmap = read_inode_bitmap(group_index);
+                std::vector<uint8_t> inode_bitmap = read_inode_bitmap(fd, group_index);
                 if (!inode_bitmap.empty()) {
                     // Scan deleted inodes (those with bit=0 in bitmap but have data)
-                    scan_deleted_inodes_safe(group_index, inode_bitmap);
+                    scan_deleted_inodes_safe(fd, group_index, inode_bitmap);
                 }
             } catch (const std::exception& e) {
                 // Log and continue on error
@@ -870,10 +905,10 @@ void Ext4Recovery::group_worker_thread(uint32_t worker_id,
 
 // ==================== Freed Block Scanning ====================
 
-void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap) {
+void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::vector<uint8_t>& bitmap) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    if (fd < 0 || block_size_ == 0 || config_.page_size == 0 ||
+        config_.page_size > source_size_) {
         return;
     }
 
@@ -885,8 +920,8 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
     // Calculate group start offset
     uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group;
 
-    // Safety check: ensure we don't read beyond device
-    uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group * block_size;
+    // Safety check: ensure we don't read beyond the admitted source
+    const uint64_t max_offset = source_size_;
 
     // InnoDB pages are 16KB, spanning multiple ext4 blocks.
     // We must read at 16KB-aligned boundaries, so step by blocks_per_page.
@@ -982,16 +1017,15 @@ void Ext4Recovery::scan_freed_blocks(uint32_t group_index, const std::vector<uin
         }
     }
 
-    close(fd);
 #endif
 }
 
 // ==================== Allocated Block Scanning (DELETE recovery) ====================
 
-void Ext4Recovery::scan_allocated_blocks(uint32_t group_index, const std::vector<uint8_t>& bitmap) {
+void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std::vector<uint8_t>& bitmap) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    if (fd < 0 || block_size_ == 0 || config_.page_size == 0 ||
+        config_.page_size > source_size_) {
         return;
     }
 
@@ -1000,8 +1034,8 @@ void Ext4Recovery::scan_allocated_blocks(uint32_t group_index, const std::vector
     uint32_t blocks_per_group = blocks_per_group_;
     uint32_t group_count = group_count_;
 
-    // Safety check: ensure we don't read beyond device
-    uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group * block_size;
+    // Safety check: ensure we don't read beyond the admitted source
+    const uint64_t max_offset = source_size_;
 
     // InnoDB pages are 16KB, spanning multiple ext4 blocks.
     // We must read at 16KB-aligned boundaries, so step by blocks_per_page.
@@ -1072,16 +1106,15 @@ void Ext4Recovery::scan_allocated_blocks(uint32_t group_index, const std::vector
         }
     }
 
-    close(fd);
 #endif
 }
 
 // ==================== Safe Deleted Inode Scanning ====================
 
-void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vector<uint8_t>& inode_bitmap) {
+void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const std::vector<uint8_t>& inode_bitmap) {
 #ifdef __linux__
-    int fd = open(config_.device_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    if (fd < 0 || block_size_ == 0 || inode_size_ == 0 ||
+        config_.page_size == 0) {
         return;
     }
 
@@ -1092,12 +1125,11 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
 
     // Safety checks
     if (inodes_per_group == 0 || inode_size == 0 || block_size == 0) {
-        close(fd);
         return;
     }
 
     // Calculate maximum disk offset for safety
-    uint64_t max_offset = static_cast<uint64_t>(group_count_) * blocks_per_group_ * block_size;
+    uint64_t max_offset = source_size_;
 
     // Scan for potential deleted inodes
     // Focus on inodes that were regular files (potential MySQL data files)
@@ -1117,8 +1149,9 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
         }
 
         // Try to read the inode safely
-        uint64_t inode_offset = inode_to_disk_offset(group_index, local_inode);
-        if (inode_offset == 0 || inode_offset >= max_offset) {
+        uint64_t inode_offset = inode_to_disk_offset(fd, group_index, local_inode);
+        if (inode_offset == 0 || inode_offset > max_offset ||
+            inode_size > max_offset - inode_offset) {
             continue;  // Invalid or out-of-bounds offset
         }
 
@@ -1244,7 +1277,6 @@ void Ext4Recovery::scan_deleted_inodes_safe(uint32_t group_index, const std::vec
         }
     }
 
-    close(fd);
 #endif
 }
 

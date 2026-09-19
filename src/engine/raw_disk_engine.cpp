@@ -260,6 +260,37 @@ bool RawDiskIOEngine::open(const std::string& path, IoMode mode) {
     return true;
 }
 
+bool RawDiskIOEngine::adopt_fd(int owned_fd, uint64_t size_bytes, IoMode mode) {
+    if (owned_fd < 0) {
+        return false;
+    }
+
+    struct stat st {};
+    const int access_mode = ::fcntl(owned_fd, F_GETFL);
+    if (mode != IoMode::READ_ONLY || access_mode < 0 ||
+        (access_mode & O_ACCMODE) != O_RDONLY || ::fstat(owned_fd, &st) != 0) {
+        ::close(owned_fd);
+        return false;
+    }
+
+    close();
+    fd_ = owned_fd;
+    size_ = size_bytes;
+    mode_ = IoMode::READ_ONLY;
+    use_direct_io_ = false;
+    optimal_block_size_ = 4096;
+
+#if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
+    struct statvfs vfs {};
+    if (::fstatvfs(fd_, &vfs) == 0 && vfs.f_bsize >= 4096) {
+        optimal_block_size_ = static_cast<uint32_t>(vfs.f_bsize);
+    }
+#endif
+
+    is_open_ = true;
+    return true;
+}
+
 void RawDiskIOEngine::close() {
     if (is_open_) {
         if (fd_ >= 0) {
@@ -276,9 +307,10 @@ void RawDiskIOEngine::close() {
 }
 
 size_t RawDiskIOEngine::read(uint64_t offset, uint8_t* buffer, size_t size) {
-    if (!is_open_ || fd_ < 0 || !buffer || size == 0) {
+    if (!is_open_ || fd_ < 0 || !buffer || size == 0 || offset >= size_) {
         return 0;
     }
+    size = std::min(size, static_cast<size_t>(size_ - offset));
 
     if (mode_ == IoMode::MEMORY_MAPPED) {
         // mmap path: use pread on the fd

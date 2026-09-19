@@ -123,6 +123,16 @@ public:
     bool open(const std::string& path, IoMode mode = IoMode::READ_ONLY);
 
     /**
+     * @brief Transfer an already-open, read-only descriptor to this engine.
+     *
+     * The caller supplies an authoritative capacity (for block devices this
+     * must come from the admission gate). This engine closes owned_fd on every
+     * failure path and uses buffered reads without reopening a pathname.
+     */
+    bool adopt_fd(int owned_fd, uint64_t size_bytes,
+                  IoMode mode = IoMode::READ_ONLY);
+
+    /**
      * @brief Close the current open device/file
      */
     void close();

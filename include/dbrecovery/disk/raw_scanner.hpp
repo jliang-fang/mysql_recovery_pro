@@ -25,6 +25,9 @@ public:
     // 打开原始磁盘设备或镜像文件
     bool open(const std::string& path);
 
+    // 移交一个已验证的只读文件描述符；无论成功或失败均由本对象负责关闭。
+    bool adopt_fd(int owned_fd, uint64_t known_size);
+
     // 关闭当前打开的设备/文件
     void close();
 

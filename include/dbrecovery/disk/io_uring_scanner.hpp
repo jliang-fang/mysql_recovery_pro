@@ -109,6 +109,14 @@ public:
     bool open(const std::string& path, bool read_only = true);
 
     /**
+     * @brief Transfer an already-open descriptor with caller-provided size.
+     *
+     * Ownership transfers regardless of success. The scanner closes owned_fd
+     * if it cannot adopt it.
+     */
+    bool adopt_fd(int owned_fd, uint64_t known_size);
+
+    /**
      * @brief Close the file/device
      */
     void close();

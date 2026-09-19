@@ -4,9 +4,29 @@
 #include <string>
 #include <vector>
 #include <system_error>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 namespace dbrecovery {
 namespace safety {
+
+struct BlockDeviceId {
+    unsigned int major = 0;
+    unsigned int minor = 0;
+
+    bool operator==(const BlockDeviceId& other) const {
+        return major == other.major && minor == other.minor;
+    }
+};
+
+struct MountTopologyReport {
+    bool complete = false;
+    std::vector<BlockDeviceId> related_devices;
+    std::vector<std::string> mount_points;
+    std::string error;
+
+    bool mounted() const { return !mount_points.empty(); }
+};
 
 /**
  * @brief LoopbackSafety: Detects loopback devices and manages safe access.
@@ -46,20 +66,33 @@ public:
     std::string find_backing_file(const std::string& device_path) const;
 
     /**
-     * @brief Check if the device is currently mounted.
+     * @brief Inspect mounted and dependent devices from an admitted descriptor.
      *
-     * Parses /proc/mounts to see if the device path appears as a mounted device.
+     * The result is complete only when mountinfo and the complete sysfs device
+     * relationship closure were read successfully. Callers must fail closed
+     * whenever complete is false.
+     */
+    MountTopologyReport inspect_mount_topology(const struct stat& device_stat) const;
+
+    /**
+     * @brief Testable mount topology inspection using explicit proc/sysfs roots.
+     */
+    MountTopologyReport inspect_mount_topology_for_paths(
+        const BlockDeviceId& device,
+        const std::string& mountinfo_path,
+        const std::string& sysfs_dev_block_root) const;
+
+    /**
+     * @brief Check if the device is currently mounted for diagnostics only.
      *
-     * @param device_path Path to the device.
-     * @return true if the device is listed in /proc/mounts.
+     * This pathname helper is not an authorization primitive.
      */
     bool check_mounted(const std::string& device_path) const;
 
     /**
-     * @brief Get all mount points for the given device.
+     * @brief Get mount points for diagnostics only.
      *
-     * @param device_path Path to the device.
-     * @return Vector of mount point paths (empty if not mounted).
+     * This pathname helper is not an authorization primitive.
      */
     std::vector<std::string> get_mount_points(const std::string& device_path) const;
 

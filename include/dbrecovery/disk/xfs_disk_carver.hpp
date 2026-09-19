@@ -400,6 +400,11 @@ public:
     XfsDiskCarver();
     ~XfsDiskCarver();
 
+    XfsDiskCarver(const XfsDiskCarver&) = delete;
+    XfsDiskCarver& operator=(const XfsDiskCarver&) = delete;
+
+    bool adopt_fd(int owned_fd, uint64_t known_size);
+
     void set_config(const XfsConfig& config);
 
     // Set external schema for schema-aware recovery
@@ -429,6 +434,8 @@ public:
 
 private:
     XfsConfig config_;
+    int source_fd_ = -1;
+    uint64_t source_size_ = 0;
     xfs_superblock superblock_;
     XfsScanResult last_result_;
     std::optional<catalog::TableSchema> external_schema_;
@@ -440,7 +447,7 @@ private:
     std::mutex result_mutex_;
 
     // Read AG headers (AGI, AGF)
-    bool read_ag_headers(uint32_t ag_index, xfs_agi& agi, xfs_agf& agf);
+    bool read_ag_headers(int fd, uint32_t ag_index, xfs_agi& agi, xfs_agf& agf);
 
     // Walk inode btree for deleted inodes
     void walk_inode_btree(uint32_t ag_index, const xfs_agi& agi, const xfs_agf& agf);
@@ -454,7 +461,7 @@ private:
                                uint16_t numrecs, uint32_t block_size, size_t btree_header_size);
 
     // Read inode and extract extents
-    std::optional<XfsExtentInfo> read_inode(uint32_t ag_index, uint32_t ag_inode);
+    std::optional<XfsExtentInfo> read_inode(int fd, uint32_t ag_index, uint32_t ag_inode);
 
     // Follow di_next_unlinked chain for deleted inode recovery
     void follow_unlinked_chain(int fd, uint32_t ag_index, uint32_t start_ino,

@@ -113,100 +113,75 @@ std::vector<IOCompletion> IOUringScheduler::wait_for_completion(
 
 std::optional<std::vector<uint8_t>> IOUringScheduler::read_file(
     const std::string& path, size_t offset, size_t size) {
-    int fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
         return std::nullopt;
     }
-    
-    // 获取文件大小
-    struct stat st;
-    fstat(fd, &st);
-    size_t file_size = st.st_size;
-    
+
+    auto result = read_fd(fd, offset, size);
+    ::close(fd);
+    return result;
+}
+
+std::optional<std::vector<uint8_t>> IOUringScheduler::read_fd(
+    int fd, size_t offset, size_t size, size_t known_size) {
+    if (fd < 0) {
+        return std::nullopt;
+    }
+
+    struct stat st {};
+    if (::fstat(fd, &st) != 0) {
+        return std::nullopt;
+    }
+
+    const size_t file_size = known_size > 0 ? known_size : static_cast<size_t>(st.st_size);
+    if (offset > file_size) {
+        return std::nullopt;
+    }
+
     if (size == 0) {
         size = file_size - offset;
     }
-    
-    // 分配缓冲区
+    if (size > file_size - offset) {
+        size = file_size - offset;
+    }
+
     std::vector<uint8_t> buffer(size);
-    
-    // 使用同步方式读取
-    ssize_t bytes_read = pread(fd, buffer.data(), size, offset);
-    ::close(fd);
-    
+    const ssize_t bytes_read = ::pread(fd, buffer.data(), size, offset);
     if (bytes_read < 0) {
         return std::nullopt;
     }
-    
-    if (static_cast<size_t>(bytes_read) < size) {
-        buffer.resize(bytes_read);
-    }
-    
-    stats_.bytes_read += bytes_read;
+
+    buffer.resize(static_cast<size_t>(bytes_read));
+    stats_.bytes_read += static_cast<size_t>(bytes_read);
     stats_.requests_completed++;
-    
     return buffer;
 }
 
 bool IOUringScheduler::read_file_async(
     const std::string& path, size_t offset, size_t size,
     std::function<void(std::optional<std::vector<uint8_t>>)> callback) {
-    int fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    int fd = ::open(path.c_str(), O_RDONLY);
     if (fd < 0) {
         callback(std::nullopt);
         return false;
     }
-    
-    // 获取文件大小
-    struct stat st;
-    fstat(fd, &st);
-    size_t file_size = st.st_size;
-    
-    if (size == 0) {
-        size = file_size - offset;
-    }
-    
-    // 分配缓冲区
-    auto buffer = std::make_shared<std::vector<uint8_t>>(size);
-    
-    // 提交异步读取请求
-    struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
-    if (!sqe) {
-        ::close(fd);
-        callback(std::nullopt);
-        return false;
-    }
-    
-    io_uring_prep_read(sqe, fd, buffer->data(), size, offset);
-    sqe->user_data = (uint64_t)buffer.get();
-    
-    stats_.requests_submitted++;
-    
-    // 等待完成
-    struct io_uring_cqe* cqe;
-    int ret = io_uring_submit_and_wait(&ring_, &cqe, 1);
-    
-    if (ret < 0) {
-        ::close(fd);
-        callback(std::nullopt);
-        return false;
-    }
-    
-    io_uring_for_each_cqe(&ring_, head, cqe) {
-        if (cqe->res >= 0) {
-            buffer->resize(cqe->res);
-            stats_.bytes_read += cqe->res;
-            callback(buffer);
-        } else {
-            callback(std::nullopt);
-            stats_.errors++;
-        }
-        stats_.requests_completed++;
-    }
-    
-    io_uring_cq_advance(&ring_, 1);
+
+    const bool result = read_fd_async(fd, offset, size, 0, std::move(callback));
     ::close(fd);
-    
+    return result;
+}
+
+bool IOUringScheduler::read_fd_async(
+    int fd, size_t offset, size_t size, size_t known_size,
+    std::function<void(std::optional<std::vector<uint8_t>>)> callback) {
+    if (fd < 0) {
+        callback(std::nullopt);
+        return false;
+    }
+
+    auto result = read_fd(fd, offset, size, known_size);
+    callback(std::move(result));
     return true;
 }
 
@@ -282,16 +257,16 @@ std::vector<std::optional<std::vector<uint8_t>>> IOUringScheduler::read_pages(
 
 std::optional<std::vector<uint8_t>> IOUringFileReader::read(size_t offset,
                                                              size_t size) {
-    return scheduler_.read_file(path_, offset, size);
+    return scheduler_.read_fd(fd_, offset, size, size_);
 }
 
 bool IOUringFileReader::read_async(size_t offset, size_t size,
                                     std::function<void(std::optional<std::vector<uint8_t>>)> callback) {
-    return scheduler_.read_file_async(path_, offset, size, callback);
+    return scheduler_.read_fd_async(fd_, offset, size, size_, std::move(callback));
 }
 
 std::optional<std::vector<uint8_t>> IOUringFileReader::read_all() {
-    return scheduler_.read_file(path_, 0, size_);
+    return scheduler_.read_fd(fd_, 0, size_, size_);
 }
 
 std::optional<std::vector<uint8_t>> IOUringFileReader::read_page(size_t page_no,

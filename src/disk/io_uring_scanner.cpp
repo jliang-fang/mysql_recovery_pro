@@ -64,6 +64,37 @@ public:
         return true;
     }
 
+    bool adopt_fd(int owned_fd, uint64_t known_size) {
+        if (owned_fd < 0) {
+            return false;
+        }
+
+        struct stat st {};
+        const int access_mode = ::fcntl(owned_fd, F_GETFL);
+        if (access_mode < 0 || (access_mode & O_ACCMODE) != O_RDONLY ||
+            ::fstat(owned_fd, &st) != 0) {
+            ::close(owned_fd);
+            return false;
+        }
+
+        if (is_open_) {
+            close();
+        }
+
+        fd_ = owned_fd;
+        size_ = known_size;
+        const int ret = io_uring_queue_init(queue_depth_, &ring_, 0);
+        if (ret < 0) {
+            ::close(fd_);
+            fd_ = -1;
+            size_ = 0;
+            return false;
+        }
+
+        is_open_ = true;
+        return true;
+    }
+
     void close() {
         if (is_open_) {
             if (fd_ >= 0) {
@@ -82,6 +113,10 @@ public:
         if (!is_open_ || fd_ < 0) {
             return -EBADF;
         }
+        if (!buffer || size == 0 || offset >= size_) {
+            return -EINVAL;
+        }
+        size = static_cast<size_t>(std::min<uint64_t>(size, size_ - offset));
 
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
         if (!sqe) {
@@ -97,9 +132,10 @@ public:
     }
 
     ssize_t read(uint64_t offset, uint8_t* buffer, size_t size) {
-        if (!is_open_ || fd_ < 0) {
-            return -EBADF;
+        if (!is_open_ || fd_ < 0 || !buffer || size == 0 || offset >= size_) {
+            return -EINVAL;
         }
+        size = static_cast<size_t>(std::min<uint64_t>(size, size_ - offset));
 
         struct io_uring_cqe* cqe;
         struct io_uring_sqe* sqe = io_uring_get_sqe(&ring_);
@@ -263,6 +299,29 @@ public:
         return true;
     }
 
+    bool adopt_fd(int owned_fd, uint64_t known_size) {
+        if (owned_fd < 0) {
+            return false;
+        }
+
+        struct stat st {};
+        const int access_mode = ::fcntl(owned_fd, F_GETFL);
+        if (access_mode < 0 || (access_mode & O_ACCMODE) != O_RDONLY ||
+            ::fstat(owned_fd, &st) != 0) {
+            ::close(owned_fd);
+            return false;
+        }
+
+        if (is_open_) {
+            close();
+        }
+
+        fd_ = owned_fd;
+        size_ = known_size;
+        is_open_ = true;
+        return true;
+    }
+
     void close() {
         if (is_open_) {
             if (fd_ >= 0) {
@@ -278,6 +337,10 @@ public:
         if (!is_open_ || fd_ < 0) {
             return -EBADF;
         }
+        if (!buffer || size == 0 || offset >= size_) {
+            return -EINVAL;
+        }
+        size = static_cast<size_t>(std::min<uint64_t>(size, size_ - offset));
 
         ssize_t result = ::pread(fd_, buffer, size, offset);
         if (result >= 0) {
@@ -291,6 +354,11 @@ public:
     }
 
     ssize_t read(uint64_t offset, uint8_t* buffer, size_t size) {
+        if (!is_open_ || fd_ < 0 || !buffer || size == 0 || offset >= size_) {
+            return -EINVAL;
+        }
+        size = static_cast<size_t>(std::min<uint64_t>(size, size_ - offset));
+
         ssize_t result = ::pread(fd_, buffer, size, offset);
         if (result >= 0) {
             stats_.bytes_read += result;
@@ -378,6 +446,16 @@ IOUringScanner& IOUringScanner::operator=(IOUringScanner&& other) noexcept {
 
 bool IOUringScanner::open(const std::string& path, bool read_only) {
     return impl_->open(path, read_only);
+}
+
+bool IOUringScanner::adopt_fd(int owned_fd, uint64_t known_size) {
+    if (!impl_) {
+        if (owned_fd >= 0) {
+            ::close(owned_fd);
+        }
+        return false;
+    }
+    return impl_->adopt_fd(owned_fd, known_size);
 }
 
 void IOUringScanner::close() {

@@ -91,7 +91,16 @@ public:
         const std::string& path,
         size_t offset = 0,
         size_t size = 0);
-    
+
+    /**
+     * @brief 从借用的文件描述符同步读取
+     */
+    std::optional<std::vector<uint8_t>> read_fd(
+        int fd,
+        size_t offset = 0,
+        size_t size = 0,
+        size_t known_size = 0);
+
     /**
      * @brief 异步读取文件
      */
@@ -99,6 +108,16 @@ public:
         const std::string& path,
         size_t offset,
         size_t size,
+        std::function<void(std::optional<std::vector<uint8_t>>)> callback);
+
+    /**
+     * @brief 从借用的文件描述符异步读取
+     */
+    bool read_fd_async(
+        int fd,
+        size_t offset,
+        size_t size,
+        size_t known_size,
         std::function<void(std::optional<std::vector<uint8_t>>)> callback);
     
     /**

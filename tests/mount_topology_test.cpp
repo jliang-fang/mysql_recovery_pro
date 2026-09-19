@@ -1,0 +1,122 @@
+#include <gtest/gtest.h>
+
+#include "dbrecovery/safety/loopback_safety.hpp"
+
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+namespace {
+
+namespace fs = std::filesystem;
+
+class MountTopologyTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        const char* root = std::getenv("DBREC_TEST_TMPDIR");
+        ASSERT_NE(root, nullptr);
+        test_root_ = fs::path(root) / ("mount_topology_" + std::to_string(++counter_));
+        fs::create_directories(test_root_ / "dev-block");
+        fs::create_directories(test_root_ / "devices");
+    }
+
+    void TearDown() override {
+        std::error_code error;
+        fs::remove_all(test_root_, error);
+    }
+
+    fs::path add_device(const std::string& name, const std::string& id,
+                        const fs::path& parent = {}) {
+        const fs::path path = parent.empty() ? test_root_ / "devices" / name
+                                              : parent / name;
+        fs::create_directories(path / "slaves");
+        fs::create_directories(path / "holders");
+        std::ofstream(path / "dev") << id << '\n';
+        fs::create_symlink(path, test_root_ / "dev-block" / id);
+        return path;
+    }
+
+    void add_relation(const fs::path& device, const std::string& relation,
+                      const fs::path& related) {
+        fs::create_symlink(related, device / relation / related.filename());
+    }
+
+    void write_mountinfo(const std::string& contents) {
+        std::ofstream(test_root_ / "mountinfo") << contents;
+    }
+
+    dbrecovery::safety::MountTopologyReport inspect(const std::string& id = "8:1") {
+        const auto separator = id.find(':');
+        return safety_.inspect_mount_topology_for_paths(
+            {static_cast<unsigned int>(std::stoul(id.substr(0, separator))),
+             static_cast<unsigned int>(std::stoul(id.substr(separator + 1)))},
+            (test_root_ / "mountinfo").string(), (test_root_ / "dev-block").string());
+    }
+
+    fs::path test_root_;
+    dbrecovery::safety::LoopbackSafety safety_;
+
+private:
+    inline static unsigned counter_ = 0;
+};
+
+TEST_F(MountTopologyTest, RejectsMountedParentOfAdmittedPartition) {
+    const auto disk = add_device("disk", "8:0");
+    add_device("partition", "8:1", disk);
+    write_mountinfo("42 1 8:0 / /mnt/parent rw - ext4 /dev/disk rw\n");
+
+    const auto report = inspect();
+    EXPECT_TRUE(report.complete);
+    EXPECT_TRUE(report.mounted());
+    ASSERT_EQ(report.mount_points.size(), 1u);
+    EXPECT_EQ(report.mount_points.front(), "/mnt/parent");
+}
+
+TEST_F(MountTopologyTest, RejectsMountedSlaveAndHolderRelations) {
+    const auto admitted = add_device("admitted", "8:1");
+    const auto slave = add_device("slave", "253:0");
+    const auto holder = add_device("holder", "9:0");
+    add_relation(admitted, "slaves", slave);
+    add_relation(admitted, "holders", holder);
+    write_mountinfo("42 1 253:0 / /mnt/slave rw - ext4 /dev/mapper/test rw\n"
+                    "43 1 9:0 / /mnt/holder rw - ext4 /dev/md0 rw\n");
+
+    const auto report = inspect();
+    EXPECT_TRUE(report.complete);
+    ASSERT_EQ(report.mount_points.size(), 2u);
+    EXPECT_EQ(report.mount_points[0], "/mnt/slave");
+    EXPECT_EQ(report.mount_points[1], "/mnt/holder");
+}
+
+TEST_F(MountTopologyTest, IgnoresUnrelatedMountAndUnescapesMountPoint) {
+    add_device("admitted", "8:1");
+    add_device("unrelated", "8:2");
+    write_mountinfo("42 1 8:2 / /mnt/with\\040space rw - ext4 /dev/unrelated rw\n");
+
+    const auto report = inspect();
+    EXPECT_TRUE(report.complete);
+    EXPECT_FALSE(report.mounted());
+    EXPECT_TRUE(report.mount_points.empty());
+}
+
+TEST_F(MountTopologyTest, FailsClosedForMissingTopologyOrMalformedMountinfo) {
+    fs::create_directories(test_root_ / "devices" / "admitted");
+    std::ofstream(test_root_ / "devices" / "admitted" / "dev") << "8:1\n";
+    fs::create_symlink(test_root_ / "devices" / "admitted", test_root_ / "dev-block" / "8:1");
+    write_mountinfo("42 1 8:1 / /mnt rw - ext4 /dev/admitted rw\n");
+
+    auto report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+
+    fs::create_directories(test_root_ / "devices" / "admitted" / "slaves");
+    fs::create_directories(test_root_ / "devices" / "admitted" / "holders");
+    write_mountinfo("malformed\n");
+
+    report = inspect();
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+}
+
+}  // namespace

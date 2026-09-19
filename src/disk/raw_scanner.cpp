@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <cstring>
 #include <stdexcept>
+#include <algorithm>
 
 #ifdef HAVE_IO_URING
 #include "dbrecovery/disk/io_uring_scanner.hpp"
@@ -59,6 +60,39 @@ bool RawScanner::open(const std::string& path) {
     return true;
 }
 
+bool RawScanner::adopt_fd(int owned_fd, uint64_t known_size) {
+    if (owned_fd < 0) {
+        return false;
+    }
+
+#ifdef HAVE_IO_URING
+    if (io_uring_scanner_ && io_uring_scanner_->adopt_fd(owned_fd, known_size)) {
+        impl_->fd_ = -1;
+        impl_->size_ = known_size;
+        impl_->is_open_ = true;
+        return true;
+    }
+    return false;
+#else
+    struct stat st {};
+    const int access_mode = ::fcntl(owned_fd, F_GETFL);
+    if (access_mode < 0 || (access_mode & O_ACCMODE) != O_RDONLY ||
+        ::fstat(owned_fd, &st) != 0) {
+        ::close(owned_fd);
+        return false;
+    }
+
+    if (impl_->is_open_) {
+        close();
+    }
+
+    impl_->fd_ = owned_fd;
+    impl_->size_ = known_size;
+    impl_->is_open_ = true;
+    return true;
+#endif
+}
+
 void RawScanner::close() {
     if (impl_->is_open_) {
 #ifdef HAVE_IO_URING
@@ -76,9 +110,10 @@ void RawScanner::close() {
 }
 
 size_t RawScanner::read(uint64_t offset, uint8_t* buffer, size_t size) {
-    if (!impl_->is_open_) {
+    if (!impl_->is_open_ || !buffer || size == 0 || offset >= impl_->size_) {
         return 0;
     }
+    size = std::min(size, static_cast<size_t>(impl_->size_ - offset));
 
 #ifdef HAVE_IO_URING
     if (io_uring_scanner_ && io_uring_scanner_->is_open()) {
