@@ -19,6 +19,14 @@
 
 namespace dbrecovery {
 namespace disk {
+namespace {
+
+bool is_block_device_path(const std::string& path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0 && S_ISBLK(st.st_mode);
+}
+
+}  // namespace
 
 #ifdef HAVE_LIBURING_H
 
@@ -37,6 +45,10 @@ public:
     }
 
     bool open(const std::string& path, bool read_only) {
+        if (is_block_device_path(path)) {
+            return false;
+        }
+
         if (is_open_) {
             close();
         }
@@ -283,6 +295,10 @@ public:
     }
 
     bool open(const std::string& path, bool read_only) {
+        if (is_block_device_path(path)) {
+            return false;
+        }
+
         if (is_open_) {
             close();
         }

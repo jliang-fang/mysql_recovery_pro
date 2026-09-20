@@ -12,6 +12,14 @@
 
 namespace dbrecovery {
 namespace disk {
+namespace {
+
+bool is_block_device_path(const std::string& path) {
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0 && S_ISBLK(st.st_mode);
+}
+
+}  // namespace
 
 // ==================== RawScanner 实现 ====================
 
@@ -26,6 +34,10 @@ RawScanner::~RawScanner() {
 }
 
 bool RawScanner::open(const std::string& path) {
+    if (is_block_device_path(path)) {
+        return false;
+    }
+
     if (impl_->is_open_) {
         close();
     }

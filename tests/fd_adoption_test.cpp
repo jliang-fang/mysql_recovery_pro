@@ -17,6 +17,9 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 namespace {
@@ -42,6 +45,14 @@ protected:
 
     int open_source_read_only() const {
         return ::open(source_path_.c_str(), O_RDONLY);
+    }
+
+    std::filesystem::path block_device_path() const {
+        const auto path = root_ / "block-device";
+        if (::mknod(path.c_str(), S_IFBLK | 0600, makedev(1, 7)) != 0) {
+            return {};
+        }
+        return path;
     }
 
     static void write_file(const std::filesystem::path& path,
@@ -137,6 +148,28 @@ protected:
 private:
     inline static unsigned counter_ = 0;
 };
+
+TEST_F(FdAdoptionTest, RawScannerRejectsBlockPathBeforeOpening) {
+    const auto block_path = block_device_path();
+    if (block_path.empty()) {
+        GTEST_SKIP() << "mknod is unavailable in this test environment";
+    }
+
+    dbrecovery::disk::RawScanner scanner;
+    EXPECT_FALSE(scanner.open(block_path.string()));
+    EXPECT_FALSE(scanner.is_open());
+}
+
+TEST_F(FdAdoptionTest, IOUringScannerRejectsBlockPathBeforeOpening) {
+    const auto block_path = block_device_path();
+    if (block_path.empty()) {
+        GTEST_SKIP() << "mknod is unavailable in this test environment";
+    }
+
+    dbrecovery::disk::IOUringScanner scanner;
+    EXPECT_FALSE(scanner.open(block_path.string()));
+    EXPECT_FALSE(scanner.is_open());
+}
 
 TEST_F(FdAdoptionTest, IOUringScannerUsesAdoptedDescriptorAfterPathReplacement) {
     const int fd = open_source_read_only();

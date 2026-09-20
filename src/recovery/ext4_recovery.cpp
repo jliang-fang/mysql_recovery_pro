@@ -151,6 +151,11 @@ bool Ext4Recovery::is_ext4_device(const std::string& device_path) {
 
 bool Ext4Recovery::read_superblock(const std::string& device_path, ext4_superblock& sb) {
 #ifdef __linux__
+    struct stat status {};
+    if (::stat(device_path.c_str(), &status) != 0 || S_ISBLK(status.st_mode)) {
+        return false;
+    }
+
     int fd = open(device_path.c_str(), O_RDONLY);
     if (fd < 0) {
         return false;

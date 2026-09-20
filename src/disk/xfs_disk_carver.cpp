@@ -133,6 +133,11 @@ bool XfsDiskCarver::is_xfs_device(const std::string& device_path) {
 
 bool XfsDiskCarver::read_superblock(const std::string& device_path, xfs_superblock& sb) {
 #ifdef __linux__
+    struct stat status {};
+    if (::stat(device_path.c_str(), &status) != 0 || S_ISBLK(status.st_mode)) {
+        return false;
+    }
+
     int fd = open(device_path.c_str(), O_RDONLY);
     if (fd < 0) {
         return false;
