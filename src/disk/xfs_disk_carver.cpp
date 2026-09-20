@@ -2568,9 +2568,9 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
             catalog::TypeIdDomain::kInnodbParser, diagnostics);
         if (!converted.has_value()) {
             for (const auto& d : diagnostics) {
-                std::cerr << "[WARN] XFS schema column rejected: " << d << std::endl;
+                std::cerr << "[WARN] XFS schema rejected: " << d << std::endl;
             }
-            continue;
+            return records;
         }
         innodb::IndexColumnDef col_def = *converted;
 

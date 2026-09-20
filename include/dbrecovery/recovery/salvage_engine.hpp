@@ -62,6 +62,11 @@ enum class SalvageLevel : uint8_t {
     STRING_ONLY = 2
 };
 
+struct RawFieldEvidence {
+    std::string column_name;
+    std::vector<uint8_t> raw_bytes;
+};
+
 struct SalvagedRow {
     uint64_t page_offset = 0;
     uint64_t record_offset = 0;
@@ -73,6 +78,7 @@ struct SalvagedRow {
     std::string content_hash;      // SHA256 of raw record bytes (for dedup)
     double confidence = 0.0;
     std::string recovery_method;
+    std::vector<RawFieldEvidence> raw_field_evidence;
     ForensicEvidence evidence;  // provenance metadata for L3/L4 heuristic results
 };
 

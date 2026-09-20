@@ -19,6 +19,7 @@
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -2937,11 +2938,41 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             return 1;
         }
 
+        bool raw_block_source = false;
+        std::optional<dbrecovery::safety::AuthorizedRawDevice> authorized_raw_device;
+
+#ifdef __linux__
+        struct stat source_status {};
+        if (::stat(device_path.c_str(), &source_status) != 0) {
+            std::cerr << "[ERROR] Disk carving source cannot be accessed: " << device_path << "\n";
+            return 1;
+        }
+
+        raw_block_source = S_ISBLK(source_status.st_mode);
+        if (raw_block_source) {
+            dbrecovery::safety::SafetyGate gate;
+            std::string authorization_reason;
+            authorized_raw_device = gate.authorize_read_only_raw_device(
+                device_path, &authorization_reason);
+            if (!authorized_raw_device.has_value()) {
+                std::cerr << "[ERROR] Disk carving raw source rejected: "
+                          << authorization_reason << "\n";
+                return 1;
+            }
+        } else {
+            std::string admission_reason;
+            if (!dbrecovery::recovery::RawDiskCarver::admit_source(device_path, &admission_reason)) {
+                std::cerr << "[ERROR] Disk carving raw source rejected: " << admission_reason << "\n";
+                return 1;
+            }
+        }
+#else
         std::string admission_reason;
         if (!dbrecovery::recovery::RawDiskCarver::admit_source(device_path, &admission_reason)) {
             std::cerr << "[ERROR] Disk carving raw source rejected: " << admission_reason << "\n";
             return 1;
         }
+#endif
 
         std::cout << "[INFO] Starting raw disk carving recovery...\n";
         std::cout << "[INFO] Device: " << device_path << "\n";
@@ -2992,6 +3023,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             xfs_carver.set_config(xfs_config);
+            if (raw_block_source) {
+                const int source_fd = authorized_raw_device->duplicate_fd();
+                if (source_fd < 0 || !xfs_carver.adopt_fd(
+                                         source_fd,
+                                         authorized_raw_device->size_bytes())) {
+                    std::cerr << "[ERROR] Cannot hand authorized raw source to XFS recovery\n";
+                    return 1;
+                }
+            }
 
             // Load and set external schema for schema-aware recovery
             std::optional<catalog::TableSchema> xfs_schema = load_schema_from_file(schema_file_path);
@@ -3115,12 +3155,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                             col.mysql_type_id = 255;  // MYSQL_TYPE_GEOMETRY
                             col.is_variable_length = true;
                         } else {
-                            // Default to VARCHAR
-                            col.mysql_type_id = 15;
-                            col.is_variable_length = true;
-                            if (parts.size() >= 3) {
-                                col.column_length = std::stoi(parts[2]);
-                            }
+                            std::cerr << "[ERROR] Unsupported --schema type for column '"
+                                      << col.name << "': " << parts[1] << "\n";
+                            return 1;
                         }
 
                         col.is_nullable = true;
@@ -3146,6 +3183,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                         parsed_schema.columns[ordinal] = col;
                         ordinal++;
+                    } else {
+                        std::cerr << "[ERROR] Missing --schema type for column definition: "
+                                  << col_def << "\n";
+                        return 1;
                     }
                 }
 
@@ -3249,6 +3290,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
 
             ext4_recovery.set_config(ext4_config);
+            if (raw_block_source) {
+                const int source_fd = authorized_raw_device->duplicate_fd();
+                if (source_fd < 0 || !ext4_recovery.adopt_fd(
+                                         source_fd,
+                                         authorized_raw_device->size_bytes())) {
+                    std::cerr << "[ERROR] Cannot hand authorized raw source to ext4 recovery\n";
+                    return 1;
+                }
+            }
 
             // Load and set external schema for schema-aware recovery (same logic as XFS)
             std::optional<catalog::TableSchema> ext4_schema = load_schema_from_file(schema_file_path);
@@ -3342,8 +3392,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         } else if (type_str == "GEOMETRY") {
                             col.mysql_type_id = 255; col.is_variable_length = true;
                         } else {
-                            col.mysql_type_id = 15; col.is_variable_length = true;
-                            if (parts.size() >= 3) col.column_length = std::stoi(parts[2]);
+                            std::cerr << "[ERROR] Unsupported --schema type for column '"
+                                      << col.name << "': " << parts[1] << "\n";
+                            return 1;
                         }
 
                         // Check for pk and unsigned flags
@@ -3362,6 +3413,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                         parsed_schema.columns[ordinal] = col;
                         ordinal++;
+                    } else {
+                        std::cerr << "[ERROR] Missing --schema type for column definition: "
+                                  << col_def << "\n";
+                        return 1;
                     }
                 }
 
@@ -3455,40 +3510,69 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             identity_config.require_valid_checksum = false;
             identity_config.verbose = verbose;
 
-            // Read the first few MB of the device for identity scanning
-            std::ifstream device(device_path, std::ios::binary | std::ios::ate);
-            if (device) {
-                size_t file_size = device.tellg();
-                device.seekg(0, std::ios::beg);
+            // Scan in 16MB chunks.
+            constexpr size_t SCAN_CHUNK = 16 * 1024 * 1024;
+            std::vector<uint8_t> chunk_buf(SCAN_CHUNK);
+            size_t last_chunk_size = 0;
 
-                // Scan in 16MB chunks
-                constexpr size_t SCAN_CHUNK = 16 * 1024 * 1024;
-                std::vector<uint8_t> chunk_buf(SCAN_CHUNK);
+            auto scan_identity_chunk = [&](size_t bytes_read) {
+                if (bytes_read == 0) return;
+                last_chunk_size = bytes_read;
+                auto identities = identity_engine.identify_pages(
+                    chunk_buf.data(), bytes_read, identity_config);
+                if (!identities.empty() && verbose) {
+                    std::cout << "[DEEP-CARVE] Found " << identities.size()
+                              << " pages in chunk\n";
+                }
+            };
 
-                while (device.read(reinterpret_cast<char*>(chunk_buf.data()), SCAN_CHUNK)) {
-                    size_t bytes_read = device.gcount();
-                    if (bytes_read == 0) break;
-
-                    auto identities = identity_engine.identify_pages(
-                        chunk_buf.data(), bytes_read, identity_config);
-
-                    if (!identities.empty() && verbose) {
-                        std::cout << "[DEEP-CARVE] Found " << identities.size()
-                                  << " pages in chunk\n";
-                    }
+#ifdef __linux__
+            if (raw_block_source) {
+                const int source_fd = authorized_raw_device->duplicate_fd();
+                if (source_fd < 0) {
+                    std::cerr << "[ERROR] Cannot duplicate authorized raw source for deep carving\n";
+                    return 1;
                 }
 
-                auto summary = identity_engine.get_summary();
-                std::cout << "[DEEP-CARVE] Scan complete: " << summary.to_string() << "\n";
-
-                // If identity engine found pages, use its detected page size
-                if (summary.total_pages > 0) {
-                    config.page_size = identity_engine.detect_page_size(
-                        chunk_buf.data(), chunk_buf.size());
-                    if (config.page_size != static_cast<size_t>(page_size)) {
-                        std::cout << "[DEEP-CARVE] Adjusted page size from "
-                                  << page_size << " to " << config.page_size << "\n";
+                const uint64_t source_size = authorized_raw_device->size_bytes();
+                uint64_t offset = 0;
+                while (offset < source_size) {
+                    const size_t requested = static_cast<size_t>(std::min<uint64_t>(
+                        SCAN_CHUNK, source_size - offset));
+                    const ssize_t bytes_read = ::pread(source_fd, chunk_buf.data(), requested, offset);
+                    if (bytes_read <= 0) {
+                        std::cerr << "[ERROR] Deep carve could not read the authorized raw source\n";
+                        ::close(source_fd);
+                        return 1;
                     }
+                    scan_identity_chunk(static_cast<size_t>(bytes_read));
+                    offset += static_cast<uint64_t>(bytes_read);
+                }
+                ::close(source_fd);
+            } else
+#endif
+            {
+                std::ifstream device(device_path, std::ios::binary | std::ios::ate);
+                if (!device) {
+                    std::cerr << "[ERROR] Deep carve could not open source image\n";
+                    return 1;
+                }
+                device.seekg(0, std::ios::beg);
+                while (device) {
+                    device.read(reinterpret_cast<char*>(chunk_buf.data()), SCAN_CHUNK);
+                    scan_identity_chunk(static_cast<size_t>(device.gcount()));
+                }
+            }
+
+            auto summary = identity_engine.get_summary();
+            std::cout << "[DEEP-CARVE] Scan complete: " << summary.to_string() << "\n";
+
+            if (summary.total_pages > 0 && last_chunk_size > 0) {
+                config.page_size = identity_engine.detect_page_size(
+                    chunk_buf.data(), last_chunk_size);
+                if (config.page_size != static_cast<size_t>(page_size)) {
+                    std::cout << "[DEEP-CARVE] Adjusted page size from "
+                              << page_size << " to " << config.page_size << "\n";
                 }
             }
         }
@@ -3521,12 +3605,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 col.is_nullable = true;
                 col.column_length = 0;
 
-                if (parts.size() > 1) {
-                    std::string type_str = parts[1];
-                    std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
+                if (parts.size() < 2) {
+                    std::cerr << "[ERROR] Missing --schema type for column '" << col.name << "'\n";
+                    return 1;
+                }
 
-                    // Parse type
-                    if (type_str == "INT" || type_str == "INTEGER") {
+                std::string type_str = parts[1];
+                std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
+
+                // Parse type
+                if (type_str == "INT" || type_str == "INTEGER") {
                         col.mysql_type_id = 3;  // LONG
                         col.column_length = 4;
                     } else if (type_str == "BIGINT") {
@@ -3576,10 +3664,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         col.mysql_type_id = 9;  // INT24
                         col.column_length = 4;
                     } else {
-                        col.mysql_type_id = 253;  // Default to VARCHAR
-                        col.column_length = 255;
+                        std::cerr << "[ERROR] Unsupported --schema type for column '"
+                                  << col.name << "': " << parts[1] << "\n";
+                        return 1;
                     }
-                }
 
                 // Check for PK flag
                 for (size_t i = 2; i < parts.size(); i++) {
@@ -3612,6 +3700,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Set external schema before scanning if provided
         if (external_schema.has_value()) {
             carver.set_external_schema(*external_schema);
+        }
+        carver.set_config(config);
+        if (raw_block_source) {
+            carver.adopt_authorized_raw_device(std::move(*authorized_raw_device));
         }
 
         auto result = carver.scan_and_recover([&](double progress, const std::string& msg) {
@@ -4251,9 +4343,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     parts.push_back(token);
                 }
 
-                if (parts.empty()) continue;
+                if (parts.size() < 2) {
+                    std::cerr << "[ERROR] Missing --schema type for column '" << parts[0] << "'\n";
+                    return false;
+                }
                 name_str = parts[0];
-                type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
+                type_str = parts[1];
                 for (size_t fi = 2; fi < parts.size(); fi++) {
                     flag_parts.push_back(parts[fi]);
                 }
@@ -4270,15 +4365,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 if (tokens.empty()) continue;
                 name_str = tokens[0];
 
-                // Find type (first non-keyword after name)
-                size_t type_idx = 1;
-                if (tokens.size() > 1) {
-                    type_str = tokens[1];
-                    // Check if type has (size) attached
-                    // Handle DECIMAL(M,D), VARCHAR(255), ENUM('a','b'), etc.
-                } else {
-                    type_str = "VARCHAR";  // default
+                if (tokens.size() < 2) {
+                    std::cerr << "[ERROR] Missing --schema type for column '" << name_str << "'\n";
+                    return false;
                 }
+                type_str = tokens[1];
 
                 // Remaining tokens are flags
                 for (size_t fi = 2; fi < tokens.size(); fi++) {
@@ -4492,8 +4583,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 icol.col_length = 1;
             }
             else {
-                icol.col_type = 15;  // Default to NEWDATE/unknown
-                icol.is_big = (icol.col_length > 255);
+                std::cerr << "[ERROR] Unsupported --schema type for column '"
+                          << icol.name << "': " << type_str << "\n";
+                return false;
             }
 
             // Parse flags (pk, notnull, unsigned)

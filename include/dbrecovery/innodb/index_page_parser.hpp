@@ -19,6 +19,7 @@
  */
 
 #include <cstdint>
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <optional>
@@ -314,6 +315,7 @@ struct IndexFieldValue {
     bool is_null = false;
     bool is_deleted = false;        // From deleted record
     bool is_overflow = false;       // Data is off-page (overflow pointer)
+    bool is_unparsable_json = false; // Raw JSON evidence; never structured-exportable
 
     // Overflow pointer details
     uint32_t overflow_space_id = 0;
@@ -385,7 +387,14 @@ struct IndexRecord {
     // Confidence score for this record (0.0-1.0)
     double confidence = 1.0;
 
+    bool has_unparsable_json_evidence() const {
+        return std::any_of(fields.begin(), fields.end(), [](const IndexFieldValue& field) {
+            return field.is_unparsable_json;
+        });
+    }
+
     std::string to_csv_line() const {
+        if (has_unparsable_json_evidence()) return {};
         // Pre-calculate approximate size to reduce allocations
         size_t estimated_size = fields.size() * 16;  // rough estimate
         for (const auto& f : fields) {
@@ -431,6 +440,7 @@ struct IndexRecord {
     }
 
     std::string to_sql_values(const std::string& table_name = "recovered_table") const {
+        if (has_unparsable_json_evidence()) return {};
         // Pre-calculate size
         size_t estimated_size = 50 + table_name.size() + fields.size() * 20;
         for (const auto& f : fields) {

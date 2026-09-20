@@ -134,6 +134,11 @@ public:
     void set_config(const Config& config);
 
     /**
+     * @brief Transfer an already-authorized raw-device capability to this carver.
+     */
+    void adopt_authorized_raw_device(safety::AuthorizedRawDevice&& device);
+
+    /**
      * @brief 执行磁盘扫描
      * @param progress 进度回调 (0.0-1.0, message)
      * @return 扫描结果

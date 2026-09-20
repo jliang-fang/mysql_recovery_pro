@@ -1263,9 +1263,13 @@ int main(int argc, char** argv) {
                 while (std::getline(cs, token, ':')) {
                     parts.push_back(token);
                 }
-                if (parts.empty()) continue;
+                if (parts.size() < 2 || parts[0].empty() || parts[1].empty()) {
+                    std::cerr << "[ERROR] --schema requires name and type: "
+                              << col_def << "\n";
+                    return 1;
+                }
                 tcol.name = parts[0];
-                std::string type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
+                std::string type_str = parts[1];
 
                 // Parse type name and extract max_length for VARCHAR
                 tcol.type_name = type_str;
@@ -1347,7 +1351,10 @@ int main(int argc, char** argv) {
                 else if (type_upper == "BLOB" || type_upper == "TINYBLOB") { tcol.mysql_type = dbrecovery::innodb::mysql_types::BLOB; tcol.is_variable_length = true; tcol.max_length = 65535; tcol.char_length = 65535; }
                 else if (type_upper == "BIT") { tcol.mysql_type = dbrecovery::innodb::mysql_types::BIT; }
                 else if (type_upper == "JSON") { tcol.mysql_type = dbrecovery::innodb::mysql_types::JSON; tcol.is_variable_length = true; tcol.max_length = 4294967295; tcol.char_length = 4294967295; }
-                else { tcol.mysql_type = dbrecovery::innodb::mysql_types::VARCHAR; tcol.is_variable_length = true; tcol.max_length = 255; tcol.char_length = 255; }
+                else {
+                    std::cerr << "[ERROR] Unsupported --schema type: " << type_str << "\n";
+                    return 1;
+                }
 
                 // Parse flags (pk, null, unsigned)
                 for (size_t fi = 2; fi < parts.size(); fi++) {
@@ -1419,6 +1426,9 @@ int main(int argc, char** argv) {
                 // fail-closed type conversion boundary; SDI/FRM schema fields
                 // carry InnoDB parser-domain IDs, so validate them as such.
                 schema_template.table_name = sdi_schema->table_name;
+                std::vector<dbrecovery::engine::SchemaTemplate::Column> converted_columns;
+                std::vector<uint32_t> converted_primary_keys;
+                bool schema_rejected = false;
                 for (auto& [pos, col] : sdi_schema->columns) {
                     std::vector<std::string> type_diag;
                     auto converted = dbrecovery::catalog::build_index_column(
@@ -1431,7 +1441,8 @@ int main(int argc, char** argv) {
                         for (const auto& d : type_diag) {
                             std::cerr << "[WARN] SDI schema column rejected: " << d << "\n";
                         }
-                        continue;
+                        schema_rejected = true;
+                        break;
                     }
                     dbrecovery::engine::SchemaTemplate::Column tcol;
                     tcol.name = converted->name;
@@ -1440,13 +1451,21 @@ int main(int argc, char** argv) {
                     tcol.is_primary_key = (pos == 1);
                     tcol.enum_values = converted->enum_values;
                     tcol.set_values = converted->set_values;
-                    schema_template.columns.push_back(tcol);
                     if (tcol.is_primary_key) {
-                        schema_template.primary_key_columns.push_back(
-                            static_cast<uint32_t>(schema_template.columns.size() - 1));
+                        converted_primary_keys.push_back(
+                            static_cast<uint32_t>(converted_columns.size()));
                     }
+                    converted_columns.push_back(std::move(tcol));
                 }
-                has_schema = !schema_template.columns.empty();
+                if (schema_rejected) {
+                    schema_template = {};
+                    schema_template.table_name = table_name.empty() ? "recovered_table" : table_name;
+                    std::cerr << "[WARN] SDI schema is incomplete; using evidence-only heuristic extraction\n";
+                } else {
+                    schema_template.columns = std::move(converted_columns);
+                    schema_template.primary_key_columns = std::move(converted_primary_keys);
+                    has_schema = !schema_template.columns.empty();
+                }
             } else if (!frm_path.empty()) {
                 // Try to parse schema from .frm file
                 std::cout << "[INFO] Attempting to parse schema from .frm file: " << frm_path << "\n";
@@ -1454,6 +1473,8 @@ int main(int argc, char** argv) {
                 if (frm_schema.has_value()) {
                     std::cout << "[INFO] Schema obtained from .frm file\n";
                     schema_template.table_name = frm_schema->table_name;
+                    std::vector<dbrecovery::engine::SchemaTemplate::Column> converted_columns;
+                    bool schema_rejected = false;
                     for (auto& [pos, col] : frm_schema->columns) {
                         std::vector<std::string> type_diag;
                         auto converted = dbrecovery::catalog::build_index_column(
@@ -1466,7 +1487,8 @@ int main(int argc, char** argv) {
                             for (const auto& d : type_diag) {
                                 std::cerr << "[WARN] FRM schema column rejected: " << d << "\n";
                             }
-                            continue;
+                            schema_rejected = true;
+                            break;
                         }
                         dbrecovery::engine::SchemaTemplate::Column tcol;
                         tcol.name = converted->name;
@@ -1475,9 +1497,16 @@ int main(int argc, char** argv) {
                         tcol.max_length = converted->col_length;
                         tcol.enum_values = converted->enum_values;
                         tcol.set_values = converted->set_values;
-                        schema_template.columns.push_back(tcol);
+                        converted_columns.push_back(std::move(tcol));
                     }
-                    has_schema = !schema_template.columns.empty();
+                    if (schema_rejected) {
+                        schema_template = {};
+                        schema_template.table_name = table_name.empty() ? "recovered_table" : table_name;
+                        std::cerr << "[WARN] FRM schema is incomplete; using evidence-only heuristic extraction\n";
+                    } else {
+                        schema_template.columns = std::move(converted_columns);
+                        has_schema = !schema_template.columns.empty();
+                    }
                 } else {
                     std::cout << "[INFO] Failed to parse .frm file, using heuristic schema inference\n";
                     schema_template.table_name = table_name.empty() ? "recovered_table" : table_name;
@@ -1819,6 +1848,8 @@ int main(int argc, char** argv) {
             if (schema_opt.has_value()) {
                 const auto& schema = schema_opt.value();
                 uint32_t n_pk = 0;
+                std::vector<dbrecovery::innodb::IndexColumnDef> converted_columns;
+                bool schema_rejected = false;
                 for (const auto& [ord, col] : schema.columns) {
                     // Route the SDI-derived type ID through the fail-closed
                     // conversion boundary. SDI schema carries InnoDB parser-
@@ -1834,18 +1865,24 @@ int main(int argc, char** argv) {
                         for (const auto& d : type_diag) {
                             std::cerr << "[WARN] SDI schema column rejected: " << d << "\n";
                         }
-                        continue;
+                        schema_rejected = true;
+                        break;
                     }
                     dbrecovery::innodb::IndexColumnDef icol = std::move(*converted);
                     // JSON columns use binary charset but must not be treated as
                     // opaque binary data.
                     icol.is_binary = icol.is_binary && (icol.col_type != 31);
-                    index_columns.push_back(std::move(icol));
+                    converted_columns.push_back(std::move(icol));
                 }
-                if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
-                index_parser.set_columns(index_columns, false, n_pk);
-                std::cout << "[INFO] Schema extracted from SDI (" << index_columns.size()
-                          << " columns, " << n_pk << " PK columns)\\n";
+                if (schema_rejected) {
+                    std::cerr << "[WARN] SDI schema is incomplete; structured index parsing is disabled\n";
+                } else if (!converted_columns.empty()) {
+                    if (n_pk == 0) n_pk = 1;
+                    index_columns = std::move(converted_columns);
+                    index_parser.set_columns(index_columns, false, n_pk);
+                    std::cout << "[INFO] Schema extracted from SDI (" << index_columns.size()
+                              << " columns, " << n_pk << " PK columns)\\n";
+                }
             }
         }
 
@@ -1879,9 +1916,13 @@ int main(int argc, char** argv) {
                 while (std::getline(cs, token, ':')) {
                     parts.push_back(token);
                 }
-                if (parts.empty()) continue;
+                if (parts.size() < 2 || parts[0].empty() || parts[1].empty()) {
+                    std::cerr << "[ERROR] --schema requires name and type: "
+                              << col_def << "\n";
+                    return 1;
+                }
                 icol.name = parts[0];
-                std::string type_str = parts.size() > 1 ? parts[1] : "VARCHAR";
+                std::string type_str = parts[1];
 
                 // Parse type name and extract length
                 auto paren_pos = type_str.find('(');
@@ -1946,7 +1987,10 @@ int main(int argc, char** argv) {
                 else if (type_upper == "TEXT") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
                 else if (type_upper == "BLOB") { icol.col_type = 27; icol.is_big = true; icol.col_length = 65535; }
                 else if (type_upper == "JSON") { icol.col_type = 31; icol.is_big = true; icol.col_length = 4294967295; }
-                else { icol.col_type = 15; icol.is_big = (icol.col_length > 255); }
+                else {
+                    std::cerr << "[ERROR] Unsupported --schema type: " << type_str << "\n";
+                    return 1;
+                }
 
                 // Determine which part index contains flags
                 // Format: name:TYPE[:size][:flag1:flag2:...]

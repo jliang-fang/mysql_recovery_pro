@@ -277,8 +277,8 @@ bool convert_schema(const catalog::TableSchema& schema,
                     std::vector<innodb::IndexColumnDef>& columns,
                     uint32_t& primary_key_columns,
                     std::vector<std::string>* diagnostics = nullptr) {
-    columns.clear();
-    primary_key_columns = 0;
+    std::vector<innodb::IndexColumnDef> converted_columns;
+    uint32_t converted_primary_key_columns = 0;
     for (const auto& entry : schema.columns) {
         const auto& source = entry.second;
         if (source.name == "DB_TRX_ID" || source.name == "DB_ROLL_PTR" ||
@@ -297,28 +297,30 @@ bool convert_schema(const catalog::TableSchema& schema,
                 diagnostics->insert(diagnostics->end(), local_diag.begin(),
                                     local_diag.end());
             }
-            continue;
+            return false;
         }
-        columns.push_back(std::move(*converted));
+        converted_columns.push_back(std::move(*converted));
     }
-    if (columns.empty()) return false;
-    std::sort(columns.begin(), columns.end(), [](const auto& left, const auto& right) {
+    if (converted_columns.empty()) return false;
+    std::sort(converted_columns.begin(), converted_columns.end(), [](const auto& left, const auto& right) {
         return left.physical_pos < right.physical_pos;
     });
     for (const auto& index : schema.indexes) {
         if (!index.is_primary) continue;
         for (const auto& name : index.columns) {
-            if (std::any_of(columns.begin(), columns.end(), [&](const auto& column) {
+            if (std::any_of(converted_columns.begin(), converted_columns.end(), [&](const auto& column) {
                     return column.name == name;
                 })) {
-                ++primary_key_columns;
+                ++converted_primary_key_columns;
             }
         }
     }
-    if (primary_key_columns == 0) {
-        primary_key_columns = 1;
-        columns.front().is_nullable = false;
+    if (converted_primary_key_columns == 0) {
+        converted_primary_key_columns = 1;
+        converted_columns.front().is_nullable = false;
     }
+    columns = std::move(converted_columns);
+    primary_key_columns = converted_primary_key_columns;
     return true;
 }
 
@@ -563,6 +565,7 @@ UnifiedRecoveryResult run_unified_recovery(
                 for (auto &idx : frm->indexes) if (idx.is_primary) for (auto &c: idx.columns) pk_names.insert(c);
                 uint32_t n_pk = 0;
                 bool frm_type_rejected = false;
+                std::vector<innodb::IndexColumnDef> frm_columns;
                 for (auto &[pos, col] : frm->columns) {
                     // FRMParser already normalizes MySQL server type IDs into
                     // the InnoDB parser domain; verify through the fail-closed
@@ -570,8 +573,8 @@ UnifiedRecoveryResult run_unified_recovery(
                     std::vector<std::string> type_diag;
                     auto converted = catalog::build_index_column(
                         col,
-                        /*ordinal_position=*/static_cast<uint32_t>(index_columns.size() + 1),
-                        /*physical_pos_override=*/static_cast<uint32_t>(index_columns.size() + 1),
+                        /*ordinal_position=*/static_cast<uint32_t>(frm_columns.size() + 1),
+                        /*physical_pos_override=*/static_cast<uint32_t>(frm_columns.size() + 1),
                         catalog::TypeIdDomain::kInnodbParser,
                         type_diag);
                     if (!converted.has_value()) {
@@ -579,24 +582,21 @@ UnifiedRecoveryResult run_unified_recovery(
                         for (const auto& d : type_diag) {
                             result.schema_diagnostics.push_back("FRM " + d);
                         }
-                        continue;
+                        break;
                     }
                     innodb::IndexColumnDef icol = std::move(*converted);
                     icol.is_binary = (col.charset_id==63||col.collation_id==63) && icol.col_type!=31;
                     if (pk_names.count(col.name)) n_pk++;
-                    index_columns.push_back(std::move(icol));
+                    frm_columns.push_back(std::move(icol));
                 }
-                if (frm_type_rejected && index_columns.empty()) {
+                if (frm_type_rejected) {
                     result.trust_level = "EVIDENCE_ONLY";
                     result.schema_source = "FRM";
                     result.schema_diagnostics.push_back(
                         "FRM column types failed conversion; export blocked");
-                }
-                if (index_columns.empty()) {
-                    // No usable columns — do not promote a schema whose every
-                    // column type was rejected by the conversion boundary.
-                } else {
+                } else if (!frm_columns.empty()) {
                     if (n_pk==0) n_pk=1;
+                    index_columns = std::move(frm_columns);
                     parser.set_columns(index_columns,false,n_pk);
                     schema_source = "FRM";
                     have_schema = true;

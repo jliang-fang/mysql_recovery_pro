@@ -187,6 +187,12 @@ bool RawDiskIOEngine::open(const std::string& path, IoMode mode) {
         close();
     }
 
+    struct stat path_stat {};
+    if (::stat(path.c_str(), &path_stat) != 0 || S_ISBLK(path_stat.st_mode)) {
+        std::cerr << "[ERROR] RawDiskIOEngine: block devices require SafetyGate authorization and adopt_fd()" << std::endl;
+        return false;
+    }
+
     mode_ = mode;
 
     if (mode == IoMode::MEMORY_MAPPED) {
@@ -199,12 +205,14 @@ bool RawDiskIOEngine::open(const std::string& path, IoMode mode) {
         }
         use_direct_io_ = false;
 
-        struct stat st;
-        if (fstat(fd_, &st) == 0) {
-            size_ = st.st_size;
-        } else {
-            size_ = 0;
+        struct stat st {};
+        if (::fstat(fd_, &st) != 0 || S_ISBLK(st.st_mode)) {
+            ::close(fd_);
+            fd_ = -1;
+            std::cerr << "[ERROR] RawDiskIOEngine: block devices require SafetyGate authorization and adopt_fd()" << std::endl;
+            return false;
         }
+        size_ = st.st_size;
 
         is_open_ = true;
         return true;
@@ -235,25 +243,28 @@ bool RawDiskIOEngine::open(const std::string& path, IoMode mode) {
     }
 #endif
 
-    // Get file size
-    struct stat st;
-    if (fstat(fd_, &st) == 0) {
-        size_ = st.st_size;
+    // Validate the opened object as well as the pathname check above, so a
+    // pathname substitution cannot admit a block device between stat() and open().
+    struct stat st {};
+    if (::fstat(fd_, &st) != 0 || S_ISBLK(st.st_mode)) {
+        ::close(fd_);
+        fd_ = -1;
+        std::cerr << "[ERROR] RawDiskIOEngine: block devices require SafetyGate authorization and adopt_fd()" << std::endl;
+        return false;
+    }
+    size_ = st.st_size;
 
-        // Get optimal I/O block size
+    // Get optimal I/O block size
 #if defined(_GNU_SOURCE) || defined(_BSD_SOURCE)
-        struct statvfs vfs;
-        if (fstatvfs(fd_, &vfs) == 0) {
-            optimal_block_size_ = static_cast<uint32_t>(vfs.f_bsize);
-        }
+    struct statvfs vfs {};
+    if (::fstatvfs(fd_, &vfs) == 0) {
+        optimal_block_size_ = static_cast<uint32_t>(vfs.f_bsize);
+    }
 #endif
 
-        // Ensure at least 4K alignment
-        if (optimal_block_size_ < 4096) {
-            optimal_block_size_ = 4096;
-        }
-    } else {
-        size_ = 0;
+    // Ensure at least 4K alignment
+    if (optimal_block_size_ < 4096) {
+        optimal_block_size_ = 4096;
     }
 
     is_open_ = true;

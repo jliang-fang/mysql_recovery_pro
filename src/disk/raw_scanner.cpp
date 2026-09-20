@@ -49,12 +49,13 @@ bool RawScanner::open(const std::string& path) {
         }
     }
 
-    // Get file size
-    struct stat st;
-    if (fstat(fd, &st) == 0) {
-        impl_->size_ = st.st_size;
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || S_ISBLK(st.st_mode)) {
+        ::close(fd);
+        return false;
     }
 
+    impl_->size_ = st.st_size;
     impl_->fd_ = fd;
     impl_->is_open_ = true;
     return true;

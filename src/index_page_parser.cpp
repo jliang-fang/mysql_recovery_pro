@@ -2661,6 +2661,7 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 if (val.str_value == JSON_UNPARSABLE) {
                     // 未能完整解析的 JSON 降级为原始证据字节，不进入结构化文本
                     val.type = IndexFieldValue::Type::UNKNOWN_VAL;
+                    val.is_unparsable_json = true;
                     val.raw_bytes.assign(data + offset, data + offset + field_size);
                     val.str_value.clear();
                 }

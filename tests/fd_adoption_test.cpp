@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include "dbrecovery/disk/enhanced_scanner.hpp"
 #include "dbrecovery/disk/io_uring_scanner.hpp"
 #include "dbrecovery/disk/raw_scanner.hpp"
 #include "dbrecovery/disk/xfs_disk_carver.hpp"
 #include "dbrecovery/engine/raw_disk_engine.hpp"
+#include "dbrecovery/recovery/raw_disk_carver.hpp"
+#include "dbrecovery/recovery/ext4_recovery.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -47,6 +50,53 @@ protected:
         ASSERT_TRUE(output.is_open());
         output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
         ASSERT_TRUE(output.good());
+    }
+
+    static std::vector<uint8_t> innodb_index_page(uint32_t page_size = 4096) {
+        std::vector<uint8_t> page(page_size, 0);
+        write_be32(page, 4, 7);
+        write_be16(page, 24, dbrecovery::innodb::FIL_PAGE_INDEX);
+        write_be32(page, 34, 42);
+        return page;
+    }
+
+    static std::vector<uint8_t> ext4_image() {
+        std::vector<uint8_t> image(4096, 0);
+        constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+        write_le32(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_blocks_count_lo),
+                   1);
+        write_le32(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_log_block_size),
+                   0);
+        write_le32(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_blocks_per_group),
+                   1);
+        write_le32(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_inodes_per_group),
+                   1);
+        write_le16(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_magic),
+                   dbrecovery::recovery::ext4::EXT2_SUPER_MAGIC);
+        write_le16(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_inode_size),
+                   128);
+        write_le16(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                                s_desc_size),
+                   32);
+        return image;
+    }
+
+    static void write_le16(std::vector<uint8_t>& bytes, size_t offset, uint16_t value) {
+        bytes[offset] = static_cast<uint8_t>(value);
+        bytes[offset + 1] = static_cast<uint8_t>(value >> 8);
+    }
+
+    static void write_le32(std::vector<uint8_t>& bytes, size_t offset, uint32_t value) {
+        bytes[offset] = static_cast<uint8_t>(value);
+        bytes[offset + 1] = static_cast<uint8_t>(value >> 8);
+        bytes[offset + 2] = static_cast<uint8_t>(value >> 16);
+        bytes[offset + 3] = static_cast<uint8_t>(value >> 24);
     }
 
     static std::vector<uint8_t> xfs_image(uint32_t block_size) {
@@ -214,7 +264,91 @@ TEST_F(FdAdoptionTest, XfsCarverHonorsAdmittedCapacity) {
     EXPECT_EQ(result.errors.front(), "Invalid XFS superblock on admitted source");
 }
 
-TEST_F(FdAdoptionTest, RawDiskEngineReplacesPreviouslyAdoptedDescriptor) {
+TEST_F(FdAdoptionTest, EnhancedScannerUsesAdoptedDescriptorAndCapacity) {
+    const auto page = innodb_index_page();
+    write_file(source_path_, page);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::disk::EnhancedScanner scanner;
+    ASSERT_TRUE(scanner.adopt_fd(fd, page.size()));
+    ASSERT_EQ(::rename(replacement_path_.c_str(), source_path_.c_str()), 0);
+
+    const auto blocks = scanner.scan_for_ibd_blocks();
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(blocks.front().page_size, page.size());
+    EXPECT_EQ(blocks.front().page_number, 7u);
+    EXPECT_EQ(blocks.front().space_id, 42u);
+    EXPECT_EQ(blocks.front().page_type, dbrecovery::innodb::FIL_PAGE_INDEX);
+    EXPECT_EQ(blocks.front().data, page);
+
+    const int limited_fd = ::open(source_path_.c_str(), O_RDONLY);
+    ASSERT_GE(limited_fd, 0);
+    dbrecovery::disk::EnhancedScanner limited_scanner;
+    ASSERT_TRUE(limited_scanner.adopt_fd(limited_fd, 128));
+    EXPECT_TRUE(limited_scanner.scan_for_ibd_blocks().empty());
+    EXPECT_EQ(limited_scanner.get_stats().total_bytes_scanned, 128u);
+}
+
+TEST_F(FdAdoptionTest, EnhancedScannerTemplateScanUsesAlreadyOpenSource) {
+    const auto page = innodb_index_page();
+    write_file(source_path_, page);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::disk::EnhancedScanner scanner;
+    ASSERT_TRUE(scanner.adopt_fd(fd, page.size()));
+    ASSERT_EQ(::rename(replacement_path_.c_str(), source_path_.c_str()), 0);
+
+    const auto blocks = scanner.scan_with_table_template({}, 1);
+    ASSERT_EQ(blocks.size(), 1u);
+    EXPECT_EQ(blocks.front().data, page);
+}
+
+TEST_F(FdAdoptionTest, Ext4RecoveryUsesAdoptedDescriptorAfterPathReplacement) {
+    const auto image = ext4_image();
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    config.scan_freed_blocks = false;
+    config.scan_deleted_inodes = false;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+    ASSERT_EQ(::rename(replacement_path_.c_str(), source_path_.c_str()), 0);
+
+    const auto result = recovery.scan();
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.block_size, 1024u);
+    EXPECT_EQ(result.group_count, 1u);
+}
+
+TEST_F(FdAdoptionTest, Ext4RecoveryHonorsAdmittedCapacityAndClosesRejectedDescriptors) {
+    const auto image = ext4_image();
+    write_file(source_path_, image);
+
+    const int writable_fd = ::open(source_path_.c_str(), O_RDWR);
+    ASSERT_GE(writable_fd, 0);
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    EXPECT_FALSE(recovery.adopt_fd(writable_fd, image.size()));
+    errno = 0;
+    EXPECT_EQ(::fcntl(writable_fd, F_GETFD), -1);
+    EXPECT_EQ(errno, EBADF);
+
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+    ASSERT_TRUE(recovery.adopt_fd(fd, 1024));
+    const auto result = recovery.scan();
+    EXPECT_FALSE(result.success);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front(), "Invalid ext4 superblock or cannot read admitted source");
+}
+
+TEST_F(FdAdoptionTest, RawDiskEngineReplacesOwnedDescriptors) {
     const int first_fd = open_source_read_only();
     ASSERT_GE(first_fd, 0);
 

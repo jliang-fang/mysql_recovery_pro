@@ -78,6 +78,13 @@ void RawDiskCarver::set_config(const Config& config) {
     }
 }
 
+void RawDiskCarver::adopt_authorized_raw_device(safety::AuthorizedRawDevice&& device) {
+    authorized_raw_device_.reset();
+    if (device.valid() && device.size_bytes() > 0) {
+        authorized_raw_device_.emplace(std::move(device));
+    }
+}
+
 void RawDiskCarver::set_external_schema(const catalog::TableSchema& schema) {
     external_schema_ = schema;
 }
@@ -342,65 +349,64 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
         return result;
     }
 
-    authorized_raw_device_.reset();
-
-    // 获取设备/路径大小
+    // Obtain the source capacity. A transferred authorization is the only
+    // admissible authority for a raw block device.
     uint64_t device_size = 0;
 
 #ifdef __linux__
-    struct stat st{};
-    if (stat(config_.device_path.c_str(), &st) != 0) {
-        result.errors.push_back("Cannot access device: " + config_.device_path);
-        return result;
-    }
-
-    if (S_ISBLK(st.st_mode)) {
-        dbrecovery::safety::SafetyGate gate;
-        std::string authorization_reason;
-        authorized_raw_device_ = gate.authorize_read_only_raw_device(
-            config_.device_path, &authorization_reason);
-        if (!authorized_raw_device_.has_value()) {
-            result.errors.push_back("Raw source rejected: " + authorization_reason);
+    if (authorized_raw_device_.has_value()) {
+        device_size = authorized_raw_device_->size_bytes();
+    } else {
+        struct stat st{};
+        if (stat(config_.device_path.c_str(), &st) != 0) {
+            result.errors.push_back("Cannot access device: " + config_.device_path);
             return result;
         }
-        device_size = authorized_raw_device_->size_bytes();
-    } else if (S_ISREG(st.st_mode)) {
-        // 普通文件
-        device_size = st.st_size;
-    } else if (S_ISDIR(st.st_mode)) {
-        // 目录 - 递归扫描所有文件
-        // 目录扫描模式：扫描目录中的所有.ibd文件
-        if (config_.verbose) {
-            std::cout << "[INFO] Directory scan mode: scanning all files in " << config_.device_path << "\n";
-        }
 
-        try {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(config_.device_path)) {
-                if (entry.is_regular_file()) {
-                    std::string filename = entry.path().filename().string();
-                    // 扫描所有文件（不限于.ibd），因为可能有残留数据
-                    std::string filepath = entry.path().string();
+        if (S_ISREG(st.st_mode)) {
+            device_size = st.st_size;
+        } else if (S_ISDIR(st.st_mode)) {
+            // 目录 - 递归扫描所有文件
+            // 目录扫描模式：扫描目录中的所有.ibd文件
+            if (config_.verbose) {
+                std::cout << "[INFO] Directory scan mode: scanning all files in " << config_.device_path << "\n";
+            }
 
-                    // 获取文件大小
-                    try {
-                        uint64_t file_size = std::filesystem::file_size(entry.path());
-                        device_size += file_size;
+            try {
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(config_.device_path)) {
+                    if (entry.is_regular_file()) {
+                        std::string filename = entry.path().filename().string();
+                        // 扫描所有文件（不限于.ibd），因为可能有残留数据
+                        std::string filepath = entry.path().string();
 
-                        if (config_.verbose && file_size > 0) {
-                            std::cout << "[INFO] Found file: " << filepath << " (" << file_size << " bytes)\n";
+                        // 获取文件大小
+                        try {
+                            uint64_t file_size = std::filesystem::file_size(entry.path());
+                            device_size += file_size;
+
+                            if (config_.verbose && file_size > 0) {
+                                std::cout << "[INFO] Found file: " << filepath << " (" << file_size << " bytes)\n";
+                            }
+                        } catch (...) {
+                            // Skip files we can't read
                         }
-                    } catch (...) {
-                        // Skip files we can't read
                     }
                 }
+            } catch (const std::filesystem::filesystem_error& e) {
+                result.errors.push_back("Directory scan error: " + std::string(e.what()));
+                return result;
             }
-        } catch (const std::filesystem::filesystem_error& e) {
-            result.errors.push_back("Directory scan error: " + std::string(e.what()));
-            return result;
-        }
 
-        if (config_.verbose) {
-            std::cout << "[INFO] Total files size: " << device_size << " bytes\n";
+            if (config_.verbose) {
+                std::cout << "[INFO] Total files size: " << device_size << " bytes\n";
+            }
+        } else if (S_ISBLK(st.st_mode)) {
+            result.errors.push_back(
+                "Raw block devices require SafetyGate authorization and capability adoption");
+            return result;
+        } else {
+            result.errors.push_back("Unsupported source type");
+            return result;
         }
     }
 #else
@@ -516,6 +522,17 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             std::cerr << "[Worker " << worker_id << "] Cannot open device\n";
         }
         return;
+    }
+    if (!authorized_raw_device_.has_value()) {
+        struct stat opened{};
+        if (::fstat(fd, &opened) != 0 || !S_ISREG(opened.st_mode)) {
+            ::close(fd);
+            if (config_.verbose) {
+                std::cerr << "[Worker " << worker_id
+                          << "] Source changed to an unsupported type\n";
+            }
+            return;
+        }
     }
 #else
     std::ifstream device(config_.device_path, std::ios::binary);
@@ -1355,9 +1372,9 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
             type_diag);
         if (!converted.has_value()) {
             for (const auto& d : type_diag) {
-                std::cerr << "[WARN] raw-disk schema column rejected: " << d << "\n";
+                std::cerr << "[WARN] raw-disk schema rejected: " << d << "\n";
             }
-            continue;
+            return records;
         }
         columns.push_back(std::move(*converted));
     }

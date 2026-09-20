@@ -47,10 +47,13 @@ public:
             return false;
         }
 
-        struct stat st;
-        if (fstat(fd_, &st) == 0) {
-            size_ = st.st_size;
+        struct stat st {};
+        if (::fstat(fd_, &st) != 0 || S_ISBLK(st.st_mode)) {
+            ::close(fd_);
+            fd_ = -1;
+            return false;
         }
+        size_ = st.st_size;
 
         // Initialize io_uring
         int ret = io_uring_queue_init(queue_depth_, &ring_, 0);
@@ -290,10 +293,13 @@ public:
             return false;
         }
 
-        struct stat st;
-        if (fstat(fd_, &st) == 0) {
-            size_ = st.st_size;
+        struct stat st {};
+        if (::fstat(fd_, &st) != 0 || S_ISBLK(st.st_mode)) {
+            ::close(fd_);
+            fd_ = -1;
+            return false;
         }
+        size_ = st.st_size;
 
         is_open_ = true;
         return true;

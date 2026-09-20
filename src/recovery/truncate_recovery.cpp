@@ -676,6 +676,7 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
     if (!schema.columns.empty()) {
         std::vector<innodb::IndexColumnDef> col_defs;
         uint32_t n_pk = 0;
+        bool schema_rejected = false;
         for (const auto& [idx, col] : schema.columns) {
             // Schema carries InnoDB parser-domain type IDs; route through the
             // fail-closed conversion boundary instead of a raw narrowing cast.
@@ -688,9 +689,10 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
                 type_diag);
             if (!converted.has_value()) {
                 for (const auto& d : type_diag) {
-                    std::cerr << "[WARN] TRUNCATE schema column rejected: " << d << "\n";
+                    std::cerr << "[WARN] TRUNCATE schema rejected: " << d << "\n";
                 }
-                continue;
+                schema_rejected = true;
+                break;
             }
             innodb::IndexColumnDef def = std::move(*converted);
             // Preserve prior binary/mb_maxlen refinements.
@@ -700,28 +702,30 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
             def.is_binary = def.is_binary && (def.col_type != 31);
             col_defs.push_back(std::move(def));
         }
-        if (n_pk == 0 && !col_defs.empty()) n_pk = 1;
+        if (!schema_rejected) {
+            if (n_pk == 0 && !col_defs.empty()) n_pk = 1;
 
-        innodb::InnoDBIndexParser parser;
-        parser.set_columns(col_defs, false, n_pk);
-        parser.set_recover_deleted(true);
-        parser.set_bad_page_mode(2);  // Try mode for truncated pages
+            innodb::InnoDBIndexParser parser;
+            parser.set_columns(col_defs, false, n_pk);
+            parser.set_recover_deleted(true);
+            parser.set_bad_page_mode(2);  // Try mode for truncated pages
 
-        auto index_records = parser.parse_ibd_force(ibd_path);
-        if (!index_records.empty()) {
-            for (const auto& rec : index_records) {
-                std::map<std::string, std::string> record;
-                for (size_t i = 0; i < rec.fields.size() && i < col_names.size(); i++) {
-                    record[col_names[i]] = rec.fields[i].str_value;
+            auto index_records = parser.parse_ibd_force(ibd_path);
+            if (!index_records.empty()) {
+                for (const auto& rec : index_records) {
+                    std::map<std::string, std::string> record;
+                    for (size_t i = 0; i < rec.fields.size() && i < col_names.size(); i++) {
+                        record[col_names[i]] = rec.fields[i].str_value;
+                    }
+                    if (record.size() >= 2) {
+                        records.push_back(record);
+                    }
                 }
-                if (record.size() >= 2) {
-                    records.push_back(record);
+                if (!records.empty()) {
+                    std::cout << "[INFO] Detected " << records.size()
+                              << " records via InnoDBIndexParser (schema-aware)\n";
+                    return records;
                 }
-            }
-            if (!records.empty()) {
-                std::cout << "[INFO] Detected " << records.size()
-                          << " records via InnoDBIndexParser (schema-aware)\n";
-                return records;
             }
         }
     }

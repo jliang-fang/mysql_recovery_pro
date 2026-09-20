@@ -676,7 +676,7 @@ uint64_t Ext4Recovery::block_to_disk_offset(uint64_t block) const {
 
 int Ext4Recovery::duplicate_source_fd() const {
 #ifdef __linux__
-    return source_fd_ >= 0 ? ::dup(source_fd_) : -1;
+    return source_fd_ >= 0 ? ::fcntl(source_fd_, F_DUPFD_CLOEXEC, 0) : -1;
 #else
     return -1;
 #endif

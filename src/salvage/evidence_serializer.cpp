@@ -108,6 +108,16 @@ std::string SalvageEvidenceSerializer::to_json(
         for (const auto& tag : frag.evidence.tags) {
             entry["evidence"]["tags"].push_back(tag);
         }
+        entry["raw_field_evidence"] = nlohmann::json::array();
+        for (const auto& raw_field : frag.raw_field_evidence) {
+            nlohmann::json raw_entry;
+            raw_entry["column_name"] = raw_field.column_name;
+            raw_entry["sha256"] = sha256_hex(std::string(
+                reinterpret_cast<const char*>(raw_field.raw_bytes.data()),
+                raw_field.raw_bytes.size()));
+            raw_entry["byte_length"] = raw_field.raw_bytes.size();
+            entry["raw_field_evidence"].push_back(std::move(raw_entry));
+        }
 
         // Fields: hash + bounded preview only (never full raw values)
         entry["fields"] = nlohmann::json::array();

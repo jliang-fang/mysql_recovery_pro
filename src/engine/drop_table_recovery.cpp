@@ -1597,7 +1597,6 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
         return all_records;
     }
 
-    // Build column definitions for InnoDBIndexParser
     std::vector<innodb::IndexColumnDef> col_defs;
     uint32_t n_pk = 0;
     std::set<std::string> pk_col_names;
@@ -1611,6 +1610,8 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
         }
     }
 
+    std::vector<innodb::IndexColumnDef> converted_defs;
+    uint32_t converted_n_pk = 0;
     for (const auto& [idx, col] : schema.columns) {
         std::vector<std::string> diagnostics;
         auto converted = catalog::build_index_column(
@@ -1618,9 +1619,9 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
             catalog::TypeIdDomain::kInnodbParser, diagnostics);
         if (!converted.has_value()) {
             for (const auto& d : diagnostics) {
-                std::cerr << "[WARN] DROP recovery schema column rejected: " << d << std::endl;
+                std::cerr << "[WARN] DROP recovery schema rejected: " << d << std::endl;
             }
-            continue;
+            return all_records;
         }
         innodb::IndexColumnDef def = *converted;
 
@@ -1631,21 +1632,21 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
             def.mb_maxlen = 1;  // latin1, utf8
         }
 
-        // Set is_big for variable-length columns
         if (def.is_variable_length()) {
             def.is_big = (def.col_length * def.mb_maxlen > 255);
         }
 
-        // Set is_binary based on charset
         def.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (def.col_type != 31);
 
-        // Check if PK column
         if (pk_col_names.count(col.name) > 0) {
-            n_pk++;
+            ++converted_n_pk;
         }
 
-        col_defs.push_back(def);
+        converted_defs.push_back(std::move(def));
     }
+
+    col_defs = std::move(converted_defs);
+    n_pk = converted_n_pk;
 
     if (n_pk == 0 && !col_defs.empty()) {
         n_pk = 1;  // Default: first column is PK

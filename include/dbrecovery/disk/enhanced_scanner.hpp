@@ -5,12 +5,16 @@
 #include "dbrecovery/innodb/binary_reader.hpp"
 #include "dbrecovery/disk/ibd_signatures.hpp"
 #include "dbrecovery/disk/raw_scanner.hpp"
-#include <vector>
-#include <string>
+#include <algorithm>
+#include <array>
+#include <cstring>
 #include <functional>
-#include <optional>
-#include <unordered_set>
 #include <memory>
+#include <optional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace dbrecovery {
 namespace disk {
@@ -58,6 +62,11 @@ public:
 
     // PhotoRec 风格的文件雕刻
     std::vector<FoundIbdFile> carve_ibd_files(uint32_t min_pages = 2);
+
+    // 使用已知表结构作为模板扫描已打开来源
+    std::vector<FoundIbdBlock> scan_with_table_template(
+        const std::vector<std::pair<std::string, uint8_t>>& column_definitions,
+        uint32_t min_pages = 2);
 
     // 使用已知表结构作为模板扫描
     std::vector<FoundIbdBlock> scan_with_table_template(
@@ -121,6 +130,7 @@ private:
     static constexpr std::array<uint32_t, 5> PAGE_SIZES{4096, 8192, 16384, 32768, 65536};
 
     uint32_t default_page_size_ = 16384;
+    uint64_t scan_limit_ = 0;
 };
 
 // ==================== 实现 ====================
@@ -137,8 +147,19 @@ inline bool EnhancedScanner::scan(const std::string& disk_path, uint64_t max_sca
     }
 
     uint64_t disk_size = scanner_->get_size();
-    stats_.total_bytes_scanned = max_scan_size > 0 ? std::min(max_scan_size, disk_size) : disk_size;
+    scan_limit_ = max_scan_size > 0 ? std::min(max_scan_size, disk_size) : disk_size;
+    stats_.total_bytes_scanned = scan_limit_;
 
+    return true;
+}
+
+inline bool EnhancedScanner::adopt_fd(int owned_fd, uint64_t known_size, uint64_t max_scan_size) {
+    if (!scanner_->adopt_fd(owned_fd, known_size)) {
+        return false;
+    }
+
+    scan_limit_ = max_scan_size > 0 ? std::min(max_scan_size, known_size) : known_size;
+    stats_.total_bytes_scanned = scan_limit_;
     return true;
 }
 
@@ -149,7 +170,10 @@ inline std::vector<FoundIbdBlock> EnhancedScanner::scan_page_size(uint32_t page_
         return blocks;
     }
 
-    uint64_t disk_size = scanner_->get_size();
+    uint64_t disk_size = std::min(scanner_->get_size(), scan_limit_);
+    if (page_size == 0) {
+        return blocks;
+    }
     if (max_pages == 0) {
         max_pages = disk_size / page_size;
     }
@@ -171,15 +195,15 @@ inline std::vector<FoundIbdBlock> EnhancedScanner::scan_page_size(uint32_t page_
         }
 
         // 检查页类型
-        uint16_t page_type = innodb::read_le<uint16_t>(page_data.data(), 24);
+        uint16_t page_type = innodb::read_be<uint16_t>(page_data.data(), 24);
 
         if (!innodb::is_valid_page_type(page_type)) {
             continue;
         }
 
         // 提取元数据
-        uint32_t space_id = innodb::read_le<uint32_t>(page_data.data(), 0);
-        uint32_t page_number = innodb::read_le<uint32_t>(page_data.data(), 4);
+        uint32_t space_id = innodb::read_be<uint32_t>(page_data.data(), 34);
+        uint32_t page_number = innodb::read_be<uint32_t>(page_data.data(), 4);
 
         // 跳过无效的页号
         if (page_number > 1000000) {
@@ -191,18 +215,17 @@ inline std::vector<FoundIbdBlock> EnhancedScanner::scan_page_size(uint32_t page_
         stats_.valid_ibd_pages++;
 
         switch (page_type) {
-            case 17852:  // MySQL 5.6 索引页
-            case 9969:   // MySQL 8.0 索引页
-            case 48965:  // MySQL 5.6 索引页变体
+            case innodb::FIL_PAGE_INDEX:
                 stats_.index_pages++;
                 break;
-            case 9971:   // SDI
+            case innodb::FIL_PAGE_SDI:
+            case innodb::FIL_PAGE_SDI_ZIP:
                 stats_.sdi_pages++;
                 break;
-            case 9970:   // UNDO
+            case innodb::FIL_PAGE_UNDO_LOG:
                 stats_.undo_pages++;
                 break;
-            case 0:      // ALLOCATED
+            case innodb::FIL_PAGE_TYPE_ALLOCATED:
                 stats_.allocated_pages++;
                 break;
         }
@@ -214,7 +237,7 @@ inline std::vector<FoundIbdBlock> EnhancedScanner::scan_page_size(uint32_t page_
         block.page_number = page_number;
         block.space_id = space_id;
         block.page_type = page_type;
-        block.data = std::move(page_data);
+        block.data = page_data;
 
         if (block_callback_) {
             block_callback_(block);
@@ -298,12 +321,11 @@ inline std::vector<FoundIbdFile> EnhancedScanner::aggregate_blocks(
             file.page_numbers.push_back(block.page_number);
 
             switch (block.page_type) {
-                case 17852:
-                case 9969:
-                case 48965:
+                case innodb::FIL_PAGE_INDEX:
                     file.index_pages++;
                     break;
-                case 9971:
+                case innodb::FIL_PAGE_SDI:
+                case innodb::FIL_PAGE_SDI_ZIP:
                     file.sdi_pages++;
                     break;
             }
@@ -342,7 +364,7 @@ inline bool EnhancedScanner::page_matches_table_template(
     // 实际实现需要根据表结构解析页中的记录
 
     // 基本检查：页类型必须是索引页
-    uint16_t page_type = innodb::read_le<uint16_t>(page_data.data(), 24);
+    uint16_t page_type = innodb::read_be<uint16_t>(page_data.data(), 24);
     if (!innodb::is_valid_index_page_type(page_type)) {
         return false;
     }
@@ -354,16 +376,14 @@ inline bool EnhancedScanner::page_matches_table_template(
 }
 
 inline std::vector<FoundIbdBlock> EnhancedScanner::scan_with_table_template(
-    const std::string& disk_path,
     const std::vector<std::pair<std::string, uint8_t>>& column_definitions,
     uint32_t min_pages) {
-    if (!scan(disk_path)) {
+    if (!scanner_ || !scanner_->is_open()) {
         return {};
     }
 
     auto blocks = scan_for_ibd_blocks(min_pages);
 
-    // 过滤匹配表模板的页
     std::vector<FoundIbdBlock> filtered;
     for (const auto& block : blocks) {
         if (page_matches_table_template(block.data, column_definitions)) {
@@ -372,6 +392,17 @@ inline std::vector<FoundIbdBlock> EnhancedScanner::scan_with_table_template(
     }
 
     return filtered;
+}
+
+inline std::vector<FoundIbdBlock> EnhancedScanner::scan_with_table_template(
+    const std::string& disk_path,
+    const std::vector<std::pair<std::string, uint8_t>>& column_definitions,
+    uint32_t min_pages) {
+    if (!scan(disk_path)) {
+        return {};
+    }
+
+    return scan_with_table_template(column_definitions, min_pages);
 }
 
 } // namespace disk
