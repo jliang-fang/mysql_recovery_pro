@@ -34,7 +34,8 @@ struct DeviceIdentityInfo {
  */
 class DeviceIdentity {
 public:
-    DeviceIdentity();
+    explicit DeviceIdentity(std::string sysfs_dev_block_root = "/sys/dev/block",
+                            std::string sysfs_block_root = {});
     ~DeviceIdentity() = default;
 
     // Movable, non-copyable
@@ -115,7 +116,7 @@ private:
      * @param info Output parameter to populate.
      * @return true on success.
      */
-    bool read_sysfs_identity(const std::string& device_path, DeviceIdentityInfo& info);
+    bool read_sysfs_identity(const struct stat& device_stat, DeviceIdentityInfo& info);
 
     /**
      * @brief Read loopback backing file path from sysfs (/sys/block/<dev>/loop/backing_file).
@@ -151,6 +152,8 @@ private:
 
     /** Cached major number map */
     mutable std::vector<std::pair<uint32_t, std::string>> major_map_;
+    std::string sysfs_dev_block_root_;
+    std::string sysfs_block_root_;
 };
 
 } // namespace safety

@@ -66,7 +66,7 @@ FileMapper::FileMapper(const std::string& path)
     handle_ = hFile;
     is_valid_ = true;
 #else
-    fd_ = open(path.c_str(), O_RDONLY);
+    fd_ = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd_ < 0) {
         std::cerr << "[ERROR] Failed to open file: " << path << ", error: " << strerror(errno) << std::endl;
         return;
@@ -80,6 +80,13 @@ FileMapper::FileMapper(const std::string& path)
         return;
     }
     
+    if (!S_ISREG(st.st_mode)) {
+        std::cerr << "[ERROR] File mapper accepts regular files only: " << path << std::endl;
+        close(fd_);
+        fd_ = -1;
+        return;
+    }
+
     size_ = static_cast<size_t>(st.st_size);
     if (size_ == 0) {
         std::cerr << "[ERROR] File is empty: " << path << std::endl;

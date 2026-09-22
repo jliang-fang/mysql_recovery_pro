@@ -3768,17 +3768,56 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         dbrecovery::innodb::g_verbose = verbose;
         std::cout << "[INFO] Starting DROP TABLE recovery...\n";
 
+        std::optional<dbrecovery::safety::AuthorizedRawDevice> authorized_raw_device;
+#ifdef __linux__
+        if (!system_tablespace.empty()) {
+            struct stat tablespace_status {};
+            if (::stat(system_tablespace.c_str(), &tablespace_status) != 0 ||
+                S_ISBLK(tablespace_status.st_mode)) {
+                std::cerr << "[ERROR] DROP TABLE system tablespace must be a regular file\n";
+                return 1;
+            }
+        }
+
+        if (!device_path.empty()) {
+            struct stat source_status {};
+            if (::stat(device_path.c_str(), &source_status) != 0) {
+                std::cerr << "[ERROR] DROP TABLE raw source cannot be accessed: "
+                          << device_path << "\n";
+                return 1;
+            }
+            if (S_ISBLK(source_status.st_mode)) {
+                dbrecovery::safety::SafetyGate gate;
+                std::string authorization_reason;
+                authorized_raw_device = gate.authorize_read_only_raw_device(
+                    device_path, &authorization_reason);
+                if (!authorized_raw_device.has_value()) {
+                    std::cerr << "[ERROR] DROP TABLE raw source rejected: "
+                              << authorization_reason << "\n";
+                    return 1;
+                }
+            } else if (!S_ISREG(source_status.st_mode)) {
+                std::cerr << "[ERROR] DROP TABLE raw source must be a regular file or block device\n";
+                return 1;
+            }
+        }
+#endif
+
         dbrecovery::engine::DropTableRecovery recovery;
         dbrecovery::engine::DropTableRecovery::Config config;
         config.system_tablespace = system_tablespace;
         config.data_directory = data_dir;
         config.output_directory = output_dir;
+        config.device_path = device_path;
         config.page_size = page_size;
         config.schema_file = schema_file_path;
         config.export_csv = false;
         config.export_sql = false;
         config.export_json = false;
         recovery.set_config(config);
+        if (authorized_raw_device.has_value()) {
+            recovery.adopt_authorized_raw_device(std::move(*authorized_raw_device));
+        }
 
         auto result = recovery.recover([&](double progress, const std::string& msg) {
             if (verbose) {
@@ -4190,46 +4229,46 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             }
         }
 
-        std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
-        uint32_t n_pk = 0;
-        uint32_t ordinal = 1;  // ordinal_position starts from 1
+        std::vector<catalog::IndexColumnBuildRequest> conversion_requests;
+        conversion_requests.reserve(frm_schema->columns.size());
+        uint32_t ordinal = 1;
+        for (const auto& [pos, col] : frm_schema->columns) {
+            conversion_requests.push_back({col, ordinal, ordinal});
+            ++ordinal;
+        }
 
-        for (auto& [pos, col] : frm_schema->columns) {
-            std::vector<std::string> diagnostics;
-            auto converted = catalog::build_index_column(
-                col, ordinal, ordinal,
-                catalog::TypeIdDomain::kInnodbParser, diagnostics);
-            if (!converted.has_value()) {
-                for (const auto& d : diagnostics) {
-                    std::cout << "[WARN] FRM schema column rejected: " << d << "\n";
-                }
-                ordinal++;
-                continue;
+        auto converted_schema = catalog::build_index_columns(
+            conversion_requests, catalog::TypeIdDomain::kInnodbParser);
+        if (!converted_schema.ok()) {
+            for (const auto& diagnostic : converted_schema.diagnostics) {
+                std::cout << "[WARN] FRM schema rejected: " << diagnostic << "\n";
             }
-            dbrecovery::innodb::IndexColumnDef icol = *converted;
+            return false;
+        }
 
-            // Determine mb_maxlen from charset_id (extracted from FRM)
-            // 8=latin1 → 1, 33/83/224=utf8 → 3, 45/94=utf8mb4 → 4, 63=binary → 1
+        auto index_columns = std::move(converted_schema.columns);
+        uint32_t n_pk = 0;
+        for (auto& icol : index_columns) {
+            const auto source = std::find_if(
+                frm_schema->columns.begin(), frm_schema->columns.end(),
+                [&](const auto& entry) { return entry.second.name == icol.name; });
+            if (source == frm_schema->columns.end()) {
+                return false;
+            }
+            const auto& col = source->second;
+
             uint8_t charset_id = static_cast<uint8_t>(col.charset_id);
             switch (charset_id) {
-                case 33: case 83: case 224: icol.mb_maxlen = 3; break;   // utf8
-                case 45: case 94: icol.mb_maxlen = 4; break;             // utf8mb4
-                default: icol.mb_maxlen = 1; break;                       // latin1/binary/etc
+                case 33: case 83: case 224: icol.mb_maxlen = 3; break;
+                case 45: case 94: icol.mb_maxlen = 4; break;
+                default: icol.mb_maxlen = 1; break;
             }
 
-            // ✅ 关键：设置 ordinal_position 和 physical_pos
-            // 对于 MySQL 5.6/5.7 FRM 文件，physical_pos 通常等于 ordinal_position
-            ordinal++;
-
-            // Set precision/scale for DECIMAL types (InnoDB type 21)
             if (icol.col_type == 21 && col.numeric_precision > 0) {
                 icol.precision = col.numeric_precision;
                 icol.scale = col.numeric_scale;
             }
 
-            // Set datetime_precision from column length for temporal types
-            // InnoDB types: 18=TIMESTAMP2, 19=DATETIME2, 20=TIME2
-            // FRM field_length includes fractional seconds display: base + precision + 1
             if (icol.col_type == 18 || icol.col_type == 19 || icol.col_type == 20) {
                 uint32_t base_len = (icol.col_type == 20) ? 10 : 19;
                 if (col.column_length > base_len) {
@@ -4237,16 +4276,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
             }
 
-            // Determine if variable length based on InnoDB type
             switch (icol.col_type) {
-                case 16:  // VARCHAR
+                case 16:
+                case 29:
                     icol.is_big = (col.column_length * icol.mb_maxlen > 255);
                     break;
-                case 29:  // STRING/CHAR
-                    // CHAR with multi-byte charset: is_big when byte_len > 255
-                    icol.is_big = (col.column_length * icol.mb_maxlen > 255);
-                    break;
-                case 24: case 25: case 26: case 27: case 31:  // BLOB variants, JSON
+                case 24: case 25: case 26: case 27: case 31:
                     icol.is_big = true;
                     break;
                 default:
@@ -4254,17 +4289,11 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     break;
             }
 
-            // CRITICAL FIX: Set is_binary based on charset_id/collation_id
-            // MySQL binary charset (BINARY, VARBINARY, BLOB) has charset_id=63 or collation_id=63
-            // EXCEPTION: JSON type (31) uses binary charset but should NOT be treated as binary
-            icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) && (icol.col_type != 31);
-
-            // Check if this column is part of PK
+            icol.is_binary = (col.charset_id == 63 || col.collation_id == 63) &&
+                             (icol.col_type != 31);
             if (pk_column_names.count(col.name) > 0) {
-                n_pk++;
+                ++n_pk;
             }
-
-            index_columns.push_back(icol);
         }
 
         if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
@@ -5053,21 +5082,19 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             auto sdi_schema_opt = parse_schema_from_sdi(ibd_path, table_id, sdi_version);
             if (sdi_schema_opt.has_value()) {
                 const auto& schema = sdi_schema_opt.value();
-                std::vector<dbrecovery::innodb::IndexColumnDef> columns;
+                std::vector<catalog::IndexColumnBuildRequest> requests;
+                requests.reserve(schema.columns.size());
                 for (const auto& [pos, col] : schema.columns) {
-                    std::vector<std::string> diagnostics;
-                    auto converted = catalog::build_index_column(
-                        col, pos, 0,
-                        catalog::TypeIdDomain::kInnodbParser, diagnostics);
-                    if (!converted.has_value()) {
-                        for (const auto& d : diagnostics) {
-                            std::cout << "[WARN] SDI schema column rejected: " << d << "\n";
-                        }
-                        continue;
-                    }
-                    columns.push_back(*converted);
+                    requests.push_back({col, pos, 0});
                 }
-                if (!columns.empty()) {
+                auto converted_schema = catalog::build_index_columns(
+                    requests, catalog::TypeIdDomain::kInnodbParser);
+                if (!converted_schema.ok()) {
+                    for (const auto& diagnostic : converted_schema.diagnostics) {
+                        std::cout << "[WARN] SDI schema rejected: " << diagnostic << "\n";
+                    }
+                } else if (!converted_schema.columns.empty()) {
+                    const auto& columns = converted_schema.columns;
                     // Debug: print enum/set values being passed
                     for (const auto& c : columns) {
                         if (!c.enum_values.empty()) {

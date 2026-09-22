@@ -57,8 +57,14 @@ static constexpr uint8_t NVME_IDENTIFY_CNS = 0x01;
 
 #endif // HAVE_LINUX_NVME_IOCTL_H
 
-DeviceIdentity::DeviceIdentity() {
-    major_map_ = load_major_map();
+DeviceIdentity::DeviceIdentity(std::string sysfs_dev_block_root,
+                               std::string sysfs_block_root)
+    : sysfs_dev_block_root_(std::move(sysfs_dev_block_root)),
+      sysfs_block_root_(std::move(sysfs_block_root)),
+      major_map_(load_major_map()) {
+    if (sysfs_block_root_.empty()) {
+        sysfs_block_root_ = "/sys/block";
+    }
 }
 
 DeviceIdentityInfo DeviceIdentity::verify_identity(const std::string& device_path) {
@@ -114,7 +120,7 @@ DeviceIdentityInfo DeviceIdentity::verify_identity(int fd,
         info.confidence = 0.95;
     }
 
-    if (info.confidence < 0.5 && read_sysfs_identity(device_path, info) &&
+    if (info.confidence < 0.5 && read_sysfs_identity(device_stat, info) &&
         info.confidence < 0.5) {
         info.confidence = 0.7;
     }
@@ -133,7 +139,7 @@ DeviceIdentityInfo DeviceIdentity::verify_identity(int fd,
 bool DeviceIdentity::read_loopback_sysfs(const std::string& dev_name,
                                          std::string& backing_file) const {
     // The kernel exposes the backing file path with a trailing newline.
-    std::ifstream ifs("/sys/block/" + dev_name + "/loop/backing_file");
+    std::ifstream ifs(sysfs_block_root_ + "/" + dev_name + "/loop/backing_file");
     if (!ifs.is_open()) return false;
     std::getline(ifs, backing_file);
     while (!backing_file.empty() &&
@@ -365,20 +371,21 @@ bool DeviceIdentity::read_nvme_identity(int fd, DeviceIdentityInfo& info) {
 #endif
 }
 
-bool DeviceIdentity::read_sysfs_identity(const std::string& device_path,
-                                          DeviceIdentityInfo& info) {
-    // Derive the short device name from the path
-    // /dev/nvme0n1 -> nvme0n1, /dev/sda -> sda
-    std::string dev_name;
-    auto pos = device_path.rfind('/');
-    if (pos != std::string::npos && pos + 1 < device_path.size()) {
-        dev_name = device_path.substr(pos + 1);
-    } else {
-        dev_name = device_path;
+bool DeviceIdentity::read_sysfs_identity(const struct stat& device_stat,
+                                         DeviceIdentityInfo& info) {
+    const std::string device_id =
+        std::to_string(::major(device_stat.st_rdev)) + ":" +
+        std::to_string(::minor(device_stat.st_rdev));
+    std::error_code error;
+    const std::filesystem::path sysfs_node =
+        std::filesystem::canonical(std::filesystem::path(sysfs_dev_block_root_) / device_id,
+                                   error);
+    if (error || !std::filesystem::is_directory(sysfs_node, error) || error) {
+        return false;
     }
 
-    // NVMe sysfs path: /sys/block/<dev>/device/{model,serial,firmware_rev}
-    std::string sysfs_base = "/sys/block/" + dev_name + "/device/";
+    const std::filesystem::path block_node = sysfs_node.parent_path();
+    const std::string sysfs_base = (block_node / "device").string() + "/";
 
     std::string model_path   = sysfs_base + "model";
     std::string serial_path  = sysfs_base + "serial";
@@ -405,7 +412,7 @@ bool DeviceIdentity::read_sysfs_identity(const std::string& device_path,
     }
 
     // Read size info from sysfs
-    std::string size_path = "/sys/block/" + dev_name + "/size";
+    std::string size_path = (block_node / "size").string();
     ifs.open(size_path);
     if (ifs.is_open()) {
         std::string size_str;
@@ -421,7 +428,8 @@ bool DeviceIdentity::read_sysfs_identity(const std::string& device_path,
     }
 
     // Read logical block size
-    std::string queue_logical_path = "/sys/block/" + dev_name + "/queue/logical_block_size";
+    std::string queue_logical_path =
+        (block_node / "queue" / "logical_block_size").string();
     ifs.open(queue_logical_path);
     if (ifs.is_open()) {
         std::string size_str;

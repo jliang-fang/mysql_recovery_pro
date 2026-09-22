@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/tools/unified_recovery.hpp"
+#include "dbrecovery/innodb/index_page_parser.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -19,6 +20,18 @@ std::string test_tmp_path(const char* name) {
 }
 
 }  // namespace
+
+TEST(ExportRejection, MalformedJsonRecordCannotProduceCsvOrSql) {
+    dbrecovery::innodb::IndexRecord record;
+    dbrecovery::innodb::IndexFieldValue field;
+    field.is_unparsable_json = true;
+    field.raw_bytes = {0x00, 0xFF};
+    record.fields.push_back(std::move(field));
+
+    EXPECT_TRUE(record.has_unparsable_json_evidence());
+    EXPECT_TRUE(record.to_csv_line().empty());
+    EXPECT_TRUE(record.to_sql_values().empty());
+}
 
 TEST(ExportRejection, ZeroRowsEmptyExport) {
     std::string p = test_tmp_path("export_reject_zero.csv");

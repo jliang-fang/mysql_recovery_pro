@@ -480,7 +480,7 @@ DiskImageMapper::DiskImageMapper(const std::string& path, MapMode mode)
         flags = O_RDONLY; // MAP_PRIVATE will handle COW
     }
 
-    fd_ = open(path.c_str(), flags);
+    fd_ = open(path.c_str(), flags | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (fd_ < 0) {
         throw std::system_error(errno, std::system_category(), "Failed to open: " + path);
     }
@@ -490,6 +490,12 @@ DiskImageMapper::DiskImageMapper(const std::string& path, MapMode mode)
         close(fd_);
         fd_ = -1;
         throw std::system_error(errno, std::system_category(), "Failed to stat: " + path);
+    }
+
+    if (!S_ISREG(st.st_mode)) {
+        close(fd_);
+        fd_ = -1;
+        throw std::invalid_argument("Disk image mapper accepts regular files only: " + path);
     }
 
     size_ = st.st_size;
@@ -509,7 +515,7 @@ DiskImageMapper::~DiskImageMapper() {
 }
 
 const uint8_t* DiskImageMapper::map(uint64_t offset, size_t size) {
-    if (!is_open() || offset + size > size_) {
+    if (!is_open() || offset > size_ || size > size_ - offset) {
         return nullptr;
     }
 
@@ -534,7 +540,7 @@ const uint8_t* DiskImageMapper::map(uint64_t offset, size_t size) {
 }
 
 uint8_t* DiskImageMapper::map_rw(uint64_t offset, size_t size) {
-    if (!is_open() || offset + size > size_) {
+    if (!is_open() || offset > size_ || size > size_ - offset) {
         return nullptr;
     }
 
@@ -595,7 +601,8 @@ void DiskImageMapper::advise_will_need(uint64_t offset, size_t size) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (const auto& m : mappings_) {
-        if (offset >= m.offset && offset + size <= m.offset + m.size) {
+        if (offset >= m.offset && offset - m.offset <= m.size &&
+            size <= m.size - (offset - m.offset)) {
             size_t map_offset = offset - m.offset;
             madvise(static_cast<char*>(m.ptr) + map_offset, size, MADV_WILLNEED);
             break;

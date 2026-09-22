@@ -18,6 +18,7 @@
 #define DBRECOVERY_ENGINE_DROP_TABLE_RECOVERY_HPP
 
 #include "dbrecovery/engine/raw_disk_engine.hpp"
+#include "dbrecovery/safety/safety_gate.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include <string>
 #include <vector>
@@ -391,6 +392,11 @@ public:
     void set_config(const Config& config);
 
     /**
+     * @brief Transfer an already-authorized raw-device capability to this recovery.
+     */
+    void adopt_authorized_raw_device(safety::AuthorizedRawDevice&& device);
+
+    /**
      * @brief Run recovery
      * @param progress Progress callback
      * @return Recovery result
@@ -421,13 +427,7 @@ private:
     Config config_;
     std::string error_;
     std::unique_ptr<SystemTablespaceScanner> sys_scanner_;
-    std::unique_ptr<OrphanedPageScanner> page_scanner_;
-
-    /**
-     * @brief Find orphaned pages for table
-     */
-    std::vector<OrphanedPageScanner::OrphanedPage> find_table_pages(
-        const RecoveredTableMetadata& table);
+    std::optional<safety::AuthorizedRawDevice> authorized_raw_device_;
 
     /**
      * @brief Extract records from orphaned pages

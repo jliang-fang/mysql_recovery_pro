@@ -403,6 +403,10 @@ add_executable(test_mount_topology mount_topology_test.cpp)
 target_link_libraries(test_mount_topology PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_mount_topology PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
+add_executable(test_file_mapper_safety file_mapper_safety_test.cpp)
+target_link_libraries(test_file_mapper_safety PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_file_mapper_safety PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
 add_executable(test_l3_l4_isolation test_l3_l4_isolation.cpp)
 target_link_libraries(test_l3_l4_isolation PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_l3_l4_isolation PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")

@@ -180,6 +180,48 @@ MountTopologyReport LoopbackSafety::inspect_mount_topology_for_paths(
             return report;
         }
 
+        fs::directory_iterator children(canonical_node, error);
+        if (error) {
+            report.error = "could not enumerate sysfs child partitions for device " +
+                           device_key(current);
+            return report;
+        }
+        for (const auto& entry : children) {
+            const fs::file_status entry_status = entry.symlink_status(error);
+            if (error) {
+                report.error = "could not inspect sysfs child entry for device " +
+                               device_key(current);
+                return report;
+            }
+            if (!fs::is_directory(entry_status) && !fs::is_symlink(entry_status)) {
+                continue;
+            }
+
+            const fs::path child = fs::canonical(entry.path(), error);
+            if (error || !fs::is_directory(child, error) || error) {
+                report.error = "could not resolve sysfs child partition for device " +
+                               device_key(current);
+                return report;
+            }
+            if (!fs::exists(child / "partition", error) || error) {
+                if (error) {
+                    report.error = "could not inspect sysfs child partition for device " +
+                                   device_key(current);
+                    return report;
+                }
+                continue;
+            }
+
+            const std::string child_device = read_sysfs_file((child / "dev").string());
+            BlockDeviceId parsed_child;
+            if (!parse_device_id(child_device, &parsed_child)) {
+                report.error = "invalid sysfs child partition identity for device " +
+                               device_key(current);
+                return report;
+            }
+            add_device(parsed_child);
+        }
+
         for (const char* relation : {"slaves", "holders"}) {
             const fs::path relation_dir = canonical_node / relation;
             if (!fs::is_directory(relation_dir, error) || error) {

@@ -9,8 +9,10 @@
 namespace {
 
 using dbrecovery::catalog::ColumnInfo;
+using dbrecovery::catalog::IndexColumnBuildRequest;
 using dbrecovery::catalog::TypeIdDomain;
 using dbrecovery::catalog::build_index_column;
+using dbrecovery::catalog::build_index_columns;
 using dbrecovery::catalog::convert_column_type_id;
 using dbrecovery::catalog::validate_parser_type_id;
 using dbrecovery::catalog::TypeConversionResult;
@@ -199,6 +201,49 @@ TEST(BuildIndexColumn, BinaryCharsetResetsMbMaxlen) {
     ASSERT_TRUE(converted.has_value());
     EXPECT_TRUE(converted->is_binary);
     EXPECT_EQ(converted->mb_maxlen, 1u);
+}
+
+TEST(BuildIndexColumns, PublishesNothingWhenAnyColumnIsInvalid) {
+    std::vector<IndexColumnBuildRequest> requests;
+    requests.push_back({
+        make_column(dbrecovery::innodb::mysql_types::LONG, "valid"), 1, 1});
+    requests.push_back({make_column(0xFF, "invalid"), 2, 2});
+
+    const auto result = build_index_columns(
+        requests, TypeIdDomain::kInnodbParser);
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.columns.empty());
+    ASSERT_EQ(result.diagnostics.size(), 1u);
+    EXPECT_NE(result.diagnostics.front().find("invalid"), std::string::npos);
+}
+
+TEST(BuildIndexColumns, AggregatesAllConversionDiagnostics) {
+    std::vector<IndexColumnBuildRequest> requests;
+    requests.push_back({make_column(7, "null_type"), 1, 1});
+    requests.push_back({make_column(0xFF, "unknown_type"), 2, 2});
+
+    const auto result = build_index_columns(
+        requests, TypeIdDomain::kInnodbParser);
+
+    EXPECT_FALSE(result.ok());
+    EXPECT_TRUE(result.columns.empty());
+    ASSERT_EQ(result.diagnostics.size(), 2u);
+    EXPECT_NE(result.diagnostics[0].find("null_type"), std::string::npos);
+    EXPECT_NE(result.diagnostics[1].find("unknown_type"), std::string::npos);
+}
+
+TEST(BuildIndexColumns, ConvertsServerDomainJsonAtomically) {
+    std::vector<IndexColumnBuildRequest> requests;
+    requests.push_back({make_column(245, "json"), 1, 1});
+
+    const auto result = build_index_columns(
+        requests, TypeIdDomain::kMysqlServer);
+
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.columns.size(), 1u);
+    EXPECT_EQ(result.columns.front().col_type,
+              dbrecovery::innodb::mysql_types::JSON);
 }
 
 // ---------------------------------------------------------------------------

@@ -149,6 +149,35 @@ std::optional<innodb::IndexColumnDef> build_index_column(
     return column;
 }
 
+IndexColumnBatchResult build_index_columns(
+    const std::vector<IndexColumnBuildRequest>& requests,
+    TypeIdDomain domain) {
+    IndexColumnBatchResult result;
+    std::vector<innodb::IndexColumnDef> converted;
+    converted.reserve(requests.size());
+
+    for (const auto& request : requests) {
+        std::vector<std::string> diagnostics;
+        auto column = build_index_column(
+            request.source,
+            request.ordinal_position,
+            request.physical_pos_override,
+            domain,
+            diagnostics);
+        if (!column.has_value()) {
+            result.diagnostics.insert(result.diagnostics.end(),
+                                      diagnostics.begin(), diagnostics.end());
+            continue;
+        }
+        converted.push_back(std::move(*column));
+    }
+
+    if (result.diagnostics.empty()) {
+        result.columns = std::move(converted);
+    }
+    return result;
+}
+
 } // namespace catalog
 } // namespace dbrecovery
 

@@ -49,6 +49,33 @@ std::optional<innodb::IndexColumnDef> build_index_column(
     std::vector<std::string>& diagnostics);
 
 /**
+ * One source column and its parser layout positions for batch conversion.
+ */
+struct IndexColumnBuildRequest {
+    ColumnInfo source;
+    uint32_t ordinal_position = 0;
+    uint32_t physical_pos_override = 0;
+};
+
+/**
+ * Atomic schema conversion result. `columns` is populated only when every
+ * source column converts successfully; failures are collected in diagnostics.
+ */
+struct IndexColumnBatchResult {
+    std::vector<innodb::IndexColumnDef> columns;
+    std::vector<std::string> diagnostics;
+
+    bool ok() const { return diagnostics.empty(); }
+};
+
+/**
+ * Convert a schema collection without exposing a partial parser layout.
+ */
+IndexColumnBatchResult build_index_columns(
+    const std::vector<IndexColumnBuildRequest>& requests,
+    TypeIdDomain domain);
+
+/**
  * Charset-ID to InnoDB mb_maxlen lookup shared by all conversion sites.
  * Returns 1 for unknown/binary charsets.
  */

@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <set>
+#include <sys/stat.h>
 #include <nlohmann/json.hpp>
 
 namespace dbrecovery {
@@ -1316,6 +1317,13 @@ void DropTableRecovery::set_config(const Config& config) {
     config_ = config;
 }
 
+void DropTableRecovery::adopt_authorized_raw_device(safety::AuthorizedRawDevice&& device) {
+    authorized_raw_device_.reset();
+    if (device.valid() && device.size_bytes() > 0) {
+        authorized_raw_device_.emplace(std::move(device));
+    }
+}
+
 DropTableRecovery::Result DropTableRecovery::recover(
     std::function<void(double, const std::string&)> progress) {
 
@@ -1434,44 +1442,62 @@ DropTableRecovery::Result DropTableRecovery::recover(
             }
 
             if (!primary_index_ids.empty() && !config_.device_path.empty()) {
-                // Deep scan raw device for orphaned pages
                 if (progress) progress(0.3, "Scanning raw device for orphaned pages...");
 
                 RawDiskIOEngine engine;
-                if (engine.open(config_.device_path)) {
-                    page_scanner_ = std::make_unique<OrphanedPageScanner>(engine);
-
-                    auto orphaned_pages = page_scanner_->scan_by_index_ids(
-                        primary_index_ids, config_.page_size);
-
-                    if (progress) {
-                        uint64_t total_pages = 0;
-                        for (const auto& [id, pages] : orphaned_pages) {
-                            total_pages += pages.size();
-                        }
-                        std::ostringstream oss;
-                        oss << "Found " << total_pages << " orphaned INDEX page(s)";
-                        progress(0.5, oss.str());
+                if (authorized_raw_device_.has_value()) {
+                    const int owned_fd = authorized_raw_device_->duplicate_fd();
+                    if (owned_fd < 0 ||
+                        !engine.adopt_fd(owned_fd, authorized_raw_device_->size_bytes())) {
+                        result.errors.push_back(
+                            "could not adopt authorized raw-device descriptor");
+                        return result;
                     }
+                } else {
+                    struct stat source_stat {};
+                    if (::stat(config_.device_path.c_str(), &source_stat) != 0 ||
+                        S_ISBLK(source_stat.st_mode)) {
+                        result.errors.push_back(
+                            "raw block-device recovery requires an authorized descriptor");
+                        return result;
+                    }
+                    if (!engine.open(config_.device_path)) {
+                        result.errors.push_back("could not open raw recovery image");
+                        return result;
+                    }
+                }
 
-                    // Step 3: Extract records from orphaned pages
-                    if (progress) progress(0.6, "Extracting records from orphaned pages...");
+                OrphanedPageScanner page_scanner(engine);
+                auto orphaned_pages = page_scanner.scan_by_index_ids(
+                    primary_index_ids, config_.page_size);
 
-                    for (auto& table : result.recovered_tables) {
-                        if (table.primary_index_id == 0) continue;
+                if (progress) {
+                    uint64_t total_pages = 0;
+                    for (const auto& [id, pages] : orphaned_pages) {
+                        total_pages += pages.size();
+                    }
+                    std::ostringstream oss;
+                    oss << "Found " << total_pages << " orphaned INDEX page(s)";
+                    progress(0.5, oss.str());
+                }
 
-                        auto it = orphaned_pages.find(table.primary_index_id);
-                        if (it == orphaned_pages.end() || it->second.empty()) continue;
+                // Step 3: Extract records from orphaned pages
+                if (progress) progress(0.6, "Extracting records from orphaned pages...");
 
-                        auto records = extract_records(it->second, table.schema);
-                        if (!records.empty()) {
-                            result.records_per_table[table.table_id] = records.size();
-                            result.total_records += records.size();
+                for (auto& table : result.recovered_tables) {
+                    if (table.primary_index_id == 0) continue;
 
-                            // Export recovered data
-                            if (export_data(table.table_name, table.schema, records)) {
-                                result.tables_recovered++;
-                            }
+                    auto it = orphaned_pages.find(table.primary_index_id);
+                    if (it == orphaned_pages.end() || it->second.empty()) continue;
+
+                    auto records = extract_records(it->second, table.schema);
+                    if (!records.empty()) {
+                        result.records_per_table[table.table_id] = records.size();
+                        result.total_records += records.size();
+
+                        // Export recovered data
+                        if (export_data(table.table_name, table.schema, records)) {
+                            result.tables_recovered++;
                         }
                     }
                 }
@@ -1576,16 +1602,6 @@ DropTableRecovery::Result DropTableRecovery::recover_by_table_id(uint64_t table_
     return result;
 }
 
-std::vector<OrphanedPageScanner::OrphanedPage> DropTableRecovery::find_table_pages(
-    const RecoveredTableMetadata& table) {
-
-    if (!page_scanner_ || table.primary_index_id == 0) {
-        return {};
-    }
-
-    return page_scanner_->scan_by_index_id(table.primary_index_id, config_.page_size);
-}
-
 std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_records(
     const std::vector<OrphanedPageScanner::OrphanedPage>& pages,
     const catalog::TableSchema& schema) {
@@ -1687,11 +1703,17 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
             }
 
             for (const auto& rec : records) {
+                if (rec.has_unparsable_json_evidence()) {
+                    std::cerr << "[WARN] DROP recovery record rejected: malformed JSON evidence"
+                              << std::endl;
+                    continue;
+                }
+
                 std::map<std::string, std::string> record_map;
                 for (size_t i = 0; i < rec.fields.size() && i < col_defs.size(); i++) {
                     record_map[col_defs[i].name] = rec.fields[i].str_value;
                 }
-                all_records.push_back(record_map);
+                all_records.push_back(std::move(record_map));
             }
         } catch (...) {
             // Continue with next page if parsing fails
@@ -1834,12 +1856,17 @@ bool DropTableRecovery::try_recover_from_ibd(
         // Parse page records using schema-aware parsing
         auto page_records = parser.parse_page(page_data.data(), page_size, page_no);
         for (const auto& rec : page_records) {
-            // Convert IndexRecord to map format
+            if (rec.has_unparsable_json_evidence()) {
+                std::cerr << "[WARN] DROP recovery record rejected: malformed JSON evidence"
+                          << std::endl;
+                continue;
+            }
+
             std::map<std::string, std::string> record;
             for (size_t i = 0; i < rec.fields.size() && i < table.columns.size(); i++) {
                 record[table.columns[i].name] = rec.fields[i].to_string();
             }
-            records.push_back(record);
+            records.push_back(std::move(record));
         }
     }
 

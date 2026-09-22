@@ -42,6 +42,10 @@ protected:
         fs::create_symlink(related, device / relation / related.filename());
     }
 
+    void mark_partition(const fs::path& device, unsigned int number) {
+        std::ofstream(device / "partition") << number << '\n';
+    }
+
     void write_mountinfo(const std::string& contents) {
         std::ofstream(test_root_ / "mountinfo") << contents;
     }
@@ -71,6 +75,54 @@ TEST_F(MountTopologyTest, RejectsMountedParentOfAdmittedPartition) {
     EXPECT_TRUE(report.mounted());
     ASSERT_EQ(report.mount_points.size(), 1u);
     EXPECT_EQ(report.mount_points.front(), "/mnt/parent");
+}
+
+TEST_F(MountTopologyTest, RejectsMountedChildPartitionOfAdmittedDisk) {
+    const auto disk = add_device("disk", "8:0");
+    const auto partition = add_device("partition", "8:1", disk);
+    mark_partition(partition, 1);
+    write_mountinfo("42 1 8:1 / /mnt/child rw - ext4 /dev/disk1 rw\n");
+
+    const auto report = inspect("8:0");
+    EXPECT_TRUE(report.complete);
+    EXPECT_TRUE(report.mounted());
+    ASSERT_EQ(report.mount_points.size(), 1u);
+    EXPECT_EQ(report.mount_points.front(), "/mnt/child");
+}
+
+TEST_F(MountTopologyTest, IgnoresOrdinaryAttributesAndUnmarkedDirectories) {
+    const auto disk = add_device("disk", "8:0");
+    std::ofstream(disk / "uevent") << "DEVTYPE=disk\n";
+    fs::create_directories(disk / "queue");
+    fs::create_directories(disk / "not-a-partition");
+    write_mountinfo("42 1 8:2 / /mnt/unrelated rw - ext4 /dev/unrelated rw\n");
+
+    const auto report = inspect("8:0");
+    EXPECT_TRUE(report.complete);
+    EXPECT_FALSE(report.mounted());
+    ASSERT_EQ(report.related_devices.size(), 1u);
+}
+
+TEST_F(MountTopologyTest, FailsClosedForMalformedChildPartitionIdentity) {
+    const auto disk = add_device("disk", "8:0");
+    const auto partition = add_device("partition", "8:1", disk);
+    mark_partition(partition, 1);
+    std::ofstream(partition / "dev", std::ios::trunc) << "invalid\n";
+    write_mountinfo("42 1 8:1 / /mnt/child rw - ext4 /dev/disk1 rw\n");
+
+    const auto report = inspect("8:0");
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
+}
+
+TEST_F(MountTopologyTest, FailsClosedForBrokenChildPartitionLink) {
+    const auto disk = add_device("disk", "8:0");
+    fs::create_symlink(test_root_ / "devices" / "missing", disk / "broken-partition");
+    write_mountinfo("42 1 8:0 / /mnt/disk rw - ext4 /dev/disk rw\n");
+
+    const auto report = inspect("8:0");
+    EXPECT_FALSE(report.complete);
+    EXPECT_FALSE(report.error.empty());
 }
 
 TEST_F(MountTopologyTest, RejectsMountedSlaveAndHolderRelations) {
