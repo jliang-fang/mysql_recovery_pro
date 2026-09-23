@@ -1359,6 +1359,16 @@ DropTableRecovery::Result DropTableRecovery::recover(
             }
         }
 
+        if (!config_.device_path.empty() && !authorized_raw_device_.has_value()) {
+            struct stat source_stat {};
+            if (::stat(config_.device_path.c_str(), &source_stat) == 0 &&
+                S_ISBLK(source_stat.st_mode)) {
+                result.errors.push_back(
+                    "raw block-device recovery requires an authorized descriptor");
+                return result;
+            }
+        }
+
         // Step 1: Scan system tablespace for deleted table metadata
         if (!system_tablespace_path.empty()) {
             if (progress) progress(0.1, "Scanning system tablespace for deleted tables...");

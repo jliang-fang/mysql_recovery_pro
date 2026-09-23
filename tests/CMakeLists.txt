@@ -415,6 +415,10 @@ add_executable(test_export_rejection test_export_rejection.cpp)
 target_link_libraries(test_export_rejection PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_export_rejection PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
+add_executable(test_drop_table_authorization drop_table_authorization_test.cpp)
+target_link_libraries(test_drop_table_authorization PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_drop_table_authorization PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
 add_executable(test_recovery_idempotency test_recovery_idempotency.cpp)
 target_link_libraries(test_recovery_idempotency PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_recovery_idempotency)
