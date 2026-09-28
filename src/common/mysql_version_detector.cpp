@@ -250,13 +250,13 @@ int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_
     // < 42 check allowed out-of-bounds reads on 42..45 byte buffers.
     if (page_size < innodb::FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t)) return 0;
 
-    uint16_t page_type = endian::read_be16(page_data, innodb::FIL_PAGE_TYPE_ABS);
-    if (page_type != innodb::FIL_PAGE_TYPE_FSP_HDR) {
-        return 0;  // 非FSP页，无法读取空间标志
+    const auto metadata = innodb::parse_fsp_compression_metadata_detailed(
+        page_data, page_size, innodb::UNIV_PAGE_SIZE);
+    if (!metadata) {
+        return 0;
     }
 
-    // FSP Header (Page 0, offset 38): FSP_SPACE_ID at +0, FSP_SPACE_FLAGS at +4
-    uint32_t flags = endian::read_be32(page_data, innodb::FSP_SPACE_FLAGS_OFFSET);  // offset 42
+    const uint32_t flags = metadata.metadata->raw_flags;
 
     // POST_ANTELOPE位（bit 0）：MySQL 5.7+ 设置，5.6及更早版本清除
     // ATOMIC_BLOBS位（bit 5）：MySQL 5.7+ 设置

@@ -3902,6 +3902,35 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         return 1;
     }
 
+    {
+        std::ifstream input(ibd_path, std::ios::binary);
+        std::vector<uint8_t> page0(innodb::FIL_HEADER_SIZE + 45);
+        input.read(reinterpret_cast<char*>(page0.data()),
+                   static_cast<std::streamsize>(page0.size()));
+        const size_t bytes_read = static_cast<size_t>(input.gcount());
+        if (innodb::TDEDecryptor::probe_candidate(page0.data(), bytes_read) ==
+            innodb::TDECandidateProbe::RECOGNIZED_CANDIDATE) {
+            constexpr const char* reason = "tde_candidate_UNVALIDATED";
+            std::cerr << "[ERROR] Recovery rejected: " << reason
+                      << " (encrypted input requires a fixture-validated decryptor)\n";
+            if (!write_result_json({
+                    {"mode", recovery_type},
+                    {"success", false},
+                    {"classification", "expected_reject"},
+                    {"structured_rows", 0},
+                    {"evidence_fragments", 0},
+                    {"importable", false},
+                    {"reason", reason},
+                    {"source_inputs", {{"ibd", ibd_path}}},
+                    {"recovery_type", recovery_type},
+                    {"mysql_version", mysql_version},
+                    {"output_format", format}})) {
+                return 1;
+            }
+            return 1;
+        }
+    }
+
     // 创建输出目录
     try {
         fs::create_directories(output_dir);
@@ -4013,6 +4042,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::vector<std::string> recovered_column_order;  // 用于保持列顺序
     bool specialized_structured_export_allowed = true;
     std::string specialized_export_rejection_reason;
+    bool unvalidated_tde_candidate_rejected = false;
     bool shared_specialized_handled = false;
 
     struct PhysicalFormat {
@@ -4843,7 +4873,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (format.kind != "none") {
                 shared_specialized_handled = true;
                 specialized_structured_export_allowed = false;
-                specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
+                if (format.kind == "encrypted" || format.kind == "compressed+encrypted") {
+                    unvalidated_tde_candidate_rejected = true;
+                    specialized_export_rejection_reason = "tde_candidate_UNVALIDATED";
+                } else {
+                    specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
+                }
             }
         }
         if (shared_specialized_handled) {
@@ -4956,7 +4991,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (format.kind != "none") {
                 shared_specialized_handled = true;
                 specialized_structured_export_allowed = false;
-                specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
+                if (format.kind == "encrypted" || format.kind == "compressed+encrypted") {
+                    unvalidated_tde_candidate_rejected = true;
+                    specialized_export_rejection_reason = "tde_candidate_UNVALIDATED";
+                } else {
+                    specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
+                }
             }
         }
         if (shared_specialized_handled) {
@@ -5063,7 +5103,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (format.kind != "none") {
                 shared_specialized_handled = true;
                 specialized_structured_export_allowed = false;
-                specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
+                if (format.kind == "encrypted" || format.kind == "compressed+encrypted") {
+                    unvalidated_tde_candidate_rejected = true;
+                    specialized_export_rejection_reason = "tde_candidate_UNVALIDATED";
+                } else {
+                    specialized_export_rejection_reason = "specialized physical format is not fixture-validated";
+                }
             }
         }
         if (shared_specialized_handled) {
@@ -5440,6 +5485,27 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     auto total_end = std::chrono::high_resolution_clock::now();
     stats_.elapsed_seconds = std::chrono::duration<double>(total_end - total_start).count();
+
+    if (unvalidated_tde_candidate_rejected) {
+        const std::string reason = "tde_candidate_UNVALIDATED";
+        std::cerr << "[ERROR] Recovery rejected: " << reason
+                  << " (encrypted input requires a fixture-validated decryptor)\n";
+        if (!write_result_json({
+                {"mode", "recovery"},
+                {"success", false},
+                {"classification", "expected_reject"},
+                {"structured_rows", 0},
+                {"evidence_fragments", 0},
+                {"importable", false},
+                {"reason", reason},
+                {"source_inputs", {{"ibd", ibd_path}}},
+                {"recovery_type", recovery_type},
+                {"mysql_version", mysql_version},
+                {"output_format", format}})) {
+            return 1;
+        }
+        return 1;
+    }
 
     if (!export_succeeded) {
         const std::string reason = "failed to write requested recovery output";

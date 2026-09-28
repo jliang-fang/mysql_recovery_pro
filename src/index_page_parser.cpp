@@ -3157,13 +3157,15 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
     uint32_t page_size = UNIV_PAGE_SIZE;
 
     std::vector<uint8_t> first_page(page_size);
-    if (file.read(reinterpret_cast<char*>(first_page.data()), page_size)) {
-        uint32_t detected = detect_page_size_from_fsp(first_page.data());
+    file.read(reinterpret_cast<char*>(first_page.data()), page_size);
+    const size_t first_page_bytes = static_cast<size_t>(file.gcount());
+    if (first_page_bytes > 0) {
+        uint32_t detected = detect_page_size_from_fsp(first_page.data(), first_page_bytes);
         if (detected >= UNIV_PAGE_SIZE_MIN && detected <= UNIV_PAGE_SIZE_MAX) {
             page_size = detected;
         }
 
-        uint8_t rf = detect_row_format_from_fsp(first_page.data());
+        uint8_t rf = detect_row_format_from_fsp(first_page.data(), first_page_bytes);
         if (rf == 2 || rf == 3) {
             off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
         } else {
@@ -3364,13 +3366,15 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
     uint32_t page_size = UNIV_PAGE_SIZE;
 
     std::vector<uint8_t> first_page(page_size);
-    if (file.read(reinterpret_cast<char*>(first_page.data()), page_size)) {
-        uint32_t detected = detect_page_size_from_fsp(first_page.data());
+    file.read(reinterpret_cast<char*>(first_page.data()), page_size);
+    const size_t first_page_bytes = static_cast<size_t>(file.gcount());
+    if (first_page_bytes > 0) {
+        uint32_t detected = detect_page_size_from_fsp(first_page.data(), first_page_bytes);
         if (detected >= UNIV_PAGE_SIZE_MIN && detected <= UNIV_PAGE_SIZE_MAX) {
             page_size = detected;
         }
 
-        uint8_t rf = detect_row_format_from_fsp(first_page.data());
+        uint8_t rf = detect_row_format_from_fsp(first_page.data(), first_page_bytes);
         if (rf == 2 || rf == 3) {
             off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
         } else {
@@ -3663,92 +3667,43 @@ void InnoDBIndexParser::deduplicate_records(std::vector<IndexRecord>& records) {
 
 // ==================== Standalone Utility Functions ====================
 
-uint32_t detect_page_size_from_fsp(const uint8_t* page_data) {
-    if (!page_data) return UNIV_PAGE_SIZE;
-
-    // FSP header flags at offset 42 in page 0 (FSP_SPACE_FLAGS = FIL_HEADER_SIZE+4)
-    uint32_t flags = read_be<uint32_t>(page_data, 42);
-
-    // Validate: Check if offset 0-3 (FIL header checksum) looks reasonable
-    // A valid FIL header should have reasonable checksum values
-    uint32_t checksum1 = read_be<uint32_t>(page_data, 0);
-    uint32_t checksum2 = read_be<uint32_t>(page_data, 4);  // page_no should be small
-
-    // If checksum1 is garbage (too large random value) or page_no is unreasonable,
-    // the header is likely corrupted - use default 16KB
-    bool header_valid = true;
-    if (checksum2 > 100000) {  // page_no should be 0-4 for typical IBD files
-        header_valid = false;
-    }
-
-    // Also check FIL_PAGE_TYPE at offset 24-25
-    uint16_t page_type = read_be<uint16_t>(page_data, 24);
-    // Valid types: 0x45BF (INDEX), 0x45BD (SDI_ZIP), 0x0000 (ALLOCATED), 0xFFFF (corrupted)
-    // If page_type is completely random, header is corrupted
-    if (page_type != 0x45BF && page_type != 0x45BD && page_type != 0x0000 &&
-        page_type != 0xFFFF && page_type > 0x1000) {
-        header_valid = false;
-    }
-
-    if (!header_valid) {
-        // Header is corrupted, return default 16KB
-        // The caller can try multiple page sizes as fallback
-        return UNIV_PAGE_SIZE;
-    }
-
-    // Bits 0-5: page size code
-    // 0 = default (16KB for most MySQL versions)
-    // 1 = 8KB, 2 = 4KB, 3 = 32KB, 4 = 64KB
-    // Note: The encoding varies by MySQL version, but 0 typically means default 16KB
-    uint32_t size_code = (flags >> 1) & 0x07;  // Bits 1-3 for page size
-
-    switch (size_code) {
-        case 0: return UNIV_PAGE_SIZE;  // Default 16KB
-        case 1: return 8192;
-        case 2: return 4096;
-        case 3: return 32768;
-        case 4: return 65536;
-        default: return UNIV_PAGE_SIZE;
-    }
+uint32_t detect_page_size_from_fsp(const uint8_t* page_data, size_t available_bytes) {
+    // ZIP_SSIZE only expresses a physical compression ratio relative to an
+    // already-known logical page size. It cannot establish that page size.
+    const auto metadata = parse_fsp_compression_metadata_detailed(
+        page_data, available_bytes, UNIV_PAGE_SIZE);
+    return metadata ? static_cast<uint32_t>(metadata.metadata->logical_page_size)
+                    : UNIV_PAGE_SIZE;
 }
 
 /**
- * Detect page size from file size - fallback when header is corrupted
- * For InnoDB IBD files, total_pages must be reasonable (typically > 2)
- * Returns most likely page size based on file alignment
+ * Detect page size from file size - fallback when header is corrupted.
+ * For InnoDB IBD files, total_pages must be reasonable (typically > 2).
  */
 uint32_t detect_page_size_from_file_size(size_t file_size) {
-    // Try common page sizes, prefer 16KB as most common
-    std::vector<uint32_t> candidates = {16384, 8192, 4096, 32768, 65536};
+    const std::vector<uint32_t> candidates = {16384, 8192, 4096, 32768, 65536};
 
     for (uint32_t ps : candidates) {
-        // File must be aligned to page size
         if (file_size % ps == 0) {
-            size_t total_pages = file_size / ps;
-            // Typical IBD file has at least 5-6 pages (FSP, IBUF, inode pages + data)
-            // and typically has multiple index pages
+            const size_t total_pages = file_size / ps;
             if (total_pages >= 5 && total_pages < 1000000) {
                 return ps;
             }
         }
     }
 
-    // Default fallback
     return UNIV_PAGE_SIZE;
 }
 
 /**
- * Smart page size detection with corruption resilience
- * Tries multiple methods and validates results
+ * Smart page size detection with corruption resilience.
  */
-uint32_t smart_detect_page_size(const uint8_t* page_data, size_t file_size) {
-    // First try FSP header detection
-    uint32_t fsp_size = detect_page_size_from_fsp(page_data);
+uint32_t smart_detect_page_size(const uint8_t* page_data, size_t available_bytes,
+                                size_t file_size) {
+    const uint32_t fsp_size = detect_page_size_from_fsp(page_data, available_bytes);
 
-    // Validate against file size
     if (file_size > 0) {
-        size_t pages = file_size / fsp_size;
-        // If pages is unreasonable (too small or file not aligned), try fallback
+        const size_t pages = file_size / fsp_size;
         if (pages < 3 || file_size % fsp_size != 0) {
             return detect_page_size_from_file_size(file_size);
         }
@@ -3757,44 +3712,37 @@ uint32_t smart_detect_page_size(const uint8_t* page_data, size_t file_size) {
     return fsp_size;
 }
 
-uint8_t detect_row_format_from_fsp(const uint8_t* page_data) {
-    if (!page_data) return 2;  // Default DYNAMIC
-
-    uint32_t flags = read_be<uint32_t>(page_data, 42);
-
-    // POST_ANTELOPE: bit 0 - 1=DYNAMIC/COMPRESSED, 0=REDUNDANT/COMPACT
-    // ZIP_SSIZE: bits 1-4 - if != 0, table is compressed
-    // ATOMIC_BLOBS: bit 5 - 1 means atomic BLOBs (DYNAMIC)
-    //
-    // Row format determination:
-    // - If ZIP_SSIZE != 0: COMPRESSED (3)
-    // - If POST_ANTELOPE == 1 and ATOMIC_BLOBS == 1: DYNAMIC (2)
-    // - If POST_ANTELOPE == 1 and ATOMIC_BLOBS == 0: COMPACT (1)
-    // - If POST_ANTELOPE == 0: REDUNDANT (0)
-
-    bool post_antelope = (flags & 1) != 0;        // bit 0
-    uint8_t zip_ssize = (flags >> 1) & 0x0F;      // bits 1-4
-    bool atomic_blobs = (flags & 32) != 0;        // bit 5
-
-    if (zip_ssize != 0) {
-        return 3;  // COMPRESSED
-    } else if (post_antelope && atomic_blobs) {
-        return 2;  // DYNAMIC
-    } else if (post_antelope) {
-        return 1;  // COMPACT
-    } else {
-        return 0;  // REDUNDANT
+uint8_t detect_row_format_from_fsp(const uint8_t* page_data, size_t available_bytes) {
+    const auto metadata = parse_fsp_compression_metadata_detailed(
+        page_data, available_bytes, UNIV_PAGE_SIZE);
+    if (!metadata) {
+        return 2;
     }
+
+    const uint32_t flags = metadata.metadata->raw_flags;
+    const bool post_antelope = (flags & FSP_FLAGS_POST_ANTELOPE) != 0;
+    const bool atomic_blobs = (flags & FSP_FLAGS_ATOMIC_BLOBS) != 0;
+
+    if (metadata.metadata->declares_compression) {
+        return 3;
+    }
+    if (post_antelope && atomic_blobs) {
+        return 2;
+    }
+    if (post_antelope) {
+        return 1;
+    }
+    return 0;
 }
 
-bool is_antelope_format(const uint8_t* page_data) {
-    uint8_t format = detect_row_format_from_fsp(page_data);
-    return format <= 1;  // REDUNDANT or COMPACT
+bool is_antelope_format(const uint8_t* page_data, size_t available_bytes) {
+    return detect_row_format_from_fsp(page_data, available_bytes) <= 1;
 }
 
-uint32_t read_fsp_space_flags(const uint8_t* page_data) {
-    if (!page_data) return 0;
-    return read_be<uint32_t>(page_data, 42);
+uint32_t read_fsp_space_flags(const uint8_t* page_data, size_t available_bytes) {
+    const auto metadata = parse_fsp_compression_metadata_detailed(
+        page_data, available_bytes, UNIV_PAGE_SIZE);
+    return metadata ? metadata.metadata->raw_flags : 0;
 }
 
 uint32_t get_root_page_from_inode(const uint8_t* ibd_data, size_t ibd_size, uint32_t page_size) {

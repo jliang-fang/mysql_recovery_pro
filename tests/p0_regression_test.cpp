@@ -1212,9 +1212,45 @@ TEST_F(FSPFlagsCompressionTest, RejectsInvalidOrIncompleteMetadata) {
     EXPECT_FALSE(parse_fsp_compression_metadata(nullptr, 0, 16384).has_value());
 }
 
-// ======================================================================
-// P0.6: Encrypted Page Space ID
-// ======================================================================
+TEST_F(FSPFlagsCompressionTest, ReportsDetailedMetadataBoundaries) {
+    const auto page = create_fsp_page(16384, 2);
+    for (const size_t size : {41u, 42u, 45u}) {
+        EXPECT_EQ(parse_fsp_compression_metadata_detailed(page.data(), size, 16384).status,
+                  FSPCompressionMetadataStatus::TRUNCATED);
+    }
+
+    for (const uint16_t page_type : {FIL_PAGE_TYPE_FSP_HDR, FIL_PAGE_TYPE_FSP_HDR_LEGACY}) {
+        auto header = create_fsp_page(16384, 2);
+        write_be<uint16_t>(header.data(), FIL_PAGE_TYPE_ABS, page_type);
+        const auto result = parse_fsp_compression_metadata_detailed(header.data(), 46, 16384);
+        ASSERT_EQ(result.status, FSPCompressionMetadataStatus::OK);
+        ASSERT_TRUE(result.metadata.has_value());
+        EXPECT_EQ(result.metadata->logical_page_size, 16384u);
+        EXPECT_EQ(result.metadata->physical_page_size, 4096u);
+    }
+}
+
+TEST_F(FSPFlagsCompressionTest, ReportsDetailedMetadataFailures) {
+    auto invalid_zip = create_fsp_page(16384, 5);
+    EXPECT_EQ(parse_fsp_compression_metadata_detailed(invalid_zip.data(), invalid_zip.size(), 16384).status,
+              FSPCompressionMetadataStatus::INVALID_ZIP_SSIZE);
+
+    auto non_fsp = create_fsp_page(16384, 1);
+    write_be<uint16_t>(non_fsp.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    EXPECT_EQ(parse_fsp_compression_metadata_detailed(non_fsp.data(), non_fsp.size(), 16384).status,
+              FSPCompressionMetadataStatus::NOT_FSP_HEADER);
+}
+
+TEST_F(FSPFlagsCompressionTest, PreservesCallerSelectedLogicalPageSize) {
+    const auto page = create_fsp_page(32768, 2);
+    const auto result = parse_fsp_compression_metadata_detailed(page.data(), page.size(), 32768);
+
+    ASSERT_EQ(result.status, FSPCompressionMetadataStatus::OK);
+    ASSERT_TRUE(result.metadata.has_value());
+    EXPECT_EQ(result.metadata->logical_page_size, 32768u);
+    EXPECT_EQ(result.metadata->physical_page_size, 8192u);
+}
+
 
 class EncryptedPageSpaceIDTest : public ::testing::Test {
 protected:

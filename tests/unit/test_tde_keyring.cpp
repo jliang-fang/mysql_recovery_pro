@@ -6,7 +6,11 @@
 #include <gtest/gtest.h>
 #include <fstream>
 #include <filesystem>
+#include <cstdlib>
+#include <stdexcept>
+#include <cstdint>
 #include "dbrecovery/innodb/tde_decryptor.hpp"
+#include "dbrecovery/innodb/offline_keyring_parser.hpp"
 #include "dbrecovery/innodb/encrypted_table_recovery.hpp"
 #include "dbrecovery/innodb/compressed_table_recovery.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
@@ -21,7 +25,12 @@ protected:
     std::string keyring_path_;
 
     void SetUp() override {
-        test_dir_ = "/tmp/tde_keyring_test_" + std::to_string(getpid());
+        const char* root = std::getenv("DBREC_TEST_TMPDIR");
+        if (!root || *root == '\0') {
+            throw std::runtime_error("DBREC_TEST_TMPDIR must be set");
+        }
+        test_dir_ = std::string(root) + "/tde_keyring_test_" +
+                    std::to_string(reinterpret_cast<uintptr_t>(this));
         std::filesystem::create_directories(test_dir_);
         keyring_path_ = test_dir_ + "/keyring";
     }
@@ -115,6 +124,13 @@ protected:
         file.write(reinterpret_cast<const char*>(data.data()), data.size());
         file.close();
     }
+
+    std::string write_json_keyring(const std::string& name, const std::string& json) {
+        const std::string path = test_dir_ + "/" + name;
+        std::ofstream file(path);
+        file << json;
+        return path;
+    }
 };
 
 TEST_F(TDEKeyringTest, LoadKeyringFileRejected) {
@@ -125,6 +141,90 @@ TEST_F(TDEKeyringTest, LoadKeyringFileRejected) {
     ASSERT_FALSE(keyring.load(keyring_path_)) << "Native binary keyring must be rejected";
     EXPECT_TRUE(keyring.entries.empty()) << "No entries should be loaded from native binary keyring";
 }
+
+TEST_F(TDEKeyringTest, OfflineParserRejectsUnknownAlgorithm) {
+    const auto path = write_json_keyring(
+        "unknown_algorithm.json",
+        R"({"key":{"master_key_id":1,"algorithm":"AES-256-GCM","key":"abababababababababababababababab"}})");
+
+    innodb::OfflineKeyringParser parser;
+    EXPECT_FALSE(parser.parse_keyring_file(path));
+    EXPECT_TRUE(parser.get_master_keys().empty());
+    EXPECT_NE(parser.get_last_error().find("unsupported algorithm"), std::string::npos);
+}
+
+TEST_F(TDEKeyringTest, OfflineParserRejectsMalformedBase64) {
+    const auto invalid_char = write_json_keyring(
+        "invalid_base64_char.json",
+        R"({"key":{"master_key_id":1,"key_data":"q6urq6urq6urq6urq6urq!="}})");
+    const auto invalid_padding = write_json_keyring(
+        "invalid_base64_padding.json",
+        R"({"key":{"master_key_id":1,"key_data":"q6urq6urq6urq6urq6urq=="}})");
+    const auto invalid_length = write_json_keyring(
+        "invalid_base64_length.json",
+        R"({"key":{"master_key_id":1,"key_data":"q6urq6urq6urq6urq6urq"}})");
+
+    for (const auto& path : {invalid_char, invalid_padding, invalid_length}) {
+        innodb::OfflineKeyringParser parser;
+        EXPECT_FALSE(parser.parse_keyring_file(path));
+        EXPECT_TRUE(parser.get_master_keys().empty());
+        EXPECT_NE(parser.get_last_error().find("invalid Base64"), std::string::npos);
+    }
+}
+
+TEST_F(TDEKeyringTest, OfflineParserRejectsMalformedHex) {
+    const auto odd_length = write_json_keyring(
+        "odd_hex.json",
+        R"({"key":{"master_key_id":1,"key":"abc"}})");
+    const auto invalid_character = write_json_keyring(
+        "invalid_hex.json",
+        R"({"key":{"master_key_id":1,"key":"gg000000000000000000000000000000"}})");
+
+    for (const auto& path : {odd_length, invalid_character}) {
+        innodb::OfflineKeyringParser parser;
+        EXPECT_FALSE(parser.parse_keyring_file(path));
+        EXPECT_TRUE(parser.get_master_keys().empty());
+        EXPECT_NE(parser.get_last_error().find("invalid hexadecimal"), std::string::npos);
+    }
+}
+
+TEST_F(TDEKeyringTest, OfflineParserAcceptsValidBase64AndHex) {
+    const auto base64 = write_json_keyring(
+        "valid_base64.json",
+        R"({"key":{"master_key_id":1,"key_data":"q6urq6urq6urq6urq6urqw=="}})");
+    const auto hex = write_json_keyring(
+        "valid_hex.json",
+        R"({"key":{"master_key_id":2,"key":"abababababababababababababababab"}})");
+
+    innodb::OfflineKeyringParser parser;
+    EXPECT_TRUE(parser.parse_keyring_file(base64));
+    ASSERT_EQ(parser.get_master_keys().size(), 1u);
+    EXPECT_EQ(parser.get_master_keys()[0].key_id, 1u);
+    EXPECT_EQ(parser.get_master_keys()[0].key_data.size(), 16u);
+
+    EXPECT_TRUE(parser.parse_keyring_file(hex));
+    ASSERT_EQ(parser.get_master_keys().size(), 1u);
+    EXPECT_EQ(parser.get_master_keys()[0].key_id, 2u);
+    EXPECT_EQ(parser.get_master_keys()[0].key_data.size(), 16u);
+}
+
+TEST_F(TDEKeyringTest, OfflineParserPreservesKeysAfterFailedReplacement) {
+    const auto valid = write_json_keyring(
+        "valid_before_failure.json",
+        R"({"existing":{"master_key_id":7,"key":"abababababababababababababababab"}})");
+    const auto invalid = write_json_keyring(
+        "invalid_replacement.json",
+        R"({"replacement":{"master_key_id":8,"algorithm":"AES-256-GCM","key":"abababababababababababababababab"}})");
+
+    innodb::OfflineKeyringParser parser;
+    ASSERT_TRUE(parser.parse_keyring_file(valid));
+    ASSERT_EQ(parser.get_master_keys().size(), 1u);
+    EXPECT_FALSE(parser.parse_keyring_file(invalid));
+    ASSERT_EQ(parser.get_master_keys().size(), 1u);
+    EXPECT_EQ(parser.get_master_keys()[0].key_id, 7u);
+    EXPECT_EQ(parser.get_master_keys()[0].key_name, "existing");
+}
+
 
 TEST_F(TDEKeyringTest, FindKeyByNameFailsOnLoadedKeyring) {
     create_test_keyring();

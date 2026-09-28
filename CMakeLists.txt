@@ -225,7 +225,7 @@ enable_testing()
 
 # Unit tests (C++ GTest)
 find_package(GTest QUIET)
-if(GTEST_FOUND)
+if(GTest_FOUND)
     add_subdirectory(tests)
 else()
     # 如果系统没有GTest，尝试使用本地版本或创建别名

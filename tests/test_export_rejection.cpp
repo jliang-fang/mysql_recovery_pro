@@ -5,7 +5,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
+#include <vector>
 
 using namespace dbrecovery::recovery;
 
@@ -73,14 +75,40 @@ TEST(ExportRejection, DDLBlockedEvidenceOnly) {
 }
 
 TEST(ExportRejection, TDECandidateBlocked) {
-    std::string tmp = test_tmp_path("export_reject_tde.ibd");
+    const std::string input = test_tmp_path("export_reject_tde.ibd");
+    const std::filesystem::path output = test_tmp_path("export_reject_tde_out");
+    std::filesystem::remove(input);
+    std::filesystem::remove_all(output);
+
+    std::vector<uint8_t> page(16384, 0);
+    page[24] = 0x45;
+    page[25] = 0xBF;
+    page[38] = 6;
+    page[39] = 1;
+    for (size_t i = 55; i < 83; ++i) page[i] = 0xAB;
+
     {
-        std::ofstream f(tmp, std::ios::binary);
-        std::vector<uint8_t> b(200, 0);
-        f.write(reinterpret_cast<char*>(b.data()), b.size());
+        std::ofstream file(input, std::ios::binary);
+        ASSERT_TRUE(file.good());
+        file.write(reinterpret_cast<const char*>(page.data()), page.size());
+        ASSERT_TRUE(file.good());
     }
-    auto r = dbrecovery::tools::run_unified_recovery(tmp, test_tmp_path("export_reject_tde_out"), "t_tde", "csv", 16384, "", "", 0, "", false, false, false);
-    (void)r;
-    SUCCEED();
-    std::remove(tmp.c_str());
+
+    const auto result = dbrecovery::tools::run_unified_recovery(
+        input, output.string(), "t_tde", "all", 16384, "", "", 0,
+        "", false, false, false);
+
+    EXPECT_FALSE(result.success);
+    EXPECT_TRUE(result.records.empty());
+    EXPECT_EQ(result.trust_level, "EVIDENCE_ONLY");
+    EXPECT_EQ(result.schema_source, "EVIDENCE_ONLY");
+    EXPECT_EQ(result.result_classification, "forensic_evidence");
+    EXPECT_EQ(result.recovery_method, "blocked_tde_candidate");
+    EXPECT_EQ(result.export_rejection_reason, "tde_candidate_UNVALIDATED");
+    EXPECT_FALSE(std::filesystem::exists(output));
+    EXPECT_FALSE(std::filesystem::exists(output / "t_tde.csv"));
+    EXPECT_FALSE(std::filesystem::exists(output / "t_tde.sql"));
+
+    std::filesystem::remove(input);
+    std::filesystem::remove_all(output);
 }

@@ -293,34 +293,30 @@ CompressionStatus CompressedTableRecovery::classify(const std::string& file_path
     file.read(reinterpret_cast<char*>(page0.data()), page0.size());
     if (file.gcount() < 46) return CompressionStatus::MALFORMED;
 
-    auto metadata = parse_fsp_compression_metadata(page0.data(),
-                                                   static_cast<size_t>(file.gcount()),
-                                                   page_size);
-    if (!metadata) {
-        // Check whether page 0 is a valid FSP_HDR.  If the page type is
-        // FSP_HDR but parse_fsp_compression_metadata rejected it, the
-        // flags themselves are corrupted (invalid zip_ssize, etc.).
-        // Otherwise page 0 is not a recognizable InnoDB FSP_HDR page.
-        const uint16_t page_type = read_be<uint16_t>(page0.data(), FIL_PAGE_TYPE_ABS);
-        if (is_fsp_header_page_type(page_type)) {
+    const auto metadata_result = parse_fsp_compression_metadata_detailed(
+        page0.data(), static_cast<size_t>(file.gcount()), page_size);
+    if (!metadata_result) {
+        if (metadata_result.status == FSPCompressionMetadataStatus::INVALID_ZIP_SSIZE ||
+            metadata_result.status == FSPCompressionMetadataStatus::INVALID_PHYSICAL_PAGE_SIZE) {
             return CompressionStatus::CORRUPTED_METADATA;
         }
         return CompressionStatus::MALFORMED;
     }
-    if (!metadata->is_compressed()) return CompressionStatus::NOT_COMPRESSED;
+    const auto& metadata = *metadata_result.metadata;
+    if (!metadata.is_compressed()) return CompressionStatus::NOT_COMPRESSED;
 
     // Verify that the on-disk page stride matches the declared physical page size.
     // Read the second physical page (stride = physical_page_size) and check for
     // a valid InnoDB page type.  If the stride doesn't match, the file layout is
     // inconsistent with the FSP flags declaration.
-    if (metadata->physical_page_size < page_size) {
+    if (metadata.physical_page_size < page_size) {
         file.seekg(0, std::ios::end);
         const size_t file_size = static_cast<size_t>(file.tellg());
-        if (file_size >= metadata->physical_page_size * 2) {
-            file.seekg(static_cast<std::streamoff>(metadata->physical_page_size), std::ios::beg);
-            std::vector<uint8_t> page1(metadata->physical_page_size, 0);
+        if (file_size >= metadata.physical_page_size * 2) {
+            file.seekg(static_cast<std::streamoff>(metadata.physical_page_size), std::ios::beg);
+            std::vector<uint8_t> page1(metadata.physical_page_size, 0);
             file.read(reinterpret_cast<char*>(page1.data()), page1.size());
-            if (file.gcount() < static_cast<std::streamsize>(metadata->physical_page_size)) {
+            if (file.gcount() < static_cast<std::streamsize>(metadata.physical_page_size)) {
                 return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
             }
             const uint16_t page1_type = read_be<uint16_t>(page1.data(), FIL_PAGE_TYPE_ABS);

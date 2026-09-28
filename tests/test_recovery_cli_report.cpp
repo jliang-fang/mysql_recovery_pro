@@ -1,11 +1,14 @@
 #include <gtest/gtest.h>
 
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/wait.h>
+#include <vector>
 
 #ifndef DBRECOVERY_CLI_PATH
 #error "DBRECOVERY_CLI_PATH must name the recovery CLI executable"
@@ -30,6 +33,25 @@ std::string shell_quote(const std::string& value) {
 std::string read_file(const fs::path& path) {
     std::ifstream file(path);
     return {std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+}
+
+int process_exit_code(int status) {
+    if (status == -1 || !WIFEXITED(status)) return -1;
+    return WEXITSTATUS(status);
+}
+
+void write_tde_candidate_fixture(const fs::path& path) {
+    std::vector<uint8_t> page(16384, 0);
+    page[24] = 0x45;
+    page[25] = 0xBF;
+    page[38] = 6;
+    page[39] = 1;
+    for (size_t index = 55; index < 83; ++index) page[index] = 0xAB;
+
+    std::ofstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("unable to create TDE candidate fixture");
+    file.write(reinterpret_cast<const char*>(page.data()), static_cast<std::streamsize>(page.size()));
+    if (!file) throw std::runtime_error("unable to write TDE candidate fixture");
 }
 
 class RecoveryCliReportTest : public ::testing::Test {
@@ -124,6 +146,28 @@ TEST_F(RecoveryCliReportTest, RejectsUnwritableReportBase) {
     EXPECT_NE(run_cli(arguments, log), 0);
     EXPECT_NE(read_file(log).find("unable to write requested recovery report artifacts"),
               std::string::npos);
+}
+
+TEST_F(RecoveryCliReportTest, RejectsUnvalidatedTDECandidatesWithoutStructuredArtifacts) {
+    const fs::path input = root_ / "encrypted.ibd";
+    write_tde_candidate_fixture(input);
+
+    for (const std::string& format : {"csv", "sql"}) {
+        const fs::path output = root_ / format;
+        fs::create_directories(output);
+        const fs::path log = root_ / (format + ".log");
+        const auto arguments = "--ibd=" + shell_quote(input.string()) +
+                               " --scan --format=" + format +
+                               " --output=" + shell_quote(output.string());
+
+        EXPECT_EQ(process_exit_code(run_cli(arguments, log)), 1) << read_file(log);
+        EXPECT_FALSE(fs::exists(output / "recovered.csv"));
+        EXPECT_FALSE(fs::exists(output / "recovered.sql"));
+        EXPECT_FALSE(fs::exists(output / "recovery_report.txt"));
+        EXPECT_FALSE(fs::exists(output / "recovery_report.json"));
+        EXPECT_FALSE(fs::exists(output / "recovery_report.html"));
+        EXPECT_NE(read_file(log).find("tde_candidate_UNVALIDATED"), std::string::npos);
+    }
 }
 
 } // namespace

@@ -22,11 +22,32 @@ constexpr uint16_t FIL_HEADER_SIZE      = 38;
 constexpr uint16_t FSP_SPACE_FLAGS_OFFSET = FIL_HEADER_SIZE + 4;
 
 struct FSPCompressionMetadata {
+    uint32_t raw_flags;
     size_t logical_page_size;
     uint8_t zip_ssize;
     size_t physical_page_size;
+    bool declares_compression;
 
-    bool is_compressed() const { return zip_ssize != 0; }
+    bool is_compressed() const { return declares_compression; }
+};
+
+enum class FSPCompressionMetadataStatus : uint8_t {
+    OK,
+    NULL_INPUT,
+    TRUNCATED,
+    NOT_FSP_HEADER,
+    INVALID_LOGICAL_PAGE_SIZE,
+    INVALID_ZIP_SSIZE,
+    INVALID_PHYSICAL_PAGE_SIZE
+};
+
+struct FSPCompressionMetadataParseResult {
+    FSPCompressionMetadataStatus status = FSPCompressionMetadataStatus::NULL_INPUT;
+    std::optional<FSPCompressionMetadata> metadata;
+
+    explicit operator bool() const {
+        return status == FSPCompressionMetadataStatus::OK && metadata.has_value();
+    }
 };
 
 /// @brief FSP_SPACE_FLAGS bit definitions (from fil0fil.h)
@@ -98,30 +119,44 @@ inline bool is_fsp_header_page_type(uint16_t type) {
     return type == FIL_PAGE_TYPE_FSP_HDR || type == FIL_PAGE_TYPE_FSP_HDR_LEGACY;
 }
 
-inline std::optional<FSPCompressionMetadata> parse_fsp_compression_metadata(
+inline FSPCompressionMetadataParseResult parse_fsp_compression_metadata_detailed(
     const uint8_t* page0, size_t available_bytes, size_t logical_page_size) {
     constexpr size_t kFlagsEnd = FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t);
-    if (page0 == nullptr || available_bytes < kFlagsEnd ||
-        (logical_page_size != 4096 && logical_page_size != 8192 &&
-         logical_page_size != 16384 && logical_page_size != 32768 &&
-         logical_page_size != 65536) ||
-        available_bytes < logical_page_size ||
-        !is_fsp_header_page_type(read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS))) {
-        return std::nullopt;
+    if (page0 == nullptr) {
+        return {FSPCompressionMetadataStatus::NULL_INPUT, std::nullopt};
+    }
+    if (available_bytes < kFlagsEnd) {
+        return {FSPCompressionMetadataStatus::TRUNCATED, std::nullopt};
+    }
+    if (logical_page_size != 4096 && logical_page_size != 8192 &&
+        logical_page_size != 16384 && logical_page_size != 32768 &&
+        logical_page_size != 65536) {
+        return {FSPCompressionMetadataStatus::INVALID_LOGICAL_PAGE_SIZE, std::nullopt};
+    }
+    if (!is_fsp_header_page_type(read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS))) {
+        return {FSPCompressionMetadataStatus::NOT_FSP_HEADER, std::nullopt};
     }
 
     const uint32_t flags = read_be<uint32_t>(page0, FSP_SPACE_FLAGS_OFFSET);
     const uint8_t zip_ssize = static_cast<uint8_t>((flags >> 1) & 0x0F);
     if (zip_ssize >= 5) {
-        return std::nullopt;
+        return {FSPCompressionMetadataStatus::INVALID_ZIP_SSIZE, std::nullopt};
     }
 
     const size_t physical_page_size = logical_page_size >> zip_ssize;
     if (physical_page_size < 1024 || physical_page_size > logical_page_size) {
-        return std::nullopt;
+        return {FSPCompressionMetadataStatus::INVALID_PHYSICAL_PAGE_SIZE, std::nullopt};
     }
 
-    return FSPCompressionMetadata{logical_page_size, zip_ssize, physical_page_size};
+    return {FSPCompressionMetadataStatus::OK,
+            FSPCompressionMetadata{flags, logical_page_size, zip_ssize,
+                                   physical_page_size, zip_ssize != 0}};
+}
+
+inline std::optional<FSPCompressionMetadata> parse_fsp_compression_metadata(
+    const uint8_t* page0, size_t available_bytes, size_t logical_page_size) {
+    return parse_fsp_compression_metadata_detailed(page0, available_bytes,
+                                                   logical_page_size).metadata;
 }
 /// @brief XDES (Extent Descriptor) page type (0x45B9 = 17849)
 constexpr uint16_t FIL_PAGE_TYPE_XDES    = 17849; // 0x45B9 — Extent descriptor page

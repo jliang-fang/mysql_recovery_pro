@@ -94,16 +94,16 @@ private:
     std::string last_error_;
 
     bool parse_keyring_json(const nlohmann::json& j);
-    TDEAlgorithm parse_algorithm(const std::string& algo);
+    std::optional<TDEAlgorithm> parse_algorithm(const std::string& algo);
     void derive_key_from_password(const std::string& password,
-                                   const std::vector<uint8_t>& salt,
-                                   std::vector<uint8_t>& out_key);
+                                  const std::vector<uint8_t>& salt,
+                                  std::vector<uint8_t>& out_key);
     std::vector<uint8_t> aes_256_cbc_decrypt(
         const std::vector<uint8_t>& key,
         const std::vector<uint8_t>& iv,
         const std::vector<uint8_t>& ciphertext);
-    std::vector<uint8_t> decode_base64(const std::string& encoded);
-    std::vector<uint8_t> decode_hex(const std::string& hex);
+    std::optional<std::vector<uint8_t>> decode_base64(const std::string& encoded);
+    std::optional<std::vector<uint8_t>> decode_hex(const std::string& hex);
 };
 
 } // namespace innodb

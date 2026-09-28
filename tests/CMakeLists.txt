@@ -1,5 +1,8 @@
 # Unit test configuration for dbrecovery
 
+file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_tmp)
+set(DBREC_TEST_TMPDIR_VALUE "${CMAKE_CURRENT_BINARY_DIR}/test_tmp")
+
 # SchemaInferrer v2.0 pipeline tests (Phase 4 - Slice A)
 add_executable(test_schema_inferrer innodb/schema_inferrer_test.cpp)
 target_link_libraries(test_schema_inferrer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
@@ -160,6 +163,16 @@ add_executable(test_version_aware_recovery test_version_aware_recovery.cpp)
 target_link_libraries(test_version_aware_recovery PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_version_aware_recovery)
 
+# AutoDetector page-zero boundary tests
+add_executable(test_auto_detector_page0 auto_detector_page0_test.cpp)
+target_link_libraries(test_auto_detector_page0 PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_auto_detector_page0)
+
+# Binary stream read boundary tests
+add_executable(test_binary_stream_reader binary_stream_reader_test.cpp)
+target_link_libraries(test_binary_stream_reader PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_binary_stream_reader)
+
 # Multi-page version evidence aggregation tests (Phase 2 P0)
 add_executable(test_version_evidence test_version_evidence.cpp)
 target_link_libraries(test_version_evidence PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
@@ -198,7 +211,7 @@ gtest_discover_tests(test_ibd_recovery)
 # TDE keyring tests
 add_executable(test_tde_keyring unit/test_tde_keyring.cpp)
 target_link_libraries(test_tde_keyring PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
-gtest_discover_tests(test_tde_keyring)
+gtest_discover_tests(test_tde_keyring PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
 # Comprehensive recovery tests
 add_executable(test_comprehensive_recovery unit/test_comprehensive_recovery.cpp)
@@ -273,7 +286,7 @@ gtest_discover_tests(test_flashback_generator)
 # DeepUndoAnalyzer tests (P0 - Track 1)
 add_executable(test_deep_undo_analyzer innodb/deep_undo_analyzer_test.cpp)
 target_link_libraries(test_deep_undo_analyzer PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
-gtest_discover_tests(test_deep_undo_analyzer)
+gtest_discover_tests(test_deep_undo_analyzer PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
 # InteractiveSchemaBuilder tests (P1)
 add_executable(test_interactive_schema unit/test_interactive_schema.cpp)
@@ -377,7 +390,7 @@ gtest_discover_tests(test_compressed_table_routing)
 # Exporter canonical value and escaping tests
 add_executable(test_export_optimization test_export_optimization.cpp)
 target_link_libraries(test_export_optimization PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
-gtest_discover_tests(test_export_optimization)
+gtest_discover_tests(test_export_optimization DISCOVERY_TIMEOUT 30)
 
 # Phase 3f/g — combined pipeline, salvage accuracy, L3/L4 isolation, export rejection, idempotency
 add_executable(test_combined_recovery test_combined_recovery.cpp)
@@ -387,11 +400,6 @@ gtest_discover_tests(test_combined_recovery)
 add_executable(test_salvage_accuracy test_salvage_accuracy.cpp)
 target_link_libraries(test_salvage_accuracy PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_salvage_accuracy)
-
-# Test confinement: these suites only write under DBREC_TEST_TMPDIR (see
-# test_tmp_path() in the sources); the helper throws if the variable is unset.
-file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/test_tmp)
-set(DBREC_TEST_TMPDIR_VALUE "${CMAKE_CURRENT_BINARY_DIR}/test_tmp")
 
 # FD adoption preserves capability-bound raw reads without pathname reopening.
 add_executable(test_fd_adoption fd_adoption_test.cpp)

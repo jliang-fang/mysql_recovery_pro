@@ -2,7 +2,9 @@
 #define DBRECOVERY_INNODB_AUTO_DETECTOR_HPP
 
 #include "dbrecovery/innodb/page_types_v2.hpp"
+#include "dbrecovery/innodb/page_defs.hpp"
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -19,6 +21,8 @@ public:
         MySQLVersion version;
         RowFormat row_format;
         uint32_t page_size;
+        uint32_t logical_page_size;
+        uint32_t physical_page_size;
         bool has_sdi;
         bool is_compressed;
         uint16_t zip_size;
@@ -37,7 +41,7 @@ public:
      * @brief 从 Page 0 推测版本
      * @details 检查 FSP_HDR/XDES 页的特征
      */
-    static MySQLVersion detect_version_from_page0(const uint8_t* page0);
+    static MySQLVersion detect_version_from_page0(const uint8_t* page0, size_t available_bytes);
     
     /**
      * @brief 从 SDI 页推断版本
@@ -72,7 +76,7 @@ public:
     /**
      * @brief 从空间ID推断版本
      */
-    static MySQLVersion detect_version_from_space_id(space_id_t space_id);
+    static MySQLVersion detect_version_from_space_id(uint32_t space_id);
     
     /**
      * @brief 从页大小推断版本
@@ -95,43 +99,23 @@ private:
 
 // ==================== 实现 ====================
 
-inline MySQLVersion AutoDetector::detect_version_from_page0(const uint8_t* page0) {
-    if (!page0) {
+inline MySQLVersion AutoDetector::detect_version_from_page0(const uint8_t* page0,
+                                                            size_t available_bytes) {
+    constexpr size_t kPage0FieldsEnd = FIL_PAGE_SPACE_ID + sizeof(uint32_t);
+    if (!page0 || available_bytes < kPage0FieldsEnd) {
         return MySQLVersion::UNKNOWN;
     }
     
     // 读取页类型 (FIL header, big-endian, offset 24)
     uint16_t page_type = read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS);
 
-    // 读取空间ID (FIL header, big-endian, offset 34)
-    uint32_t space_id = read_be<uint32_t>(page0, FIL_PAGE_SPACE_ID);
+    // Only SDI page types provide version-specific evidence. Generic index and
+    // FSP metadata are shared across supported server versions.
+    if (is_sdi_page_type(page_type)) {
+        return MySQLVersion::MYSQL_80;
+    }
 
-    // FSP header starts at offset 38 (FIL_HEADER_SIZE); FSP_SPACE_FLAGS is at +4
-    // (absolute offset 42), big-endian. ZIP_SSIZE in bits 1-4.
-    uint32_t space_flags = read_be<uint32_t>(page0, 38 + 4);
-    uint16_t zip_ssize = static_cast<uint16_t>((space_flags >> 1) & 0x0F);
-    
-    // 判断版本
-    if (page_type == SDI_PAGE_TYPE || page_type == 0x5a5a) {
-        return MySQLVersion::VERSION_8_0;
-    }
-    
-    if (space_id > 0 && page_type == static_cast<uint16_t>(PageType::INDEX)) {
-        return MySQLVersion::VERSION_8_0;
-    }
-    
-    if (zip_ssize > 0) {
-        // 压缩页通常是 8.0+ 的特性
-        return MySQLVersion::VERSION_8_0;
-    }
-    
-    // 检查 FSEG_DIR 类型 (5.6/5.7 特有)
-    if (page_type == 0x45ba) {  // FSEG_DIR
-        return MySQLVersion::VERSION_5_7;
-    }
-    
-    // 默认返回 5.7
-    return MySQLVersion::VERSION_5_7;
+    return MySQLVersion::UNKNOWN;
 }
 
 inline MySQLVersion AutoDetector::detect_version_from_sdi(const uint8_t* sdi_page) {
@@ -139,10 +123,10 @@ inline MySQLVersion AutoDetector::detect_version_from_sdi(const uint8_t* sdi_pag
         return MySQLVersion::UNKNOWN;
     }
     
-    // SDI 页是 MySQL 8.0+ 的特性 — FIL header is big-endian, page_type at offset 24
-    uint16_t page_type = read_be<uint16_t>(sdi_page, 24);
-    if (page_type == SDI_PAGE_TYPE || page_type == 0x5a5a) {
-        return MySQLVersion::VERSION_8_0;
+    // SDI page types are MySQL 8.0+ evidence.
+    uint16_t page_type = read_be<uint16_t>(sdi_page, FIL_PAGE_TYPE_ABS);
+    if (is_sdi_page_type(page_type)) {
+        return MySQLVersion::MYSQL_80;
     }
     
     return MySQLVersion::UNKNOWN;
@@ -186,31 +170,18 @@ inline RowFormat AutoDetector::detect_row_format_from_header(const uint8_t* reco
 }
 
 inline MySQLVersion AutoDetector::detect_version_from_page_type(uint16_t page_type) {
-    switch (page_type) {
-        case 0x5441:  // SDI
-        case 0x5a5a:  // SDI2
-            return MySQLVersion::VERSION_8_0;
-        case 0x45ba:  // FSEG_DIR
-            return MySQLVersion::VERSION_5_7;
-        default:
-            return MySQLVersion::VERSION_5_7;
-    }
+    return is_sdi_page_type(page_type) ? MySQLVersion::MYSQL_80
+                                       : MySQLVersion::UNKNOWN;
 }
 
-inline MySQLVersion AutoDetector::detect_version_from_space_id(space_id_t space_id) {
-    // 8.0+ 空间ID通常非零
-    if (space_id > 0) {
-        return MySQLVersion::VERSION_8_0;
-    }
-    return MySQLVersion::VERSION_5_7;
+inline MySQLVersion AutoDetector::detect_version_from_space_id(uint32_t space_id) {
+    (void)space_id;
+    return MySQLVersion::UNKNOWN;
 }
 
 inline MySQLVersion AutoDetector::detect_version_from_page_size(uint32_t page_size) {
-    if (page_size != DEFAULT_PAGE_SIZE) {
-        // 非默认页大小通常是 8.0+ 的压缩页
-        return MySQLVersion::VERSION_8_0;
-    }
-    return MySQLVersion::VERSION_5_7;
+    (void)page_size;
+    return MySQLVersion::UNKNOWN;
 }
 
 inline AutoDetector::DetectionResult AutoDetector::detect(const std::filesystem::path& ibd_path) {
@@ -218,6 +189,8 @@ inline AutoDetector::DetectionResult AutoDetector::detect(const std::filesystem:
     result.version = MySQLVersion::UNKNOWN;
     result.row_format = RowFormat::COMPACT;
     result.page_size = DEFAULT_PAGE_SIZE;
+    result.logical_page_size = DEFAULT_PAGE_SIZE;
+    result.physical_page_size = DEFAULT_PAGE_SIZE;
     result.has_sdi = false;
     result.is_compressed = false;
     result.zip_size = 0;
@@ -232,9 +205,8 @@ inline AutoDetector::DetectionResult AutoDetector::detect(const std::filesystem:
     file.seekg(0, std::ios::beg);
     
     std::vector<uint8_t> buffer(std::min(size_t(16384), file_size), 0);
-    file.read(buffer.data(), buffer.size());
-    
-    return detect_from_file_header(buffer.data(), buffer.size());
+    file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    return detect_from_file_header(buffer.data(), static_cast<size_t>(file.gcount()));
 }
 
 inline AutoDetector::DetectionResult AutoDetector::detect_from_file_header(const uint8_t* file_data, size_t size) {
@@ -242,49 +214,37 @@ inline AutoDetector::DetectionResult AutoDetector::detect_from_file_header(const
     result.version = MySQLVersion::UNKNOWN;
     result.row_format = RowFormat::COMPACT;
     result.page_size = DEFAULT_PAGE_SIZE;
+    result.logical_page_size = DEFAULT_PAGE_SIZE;
+    result.physical_page_size = DEFAULT_PAGE_SIZE;
     result.has_sdi = false;
     result.is_compressed = false;
     result.zip_size = 0;
     
-    if (!file_data || size < 42) {
+    if (!file_data || size < FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t)) {
         return result;
     }
-    
+
     // 读取 Page 0 的关键字段 (FIL header fields are big-endian)
     uint16_t page_type = read_be<uint16_t>(file_data, FIL_PAGE_TYPE_ABS);
-    uint32_t space_id = read_be<uint32_t>(file_data, FIL_PAGE_SPACE_ID);
-    // FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4), big-endian.
-    // ZIP_SSIZE in bits 1-4.
-    uint32_t space_flags = read_be<uint32_t>(file_data, 38 + 4);
-    uint16_t page_size_field = static_cast<uint16_t>((space_flags >> 1) & 0x0F);
+    const auto compression = parse_fsp_compression_metadata_detailed(
+        file_data, size, DEFAULT_PAGE_SIZE);
     
-    // 推断版本
+    // Infer a version only from explicit version-specific page evidence.
     result.version = detect_version_from_page_type(page_type);
-    if (result.version == MySQLVersion::UNKNOWN) {
-        result.version = detect_version_from_space_id(space_id);
-    }
-    
-    // 推断页大小
-    if (page_size_field > 0) {
-        // ZIP_SSIZE: 1=1024, 2=2048, 3=4096, 4=8192, 5=16384
-        static constexpr uint16_t zip_sizes[] = {0, 1024, 2048, 4096, 8192, 16384};
-        uint16_t zsize = (page_size_field < 6) ? zip_sizes[page_size_field] : 0;
-        if (zsize > 0 && zsize < DEFAULT_PAGE_SIZE) {
-            result.is_compressed = true;
-            result.zip_size = zsize;
-            result.page_size = zsize;
-        }
+    result.has_sdi = is_sdi_page_type(page_type);
+
+    if (compression) {
+        result.logical_page_size = static_cast<uint32_t>(compression.metadata->logical_page_size);
+        result.physical_page_size = static_cast<uint32_t>(compression.metadata->physical_page_size);
+        result.page_size = result.logical_page_size;
+        result.is_compressed = compression.metadata->declares_compression;
+        result.zip_size = static_cast<uint16_t>(compression.metadata->physical_page_size);
     }
     
     // 推断行格式 (从 Page 0 的记录)
     if (size > 100) {
         // Page 0 通常有 FSEG_DIR 记录
         result.row_format = detect_row_format_from_header(file_data + 38);
-    }
-    
-    // 检查是否有 SDI 页
-    if (result.version >= MySQLVersion::VERSION_8_0) {
-        result.has_sdi = true;
     }
     
     return result;

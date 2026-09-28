@@ -737,7 +737,9 @@ SalvageResult SalvageEngine::salvage_pages(
             std::to_string(config_.max_l4_fragments));
     }
 
-    if (result.rows.empty() && result.evidence_fragments.empty()) {
+    result.success = !result.rows.empty() || !result.evidence_fragments.empty();
+
+    if (!result.success) {
         result.warnings.push_back("No salvageable data found in any page");
     }
 

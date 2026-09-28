@@ -380,7 +380,7 @@ TEST(P1SalvageFuzzTest, NullptrSafety) {
 
     std::vector<std::pair<const uint8_t*, size_t>> empty_pages;
     auto result = engine.salvage_pages(empty_pages);
-    EXPECT_TRUE(result.success);
+    EXPECT_FALSE(result.success);
     EXPECT_EQ(result.total_pages_scanned, 0);
 }
 
@@ -438,6 +438,7 @@ TEST(P1SalvageFuzzTest, EvidenceSeparationDefault) {
     pages.emplace_back(buffers.back().data(), buffers.back().size());
 
     auto result = engine.salvage_pages(pages);
+    EXPECT_TRUE(result.success);
 
     // All rows must be STRUCTURED
     for (const auto& row : result.rows) {
@@ -484,6 +485,7 @@ TEST(P1SalvageFuzzTest, EvidenceSeparationIncludeFragments) {
     // (random data pages typically produce L3/L4 fragments)
     bool has_evidence = !result.evidence_fragments.empty();
     EXPECT_TRUE(has_evidence);
+    EXPECT_TRUE(result.success);
 
     // All evidence_fragments must be FRAGMENT or STRING_ONLY
     for (const auto& frag : result.evidence_fragments) {

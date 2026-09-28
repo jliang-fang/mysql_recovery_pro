@@ -243,7 +243,12 @@ bool OfflineKeyringParser::parse_keyring_json(const nlohmann::json& j) {
         MasterKey mk;
         mk.key_name = it.key();
         mk.algorithm_str = value.value("algorithm", "AES-256-CBC");
-        mk.algorithm = parse_algorithm(mk.algorithm_str);
+        const auto algorithm = parse_algorithm(mk.algorithm_str);
+        if (!algorithm) {
+            last_error_ = "Keyring entry '" + it.key() + "' has an unsupported algorithm";
+            return false;
+        }
+        mk.algorithm = *algorithm;
         mk.key_type = value.value("key_type", "AES");
         mk.key_id = value["master_key_id"].get<uint32_t>();
 
@@ -252,13 +257,23 @@ bool OfflineKeyringParser::parse_keyring_json(const nlohmann::json& j) {
                 last_error_ = "Keyring entry '" + it.key() + "' has non-string key_data";
                 return false;
             }
-            mk.key_data = decode_base64(value["key_data"].get<std::string>());
+            const auto decoded = decode_base64(value["key_data"].get<std::string>());
+            if (!decoded) {
+                last_error_ = "Keyring entry '" + it.key() + "' has invalid Base64 key_data";
+                return false;
+            }
+            mk.key_data = *decoded;
         } else if (value.contains("key")) {
             if (!value["key"].is_string()) {
                 last_error_ = "Keyring entry '" + it.key() + "' has non-string key";
                 return false;
             }
-            mk.key_data = decode_hex(value["key"].get<std::string>());
+            const auto decoded = decode_hex(value["key"].get<std::string>());
+            if (!decoded) {
+                last_error_ = "Keyring entry '" + it.key() + "' has invalid hexadecimal key";
+                return false;
+            }
+            mk.key_data = *decoded;
         } else {
             last_error_ = "Keyring entry '" + it.key() + "' lacks key material";
             return false;
@@ -282,20 +297,17 @@ bool OfflineKeyringParser::parse_keyring_json(const nlohmann::json& j) {
     return true;
 }
 
-TDEAlgorithm OfflineKeyringParser::parse_algorithm(const std::string& algo) {
-    if (algo.find("128") != std::string::npos) {
-        if (algo.find("CBC") != std::string::npos) return TDEAlgorithm::AES_128_CBC;
-        if (algo.find("CTR") != std::string::npos) return TDEAlgorithm::AES_128_CTR;
-        return TDEAlgorithm::AES_128_ECB;
-    }
-    if (algo.find("192") != std::string::npos) {
-        if (algo.find("CBC") != std::string::npos) return TDEAlgorithm::AES_192_CBC;
-        if (algo.find("CTR") != std::string::npos) return TDEAlgorithm::AES_192_CTR;
-        return TDEAlgorithm::AES_192_ECB;
-    }
-    if (algo.find("CBC") != std::string::npos) return TDEAlgorithm::AES_256_CBC;
-    if (algo.find("CTR") != std::string::npos) return TDEAlgorithm::AES_256_CTR;
-    return TDEAlgorithm::AES_256_ECB;
+std::optional<TDEAlgorithm> OfflineKeyringParser::parse_algorithm(const std::string& algo) {
+    if (algo == "AES-128-ECB") return TDEAlgorithm::AES_128_ECB;
+    if (algo == "AES-128-CBC") return TDEAlgorithm::AES_128_CBC;
+    if (algo == "AES-128-CTR") return TDEAlgorithm::AES_128_CTR;
+    if (algo == "AES-192-ECB") return TDEAlgorithm::AES_192_ECB;
+    if (algo == "AES-192-CBC") return TDEAlgorithm::AES_192_CBC;
+    if (algo == "AES-192-CTR") return TDEAlgorithm::AES_192_CTR;
+    if (algo == "AES-256-ECB") return TDEAlgorithm::AES_256_ECB;
+    if (algo == "AES-256-CBC") return TDEAlgorithm::AES_256_CBC;
+    if (algo == "AES-256-CTR") return TDEAlgorithm::AES_256_CTR;
+    return std::nullopt;
 }
 
 void OfflineKeyringParser::derive_key_from_password(const std::string& password,
@@ -378,42 +390,88 @@ std::vector<uint8_t> OfflineKeyringParser::aes_256_cbc_decrypt(
     return plaintext;
 }
 
-std::vector<uint8_t> OfflineKeyringParser::decode_base64(const std::string& encoded) {
+std::optional<std::vector<uint8_t>> OfflineKeyringParser::decode_base64(
+    const std::string& encoded) {
     static const std::string b64_chars =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-    std::vector<uint8_t> result;
-    std::string clean;
-    for (char c : encoded) {
-        if (b64_chars.find(c) != std::string::npos || c == '=') {
-            clean += c;
+    if (encoded.empty() || encoded.size() % 4 != 0) {
+        return std::nullopt;
+    }
+
+    size_t padding = 0;
+    if (encoded.back() == '=') {
+        padding = 1;
+        if (encoded.size() >= 2 && encoded[encoded.size() - 2] == '=') {
+            padding = 2;
         }
     }
 
-    for (size_t i = 0; i + 3 < clean.size(); i += 4) {
-        size_t a = b64_chars.find(clean[i]);
-        size_t b = b64_chars.find(clean[i + 1]);
-        size_t c = (clean[i + 2] == '=') ? 0 : b64_chars.find(clean[i + 2]);
-        size_t d = (clean[i + 3] == '=') ? 0 : b64_chars.find(clean[i + 3]);
+    for (size_t i = 0; i < encoded.size() - padding; ++i) {
+        if (b64_chars.find(encoded[i]) == std::string::npos) {
+            return std::nullopt;
+        }
+    }
+    for (size_t i = encoded.size() - padding; i < encoded.size(); ++i) {
+        if (encoded[i] != '=') {
+            return std::nullopt;
+        }
+    }
 
-        if (a == std::string::npos || b == std::string::npos) break;
+    std::vector<uint8_t> result;
+    result.reserve((encoded.size() / 4) * 3 - padding);
+    for (size_t i = 0; i < encoded.size(); i += 4) {
+        const bool padded_third = encoded[i + 2] == '=';
+        const bool padded_fourth = encoded[i + 3] == '=';
+        if ((padded_third && !padded_fourth) ||
+            ((padded_third || padded_fourth) && i + 4 != encoded.size())) {
+            return std::nullopt;
+        }
 
-        uint32_t triple = static_cast<uint32_t>((a << 18) | (b << 12) | (c << 6) | d);
+        const auto a = b64_chars.find(encoded[i]);
+        const auto b = b64_chars.find(encoded[i + 1]);
+        const auto c = padded_third ? 0 : b64_chars.find(encoded[i + 2]);
+        const auto d = padded_fourth ? 0 : b64_chars.find(encoded[i + 3]);
+        if (a == std::string::npos || b == std::string::npos ||
+            c == std::string::npos || d == std::string::npos) {
+            return std::nullopt;
+        }
+
+        const uint32_t triple = static_cast<uint32_t>((a << 18) | (b << 12) |
+                                                        (c << 6) | d);
         result.push_back(static_cast<uint8_t>((triple >> 16) & 0xFF));
-        if (clean[i + 2] != '=') result.push_back(static_cast<uint8_t>((triple >> 8) & 0xFF));
-        if (clean[i + 3] != '=') result.push_back(static_cast<uint8_t>(triple & 0xFF));
+        if (!padded_third) {
+            result.push_back(static_cast<uint8_t>((triple >> 8) & 0xFF));
+        }
+        if (!padded_fourth) {
+            result.push_back(static_cast<uint8_t>(triple & 0xFF));
+        }
     }
     return result;
 }
 
-std::vector<uint8_t> OfflineKeyringParser::decode_hex(const std::string& hex) {
+std::optional<std::vector<uint8_t>> OfflineKeyringParser::decode_hex(
+    const std::string& hex) {
+    if (hex.empty() || hex.size() % 2 != 0) {
+        return std::nullopt;
+    }
+
+    auto decode_nibble = [](char c) -> std::optional<uint8_t> {
+        if (c >= '0' && c <= '9') return static_cast<uint8_t>(c - '0');
+        if (c >= 'a' && c <= 'f') return static_cast<uint8_t>(c - 'a' + 10);
+        if (c >= 'A' && c <= 'F') return static_cast<uint8_t>(c - 'A' + 10);
+        return std::nullopt;
+    };
+
     std::vector<uint8_t> result;
-    for (size_t i = 0; i + 1 < hex.size(); i += 2) {
-        unsigned int byte;
-        std::stringstream ss;
-        ss << std::hex << hex.substr(i, 2);
-        ss >> byte;
-        result.push_back(static_cast<uint8_t>(byte));
+    result.reserve(hex.size() / 2);
+    for (size_t i = 0; i < hex.size(); i += 2) {
+        const auto high = decode_nibble(hex[i]);
+        const auto low = decode_nibble(hex[i + 1]);
+        if (!high || !low) {
+            return std::nullopt;
+        }
+        result.push_back(static_cast<uint8_t>((*high << 4) | *low));
     }
     return result;
 }

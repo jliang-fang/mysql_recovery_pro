@@ -962,9 +962,10 @@ private:
 // ==================== Utility Functions ====================
 
 /**
- * @brief Detect page size from FSP header flags
+ * @brief Validate FSP metadata using the supplied bounded page buffer.
+ * @note ZIP_SSIZE describes a physical compressed-page size, not the logical page size.
  */
-uint32_t detect_page_size_from_fsp(const uint8_t* page_data);
+uint32_t detect_page_size_from_fsp(const uint8_t* page_data, size_t available_bytes);
 
 /**
  * @brief Detect page size from file size when header is corrupted
@@ -976,23 +977,24 @@ uint32_t detect_page_size_from_file_size(size_t file_size);
  * @brief Smart page size detection with corruption resilience
  * Tries multiple methods and validates results
  */
-uint32_t smart_detect_page_size(const uint8_t* page_data, size_t file_size);
+uint32_t smart_detect_page_size(const uint8_t* page_data, size_t available_bytes,
+                                size_t file_size);
 
 /**
  * @brief Detect row format from FSP space flags
  * Returns: 0=REDUNDANT, 1=COMPACT, 2=DYNAMIC, 3=COMPRESSED
  */
-uint8_t detect_row_format_from_fsp(const uint8_t* page_data);
+uint8_t detect_row_format_from_fsp(const uint8_t* page_data, size_t available_bytes);
 
 /**
  * @brief Check if FSP flags indicate Antelope (pre-5.7) format
  */
-bool is_antelope_format(const uint8_t* page_data);
+bool is_antelope_format(const uint8_t* page_data, size_t available_bytes);
 
 /**
  * @brief Read FSP space flags from the first page
  */
-uint32_t read_fsp_space_flags(const uint8_t* page_data);
+uint32_t read_fsp_space_flags(const uint8_t* page_data, size_t available_bytes);
 
 /**
  * @brief Get root page number from INODE page (page 2 or 3)

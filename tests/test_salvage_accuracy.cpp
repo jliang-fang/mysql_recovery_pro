@@ -28,6 +28,7 @@ TEST(SalvageAccuracy, CleanPageZeroFalsePositive) {
     auto r = eng.salvage_pages(pages);
     EXPECT_TRUE(r.rows.empty());
     EXPECT_TRUE(r.evidence_fragments.empty());
+    EXPECT_FALSE(r.success);
 }
 
 TEST(SalvageAccuracy, CorruptPageRecall) {
@@ -59,6 +60,8 @@ TEST(SalvageAccuracy, L3L4NotInRows) {
     SalvageEngine::Config cfg; cfg.min_confidence=0.0; cfg.enable_signature_scan=false; cfg.enable_pattern_match=true; cfg.enable_string_extract=true;
     SalvageEngine eng(cfg);
     std::vector<uint8_t> p(4096, 0);
+    p[24] = 0xFF;
+    p[25] = 0xFF;
     std::string url="https://example.com";
     memcpy(p.data()+50, url.data(), url.size());
     DamageReport dr; dr.level=dbrecovery::common::DamageLevel::L3_SEVERE;
@@ -66,5 +69,8 @@ TEST(SalvageAccuracy, L3L4NotInRows) {
     for (auto &r: rows) EXPECT_NE(r.salvage_level, SalvageLevel::STRUCTURED);
     std::vector<std::pair<const uint8_t*,size_t>> pages={{p.data(), p.size()}};
     auto res = eng.salvage_pages(pages);
+    EXPECT_TRUE(res.success);
+    EXPECT_TRUE(res.rows.empty());
+    EXPECT_FALSE(res.evidence_fragments.empty());
     for (auto &r: res.rows) EXPECT_EQ(r.salvage_level, SalvageLevel::STRUCTURED);
 }

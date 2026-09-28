@@ -8,6 +8,9 @@
 #include <cstdio>
 #include <cstring>
 #include <chrono>
+#include <cstdlib>
+#include <stdexcept>
+#include <cstdint>
 
 // Undo page header constants (from deep_undo_analyzer.cpp, not exposed in header)
 constexpr uint16_t TRX_UNDO_PAGE_START    = 28;
@@ -22,7 +25,13 @@ namespace innodb {
 
 static std::string create_temp_file(const std::vector<uint8_t>& data,
                                      const std::string& suffix = "") {
-    std::string path = "/tmp/test_deep_undo" + suffix + ".bin";
+    const char* root = std::getenv("DBREC_TEST_TMPDIR");
+    if (!root || *root == '\0') {
+        throw std::runtime_error("DBREC_TEST_TMPDIR must be set");
+    }
+    static uint64_t next_id = 0;
+    std::string path = std::string(root) + "/test_deep_undo" + suffix + "_" +
+                        std::to_string(++next_id) + ".bin";
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(data.data()), data.size());
     out.close();
@@ -1211,7 +1220,7 @@ TEST(DeepUndoAnalyzerTest, DeepUndoAnalyzerMultipleConfig) {
     DeepUndoAnalyzer analyzer;
     analyzer.set_page_size(4096);
     analyzer.set_max_chain_depth(50);
-    analyzer.set_ibdata_path("/tmp/test_ibdata");
+    analyzer.set_ibdata_path(create_temp_file({}, "_ibdata"));
     // No crash from multiple config calls
     analyzer.set_page_size(8192);
     analyzer.set_max_chain_depth(100);

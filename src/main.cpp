@@ -26,6 +26,7 @@
 #include "dbrecovery/repair/corruption_detector.hpp"
 #include "dbrecovery/repair/header_repairer.hpp"
 #include "dbrecovery/repair/physical_corruption.hpp"
+#include "dbrecovery/common/binary_stream_reader.hpp"
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/engine/raw_disk_engine.hpp"
 #include "dbrecovery/engine/signature_scraper.hpp"
@@ -312,15 +313,6 @@ int main(int argc, char** argv) {
         std::cerr << "  ./build/mysql_recovery_pro --batch=<file> [options]\n";
         std::cerr << "  ./build/mysql_recovery_pro --disk=<path> [options]\n";
         std::cerr << "\nRun with --help for full usage information.\n";
-        return 1;
-    }
-
-    // 创建输出目录
-    try {
-        fs::create_directories(output_dir);
-    } catch (const std::exception& e) {
-        std::cerr << "[ERROR] Failed to create output directory: " << output_dir
-                  << ", error: " << e.what() << "\n";
         return 1;
     }
 
@@ -692,17 +684,20 @@ int main(int argc, char** argv) {
             if (fsize == 0) return false;
             size_t guess = fsize < 16384 ? fsize : 16384;
             std::vector<uint8_t> page(guess);
-            f.read(reinterpret_cast<char*>(page.data()), guess);
-            if (f.gcount() <= 0) return false;
-            size_t real_page_size = dbrecovery::innodb::smart_detect_page_size(page.data(), fsize);
+            const auto prefix_result = dbrecovery::common::read_prefix(f, page);
+            if (prefix_result.bytes_read == 0) return false;
+            size_t real_page_size = dbrecovery::innodb::smart_detect_page_size(
+                page.data(), prefix_result.bytes_read, fsize);
             if (real_page_size < dbrecovery::innodb::UNIV_PAGE_SIZE_MIN ||
                 real_page_size > dbrecovery::innodb::UNIV_PAGE_SIZE_MAX) {
                 real_page_size = dbrecovery::innodb::UNIV_PAGE_SIZE;
             }
-            if (page.size() < real_page_size) {
+            if (page.size() < real_page_size || prefix_result.bytes_read < real_page_size) {
                 std::vector<uint8_t> full(real_page_size);
+                f.clear();
                 f.seekg(0, std::ios::beg);
-                f.read(reinterpret_cast<char*>(full.data()), real_page_size);
+                const auto full_result = dbrecovery::common::read_exact(f, full);
+                if (!full_result.complete) return false;
                 page = std::move(full);
             }
             out_page_size = static_cast<uint32_t>(real_page_size);
@@ -811,8 +806,12 @@ int main(int argc, char** argv) {
         input_file.seekg(0, std::ios::beg);
 
         std::vector<uint8_t> file_data(file_size);
-        input_file.read(reinterpret_cast<char*>(file_data.data()), file_size);
+        const auto read_result = dbrecovery::common::read_exact(input_file, file_data);
         input_file.close();
+        if (!read_result.complete) {
+            std::cerr << "[ERROR] Failed to read complete file: " << ibd_path << "\n";
+            return 1;
+        }
 
         // Determine page size
         size_t page_size_val = page_size > 0 ? page_size : 16384;
@@ -870,8 +869,12 @@ int main(int argc, char** argv) {
         input_file.seekg(0, std::ios::beg);
 
         std::vector<uint8_t> file_data(file_size);
-        input_file.read(reinterpret_cast<char*>(file_data.data()), file_size);
+        const auto read_result = dbrecovery::common::read_exact(input_file, file_data);
         input_file.close();
+        if (!read_result.complete) {
+            std::cerr << "[ERROR] Failed to read complete file: " << ibd_path << "\n";
+            return 1;
+        }
 
         std::cout << "[INFO] File size: " << file_size << " bytes\n";
 
@@ -1788,7 +1791,8 @@ int main(int argc, char** argv) {
             if (fsp_file) {
                 std::vector<uint8_t> first_page(16384);
                 fsp_file.read(reinterpret_cast<char*>(first_page.data()), 16384);
-                page_size = dbrecovery::innodb::detect_page_size_from_fsp(first_page.data());
+                page_size = dbrecovery::innodb::detect_page_size_from_fsp(
+                    first_page.data(), static_cast<size_t>(fsp_file.gcount()));
             }
         }
         if (page_size == 0) page_size = 16384;
@@ -2123,6 +2127,12 @@ int main(int argc, char** argv) {
             std::cout << "  Recovery time: " << std::fixed << std::setprecision(2)
                       << scan_seconds << "s\n";
 
+            if (tde_stats.tde_status ==
+                dbrecovery::innodb::TDEStatus::ENCRYPTED_UNSUPPORTED) {
+                std::cerr << "[ERROR] TDE recovery is unsupported without a validated decryptor\n";
+                return 1;
+            }
+
             // Export TDE recovered records
             fs::create_directories(output_dir);
             if (format == "csv" || format == "all") {
@@ -2342,12 +2352,18 @@ int main(int argc, char** argv) {
         input_file.seekg(0, std::ios::beg);
 
         std::vector<uint8_t> file_data(file_size);
-        input_file.read(reinterpret_cast<char*>(file_data.data()), file_size);
+        const auto read_result = dbrecovery::common::read_exact(input_file, file_data);
         input_file.close();
+        if (!read_result.complete) {
+            std::cerr << "[ERROR] Failed to read complete file: " << ibd_path << "\n";
+            return 1;
+        }
+        const size_t bytes_read = read_result.bytes_read;
 
         // Use smart page size detection for corrupted files
         size_t page_size_val = page_size > 0 ? page_size :
-            dbrecovery::innodb::smart_detect_page_size(file_data.data(), file_size);
+            dbrecovery::innodb::smart_detect_page_size(
+                file_data.data(), bytes_read, bytes_read);
         size_t total_pages = file_size / page_size_val;
 
         std::cout << "[INFO] File size: " << file_size << " bytes, " << total_pages << " pages\n";

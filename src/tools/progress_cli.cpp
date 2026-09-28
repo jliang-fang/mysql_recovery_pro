@@ -1,4 +1,5 @@
 #include "dbrecovery/tools/progress_cli.hpp"
+#include "dbrecovery/common/binary_stream_reader.hpp"
 #include "dbrecovery/innodb/sdi_extractor.hpp"
 #include <thread>
 #include <map>
@@ -401,8 +402,12 @@ bool ProgressRecoveryCLI::run_header_repair() {
     input.seekg(0, std::ios::beg);
 
     std::vector<uint8_t> file_data(file_size);
-    input.read(reinterpret_cast<char*>(file_data.data()), file_size);
+    const auto read_result = dbrecovery::common::read_exact(input, file_data);
     input.close();
+    if (!read_result.complete) {
+        std::cerr << "[ERROR] Failed to read complete file: " << ibd_path_ << "\n";
+        return false;
+    }
 
     // 使用用户指定的页大小或检测
     size_t detected_page_size = page_size_;
@@ -413,7 +418,8 @@ bool ProgressRecoveryCLI::run_header_repair() {
     
     if (use_detect) {
         // 从页类型字段检测实际页大小
-        detected_page_size = innodb::smart_detect_page_size(nullptr, 0);
+        detected_page_size = innodb::smart_detect_page_size(
+            file_data.data(), read_result.bytes_read, read_result.bytes_read);
         if (dbrecovery::innodb::g_verbose)         std::cout << "[DEBUG] Auto-detected page size: " << detected_page_size << "\n";
 
         // 如果检测失败，使用默认值

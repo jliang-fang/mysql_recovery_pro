@@ -61,7 +61,7 @@ TEST(PageHeaderV2Test, ParseMySQL80Page) {
     PageHeaderV2 header;
     header.parse(page.data(), page.size());
     
-    EXPECT_EQ(header.version_detected, MySQLVersion::VERSION_8_0);
+    EXPECT_EQ(header.version_detected, MySQLVersion::MYSQL_80);
     EXPECT_EQ(header.space_id, 4294967295U);
 }
 
@@ -458,19 +458,29 @@ TEST(BPlusTreeIteratorTest, Next) {
 
 TEST(AutoDetectorTest, DetectVersionFromSDI) {
     std::vector<uint8_t> sdi_page(16384, 0);
-    write_le<uint16_t>(sdi_page.data(), 16, FIL_PAGE_SDI);
-    
+    write_be<uint16_t>(sdi_page.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_SDI);
+
     auto version = AutoDetector::detect_version_from_sdi(sdi_page.data());
-    EXPECT_EQ(version, MySQLVersion::VERSION_8_0);
+    EXPECT_EQ(version, MySQLVersion::MYSQL_80);
 }
 
-TEST(AutoDetectorTest, DetectVersionFromPage0) {
+TEST(AutoDetectorTest, GenericPage0IsInconclusive) {
     std::vector<uint8_t> page0(16384, 0);
-    write_le<uint16_t>(page0.data(), 16, FIL_PAGE_INDEX);
-    write_le<uint32_t>(page0.data(), 18, 1);  // space_id > 0
-    
-    auto version = AutoDetector::detect_version_from_page0(page0.data());
-    EXPECT_EQ(version, MySQLVersion::VERSION_8_0);
+    write_be<uint16_t>(page0.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(page0.data(), FIL_PAGE_SPACE_ID, 1);
+
+    auto version = AutoDetector::detect_version_from_page0(page0.data(), page0.size());
+    EXPECT_EQ(version, MySQLVersion::UNKNOWN);
+}
+
+TEST(AutoDetectorTest, DetectVersionFromPage0RejectsTruncatedInput) {
+    std::vector<uint8_t> page0(FIL_PAGE_SPACE_ID + sizeof(uint32_t), 0);
+    write_be<uint16_t>(page0.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(page0.data(), FIL_PAGE_SPACE_ID, 1);
+
+    EXPECT_EQ(AutoDetector::detect_version_from_page0(page0.data(), page0.size() - 1),
+              MySQLVersion::UNKNOWN);
+    EXPECT_EQ(AutoDetector::detect_version_from_page0(nullptr, 0), MySQLVersion::UNKNOWN);
 }
 
 TEST(AutoDetectorTest, DetectRowFormatFromHeader) {
@@ -490,34 +500,35 @@ TEST(AutoDetectorTest, DetectRowFormatCompact) {
 }
 
 TEST(AutoDetectorTest, DetectVersionFromPageType) {
-    EXPECT_EQ(AutoDetector::detect_version_from_page_type(FIL_PAGE_SDI), 
-              MySQLVersion::VERSION_8_0);
-    EXPECT_EQ(AutoDetector::detect_version_from_page_type(0x45ba),  // FSEG_DIR
-              MySQLVersion::VERSION_5_7);
+    EXPECT_EQ(AutoDetector::detect_version_from_page_type(FIL_PAGE_SDI),
+              MySQLVersion::MYSQL_80);
+    EXPECT_EQ(AutoDetector::detect_version_from_page_type(0x45ba),
+              MySQLVersion::UNKNOWN);
 }
 
 TEST(AutoDetectorTest, DetectVersionFromSpaceID) {
-    EXPECT_EQ(AutoDetector::detect_version_from_space_id(0), 
-              MySQLVersion::VERSION_5_7);
-    EXPECT_EQ(AutoDetector::detect_version_from_space_id(1), 
-              MySQLVersion::VERSION_8_0);
+    EXPECT_EQ(AutoDetector::detect_version_from_space_id(0),
+              MySQLVersion::UNKNOWN);
+    EXPECT_EQ(AutoDetector::detect_version_from_space_id(1),
+              MySQLVersion::UNKNOWN);
 }
 
 TEST(AutoDetectorTest, DetectVersionFromPageSize) {
-    EXPECT_EQ(AutoDetector::detect_version_from_page_size(16384), 
-              MySQLVersion::VERSION_5_7);
-    EXPECT_EQ(AutoDetector::detect_version_from_page_size(4096), 
-              MySQLVersion::VERSION_8_0);
+    EXPECT_EQ(AutoDetector::detect_version_from_page_size(16384),
+              MySQLVersion::UNKNOWN);
+    EXPECT_EQ(AutoDetector::detect_version_from_page_size(4096),
+              MySQLVersion::UNKNOWN);
 }
 
 TEST(AutoDetectorTest, DetectFullFile) {
     std::vector<uint8_t> file_data(16384, 0);
-    write_le<uint16_t>(file_data.data(), 16, FIL_PAGE_INDEX);
-    write_le<uint32_t>(file_data.data(), 18, 1);  // space_id > 0
-    
+    write_be<uint16_t>(file_data.data(), FIL_PAGE_TYPE_ABS, FIL_PAGE_INDEX);
+    write_be<uint32_t>(file_data.data(), FIL_PAGE_SPACE_ID, 1);
+
     auto result = AutoDetector::detect_from_file_header(file_data.data(), file_data.size());
-    
-    EXPECT_EQ(result.version, MySQLVersion::VERSION_8_0);
+
+    EXPECT_EQ(result.version, MySQLVersion::UNKNOWN);
+    EXPECT_FALSE(result.has_sdi);
     EXPECT_EQ(result.row_format, RowFormat::COMPACT);
 }
 
@@ -565,9 +576,9 @@ TEST(PageTypesV2Test, RowFormatToString) {
 }
 
 TEST(PageTypesV2Test, VersionToString) {
-    EXPECT_EQ(version_to_string(MySQLVersion::VERSION_5_6), "5.6");
-    EXPECT_EQ(version_to_string(MySQLVersion::VERSION_8_0), "8.0");
-    EXPECT_EQ(version_to_string(MySQLVersion::VERSION_9_0), "9.0");
+    EXPECT_EQ(version_to_string(MySQLVersion::MYSQL_56), "5.6");
+    EXPECT_EQ(version_to_string(MySQLVersion::MYSQL_80), "8.0");
+    EXPECT_EQ(version_to_string(MySQLVersion::MYSQL_90), "9.0");
 }
 
 TEST(PageTypesV2Test, TrxIDToString) {

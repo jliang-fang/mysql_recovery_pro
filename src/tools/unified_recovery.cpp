@@ -374,6 +374,28 @@ UnifiedRecoveryResult run_unified_recovery(
         pipeline_allowed = false;
     }
 
+    // TDE candidate gate — keep plaintext parsing blocked before any less-specific
+    // layout classification can label the input as generic compressed evidence.
+    if (pipeline_allowed) {
+        std::ifstream in(ibd_path, std::ios::binary);
+        if (in) {
+            std::vector<uint8_t> p0(innodb::FIL_HEADER_SIZE + 45);
+            in.read(reinterpret_cast<char*>(p0.data()), p0.size());
+            const size_t n = static_cast<size_t>(in.gcount());
+            if (innodb::TDEDecryptor::probe_candidate(p0.data(), n) ==
+                innodb::TDECandidateProbe::RECOGNIZED_CANDIDATE) {
+                result.recovery_method = "blocked_tde_candidate";
+                result.trust_level = "EVIDENCE_ONLY";
+                result.schema_source = "EVIDENCE_ONLY";
+                result.result_classification = "forensic_evidence";
+                result.compression_rejection_reason =
+                    "input matches an unvalidated TDE candidate heuristic";
+                result.export_rejection_reason = "tde_candidate_UNVALIDATED";
+                pipeline_allowed = false;
+            }
+        }
+    }
+
     // Compressed tables remain evidence-only until a real fixture validates the decoder.
     if (pipeline_allowed) {
         const size_t classification_page_size = page_size ? page_size : 16384;
@@ -427,25 +449,6 @@ UnifiedRecoveryResult run_unified_recovery(
         }
     }
 
-    // TDE candidate gate — keep plaintext parse blocked for candidate inputs
-    if (pipeline_allowed) {
-        std::ifstream in(ibd_path, std::ios::binary);
-        if (in) {
-            std::vector<uint8_t> p0(innodb::FIL_HEADER_SIZE + 45);
-            in.read(reinterpret_cast<char*>(p0.data()), p0.size());
-            size_t n = static_cast<size_t>(in.gcount());
-            if (innodb::TDEDecryptor::probe_candidate(p0.data(), n) == innodb::TDECandidateProbe::RECOGNIZED_CANDIDATE) {
-                result.recovery_method = "blocked_tde_candidate";
-                result.trust_level = "EVIDENCE_ONLY";
-                result.schema_source = "EVIDENCE_ONLY";
-                result.result_classification = "forensic_evidence";
-                result.compression_rejection_reason = "input matches an unvalidated TDE candidate heuristic";
-                result.export_rejection_reason = "tde_candidate_UNVALIDATED";
-                pipeline_allowed = false;
-            }
-        }
-    }
-
     // Steps 2-6: Unified pipeline via InnoDBIndexParser + salvage fallbacks
     if (pipeline_allowed) {
         uint32_t psize = page_size;
@@ -454,7 +457,8 @@ UnifiedRecoveryResult run_unified_recovery(
             if (f) {
                 std::vector<uint8_t> fp(16384);
                 f.read(reinterpret_cast<char*>(fp.data()), 16384);
-                psize = innodb::detect_page_size_from_fsp(fp.data());
+                psize = innodb::detect_page_size_from_fsp(
+                    fp.data(), static_cast<size_t>(f.gcount()));
             }
             if (psize == 0) psize = 16384;
         }

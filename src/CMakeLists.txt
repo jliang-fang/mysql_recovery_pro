@@ -5,6 +5,7 @@ include(CheckIncludeFileCXX)
 
 # ==================== Common Sources ====================
 set(COMMON_SOURCES
+    common/binary_stream_reader.cpp
     common/version_compat.cpp
     common/environment_compat.cpp
     common/environment_compat_platform.cpp
