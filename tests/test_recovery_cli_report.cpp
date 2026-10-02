@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <cstdint>
 #include <cstdlib>
@@ -7,8 +8,10 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <set>
 #include <sys/wait.h>
 #include <vector>
+
 
 #ifndef DBRECOVERY_CLI_PATH
 #error "DBRECOVERY_CLI_PATH must name the recovery CLI executable"
@@ -52,6 +55,14 @@ void write_tde_candidate_fixture(const fs::path& path) {
     if (!file) throw std::runtime_error("unable to create TDE candidate fixture");
     file.write(reinterpret_cast<const char*>(page.data()), static_cast<std::streamsize>(page.size()));
     if (!file) throw std::runtime_error("unable to write TDE candidate fixture");
+}
+
+void write_empty_tablespace_fixture(const fs::path& path) {
+    std::vector<uint8_t> page(16384, 0);
+    std::ofstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("unable to create empty tablespace fixture");
+    file.write(reinterpret_cast<const char*>(page.data()), static_cast<std::streamsize>(page.size()));
+    if (!file) throw std::runtime_error("unable to write empty tablespace fixture");
 }
 
 class RecoveryCliReportTest : public ::testing::Test {
@@ -148,6 +159,29 @@ TEST_F(RecoveryCliReportTest, RejectsUnwritableReportBase) {
               std::string::npos);
 }
 
+TEST_F(RecoveryCliReportTest, BlocksOuterExportWhenUnifiedRecoveryDeniesRows) {
+    const fs::path input = root_ / "empty.ibd";
+    write_empty_tablespace_fixture(input);
+
+    for (const std::string& format : {"csv", "sql"}) {
+        const fs::path output = root_ / ("unified_" + format);
+        fs::create_directories(output);
+        const fs::path log = root_ / ("unified_" + format + ".log");
+        const auto arguments = "--ibd=" + shell_quote(input.string()) +
+                               " --format=" + format +
+                               " --schema='id:BIGINT:pk'" +
+                               " --output=" + shell_quote(output.string());
+
+        EXPECT_EQ(process_exit_code(run_cli(arguments, log)), 0) << read_file(log);
+        EXPECT_FALSE(fs::exists(output / "recovered.csv"));
+        EXPECT_FALSE(fs::exists(output / "recovered.sql"));
+        EXPECT_NE(read_file(log).find("Unified recovery pipeline blocked export"),
+                  std::string::npos);
+        EXPECT_NE(read_file(log).find("compressed_status_MALFORMED"),
+                  std::string::npos);
+    }
+}
+
 TEST_F(RecoveryCliReportTest, RejectsUnvalidatedTDECandidatesWithoutStructuredArtifacts) {
     const fs::path input = root_ / "encrypted.ibd";
     write_tde_candidate_fixture(input);
@@ -168,6 +202,121 @@ TEST_F(RecoveryCliReportTest, RejectsUnvalidatedTDECandidatesWithoutStructuredAr
         EXPECT_FALSE(fs::exists(output / "recovery_report.html"));
         EXPECT_NE(read_file(log).find("tde_candidate_UNVALIDATED"), std::string::npos);
     }
+}
+
+// --- Result-contract coverage -------------------------------------------
+// The disaster-validation orchestrator gates every recovery output on the
+// v2 result contract; these tests lock in the contract semantics the Python
+// side relies on (see REQUIRED_CONTRACT_KEYS in
+// scripts/disaster_validation/phase_a_offline_orchestrator.py).
+
+const std::set<std::string> kRequiredContractKeys = {
+    "format_version", "table_name", "success", "classification",
+    "structured_rows", "evidence_fragments", "schema_source",
+    "schema_trust_level", "damage_level", "recovery_method",
+    "ddl_variation_detected", "export_success", "export_rejection_reason",
+    "total_pages_scanned", "skipped_pages", "damaged_pages",
+    "checksum_mismatches", "header_damage_pages", "importable", "reason",
+    "source_ibd", "compression_status", "logical_page_size",
+    "physical_page_size", "compression_classification_basis",
+    "decoder_validated", "compression_rejection_reason",
+};
+
+TEST_F(RecoveryCliReportTest, MissingInputEmitsCompleteFailureContract) {
+    const fs::path output = root_ / "missing_input";
+    const fs::path result_path = output / "result.json";
+    const fs::path log = root_ / "missing_input.log";
+    const auto arguments = "--ibd=" + shell_quote((root_ / "does_not_exist.ibd").string()) +
+                           " --format=csv --schema='id:BIGINT:pk'" +
+                           " --output=" + shell_quote(output.string()) +
+                           " --result-json=" + shell_quote(result_path.string());
+
+    EXPECT_EQ(process_exit_code(run_cli(arguments, log)), 1) << read_file(log);
+    ASSERT_TRUE(fs::is_regular_file(result_path)) << read_file(log);
+
+    const auto doc = nlohmann::json::parse(read_file(result_path));
+    for (const auto& key : kRequiredContractKeys) {
+        EXPECT_TRUE(doc.contains(key)) << "missing contract key: " << key;
+    }
+    EXPECT_EQ(doc["format_version"], 2);
+    EXPECT_FALSE(doc["success"].get<bool>());
+    EXPECT_FALSE(doc["export_success"].get<bool>());
+    EXPECT_FALSE(doc["importable"].get<bool>());
+    EXPECT_FALSE(doc["export_rejection_reason"].get<std::string>().empty());
+    EXPECT_FALSE(doc["reason"].get<std::string>().empty());
+    EXPECT_EQ(doc["classification"], "operational_error");
+    EXPECT_EQ(doc["structured_rows"], 0);
+}
+
+TEST_F(RecoveryCliReportTest, TDECandidateEmitsNonSuccessContractWithoutArtifacts) {
+    const fs::path input = root_ / "tde_contract.ibd";
+    write_tde_candidate_fixture(input);
+    const fs::path output = root_ / "tde_contract_out";
+    const fs::path result_path = root_ / "tde_contract_result.json";
+    const fs::path log = root_ / "tde_contract.log";
+    const auto arguments = "--ibd=" + shell_quote(input.string()) +
+                           " --format=csv --schema='id:BIGINT:pk'" +
+                           " --output=" + shell_quote(output.string()) +
+                           " --result-json=" + shell_quote(result_path.string());
+
+    EXPECT_EQ(process_exit_code(run_cli(arguments, log)), 1) << read_file(log);
+    ASSERT_TRUE(fs::is_regular_file(result_path)) << read_file(log);
+
+    const auto doc = nlohmann::json::parse(read_file(result_path));
+    for (const auto& key : kRequiredContractKeys) {
+        EXPECT_TRUE(doc.contains(key)) << "missing contract key: " << key;
+    }
+    EXPECT_EQ(doc["format_version"], 2);
+    EXPECT_FALSE(doc["success"].get<bool>());
+    EXPECT_FALSE(doc["export_success"].get<bool>());
+    EXPECT_FALSE(doc["importable"].get<bool>());
+    EXPECT_EQ(doc["reason"], "tde_candidate_UNVALIDATED");
+    EXPECT_FALSE(fs::exists(output / "recovered.csv"));
+    EXPECT_FALSE(fs::exists(output / "recovered.sql"));
+}
+
+TEST_F(RecoveryCliReportTest, DefaultRecoveryEmitsContractWithNoFabricatedSuccess) {
+    const fs::path output = root_ / "default_contract";
+    const fs::path result_path = output / "result.json";
+    const fs::path log = root_ / "default_contract.log";
+    const auto arguments = "--ibd=" + shell_quote("/app/mysql_recovery_pro/tests/data/mysql8.0.ibd") +
+                           " --format=csv" +
+                           " --output=" + shell_quote(output.string()) +
+                           " --result-json=" + shell_quote(result_path.string());
+
+    EXPECT_EQ(process_exit_code(run_cli(arguments, log)), 0) << read_file(log);
+    ASSERT_TRUE(fs::is_regular_file(result_path)) << read_file(log);
+
+    const auto doc = nlohmann::json::parse(read_file(result_path));
+    for (const auto& key : kRequiredContractKeys) {
+        EXPECT_TRUE(doc.contains(key)) << "missing contract key: " << key;
+    }
+    EXPECT_EQ(doc["format_version"], 2);
+    EXPECT_FALSE(doc["importable"].get<bool>());
+    // The fixture has no authoritative schema, so export must be denied and
+    // the contract must not claim success without validation.
+    if (!doc["export_success"].get<bool>()) {
+        EXPECT_FALSE(doc["export_rejection_reason"].get<std::string>().empty());
+        EXPECT_FALSE(fs::exists(output / "recovered.csv"));
+    }
+    // success may only be true when export actually succeeded
+    if (!doc["export_success"].get<bool>()) {
+        EXPECT_FALSE(doc["success"].get<bool>());
+    }
+}
+
+TEST_F(RecoveryCliReportTest, ScanOnlyModeDoesNotEmitResultContract) {
+    // --scan writes only the text report; it must not fabricate a result
+    // contract that could be misread as a validated recovery outcome.
+    const fs::path output = root_ / "scan_only";
+    const fs::path result_path = output / "result.json";
+    const fs::path log = root_ / "scan_only.log";
+    const auto arguments = scan_arguments(output) +
+                           " --result-json=" + shell_quote(result_path.string());
+
+    EXPECT_EQ(process_exit_code(run_cli(arguments, log)), 0) << read_file(log);
+    EXPECT_TRUE(fs::is_regular_file(output / "recovery_report.txt"));
+    EXPECT_FALSE(fs::exists(result_path));
 }
 
 } // namespace

@@ -2,6 +2,7 @@
 #include "dbrecovery/recovery/salvage_engine.hpp"
 #include "dbrecovery/tools/unified_recovery.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/export/data_exporter.hpp"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -111,4 +112,62 @@ TEST(ExportRejection, TDECandidateBlocked) {
 
     std::filesystem::remove(input);
     std::filesystem::remove_all(output);
+}
+
+TEST(ExportRejection, SqlExportDoesNotDoubleDoubleQuotes) {
+    const std::string output = test_tmp_path("export_sql_quotes.sql");
+    std::remove(output.c_str());
+
+    std::vector<std::map<std::string, std::string>> records = {
+        {{"id", "1"}, {"payload", "{\"k\":1}"}},
+        {{"id", "2"}, {"payload", "say \"hi\""}},
+    };
+    const std::vector<std::string> column_order = {"id", "payload"};
+
+    ASSERT_TRUE(dbrecovery::exporter::Exporter::export_to_sql(
+        records, "t_quotes", column_order, output));
+
+    std::ifstream file(output);
+    ASSERT_TRUE(file.good());
+    const std::string text{std::istreambuf_iterator<char>(file),
+                           std::istreambuf_iterator<char>()};
+    file.close();
+    std::remove(output.c_str());
+
+    // Double quotes inside single-quoted literals must pass through verbatim;
+    // doubling them corrupts JSON payloads for downstream typed comparison.
+    EXPECT_NE(text.find("'{\"k\":1}'"), std::string::npos) << text;
+    EXPECT_NE(text.find("'say \"hi\"'"), std::string::npos) << text;
+    EXPECT_EQ(text.find("\"\""), std::string::npos) << text;
+    // Each row remains a complete, separately parseable INSERT statement.
+    EXPECT_EQ(text.find("INSERT INTO `t_quotes` (`id`, `payload`) VALUES\n"),
+              std::string::npos) << text;
+    EXPECT_NE(text.find("VALUES ('1', '{\"k\":1}');"), std::string::npos) << text;
+}
+
+TEST(ExportRejection, SqlExportEscapesSqlSpecials) {
+    const std::string output = test_tmp_path("export_sql_specials.sql");
+    std::remove(output.c_str());
+
+    std::vector<std::map<std::string, std::string>> records = {
+        {{"id", "1"}, {"note", "it's a \\ test\nline"}},
+        {{"id", "2"}, {"note", "NULL"}},
+        {{"id", "3"}, {"note", ""}},
+    };
+    const std::vector<std::string> column_order = {"id", "note"};
+
+    ASSERT_TRUE(dbrecovery::exporter::Exporter::export_to_sql(
+        records, "t_specials", column_order, output));
+
+    std::ifstream file(output);
+    ASSERT_TRUE(file.good());
+    const std::string text{std::istreambuf_iterator<char>(file),
+                           std::istreambuf_iterator<char>()};
+    file.close();
+    std::remove(output.c_str());
+
+    EXPECT_NE(text.find("'it''s a \\\\ test\\nline'"), std::string::npos) << text;
+    // Literal string "NULL" is still emitted as bare NULL by contract.
+    EXPECT_NE(text.find("'2', NULL"), std::string::npos) << text;
+    EXPECT_NE(text.find("'3', ''"), std::string::npos) << text;
 }

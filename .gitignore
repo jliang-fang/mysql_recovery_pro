@@ -42,3 +42,4 @@ memory/
 
 # vcpkg
 vcpkg/
+.aider*

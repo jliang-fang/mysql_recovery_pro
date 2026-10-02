@@ -234,6 +234,9 @@ bool parse_user_schema(const std::string& schema,
             column.mb_maxlen = 1;
             column.is_binary = true;
         }
+        if (column.col_type == 16 || column.col_type == 29) {
+            column.is_big = column.col_length * column.mb_maxlen > 255;
+        }
         if (definition_lower.find("primary key") != std::string::npos) {
             if (column.is_nullable) ++primary_key_columns;
             column.is_nullable = false;
@@ -903,6 +906,17 @@ UnifiedRecoveryResult run_unified_recovery(
         } catch (...) {}
 
         // Step 9: Export — only authoritative structured rows from fully valid pages may be exported.
+        if (verbose && !output_dir.empty()) {
+            std::ofstream dbg(output_dir + "/records_debug.tsv");
+            for (size_t i = 0; i < result.records.size(); ++i) {
+                const auto& rec = result.records[i];
+                dbg << i;
+                for (size_t j = 0; j < rec.fields.size(); ++j) {
+                    dbg << '\t' << (j < rec.field_nulls.size() && rec.field_nulls[j] ? "NULL" : rec.fields[j]);
+                }
+                dbg << '\n';
+            }
+        }
         if (result.total_recovered == 0) {
             result.export_rejection_reason = "no_structured_rows";
         } else if (result.trust_level != "AUTHORITATIVE" &&
@@ -925,7 +939,15 @@ UnifiedRecoveryResult run_unified_recovery(
                         ? result.column_names[i]
                         : "field_" + std::to_string(i);
                     const bool is_null = i < r.field_nulls.size() && r.field_nulls[i];
-                    m[key] = exporter::ExportValue{r.fields[i], is_null};
+                    exporter::ExportValue ev;
+                    if (is_null) {
+                        ev = exporter::ExportValue::null();
+                    } else if (i < index_columns.size() && index_columns[i].is_binary) {
+                        ev = exporter::ExportValue::binary(r.fields[i]);
+                    } else {
+                        ev = exporter::ExportValue{r.fields[i], false, exporter::ExportValue::Kind::TEXT};
+                    }
+                    m[key] = std::move(ev);
                 }
                 maps.push_back(std::move(m));
             }

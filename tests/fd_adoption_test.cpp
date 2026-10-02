@@ -360,6 +360,101 @@ TEST_F(FdAdoptionTest, Ext4RecoveryUsesAdoptedDescriptorAfterPathReplacement) {
     EXPECT_EQ(result.group_count, 1u);
 }
 
+TEST_F(FdAdoptionTest, Ext4RecoveryAcceptsStandard256ByteInodes) {
+    auto image = ext4_image();
+    constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+    write_le16(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                              s_inode_size),
+               256);
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    config.scan_freed_blocks = false;
+    config.scan_deleted_inodes = false;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+
+    const auto result = recovery.scan();
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.inode_size, 256u);
+}
+TEST_F(FdAdoptionTest, Ext4RecoveryRejectsExcessiveBlockSizeShift) {
+    auto image = ext4_image();
+    constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+    write_le32(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                              s_log_block_size),
+               7);
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+
+    const auto result = recovery.scan();
+    EXPECT_FALSE(result.success);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_NE(result.errors.front().find("block size shift exceeds limit"), std::string::npos);
+}
+
+TEST_F(FdAdoptionTest, Ext4RecoveryRejectsFilesystemLargerThanAdmittedSource) {
+    auto image = ext4_image();
+    constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+    write_le32(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                              s_blocks_count_lo),
+               8);
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+
+    const auto result = recovery.scan();
+    EXPECT_FALSE(result.success);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_NE(result.errors.front().find("filesystem larger than admitted source"), std::string::npos);
+}
+
+TEST_F(FdAdoptionTest, Ext4RecoveryRejectsInvalidInodeOrDescSize) {
+    auto image = ext4_image();
+    constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+    write_le16(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                              s_inode_size),
+               64);
+    write_le16(image, superblock + offsetof(dbrecovery::recovery::ext4::ext4_superblock,
+                                              s_desc_size),
+               16);
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+
+    const auto result = recovery.scan();
+    EXPECT_FALSE(result.success);
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors.front(), "Invalid ext4 geometry");
+}
+
 TEST_F(FdAdoptionTest, Ext4RecoveryHonorsAdmittedCapacityAndClosesRejectedDescriptors) {
     const auto image = ext4_image();
     write_file(source_path_, image);
@@ -379,6 +474,89 @@ TEST_F(FdAdoptionTest, Ext4RecoveryHonorsAdmittedCapacityAndClosesRejectedDescri
     EXPECT_FALSE(result.success);
     ASSERT_FALSE(result.errors.empty());
     EXPECT_EQ(result.errors.front(), "Invalid ext4 superblock or cannot read admitted source");
+}
+
+TEST_F(FdAdoptionTest, Ext4RecoveryHandlesOutOfBoundsBitmapBlockGracefully) {
+    auto image = ext4_image();
+    constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+    // Point block bitmap at block 0xFFFFFFFF (far beyond 4KB image)
+    constexpr size_t desc_offset = 2048;
+    write_le32(image, desc_offset + offsetof(dbrecovery::recovery::ext4::ext4_group_desc,
+                                              bg_block_bitmap_lo),
+               0xFFFFFFFF);
+    write_le32(image, desc_offset + offsetof(dbrecovery::recovery::ext4::ext4_group_desc,
+                                              bg_inode_bitmap_lo),
+               0xFFFFFFFF);
+    write_le32(image, desc_offset + offsetof(dbrecovery::recovery::ext4::ext4_group_desc,
+                                              bg_inode_table_lo),
+               0xFFFFFFFF);
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    config.scan_freed_blocks = true;
+    config.scan_deleted_inodes = true;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+
+    const auto result = recovery.scan();
+    EXPECT_TRUE(result.success);
+    EXPECT_EQ(result.deleted_inodes_found, 0u);
+    EXPECT_EQ(result.total_blocks_scanned, 0u);
+}
+
+TEST_F(FdAdoptionTest, Ext4RecoveryRejectsTruncatedExtentHeaderBuffer) {
+    // An inode extent header too small to be valid must be skipped without
+    // underflow or out-of-bounds reads. Fixture: 8-block group, inode table at
+    // block 4, all 8 inodes marked free so the deleted-inode scanner walks
+    // them; a fake regular-file inode carries a zeroed (invalid) extent header.
+    std::vector<uint8_t> image(8192, 0);
+    constexpr size_t superblock = dbrecovery::recovery::ext4::EXT4_SUPERBLOCK_OFFSET;
+    using sb = dbrecovery::recovery::ext4::ext4_superblock;
+    write_le32(image, superblock + offsetof(sb, s_inodes_count), 8);
+    write_le32(image, superblock + offsetof(sb, s_blocks_count_lo), 8);
+    write_le32(image, superblock + offsetof(sb, s_log_block_size), 0);
+    write_le32(image, superblock + offsetof(sb, s_blocks_per_group), 8);
+    write_le32(image, superblock + offsetof(sb, s_inodes_per_group), 8);
+    write_le16(image, superblock + offsetof(sb, s_magic),
+               dbrecovery::recovery::ext4::EXT2_SUPER_MAGIC);
+    write_le16(image, superblock + offsetof(sb, s_inode_size), 128);
+    write_le16(image, superblock + offsetof(sb, s_desc_size), 32);
+    // Group descriptor table at block 2 (offset 2048): inode table at block 4
+    write_le32(image, 2048 + offsetof(dbrecovery::recovery::ext4::ext4_group_desc,
+                                      bg_inode_table_lo),
+               4);
+    // Inode bitmap at block 3: all zeros => every inode free
+    // Fake inode #1 at block 4 (offset 4096): deleted regular file, extents flag
+    // set, but the extent header buffer is effectively empty (zeroed).
+    write_le16(image, 4096 + offsetof(dbrecovery::recovery::ext4::ext4_inode, i_mode),
+               0x8000);
+    write_le32(image, 4096 + offsetof(dbrecovery::recovery::ext4::ext4_inode, i_dtime),
+               1);
+    write_le32(image, 4096 + offsetof(dbrecovery::recovery::ext4::ext4_inode, i_size_lo),
+               16384);
+    write_le32(image, 4096 + offsetof(dbrecovery::recovery::ext4::ext4_inode, i_flags),
+               0x80000);
+    write_file(source_path_, image);
+    const int fd = open_source_read_only();
+    ASSERT_GE(fd, 0);
+
+    dbrecovery::recovery::ext4::Ext4Recovery recovery;
+    dbrecovery::recovery::ext4::Ext4Config config;
+    config.output_dir = (root_ / "recovered").string();
+    config.num_workers = 1;
+    config.scan_deleted_inodes = true;
+    recovery.set_config(config);
+    ASSERT_TRUE(recovery.adopt_fd(fd, image.size()));
+
+    const auto result = recovery.scan();
+    EXPECT_TRUE(result.success)
+        << (result.errors.empty() ? "no diagnostics" : result.errors.front());
+    EXPECT_EQ(result.deleted_inodes_found, 0u);
 }
 
 TEST_F(FdAdoptionTest, RawDiskEngineReplacesOwnedDescriptors) {

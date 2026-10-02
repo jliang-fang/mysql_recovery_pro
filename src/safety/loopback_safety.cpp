@@ -174,7 +174,11 @@ MountTopologyReport LoopbackSafety::inspect_mount_topology_for_paths(
         const std::string parent_device = read_sysfs_file((parent / "dev").string());
         BlockDeviceId parsed_parent;
         if (!parent_device.empty() && parse_device_id(parent_device, &parsed_parent)) {
-            add_device(parsed_parent);
+            std::error_code parent_error;
+            if (fs::exists(dev_block_root / device_key(parsed_parent), parent_error) &&
+                !parent_error) {
+                add_device(parsed_parent);
+            }
         } else if (!parent_device.empty()) {
             report.error = "invalid sysfs parent identity for " + device_key(current);
             return report;

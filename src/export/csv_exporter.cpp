@@ -171,12 +171,20 @@ bool Exporter::export_to_csv(const std::vector<std::map<std::string, ExportValue
         output << csv_escape(headers[i]);
     }
     output << '\n';
+    size_t record_index = 0;
     for (const auto& record : records) {
         for (const auto& [header, value] : record) {
-            (void)header;
-            if (!export_value_valid(value)) return false;
+            if (!export_value_valid(value)) {
+                if (innodb::g_verbose) {
+                    std::cerr << "[DEBUG EXPORT] invalid CSV value at record="
+                              << record_index << " column=" << header
+                              << " bytes=" << hex_encode(value.value) << "\n";
+                }
+                return false;
+            }
         }
         output << csv_row(headers, record) << '\n';
+        ++record_index;
     }
 
     std::ofstream file(output_path);

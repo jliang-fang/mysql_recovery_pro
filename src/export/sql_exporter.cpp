@@ -59,7 +59,7 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
                     case '\r': escaped_value += "\\r"; break;
                     case '\\': escaped_value += "\\\\"; break;
                     case '\'': escaped_value += "''"; break;
-                    case '"': escaped_value += "\"\""; break;
+                    case '"': escaped_value += c; break;
                     case '\x1a': escaped_value += "\\Z"; break;
                     default: escaped_value += c;
                 }
@@ -84,16 +84,19 @@ std::string SQLOutputter::get_result_batch(size_t batch_size) const {
 
     if (sql_statements_.empty()) return "";
 
-    // Determine column names from first statement
-    if (!column_order_.empty()) {
-        oss << "INSERT INTO `" << table_name_ << "` (";
-        bool first = true;
-        for (const auto& col : column_order_) {
-            if (!first) oss << ", ";
-            oss << "`" << col << "`";
-            first = false;
+    if (batch_size > 1) {
+        // Multi-row batch header: column names appear once before the first
+        // VALUES group.
+        if (!column_order_.empty()) {
+            oss << "INSERT INTO `" << table_name_ << "` (";
+            bool first = true;
+            for (const auto& col : column_order_) {
+                if (!first) oss << ", ";
+                oss << "`" << col << "`";
+                first = false;
+            }
+            oss << ") VALUES\n";
         }
-        oss << ") VALUES\n";
     }
 
     size_t batch_count = 0;

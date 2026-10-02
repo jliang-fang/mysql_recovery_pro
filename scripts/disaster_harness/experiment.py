@@ -72,6 +72,7 @@ class CommandResult:
 @dataclass(frozen=True)
 class NativeSpec:
     image: str
+    mysql_version: str = ""
     datadir_mount: str = "/var/lib/mysql"
     socket_path: str = "/var/run/mysqld/mysqld.sock"
     root_password: str = "root"
@@ -396,7 +397,7 @@ def _mysql_command(spec: NativeSpec, level: int, datadir: Path, run_dir: Path, n
 
 
 def _typed_export_command(spec: NativeSpec, name: str) -> List[str]:
-    return [
+    command = [
         spec.container_engine, "exec", "-i", name,
         spec.python_bin, "-m", "disaster_harness.native_export",
         "--socket", spec.socket_path,
@@ -406,6 +407,9 @@ def _typed_export_command(spec: NativeSpec, name: str) -> List[str]:
         "--user", "root",
         "--password-stdin",
     ]
+    if spec.mysql_version:
+        command.extend(["--mysql-version", spec.mysql_version])
+    return command
 
 
 def _mysql_ping_command(spec: NativeSpec, name: str) -> List[str]:

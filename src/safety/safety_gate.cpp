@@ -291,8 +291,20 @@ std::optional<AuthorizedRawDevice> SafetyGate::authorize_read_only_raw_device(
     }
 
     if (!permits_read_only_raw_access(report)) {
+        std::ostringstream failures;
+        if (!report.device_identity_verified) failures << " device_identity_verified=false";
+        if (!report.read_only_confirmed) failures << " read_only_confirmed=false";
+        if (!report.exclusive_access) failures << " exclusive_access=false";
+        if (!report.not_mounted_or_ok) {
+            failures << " not_mounted_or_ok=false";
+            if (!topology.error.empty()) failures << "(" << topology.error << ")";
+        }
+        if (report.requires_loopback_verification && !report.loopback_verified) {
+            failures << " loopback_verified=false";
+        }
         ::close(fd);
-        return reject("mandatory raw-device safety facts were not proven");
+        return reject("mandatory raw-device safety facts were not proven; failed:" +
+                      failures.str());
     }
 
     if (reason) reason->clear();

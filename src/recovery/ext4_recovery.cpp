@@ -8,6 +8,7 @@
 #include "dbrecovery/innodb/index_page_parser.hpp"
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/common/version_compat.hpp"
+#include "dbrecovery/catalog/schema_type_conversion.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -17,6 +18,7 @@
 #include <sstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <vector>
 #include <fstream>
@@ -46,6 +48,55 @@ constexpr size_t FIL_PAGE_TYPE_ABS = 24;
 
 // ext4 extent magic
 constexpr uint16_t EXT4_EXTENT_MAGIC = 0xF30A;
+constexpr uint16_t EXT4_MAX_EXTENT_DEPTH = 5;
+
+bool checked_add(uint64_t left, uint64_t right, uint64_t& result) {
+    if (left > std::numeric_limits<uint64_t>::max() - right) {
+        return false;
+    }
+    result = left + right;
+    return true;
+}
+
+bool checked_multiply(uint64_t left, uint64_t right, uint64_t& result) {
+    if (left != 0 && right > std::numeric_limits<uint64_t>::max() / left) {
+        return false;
+    }
+    result = left * right;
+    return true;
+}
+
+bool contains_range(uint64_t source_size, uint64_t offset, uint64_t length) {
+    return offset <= source_size && length <= source_size - offset;
+}
+
+bool block_range(uint64_t block, uint32_t block_size, uint64_t source_size,
+                 uint64_t& offset, uint64_t length = 0) {
+    return checked_multiply(block, block_size, offset) &&
+           contains_range(source_size, offset, length);
+}
+
+bool block_to_disk_offset_checked(uint64_t block, uint32_t block_size,
+                                  uint64_t source_size, uint64_t& offset) {
+    return checked_multiply(block, block_size, offset) &&
+           offset <= source_size;
+}
+
+bool valid_extent_header(const ext4_extent_header& header, size_t buffer_size,
+                         uint16_t expected_depth) {
+    if (buffer_size < sizeof(ext4_extent_header)) {
+        return false;
+    }
+    if (le16toh(header.eh_magic) != EXT4_EXTENT_MAGIC ||
+        le16toh(header.eh_depth) != expected_depth) {
+        return false;
+    }
+
+    const uint16_t entries = le16toh(header.eh_entries);
+    const uint16_t maximum = le16toh(header.eh_max);
+    const size_t capacity = (buffer_size - sizeof(ext4_extent_header)) / sizeof(ext4_extent);
+    return entries > 0 && entries <= maximum && entries <= capacity;
+}
 
 bool read_superblock_from_fd(int fd, uint64_t source_size, ext4_superblock& sb) {
 #ifdef __linux__
@@ -223,14 +274,18 @@ bool Ext4Recovery::read_superblock(const std::string& device_path, ext4_superblo
 bool Ext4Recovery::read_group_descriptor(int fd, uint32_t group_index, ext4_group_desc& desc) const {
 #ifdef __linux__
     if (fd < 0 || block_size_ == 0 || desc_size_ < 32 ||
-        desc_size_ > sizeof(ext4_group_desc)) {
+        desc_size_ > sizeof(ext4_group_desc) || group_index >= group_count_) {
         return false;
     }
 
     const uint32_t gdb_block = (block_size_ == 1024) ? 2 : 1;
-    const uint64_t desc_offset = static_cast<uint64_t>(gdb_block) * block_size_ +
-                                 static_cast<uint64_t>(group_index) * desc_size_;
-    if (desc_offset > source_size_ || desc_size_ > source_size_ - desc_offset) {
+    uint64_t gdb_offset = 0;
+    uint64_t index_offset = 0;
+    uint64_t desc_offset = 0;
+    if (!checked_multiply(gdb_block, block_size_, gdb_offset) ||
+        !checked_multiply(group_index, desc_size_, index_offset) ||
+        !checked_add(gdb_offset, index_offset, desc_offset) ||
+        !contains_range(source_size_, desc_offset, desc_size_)) {
         return false;
     }
 
@@ -260,8 +315,9 @@ std::vector<uint8_t> Ext4Recovery::read_block_bitmap(int fd, uint32_t group_inde
     }
 
     const size_t bitmap_size = (blocks_per_group_ + 7) / 8;
-    const uint64_t disk_offset = bitmap_block * block_size_;
-    if (disk_offset > source_size_ || bitmap_size > source_size_ - disk_offset) {
+    uint64_t disk_offset = 0;
+    if (!checked_multiply(bitmap_block, block_size_, disk_offset) ||
+        !contains_range(source_size_, disk_offset, bitmap_size)) {
         return {};
     }
 
@@ -294,8 +350,9 @@ std::vector<uint8_t> Ext4Recovery::read_inode_bitmap(int fd, uint32_t group_inde
     }
 
     const size_t bitmap_size = (inodes_per_group_ + 7) / 8;
-    const uint64_t disk_offset = bitmap_block * block_size_;
-    if (disk_offset > source_size_ || bitmap_size > source_size_ - disk_offset) {
+    uint64_t disk_offset = 0;
+    if (!checked_multiply(bitmap_block, block_size_, disk_offset) ||
+        !contains_range(source_size_, disk_offset, bitmap_size)) {
         return {};
     }
 
@@ -328,15 +385,20 @@ uint64_t Ext4Recovery::inode_to_disk_offset(int fd, uint32_t group_index, uint32
 
     const uint64_t inode_table_block = static_cast<uint64_t>(le32toh(desc.bg_inode_table_lo)) |
                                        (static_cast<uint64_t>(le32toh(desc.bg_inode_table_hi)) << 32);
-    const uint64_t group_start_block = static_cast<uint64_t>(group_index) * blocks_per_group_;
+    uint64_t group_start_block = 0;
+    if (!checked_multiply(group_index, blocks_per_group_, group_start_block)) {
+        return 0;
+    }
     const uint64_t group_end_block = group_start_block + blocks_per_group_;
     if (inode_table_block < group_start_block || inode_table_block >= group_end_block) {
         return 0;
     }
 
-    const uint64_t table_offset = inode_table_block * block_size_;
-    const uint64_t inode_offset = static_cast<uint64_t>(local_inode - 1) * inode_size_;
-    if (table_offset > source_size_ || inode_offset > source_size_ - table_offset) {
+    uint64_t table_offset = 0;
+    uint64_t inode_offset = 0;
+    if (!checked_multiply(inode_table_block, block_size_, table_offset) ||
+        !checked_multiply(local_inode - 1, inode_size_, inode_offset) ||
+        !contains_range(source_size_, table_offset, inode_offset)) {
         return 0;
     }
     return table_offset + inode_offset;
@@ -412,9 +474,13 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(int fd, const ext4_inode& i
         uint32_t blk_sz = block_size;
 
         auto read_block = [&](uint64_t block_num) -> std::vector<uint8_t> {
+            uint64_t disk_offset = 0;
+            if (!block_to_disk_offset_checked(block_num, blk_sz, source_size_, disk_offset) ||
+                !contains_range(source_size_, disk_offset, blk_sz)) {
+                return {};
+            }
             std::vector<uint8_t> buf(blk_sz);
-            ssize_t n = pread(fd, buf.data(), blk_sz,
-                              static_cast<off_t>(block_num) * blk_sz);
+            ssize_t n = pread(fd, buf.data(), blk_sz, static_cast<off_t>(disk_offset));
             if (n != static_cast<ssize_t>(blk_sz)) buf.clear();
             return buf;
         };
@@ -505,7 +571,8 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(int fd, const ext4_inode& i
     }
 
     // Read extent header from i_block
-    const ext4_extent_header* header = reinterpret_cast<const ext4_extent_header*>(inode.i_block);
+    const ext4_extent_header* header = reinterpret_cast<const ext4_extent_header*>(
+        reinterpret_cast<const uint8_t*>(inode.i_block));
 
     if (le16toh(header->eh_magic) != EXT4_EXTENT_MAGIC) {
         return extents;
@@ -517,7 +584,7 @@ std::vector<ext4_extent> Ext4Recovery::parse_extents(int fd, const ext4_inode& i
     if (depth == 0 && entries > 0 && entries <= 4) {
         // Direct extents in inode
         const ext4_extent* ext_array = reinterpret_cast<const ext4_extent*>(
-            inode.i_block + sizeof(ext4_extent_header));
+            reinterpret_cast<const uint8_t*>(inode.i_block) + sizeof(ext4_extent_header));
 
         for (uint16_t i = 0; i < entries; i++) {
             ext4_extent ext;
@@ -558,7 +625,8 @@ std::vector<ext4_extent> Ext4Recovery::traverse_extent_tree_from_inode(
     uint32_t flags = le32toh(inode.i_flags);
     if (!(flags & 0x80000)) return extents;  // EXT4_EXTENTS_FL
 
-    const ext4_extent_header* header = reinterpret_cast<const ext4_extent_header*>(inode.i_block);
+    const ext4_extent_header* header = reinterpret_cast<const ext4_extent_header*>(
+        reinterpret_cast<const uint8_t*>(inode.i_block));
     if (le16toh(header->eh_magic) != EXT4_EXTENT_MAGIC) return extents;
 
     uint16_t entries = le16toh(header->eh_entries);
@@ -567,7 +635,7 @@ std::vector<ext4_extent> Ext4Recovery::traverse_extent_tree_from_inode(
     if (depth == 0) {
         // Direct extents — same as parse_extents but with fd context
         const ext4_extent* ext_array = reinterpret_cast<const ext4_extent*>(
-            inode.i_block + sizeof(ext4_extent_header));
+            reinterpret_cast<const uint8_t*>(inode.i_block) + sizeof(ext4_extent_header));
         for (uint16_t i = 0; i < entries && i <= 4; i++) {
             ext4_extent ext;
             ext.ee_block = le32toh(ext_array[i].ee_block);
@@ -611,7 +679,11 @@ std::vector<ext4_extent> Ext4Recovery::traverse_extent_tree(
     std::vector<uint8_t> block_buffer(block_size);
 
     // Read the extent block
-    uint64_t block_offset = root_block * block_size;
+    uint64_t block_offset = 0;
+    if (!block_to_disk_offset_checked(root_block, block_size, source_size_, block_offset) ||
+        !contains_range(source_size_, block_offset, block_size)) {
+        return extents;
+    }
     if (pread(fd, block_buffer.data(), block_size, block_offset) != block_size) {
         return extents;
     }
@@ -626,7 +698,8 @@ std::vector<ext4_extent> Ext4Recovery::traverse_extent_tree(
     uint16_t entries = le16toh(header->eh_entries);
     uint16_t depth = le16toh(header->eh_depth);
 
-    if (entries == 0 || entries > 340) {  // Max entries in a 4K block
+    const size_t capacity = (block_size - sizeof(ext4_extent_header)) / sizeof(ext4_extent);
+    if (entries == 0 || entries > capacity) {
         return extents;
     }
 
@@ -702,8 +775,13 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     if (dbrecovery::innodb::g_verbose) 
     std::cout << "[DEBUG] Superblock read successfully\n" << std::flush;
 
-    // Parse superblock information
-    result.block_size = 1024 << le32toh(superblock_.s_log_block_size);
+    // Parse superblock information with fail-closed geometry validation
+    const uint32_t log_block_size = le32toh(superblock_.s_log_block_size);
+    if (log_block_size > 6) {
+        result.errors.push_back("Invalid ext4 geometry: block size shift exceeds limit");
+        return result;
+    }
+    result.block_size = 1024 << log_block_size;
     result.inode_size = le16toh(superblock_.s_inode_size);
     result.blocks_per_group = le32toh(superblock_.s_blocks_per_group);
     result.inodes_per_group = le32toh(superblock_.s_inodes_per_group);
@@ -711,14 +789,16 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     // Calculate number of block groups
     uint64_t total_blocks = static_cast<uint64_t>(le32toh(superblock_.s_blocks_count_lo)) |
                            (static_cast<uint64_t>(le32toh(superblock_.s_blocks_count_hi)) << 32);
-    if (result.block_size == 0 || result.inode_size == 0 ||
-        result.inode_size > sizeof(ext4_inode) || result.blocks_per_group == 0 ||
-        result.inodes_per_group == 0 || total_blocks == 0) {
+    if (result.block_size == 0 ||
+        result.inode_size < 128 || result.inode_size > sizeof(ext4_inode) ||
+        result.blocks_per_group == 0 || result.inodes_per_group == 0 ||
+        total_blocks == 0) {
         result.errors.push_back("Invalid ext4 geometry");
         return result;
     }
-    result.group_count = static_cast<uint32_t>((total_blocks + result.blocks_per_group - 1) /
-                                                result.blocks_per_group);
+    result.group_count = static_cast<uint32_t>(
+        (total_blocks / result.blocks_per_group) +
+        ((total_blocks % result.blocks_per_group != 0) ? 1 : 0));
 
     // Cache all superblock values to member variables for thread-safe access
     group_count_ = result.group_count;
@@ -728,6 +808,31 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
     inode_size_ = result.inode_size;
     desc_size_ = le16toh(superblock_.s_desc_size);
     if (desc_size_ == 0) desc_size_ = 32;  // Legacy default
+
+    // Fail-closed: reject geometry exceeding admitted source capacity
+    uint64_t total_bytes = 0;
+    if (!checked_multiply(total_blocks, result.block_size, total_bytes) ||
+        total_bytes > source_size_) {
+        result.errors.push_back("Invalid ext4 geometry: filesystem larger than admitted source");
+        return result;
+    }
+
+    // Fail-closed: reject descriptor sizes outside valid range
+    if (desc_size_ < 32 || desc_size_ > sizeof(ext4_group_desc)) {
+        result.errors.push_back("Invalid ext4 geometry: descriptor size out of range");
+        return result;
+    }
+
+    // Fail-closed: verify group descriptor table fits within admitted source
+    const uint32_t gdb_block = (block_size_ == 1024) ? 2 : 1;
+    uint64_t gdb_offset = 0;
+    uint64_t gdb_span = 0;
+    if (!checked_multiply(gdb_block, block_size_, gdb_offset) ||
+        !checked_multiply(group_count_, desc_size_, gdb_span) ||
+        !contains_range(source_size_, gdb_offset, gdb_span)) {
+        result.errors.push_back("Invalid ext4 geometry: group descriptor table exceeds source");
+        return result;
+    }
 
     if (config_.verbose) {
         std::cout << "[INFO] ext4 filesystem detected:\n";
@@ -944,11 +1049,15 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
             continue;  // Skip allocated blocks
         }
 
-        uint64_t disk_offset = static_cast<uint64_t>(group_index) * blocks_per_group * block_size
-                              + static_cast<uint64_t>(blk) * block_size;
-
-        // Safety check: don't read beyond device
-        if (disk_offset + config_.page_size > max_offset) break;
+        uint64_t group_offset = 0;
+        uint64_t blk_offset = 0;
+        uint64_t disk_offset = 0;
+        if (!checked_multiply(group_index, blocks_per_group, group_offset) ||
+            !checked_multiply(blk, block_size, blk_offset) ||
+            !checked_add(group_offset, blk_offset, disk_offset) ||
+            !contains_range(max_offset, disk_offset, config_.page_size)) {
+            break;
+        }
 
         // Read full page (16KB)
         std::vector<uint8_t> page_data(config_.page_size);
@@ -958,7 +1067,7 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
             blocks_scanned_.fetch_add(1);
 
             // Check for InnoDB page type at offset 24
-            if (page_data.size() >= 38) {
+            if (page_data.size() >= 74) {
                 uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
                 // Accept ALL valid InnoDB page types
@@ -1057,11 +1166,15 @@ void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std
             continue;  // Skip freed blocks
         }
 
-        uint64_t disk_offset = static_cast<uint64_t>(group_index) * blocks_per_group * block_size
-                              + static_cast<uint64_t>(blk) * block_size;
-
-        // Safety check: don't read beyond device
-        if (disk_offset + config_.page_size > max_offset) break;
+        uint64_t group_offset = 0;
+        uint64_t blk_offset = 0;
+        uint64_t disk_offset = 0;
+        if (!checked_multiply(group_index, blocks_per_group, group_offset) ||
+            !checked_multiply(blk, block_size, blk_offset) ||
+            !checked_add(group_offset, blk_offset, disk_offset) ||
+            !contains_range(max_offset, disk_offset, config_.page_size)) {
+            break;
+        }
 
         // Read full page (16KB)
         std::vector<uint8_t> page_data(config_.page_size);
@@ -1071,7 +1184,7 @@ void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std
             blocks_scanned_.fetch_add(1);
 
             // Check for InnoDB page type at offset 24
-            if (page_data.size() >= 38) {
+            if (page_data.size() >= 74) {
                 uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
                 // Only accept FIL_PAGE_INDEX (0x45BF) for allocated block scanning
@@ -1211,9 +1324,9 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
 
                 for (uint32_t blk = 0; blk < ext_blocks && blk < 100000; blk += blocks_per_page) {
                     uint64_t block_num = ext_start + blk;
-                    uint64_t disk_offset = block_num * block_size;
-
-                    if (disk_offset + config_.page_size > max_offset) {
+                    uint64_t disk_offset = 0;
+                    if (!block_to_disk_offset_checked(block_num, block_size, max_offset, disk_offset) ||
+                        !contains_range(max_offset, disk_offset, config_.page_size)) {
                         break;  // Safety check
                     }
 
@@ -1222,7 +1335,7 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
 
                     if (page_read == static_cast<ssize_t>(config_.page_size)) {
                         // Check for valid InnoDB page types
-                        if (page_data.size() >= 38) {
+                        if (page_data.size() >= 74) {
                             uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
                             bool is_valid_type = false;
@@ -1296,74 +1409,47 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         return result;
     }
 
-    // Check if schema-aware recovery is enabled
     bool use_schema = external_schema_.has_value() && !external_schema_->columns.empty();
+    std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
+    std::vector<std::string> schema_diagnostics;
+
+    if (use_schema && config_.target_index_ids.empty()) {
+        schema_diagnostics.push_back(
+            "External schema ignored: schema-aware recovery requires explicit target index IDs");
+        use_schema = false;
+    }
+
+    if (use_schema) {
+        std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_columns;
+        sorted_columns.reserve(external_schema_->columns.size());
+        for (const auto& [ordinal, column] : external_schema_->columns) {
+            const uint32_t physical_pos = column.physical_pos > 0 ? column.physical_pos : ordinal;
+            sorted_columns.push_back({physical_pos, column});
+        }
+        std::sort(sorted_columns.begin(), sorted_columns.end(),
+                  [](const auto& left, const auto& right) { return left.first < right.first; });
+
+        std::vector<catalog::IndexColumnBuildRequest> requests;
+        requests.reserve(sorted_columns.size());
+        for (const auto& [physical_pos, column] : sorted_columns) {
+            requests.push_back({column, column.ordinal, physical_pos});
+        }
+
+        auto converted = catalog::build_index_columns(
+            requests, catalog::TypeIdDomain::kInnodbParser);
+        if (converted.ok()) {
+            index_columns = std::move(converted.columns);
+        } else {
+            schema_diagnostics = std::move(converted.diagnostics);
+            use_schema = false;
+        }
+    }
+
+    result.errors.insert(result.errors.end(), schema_diagnostics.begin(), schema_diagnostics.end());
 
     if (use_schema && config_.verbose) {
         std::cout << "[INFO] Using schema-aware recovery with "
-                  << external_schema_->columns.size() << " columns\n";
-    }
-
-    // Prepare IndexColumnDef list if schema is available
-    std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
-    if (use_schema) {
-        // Convert TableSchema to IndexColumnDef list
-        std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_cols;
-        for (const auto& [ordinal, col] : external_schema_->columns) {
-            uint32_t phys_pos = col.physical_pos > 0 ? col.physical_pos : ordinal;
-            sorted_cols.push_back({phys_pos, col});
-        }
-        std::sort(sorted_cols.begin(), sorted_cols.end(),
-            [](const auto& a, const auto& b) { return a.first < b.first; });
-
-        for (const auto& [phys_pos, col] : sorted_cols) {
-            dbrecovery::innodb::IndexColumnDef col_def;
-            col_def.name = col.name;
-            // Convert MySQL server type to InnoDB storage type
-            // Reference: xfs_disk_carver.cpp mysql_type_to_innodb()
-            switch (col.mysql_type_id) {
-                case 0:   // MYSQL_TYPE_DECIMAL (old format)
-                case 246: // MYSQL_TYPE_NEWDECIMAL
-                    col_def.col_type = 21;  // InnoDB NEWDECIMAL type
-                    col_def.precision = col.numeric_precision > 0 ? col.numeric_precision : 10;
-                    col_def.scale = col.numeric_scale > 0 ? col.numeric_scale : 0;
-                    break;
-                case 1: col_def.col_type = 2; col_def.col_length = 1; break;  // TINYINT
-                case 2: col_def.col_type = 3; col_def.col_length = 2; break;  // SMALLINT
-                case 3: col_def.col_type = 4; col_def.col_length = 4; break;  // INT
-                case 4: col_def.col_type = 5; col_def.col_length = 4; break;  // FLOAT
-                case 5: col_def.col_type = 6; col_def.col_length = 8; break;  // DOUBLE
-                case 8: col_def.col_type = 9; col_def.col_length = 8; break;  // BIGINT
-                case 9: col_def.col_type = 10; col_def.col_length = 3; break;  // MEDIUMINT
-                case 10: col_def.col_type = 15; col_def.col_length = 3; break; // DATE
-                case 11: col_def.col_type = 20; col_def.col_length = 3; break; // TIME
-                case 12: col_def.col_type = 19; col_def.col_length = 5; break; // DATETIME
-                case 15: // VARCHAR
-                case 253: col_def.col_type = 16; break;  // VARCHAR (InnoDB type 16 is variable)
-                case 245: col_def.col_type = 31; break; // JSON (InnoDB type 31)
-                case 252: col_def.col_type = 27; break; // TEXT/BLOB (InnoDB type 27)
-                case 251: col_def.col_type = 27; break; // BLOB (InnoDB type 27)
-                case 247: col_def.col_type = 247; col_def.col_length = 1; break; // ENUM
-                case 248: col_def.col_type = 248; col_def.col_length = 1; break; // SET
-                case 255: col_def.col_type = 30; break; // GEOMETRY (MySQL type 255 -> InnoDB type 30)
-                default: col_def.col_type = 16; break; // Default to VARCHAR type
-            }
-            col_def.is_nullable = col.is_nullable;
-            col_def.is_unsigned = !col.is_signed;
-            col_def.ordinal_position = col.ordinal;
-            col_def.physical_pos = phys_pos;
-            index_columns.push_back(col_def);
-        }
-
-        // DEBUG: Show index_columns size
-        if (config_.verbose) {
-            if (dbrecovery::innodb::g_verbose)             std::cout << "[DEBUG] index_columns size: " << index_columns.size() << "\n";
-            for (size_t i = 0; i < index_columns.size(); i++) {
-                std::cout << "  [" << i << "] " << index_columns[i].name
-                          << " type=" << (int)index_columns[i].col_type
-                          << " phys_pos=" << index_columns[i].physical_pos << "\n";
-            }
-        }
+                  << index_columns.size() << " columns\n";
     }
 
     // Export recovered pages to CSV files with record parsing
@@ -1391,8 +1477,12 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             continue;
         }
 
+        const bool use_schema_for_index = use_schema &&
+            std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) !=
+                config_.target_index_ids.end();
+
         // Write header
-        if (use_schema) {
+        if (use_schema_for_index) {
             // Write column names from schema
             bool first = true;
             for (const auto& col : index_columns) {
@@ -1427,7 +1517,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     parser.set_mysql_version(80000);
                 }
 
-                if (use_schema) {
+                if (use_schema_for_index) {
                     // Schema-aware parsing
                     parser.set_columns(index_columns);
                     auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
@@ -1522,7 +1612,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     }
                 }
             } catch (const std::exception& e) {
-                if (!use_schema) {
+                if (!use_schema_for_index) {
                     // Fallback: export raw page data if parsing fails
                     out << (page.disk_offset / config_.page_size) << ","
                         << index_id << ","

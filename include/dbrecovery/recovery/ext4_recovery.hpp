@@ -13,6 +13,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -175,38 +176,55 @@ struct ext4_group_desc {
 
 // ==================== ext4 Inode Structure ====================
 
+// On-disk ext4 inode (little-endian). Byte-for-byte identical to the kernel
+// layout: i_block is 60 bytes (15 32-bit entries holding either direct block
+// pointers or an inline extent tree), NOT 60 entries. The struct is padded to
+// the 256-byte maximum inode size so that reads bounded by inode_size_ can
+// never overrun the interpreted fields.
 struct ext4_inode {
-    uint16_t i_mode;                // File mode
-    uint16_t i_uid;                 // Owner user ID (low 16 bits)
-    uint32_t i_size_lo;             // File size (low 32 bits)
-    uint32_t i_atime;               // Access time
-    uint32_t i_ctime;               // Creation time
-    uint32_t i_mtime;               // Modification time
-    uint32_t i_dtime;               // Deletion time
-    uint16_t i_gid;                 // Owner group ID (low 16 bits)
-    uint16_t i_links_count;         // Links count
-    uint32_t i_blocks_lo;           // Blocks count (low 32 bits)
-    uint32_t i_flags;               // Inode flags
-    uint32_t i_reserved1;
-    uint16_t i_block[60];           // Block pointers or extent tree
-    uint32_t i_generation;          // File version (for NFS)
-    uint32_t i_file_acl_lo;         // Extended attribute block (low 32 bits)
-    uint32_t i_size_hi;             // File size (high 32 bits)
-    uint32_t i_obso_faddr;          // Obsolete fragment address
-    uint16_t i_uid_high;            // Owner user ID (high 16 bits)
-    uint16_t i_gid_high;            // Owner group ID (high 16 bits)
-    uint16_t i_checksum_lo;         // Inode checksum (low 16 bits)
-    uint16_t i_reserved2;
-    uint16_t i_extra_isize;         // Extra inode size
-    uint16_t i_checksum_hi;         // Inode checksum (high 16 bits)
-    uint32_t i_ctime_extra;         // Creation time (extra bits)
-    uint32_t i_mtime_extra;         // Modification time (extra bits)
-    uint32_t i_atime_extra;         // Access time (extra bits)
-    uint32_t i_crtime;              // Creation time (low 32 bits)
-    uint32_t i_crtime_extra;        // Creation time (extra bits)
-    uint32_t i_version_hi;          // File version (high 32 bits)
-    uint32_t i_projid;              // Project ID
+    uint16_t i_mode;                // 0   File mode
+    uint16_t i_uid;                 // 2   Owner user ID (low 16 bits)
+    uint32_t i_size_lo;             // 4   File size (low 32 bits)
+    uint32_t i_atime;               // 8   Access time
+    uint32_t i_ctime;               // 12  Creation time
+    uint32_t i_mtime;               // 16  Modification time
+    uint32_t i_dtime;               // 20  Deletion time
+    uint16_t i_gid;                 // 24  Owner group ID (low 16 bits)
+    uint16_t i_links_count;         // 26  Links count
+    uint32_t i_blocks_lo;           // 28  Blocks count (low 32 bits)
+    uint32_t i_flags;               // 32  Inode flags
+    uint32_t i_osd1;                // 36  OS-dependent value
+    uint32_t i_block[15];           // 40  Block pointers or inline extent tree (60 bytes)
+    uint32_t i_generation;          // 100 File version (for NFS)
+    uint32_t i_file_acl_lo;         // 104 Extended attribute block (low 32 bits)
+    uint32_t i_size_hi;             // 108 File size (high 32 bits)
+    uint32_t i_obso_faddr;          // 112 Obsolete fragment address
+    uint16_t i_blocks_high;         // 116 Blocks count (high 16 bits)
+    uint16_t i_file_acl_high;       // 118 Extended attribute block (high 16 bits)
+    uint16_t i_uid_high;            // 120 Owner user ID (high 16 bits)
+    uint16_t i_gid_high;            // 122 Owner group ID (high 16 bits)
+    uint16_t i_checksum_lo;         // 124 Inode checksum (low 16 bits)
+    uint16_t i_reserved;            // 126 Reserved
+    uint16_t i_extra_isize;         // 128 Extra inode size
+    uint16_t i_checksum_hi;         // 130 Inode checksum (high 16 bits)
+    uint32_t i_ctime_extra;         // 132 Creation time (extra bits)
+    uint32_t i_mtime_extra;         // 136 Modification time (extra bits)
+    uint32_t i_atime_extra;         // 140 Access time (extra bits)
+    uint32_t i_crtime;              // 144 Creation time (low 32 bits)
+    uint32_t i_crtime_extra;        // 148 Creation time (extra bits)
+    uint32_t i_version_hi;          // 152 File version (high 32 bits)
+    uint32_t i_projid;              // 156 Project ID
+    uint8_t  i_pad[96];             // 160..255 Pad to the 256-byte maximum inode size
 };
+
+static_assert(sizeof(ext4_inode) == 256,
+              "ext4_inode must match the 256-byte on-disk inode image");
+static_assert(offsetof(ext4_inode, i_block) == 40,
+              "ext4 inode block map must begin at byte 40");
+static_assert(offsetof(ext4_inode, i_generation) == 100,
+              "ext4 inode generation must begin at byte 100");
+static_assert(offsetof(ext4_inode, i_size_hi) == 108,
+              "ext4 inode high size must begin at byte 108");
 
 // ext4 extent structure
 struct ext4_extent {

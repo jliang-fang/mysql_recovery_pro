@@ -384,7 +384,7 @@ bool DeviceIdentity::read_sysfs_identity(const struct stat& device_stat,
         return false;
     }
 
-    const std::filesystem::path block_node = sysfs_node.parent_path();
+    const std::filesystem::path block_node = sysfs_node;
     const std::string sysfs_base = (block_node / "device").string() + "/";
 
     std::string model_path   = sysfs_base + "model";
