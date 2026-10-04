@@ -22,12 +22,13 @@ import re
 import shutil
 import subprocess
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from scripts.disaster_harness.comparator import compare, write_comparison
 from scripts.disaster_harness.ground_truth import build_ground_truth, write_ground_truth
 from scripts.disaster_harness.manifest import canonical_json, sha256_file
 from scripts.disaster_validation.csv_to_canonical import csv_to_canonical_dataset, _parse_csv_cell
+from scripts.disaster_validation.dataset_values import hex_literal
 from scripts.disaster_validation.lifecycle import RunLifecycleError, ValidationRun
 from scripts.disaster_validation.matrix import CAPABILITIES, MatrixItem, matrix_item
 
@@ -85,16 +86,36 @@ def _run_cmd(argv: list[str], timeout: float = 300, check: bool = True,
 
 
 def _mysql_exec(container_name: str, sql: str, timeout: float = 120,
-                runner: Runner = _subprocess_runner) -> str:
-    res = runner(
-        ["podman", "exec", "-i", container_name, "mysql", "-uroot", "-e", sql],
-        timeout, "",
-    )
-    if res.returncode != 0:
-        raise RuntimeError(
-            f"MySQL query failed ({res.returncode}): {sql}\n"
-            f"STDERR: {res.stderr}\nSTDOUT: {res.stdout}")
-    return res.stdout
+                runner: Runner = _subprocess_runner, retries: int = 4) -> str:
+    """Execute SQL with bounded retries for transient mysqld/socket loss.
+
+    This is for idempotent statements (DDL, COUNT, SELECT). Non-idempotent
+    batches must pass ``retries=1`` and own their retry after proving with a
+    count whether the statement landed, otherwise a blind retry can duplicate
+    rows.
+    """
+    last: Optional[CommandResult] = None
+    for attempt in range(max(1, retries)):
+        last = runner(
+            ["podman", "exec", "-i", container_name, "mysql", "-uroot", "-e", sql],
+            timeout, "",
+        )
+        if last.returncode == 0:
+            return last.stdout
+        transient = any(marker in (last.stderr or "") for marker in (
+            "Can't connect to local MySQL server",
+            "Lost connection to MySQL server",
+            "Server shutdown in progress",
+            "Error in result packet",
+            "empty reply from server",
+        ))
+        if not transient or attempt == retries - 1:
+            break
+        time.sleep(2 * (attempt + 1))
+    assert last is not None
+    raise RuntimeError(
+        f"MySQL query failed ({last.returncode}): {sql}\n"
+        f"STDERR: {last.stderr}\nSTDOUT: {last.stdout}")
 
 
 def _mysql_exec_file(container_name: str, sql_path: Path, database: str,
@@ -636,22 +657,79 @@ class PhaseAOrchestrator:
             100000 if self.item.dataset_profile == "100k" else 1000000)
         self._insert_rows(row_count, has_json)
 
+    @staticmethod
+    def _row_values(ids: Iterable[int], has_json: bool) -> str:
+        values = []
+        for i in ids:
+            dt_str = "2026-05-01 12:00:00"
+            txt_val = f"'sample_text_{i}'" if i % 10 != 0 else "NULL"
+            json_val = f"'{{\"k\": {i}}}'," if has_json else ""
+            # X'...' must carry an even number of hex digits; see
+            # dataset_values.hex_literal for the 65536 boundary it fixes.
+            values.append(
+                f"({i}, -{i}, {i}.5000, {txt_val}, {json_val} '{dt_str}', "
+                f"{hex_literal(i)})")
+        return ",".join(values)
+
+    def _present_ids(self, first_id: int, last_id: int) -> set:
+        rows = _mysql_exec(
+            self.container_name,
+            f"SELECT id FROM `{self.database}`.`{self.table}` "
+            f"WHERE id BETWEEN {first_id} AND {last_id};",
+            timeout=120, runner=self.runner)
+        present = set()
+        for line in rows.splitlines():
+            token = line.strip()
+            if token.isdigit():
+                present.add(int(token))
+        return present
+
     def _insert_rows(self, total: int, has_json: bool) -> None:
+        """Insert the profile in bounded batches, tolerating partial applies.
+
+        A failed client can race with mysqld applying the statement, so a
+        blind retry would either duplicate rows or give up. Each retry queries
+        which ids actually landed and re-inserts only the missing ones. This
+        matters at 100k/1m, where one socket blip must not turn a valid long
+        run into a setup error. `retries=1` keeps _mysql_exec's blind retry
+        out of the non-idempotent path: this caller owns idempotency.
+        """
         batch_size = 500
         for start_id in range(1, total + 1, batch_size):
             end_id = min(start_id + batch_size, total + 1)
-            values = []
-            for i in range(start_id, end_id):
-                dt_str = "2026-05-01 12:00:00"
-                txt_val = f"'sample_text_{i}'" if i % 10 != 0 else "NULL"
-                json_val = f"'{{\"k\": {i}}}'," if has_json else ""
-                blob_val = f"X'{i:04x}'"
-                values.append(
-                    f"({i}, -{i}, {i}.5000, {txt_val}, {json_val} '{dt_str}', {blob_val})")
-            insert_sql = (
-                f"INSERT INTO `{self.database}`.`{self.table}` "
-                f"VALUES {','.join(values)};")
-            _mysql_exec(self.container_name, insert_sql, runner=self.runner)
+            pending = list(range(start_id, end_id))
+            last_error = ""
+            for attempt in range(4):
+                insert_sql = (
+                    f"INSERT INTO `{self.database}`.`{self.table}` "
+                    f"VALUES {self._row_values(pending, has_json)};")
+                try:
+                    _mysql_exec(self.container_name, insert_sql, timeout=300,
+                                runner=self.runner, retries=1)
+                    pending = []
+                    break
+                except RuntimeError as error:
+                    last_error = str(error)
+                    recoverable = any(marker in last_error for marker in (
+                        "Can't connect to local MySQL server",
+                        "Lost connection to MySQL server",
+                        "Error in result packet",
+                        # A retry after partial application surfaces as a
+                        # duplicate key, which the id probe below resolves.
+                        "Duplicate entry",
+                    ))
+                    if not recoverable:
+                        raise
+                    landed = self._present_ids(start_id, end_id - 1)
+                    pending = [i for i in pending if i not in landed]
+                    if not pending:
+                        last_error = ""
+                        break
+                    time.sleep(2 * (attempt + 1))
+            if pending:
+                raise RuntimeError(
+                    f"insert of ids {pending[0]}..{pending[-1]} incomplete after "
+                    f"retries: {last_error}")
 
     def _seal_ground_truth(self, run_dir: Path) -> Dict[str, Any]:
         dump_cols = _mysql_exec(

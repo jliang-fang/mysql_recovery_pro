@@ -5,6 +5,7 @@
 #include "dbrecovery/innodb/page_reader.hpp"
 #include "dbrecovery/innodb/page_defs.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 
 namespace dbrecovery {
 namespace innodb {
@@ -364,6 +365,49 @@ TEST(PageChecksumTest, DifferentPageSizeChecksum) {
         EXPECT_TRUE(valid) << "Failed for page size: " << page_size;
         EXPECT_EQ(stored_crc, computed_crc);
     }
+}
+
+
+// ==================== Checksum gate admission policy ====================
+//
+// Carvers reject a page only when the validator also models its input.
+// These two batches are the real inputs that motivated the policy.
+
+TEST(PageChecksumTest, GateAcceptsEveryPageWhenTheModelDoesNotFit) {
+    // MySQL 5.6 folded-LSN trailers: every intact page fails the strict
+    // validator, so the batch admits them all instead of deleting the table.
+    ChecksumGateBatch batch;
+    for (int i = 0; i < 129; ++i) batch.observe(false);
+    EXPECT_FALSE(batch.model_fits());
+    EXPECT_FALSE(batch.should_reject(false));
+
+    ChecksumGateBatch empty;
+    EXPECT_FALSE(empty.model_fits());
+    EXPECT_FALSE(empty.should_reject(false));
+    EXPECT_FALSE(empty.should_reject(true));
+}
+
+TEST(PageChecksumTest, GateRejectsOnlyTheOutlierWhenTheModelFits) {
+    // MySQL 5.7: ~129 intact pages validate, one body-flipped page does not.
+    ChecksumGateBatch batch;
+    for (int i = 0; i < 129; ++i) batch.observe(true);
+    batch.observe(false);
+    EXPECT_TRUE(batch.model_fits());
+    EXPECT_FALSE(batch.should_reject(true));
+    EXPECT_TRUE(batch.should_reject(false));
+    EXPECT_EQ(batch.total, 130u);
+    EXPECT_EQ(batch.valid, 129u);
+}
+
+TEST(PageChecksumTest, GateRequiresAnAbsoluteMajority) {
+    ChecksumGateBatch half;
+    half.observe(true);
+    half.observe(false);
+    // 50% is not a fit: with no majority we cannot tell a damaged page from a
+    // checksum format we do not implement.
+    EXPECT_FALSE(half.model_fits());
+    half.observe(true);
+    EXPECT_TRUE(half.model_fits());
 }
 
 } // namespace innodb

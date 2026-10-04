@@ -2278,16 +2278,32 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
         // The same page can be reachable twice (live file plus write-ahead
         // copy), so byte-identical rows are collapsed before export.
         std::set<std::string> seen_rows;
-        for (const auto& page_info : pages) {
+        // Calibrate the checksum validator against this index's pages first:
+        // see ChecksumGateBatch. On an input whose page format the validator
+        // does not model (MySQL 5.6/5.7 folded-LSN trailers), rejecting every
+        // page would delete the whole tablespace, so only an outlier in a
+        // batch the validator does model is dropped.
+        std::vector<uint8_t> checksum_fails;
+        dbrecovery::innodb::ChecksumGateBatch checksum_batch;
+        if (use_schema) {
+            checksum_fails.assign(pages.size(), 0);
+            for (size_t index = 0; index < pages.size(); ++index) {
+                const auto& page_info = pages[index];
+                if (page_info.data.size() < config_.page_size) continue;
+                const bool page_valid = dbrecovery::innodb::validate_page_checksum(
+                    page_info.data.data(), config_.page_size, /*strict=*/false).is_valid;
+                checksum_batch.observe(page_valid);
+                if (!page_valid) checksum_fails[index] = 1;
+            }
+        }
+        for (size_t page_index = 0; page_index < pages.size(); ++page_index) {
+            const auto& page_info = pages[page_index];
             if (use_schema) {
-                // Fail closed on checksum mismatch: a page whose stored InnoDB
-                // checksum disagrees with its bytes was altered after it was
-                // written, and decoding it can emit a row that never existed.
-                // Intact tablespaces validate cleanly for every supported
-                // version, so this only excludes damaged pages.
-                if (!dbrecovery::innodb::validate_page_checksum(
-                        page_info.data.data(), page_info.data.size(),
-                        /*strict=*/false).is_valid) {
+                // Fail closed only on a checksum mismatch that this batch
+                // proved meaningful: a page altered after it was written must
+                // not contribute a row that never existed.
+                if (page_info.data.size() >= config_.page_size &&
+                    checksum_batch.should_reject(checksum_fails[page_index] == 0)) {
                     result.checksum_rejected_pages++;
                     continue;
                 }

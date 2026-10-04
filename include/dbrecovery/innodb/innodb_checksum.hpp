@@ -167,6 +167,40 @@ uint32_t compute_innodb_checksum(const uint8_t* data, size_t size);
 uint32_t compute_ut_fold_binary_checksum(const uint8_t* data, size_t size);
 
 /**
+ * @brief Batch-level admission policy for checksum-based page rejection
+ *
+ * Carvers must not drop rows solely because `validate_page_checksum` rejects a
+ * page: a page format whose algorithm ID we cannot recognize (MySQL 5.6/5.7
+ * folded-LSN trailers) makes *every* healthy page of that input fail. Rejecting
+ * on that alone silently destroyed MySQL 5.6 recovery — 0 of 129 intact pages
+ * survived.
+ *
+ * Instead the validator is calibrated against the input itself: a page is only
+ * rejected when the same validator accepted the majority of its peers. On an
+ * input where the model does not fit (all pages "invalid"), nothing is
+ * rejected; on an input where it fits (one page invalid out of ~130), the
+ * outlier is still dropped, which is what keeps a single body-flipped page
+ * from emitting a fabricated row.
+ */
+struct ChecksumGateBatch {
+    size_t total = 0;
+    size_t valid = 0;
+
+    void observe(bool page_valid) {
+        ++total;
+        if (page_valid) ++valid;
+    }
+
+    /// True when the validator demonstrably models this input.
+    bool model_fits() const { return total > 1 && valid * 2 > total; }
+
+    /// Reject only a failing page in a batch whose model fits.
+    bool should_reject(bool page_valid) const {
+        return !page_valid && model_fits();
+    }
+};
+
+/**
  * @brief Validate page checksum using InnoDB's dual-checksum scheme
  *
  * This is the primary checksum validation function. It:

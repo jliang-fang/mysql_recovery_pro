@@ -963,15 +963,31 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
         // can never be compared against truth.
         std::set<std::string> seen_rows;
 
-        for (const auto& page_data : pages) {
+        // Calibrate the checksum validator against this index's pages first:
+        // see ChecksumGateBatch. Rejecting every page of an input the validator
+        // does not model (MySQL 5.6/5.7 folded-LSN trailers) would delete the
+        // whole tablespace, so only an outlier in a modeled batch is dropped.
+        std::vector<uint8_t> checksum_fails;
+        innodb::ChecksumGateBatch checksum_batch;
+        if (matched_schema.has_value()) {
+            checksum_fails.assign(pages.size(), 0);
+            for (size_t index = 0; index < pages.size(); ++index) {
+                const auto& page_data = pages[index];
+                if (page_data.size() < config_.page_size) continue;
+                const bool page_valid = innodb::validate_page_checksum(
+                    page_data.data(), config_.page_size, /*strict=*/false).is_valid;
+                checksum_batch.observe(page_valid);
+                if (!page_valid) checksum_fails[index] = 1;
+            }
+        }
+        for (size_t page_index = 0; page_index < pages.size(); ++page_index) {
+            const auto& page_data = pages[page_index];
             if (matched_schema.has_value()) {
-                // Fail closed on checksum mismatch: a page whose stored InnoDB
-                // checksum disagrees with its bytes was altered after it was
-                // written, and decoding it can emit a row that never existed.
+                // Fail closed only on a checksum mismatch this batch proved
+                // meaningful: a page altered after it was written must not
+                // contribute a row that never existed.
                 if (page_data.size() >= config_.page_size &&
-                    !innodb::validate_page_checksum(page_data.data(),
-                                                    config_.page_size,
-                                                    /*strict=*/false).is_valid) {
+                    checksum_batch.should_reject(checksum_fails[page_index] == 0)) {
                     result.checksum_rejected_pages++;
                     continue;
                 }

@@ -31,6 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
+from scripts.disaster_validation.dataset_values import hex_literal
 from scripts.disaster_validation.lifecycle import RunLifecycleError, ValidationRun
 from scripts.disaster_validation.matrix import CAPABILITIES, MatrixItem, matrix_item
 
@@ -439,7 +440,10 @@ class ScenarioDriver:
             for i in range(start, end):
                 txt = f"'sample_text_{i}'" if i % 10 != 0 else "NULL"
                 js = f"'{{\"k\": {i}}}'," if self.capability.supports_json else ""
-                values.append(f"({i}, -{i}, {i}.5000, {txt}, {js} '2026-05-01 12:00:00', X'{i:04x}')")
+                # Shared literal builder: an odd-length X'...' is rejected by
+                # MySQL with ERROR 1064 (the 04x form crossed into 5 digits at
+                # id 65536, killing every 100k/1m profile at row 65537).
+                values.append(f"({i}, -{i}, {i}.5000, {txt}, {js} '2026-05-01 12:00:00', {hex_literal(i)})")
             self._insert_batch(start, end - 1, ",".join(values))
 
 

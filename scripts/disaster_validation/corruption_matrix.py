@@ -41,7 +41,20 @@ _MUTATIONS = (
     "fsp_flags_corrupt",
     "garbage_append",
     "tde_candidate",
+    "compression_flags_invalid",
+    "compression_stride_mismatch",
 )
+
+# Mutations applied to a preserved .ibd copy rather than to the filesystem
+# image: they target page-0 metadata that only an offline tablespace carries.
+_IBD_MUTATIONS = frozenset({
+    "tde_candidate",
+    "compression_flags_invalid",
+    "compression_stride_mismatch",
+})
+
+# Every fail-closed .ibd mutation must land in one of these classifications.
+_FORENSIC_CLASSIFICATIONS = frozenset({"forensic_evidence", "expected_reject"})
 
 _FIL_PAGE_OFFSET = 4
 _FIL_PAGE_TYPE = 24
@@ -342,6 +355,65 @@ def apply_tde_candidate(source: Path, target: Path, page_size: int) -> MutationR
     )
 
 
+def _apply_compression_metadata_mutation(source: Path, target: Path,
+                                         page_size: int, name: str) -> MutationResult:
+    """Tamper with FSP compression metadata on a real compressed `.ibd` copy.
+
+    Only page 0's four FSP_SPACE_FLAGS bytes change: either ZIP_SSIZE becomes
+    unparseable, or it redeclares a physical stride that the file layout does
+    have. Both must end in a fail-closed forensic classification with no
+    importable artifact.
+    """
+    _copy_to_derived_image(source, target)
+    source_digest = sha256_file(source)
+    if source.stat().st_size < page_size:
+        raise CorruptionError("preserved tablespace is shorter than one page")
+    with source.open("rb") as stream:
+        page0 = stream.read(page_size)
+    if len(page0) < _FSP_SPACE_FLAGS + 4:
+        raise CorruptionError("tablespace page 0 is too short to carry FSP flags")
+    flags = int.from_bytes(page0[_FSP_SPACE_FLAGS:_FSP_SPACE_FLAGS + 4], "big")
+    zip_ssize = (flags >> 1) & 0xF
+    if zip_ssize == 0 or zip_ssize > 4:
+        raise CorruptionError(
+            f"source is not a compressed tablespace (FSP zip_ssize={zip_ssize})")
+    if name == "compression_flags_invalid":
+        # zip_ssize >= 5 is rejected by parse_fsp_compression_metadata.
+        new_zip, rule = 5, "compressed tablespace page 0, FSP_SPACE_FLAGS zip_ssize -> 5"
+    else:
+        new_zip = 1 if zip_ssize != 1 else 2
+        rule = ("compressed tablespace page 0, FSP_SPACE_FLAGS zip_ssize redeclared "
+                "so the declared stride cannot match the layout")
+    new_flags = (flags & ~0x1E) | (new_zip << 1)
+    before = page0[_FSP_SPACE_FLAGS:_FSP_SPACE_FLAGS + 4]
+    after = new_flags.to_bytes(4, "big")
+    with target.open("r+b") as stream:
+        stream.seek(_FSP_SPACE_FLAGS)
+        stream.write(after)
+    return MutationResult(
+        name=name,
+        source_sha256=source_digest,
+        target_sha256=sha256_file(target),
+        target_path=str(target),
+        before=before.hex(),
+        after=after.hex(),
+        page_no=0,
+        byte_offset=_FSP_SPACE_FLAGS,
+        page_metadata=_page_metadata(page0),
+        selection_rule=rule,
+    )
+
+
+def apply_ibd_mutation(source: Path, target: Path, page_size: int,
+                       name: str) -> MutationResult:
+    """Apply a page-0 mutation to a preserved `.ibd` copy."""
+    if name not in _IBD_MUTATIONS:
+        raise CorruptionError(f"not an offline-tablespace mutation: {name}")
+    if name == "tde_candidate":
+        return apply_tde_candidate(source, target, page_size)
+    return _apply_compression_metadata_mutation(source, target, page_size, name)
+
+
 class CorruptionScenarioDriver(ScenarioDriver):
     """Phase B setup and recovery with a derived-image mutation in between."""
 
@@ -352,9 +424,9 @@ class CorruptionScenarioDriver(ScenarioDriver):
         self.mutation_result: MutationResult | None = None
 
     def _verify(self, recovery: dict[str, Any]) -> dict[str, Any]:
-        if self.mutation != "tde_candidate":
+        if self.mutation not in _IBD_MUTATIONS:
             return super()._verify(recovery)
-        payload = recovery["runs"]["tde_candidate"]
+        payload = recovery["runs"][self.mutation]
         entry = {
             "returncode": payload.get("returncode"),
             "contract_complete": payload.get("contract_complete", False),
@@ -369,12 +441,14 @@ class CorruptionScenarioDriver(ScenarioDriver):
                 "export_success": contract.get("export_success"),
                 "importable": contract.get("importable"),
                 "recovery_method": contract.get("recovery_method"),
+                "compression_status": contract.get("compression_status"),
+                "compression_rejection_reason": contract.get("compression_rejection_reason"),
                 "reason": contract.get("reason"),
                 "status": "EVIDENCE_ONLY",
             })
         else:
             entry.update({"status": "FAIL", "reason": entry["contract_error"]})
-        return {"runs": {"tde_candidate": entry}, "blockers": []}
+        return {"runs": {self.mutation: entry}, "blockers": []}
 
     def _prepare_mutated_input(self) -> tuple[Path, bool]:
         if self.media is None:
@@ -385,13 +459,14 @@ class CorruptionScenarioDriver(ScenarioDriver):
             raise CorruptionError(f"refusing to overwrite baseline evidence: {baseline}")
         shutil.copyfile(source, baseline)
         os.chmod(baseline, 0o400)
-        if self.mutation == "tde_candidate":
+        if self.mutation in _IBD_MUTATIONS:
             ibd_candidates = sorted((self.run_dir / "persistent-input").glob("*.ibd"))
             if len(ibd_candidates) != 1:
-                raise CorruptionError("TDE candidate requires exactly one preserved tablespace")
-            target = self.run_dir / "disaster-input" / "tde_candidate.ibd"
-            self.mutation_result = apply_tde_candidate(
-                ibd_candidates[0], target, self.item.page_size)
+                raise CorruptionError(
+                    f"{self.mutation} requires exactly one preserved tablespace")
+            target = self.run_dir / "disaster-input" / f"{self.mutation}.ibd"
+            self.mutation_result = apply_ibd_mutation(
+                ibd_candidates[0], target, self.item.page_size, self.mutation)
             source_path = ibd_candidates[0]
             direct_ibd = True
         else:
@@ -418,19 +493,19 @@ class CorruptionScenarioDriver(ScenarioDriver):
     def _recover(self) -> dict[str, Any]:
         target, direct_ibd = self._prepare_mutated_input()
         if direct_ibd:
-            out_dir = self.run_dir / "recovery-output" / "tde-candidate"
+            out_dir = self.run_dir / "recovery-output" / self.mutation
             out_dir.mkdir(parents=True, exist_ok=True)
-            run = self._run_one("tde_candidate", [
+            run = self._run_one(self.mutation, [
                 str(self.config.recovery_binary), "--ibd", str(target),
                 "--page-size", str(self.item.page_size), "--schema", "id:BIGINT:pk",
                 "--format", "csv", "--output", str(out_dir),
                 "--result-json", str(out_dir / "result.json"),
             ], out_dir)
             return {
-                "input_kind": "ibd_tde_candidate",
+                "input_kind": "ibd",
                 "image": str(target),
                 "truth": str(self.run_dir / "truth" / "ground_truth.json"),
-                "runs": {"tde_candidate": run},
+                "runs": {self.mutation: run},
                 "baseline_image": str(self.run_dir / "persistent-input" / "baseline-media.img"),
                 "mutation": self.mutation_result.document() if self.mutation_result else None,
             }
@@ -553,15 +628,27 @@ def _corruption_verdict(verification: dict[str, Any], mutation: str) -> tuple[st
         return "PRODUCT_FAIL", ["recovery process timed out or was signal-terminated"]
     if any(not entry.get("contract_complete") for entry in entries):
         return "PRODUCT_FAIL", ["recovery result contract is missing or malformed"]
-    if mutation == "tde_candidate":
+    if mutation in _IBD_MUTATIONS:
         for entry in entries:
-            if entry.get("returncode") == 0:
-                return "PRODUCT_FAIL", ["unvalidated TDE candidate exited successfully"]
+            if entry.get("classification") not in _FORENSIC_CLASSIFICATIONS:
+                return "PRODUCT_FAIL", [
+                    f"{mutation}: expected a forensic classification, got "
+                    f"{entry.get('classification')}"]
             if entry.get("export_success") or entry.get("importable"):
-                return "PRODUCT_FAIL", ["unvalidated TDE candidate claims exportable output"]
-            if entry.get("classification") not in {"expected_reject", "forensic_evidence"}:
-                return "PRODUCT_FAIL", ["unvalidated TDE candidate lacks a fail-closed classification"]
-        return "PASS_EVIDENCE_ONLY", ["unvalidated TDE candidate was rejected before plaintext recovery"]
+                return "PRODUCT_FAIL", [
+                    f"{mutation}: unvalidated input claims exportable output"]
+            if mutation == "tde_candidate" and entry.get("returncode") == 0:
+                return "PRODUCT_FAIL", ["unvalidated TDE candidate exited successfully"]
+            if mutation.startswith("compression_"):
+                status = entry.get("compression_status")
+                if status in (None, "", "NOT_COMPRESSED", "UNKNOWN"):
+                    return "PRODUCT_FAIL", [
+                        f"{mutation}: compression metadata was not rejected ({status})"]
+                if not entry.get("compression_rejection_reason"):
+                    return "PRODUCT_FAIL", [
+                        f"{mutation}: rejected without a compression rejection reason"]
+        return "PASS_EVIDENCE_ONLY", [
+            f"{mutation}: rejected before any importable artifact could be written"]
     if any(entry.get("classification") != "structured_recovery" for entry in entries):
         for entry in entries:
             if entry.get("classification") != "structured_recovery":
@@ -599,30 +686,32 @@ def _corruption_verdict(verification: dict[str, Any], mutation: str) -> tuple[st
 
 def run_matrix(evidence_root: Path, versions: Iterable[str], filesystems: Iterable[str],
                mutations: Iterable[str], scenarios: Iterable[str], rows: int,
-               image_mb: int, fresh_import: bool) -> list[dict[str, Any]]:
+               image_mb: int, fresh_import: bool,
+               row_formats: Iterable[str] = ("DYNAMIC",)) -> list[dict[str, Any]]:
     evidence_root.mkdir(parents=True, exist_ok=True)
     (evidence_root / "media").mkdir(exist_ok=True)
     results: list[dict[str, Any]] = []
     for version in versions:
         for filesystem in filesystems:
             for scenario in scenarios:
-                item = matrix_item(version, filesystem, scenario, "smoke", 16384, "DYNAMIC")
-                if item.status != "PLANNED":
-                    results.append({"status": "UNSUPPORTED", "reason": item.reason,
-                                    "version": version, "filesystem": filesystem,
-                                    "scenario": scenario})
-                    continue
-                for mutation in mutations:
-                    if mutation not in _MUTATIONS:
-                        raise CorruptionError(f"unknown mutation requested: {mutation}")
-                    run_id = (f"corruption-{version.replace('.', '')}-{filesystem}-{scenario}-"
-                              f"{mutation}-{int(time.time())}")
-                    driver = CorruptionScenarioDriver(
-                        ScenarioConfig(evidence_root=evidence_root, run_id=run_id, item=item,
-                                       rows=rows, image_mb=image_mb, fresh_import=fresh_import),
-                        mutation)
-                    record = driver.execute()
-                    results.append({"run_id": run_id, **record})
+                for row_format in row_formats:
+                    item = matrix_item(version, filesystem, scenario, "smoke", 16384, row_format)
+                    if item.status != "PLANNED":
+                        results.append({"status": "UNSUPPORTED", "reason": item.reason,
+                                        "version": version, "filesystem": filesystem,
+                                        "scenario": scenario, "row_format": row_format})
+                        continue
+                    for mutation in mutations:
+                        if mutation not in _MUTATIONS:
+                            raise CorruptionError(f"unknown mutation requested: {mutation}")
+                        run_id = (f"corruption-{version.replace('.', '')}-{filesystem}-{scenario}-"
+                                  f"{row_format.lower()}-{mutation}-{int(time.time())}")
+                        driver = CorruptionScenarioDriver(
+                            ScenarioConfig(evidence_root=evidence_root, run_id=run_id, item=item,
+                                           rows=rows, image_mb=image_mb, fresh_import=fresh_import),
+                            mutation)
+                        record = driver.execute()
+                        results.append({"run_id": run_id, **record})
     return results
 
 
@@ -632,6 +721,9 @@ def main() -> int:
     parser.add_argument("--versions", nargs="+", default=["5.7"])
     parser.add_argument("--filesystems", nargs="+", default=["ext4"])
     parser.add_argument("--scenarios", nargs="+", choices=("baseline",), default=["baseline"])
+    parser.add_argument("--row-formats", nargs="+", default=["DYNAMIC"],
+                        help="Row format for the baseline tablespace; compression "
+                             "metadata mutations require COMPRESSED")
     parser.add_argument("--mutations", nargs="+", choices=_MUTATIONS,
                         default=list(_MUTATIONS))
     parser.add_argument("--rows", type=int, default=20000)
@@ -643,7 +735,8 @@ def main() -> int:
     args = parser.parse_args()
 
     results = run_matrix(args.evidence_root, args.versions, args.filesystems, args.mutations,
-                         args.scenarios, args.rows, args.image_mb, args.fresh_import)
+                         args.scenarios, args.rows, args.image_mb, args.fresh_import,
+                         row_formats=args.row_formats)
     summary_path = args.evidence_root / "corruption_summary.json"
     if summary_path.exists():
         raise CorruptionError(f"refusing to overwrite evidence summary: {summary_path}")

@@ -1509,8 +1509,29 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             out << "page_no,index_id,trx_id,roll_ptr,record_data\n";
         }
 
+        // Calibrate the checksum validator against this index's pages before
+        // decoding any of them. See ChecksumGateBatch: rejecting on a
+        // validator that does not model the input would delete every row of a
+        // MySQL 5.6 tablespace, while rejecting an outlier on an input it does
+        // model still stops one body-flipped page from emitting a fabricated
+        // row.
+        std::vector<uint8_t> checksum_fails(pages.size(), 0);
+        dbrecovery::innodb::ChecksumGateBatch checksum_batch;
+        if (use_schema_for_index) {
+            for (size_t index = 0; index < pages.size(); ++index) {
+                const auto& page = pages[index];
+                if (page.data.size() < config_.page_size) continue;
+                if (page.data.size() >= 66 && read_be<uint16_t>(page.data.data(), 64) != 0) continue;
+                const bool page_valid = dbrecovery::innodb::validate_page_checksum(
+                    page.data.data(), config_.page_size, /*strict=*/false).is_valid;
+                checksum_batch.observe(page_valid);
+                if (!page_valid) checksum_fails[index] = 1;
+            }
+        }
+
         // Parse each page and extract records
-        for (const auto& page : pages) {
+        for (size_t page_index = 0; page_index < pages.size(); ++page_index) {
+            const auto& page = pages[page_index];
             if (page.data.size() < config_.page_size) continue;
 
             // With a declared schema only leaf pages (PAGE_LEVEL == 0) may be
@@ -1524,14 +1545,10 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                 }
             }
 
-            // Fail closed on checksum mismatch: a page whose stored InnoDB
-            // checksum disagrees with its bytes has been altered after it was
-            // written, and decoding it can emit a row that never existed.
-            // Untouched pages validate (measured 0 mismatches on intact
-            // tablespaces for 5.6-9.0), so this only excludes damaged pages.
-            if (use_schema_for_index &&
-                !dbrecovery::innodb::validate_page_checksum(
-                    page.data.data(), config_.page_size, /*strict=*/false).is_valid) {
+            // Fail closed on a checksum mismatch that the batch calibration
+            // proved meaningful: a page altered after it was written must not
+            // contribute a row that never existed.
+            if (use_schema_for_index && checksum_batch.should_reject(checksum_fails[page_index] == 0)) {
                 checksum_rejected_pages++;
                 continue;
             }

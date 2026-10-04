@@ -220,6 +220,7 @@ def collect_corruption(evidence: Path) -> list[dict[str, Any]]:
             "version": record.get("version"),
             "filesystem": record.get("filesystem"),
             "scenario": record.get("scenario"),
+            "row_format": record.get("row_format"),
             "mutation": record.get("mutation"),
             "verdict": record.get("status"),
             "reasons": record.get("verdict_reasons", []),
@@ -748,7 +749,8 @@ def main() -> int:
     # newest attempt per (version, filesystem, scenario, mutation).
     corruption, superseded_corruption = newest_per_key(
         corruption, lambda c: (c.get("version"), c.get("filesystem"),
-                               c.get("scenario"), c.get("mutation")))
+                               c.get("scenario"), c.get("row_format"),
+                               c.get("mutation")))
 
     # Retries of the same matrix cell live in several roots.  Only the newest
     # run of each cell may be scored; the superseded ones stay in the JSON as
