@@ -48,7 +48,24 @@ bool SQLOutputter::export_record(const std::map<std::string, std::string>& recor
         if (!first) oss << ", ";
 
         const std::string& value = it->second;
-        if (value == "NULL") {
+        if (value.empty() && binary_columns_.count(col_name)) {
+            oss << "NULL";
+        } else if (binary_columns_.count(col_name)) {
+            // Binary columns are stored by the recovery pipeline as 0x<hex>.
+            // UNHEX keeps the bytes intact instead of re-encoding them as text.
+            std::string hex_value;
+            if (value.size() > 2 && (value[0] == '0') && (value[1] == 'x' || value[1] == 'X')) {
+                hex_value = value.substr(2);
+            } else {
+                static constexpr char digits[] = "0123456789abcdef";
+                hex_value.reserve(value.size() * 2);
+                for (unsigned char byte : value) {
+                    hex_value.push_back(digits[byte >> 4]);
+                    hex_value.push_back(digits[byte & 0x0f]);
+                }
+            }
+            oss << "UNHEX('" << hex_value << "')";
+        } else if (value == "NULL") {
             oss << "NULL";
         } else {
             std::string escaped_value;

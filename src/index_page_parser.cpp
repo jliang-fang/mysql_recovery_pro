@@ -1295,6 +1295,10 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
 
     if (rec_origin >= page_size) return std::nullopt;
 
+    // Each record starts clean; the flag is set below if any field length
+    // cannot be bounded by the record buffer.
+    field_size_guard_overflow_ = false;
+
     IndexRecord record;
     record.page_no = page_no;
     record.record_offset = static_cast<uint16_t>(rec_offset);
@@ -1416,6 +1420,15 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     // [PK + TRX + ROLL + 字段数据] <- origin (高地址)
 
     if (!columns_.empty()) {
+        field_size_guard_overflow_ = false;
+        if (!is_compact) {
+            // REDUNDANT's offset array also accounts for hidden clustered-index
+            // system fields. The schema-only decoder cannot prove their exact
+            // placement without an authoritative record-layout descriptor, so
+            // reject the row rather than exporting shifted values.
+            return std::nullopt;
+        }
+
         // Pass rec_origin as the start position for read_reverse
         // The NULL bitmap and sizes are BEFORE the header (at lower addresses from origin)
         size_t reverse_start = rec_origin;  // Start from origin, read backward
@@ -1464,6 +1477,12 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         size_t record_data_end = data_end;
         record.fields = parse_record_schemaless(
             page_data, page_size, rec_offset, record_data_end, is_compact, is_leaf);
+    }
+
+    // A record whose field bounds could not be proven is dropped: exporting it
+    // would shift every following column. The caller sees no row at all.
+    if (field_size_guard_overflow_) {
+        return std::nullopt;
     }
 
     return record;
@@ -1954,8 +1973,20 @@ IndexFieldValue InnoDBIndexParser::decode_column(
     const IndexColumnDef& col, size_t field_size) {
     IndexFieldValue val;
 
-    // Additional sanity check: field_size shouldn't exceed remaining buffer
+    // Additional sanity check: field_size shouldn't exceed remaining buffer.
+    // `offset` must be bounded first: if it is already past `max_size`,
+    // `max_size - offset` underflows to a huge value and lets an arbitrary
+    // length through to the allocators below.
+    if (offset > max_size) {
+        // `offset` past the buffer is not a recoverable field: `max_size - offset`
+        // would underflow and admit an arbitrary length to the allocators.
+        field_size_guard_overflow_ = true;
+        val.is_null = true;
+        val.type = IndexFieldValue::Type::NULL_VAL;
+        return val;
+    }
     if (field_size > max_size - offset) {
+        field_size_guard_overflow_ = true;
         val.is_null = true;
         val.type = IndexFieldValue::Type::NULL_VAL;
         return val;
@@ -2755,6 +2786,11 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
 
     auto page_hdr = parse_page_header(page_data, page_size);
     if (!page_hdr) {
+        // Strict mode refuses to fabricate rows from a page whose header
+        // cannot be validated: an unparseable page is evidence, not rows.
+        if (strict_) {
+            return records;
+        }
         if (bad_page_mode_ == 1) {
             return parse_page_fast(page_data, page_size, page_no);
         } else if (bad_page_mode_ == 2) {
@@ -2771,7 +2807,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
     // Check if recovery rate is low (recovered records < expected * 0.8)
     // For 100K row tests, chains may break more often due to page splits
     uint16_t expected_recs = page_hdr->n_recs;
-    if (expected_recs > 0 && records.size() < expected_recs * 4 / 5) {
+    if (!strict_ && expected_recs > 0 && records.size() < expected_recs * 4 / 5) {
         // Record chain may be broken, try page directory scan
         auto fast_records = parse_page_fast(page_data, page_size, page_no);
         if (fast_records.size() > records.size()) {
@@ -2791,7 +2827,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
     // Only merge brute force results if chain recovery missed records
     // When chain recovers expected count (matching n_recs), skip brute force
     // to avoid false positives from empty/unused page space
-    if (records.size() < page_hdr->n_recs) {
+    if (!strict_ && records.size() < page_hdr->n_recs) {
         auto try_records = parse_page_try(page_data, page_size, page_no);
         if (try_records.size() > 0) {
             std::set<uint16_t> seen_heap_no;
@@ -3145,6 +3181,61 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_free_chain(
 
 // ==================== Full File Processing ====================
 
+namespace {
+
+/**
+ * Derive the physical page size from the file layout.
+ *
+ * InnoDB pages carry no page-size field, and `detect_page_size_from_fsp` can
+ * only echo back the logical size it was handed, so guessing 16 KiB silently
+ * turns an 8 KiB tablespace into eight 16 KiB pages and drops half the rows.
+ * Candidates are validated against page 0's tablespace identity instead:
+ * a real page at that stride repeats the FIL header with the same space_id.
+ */
+uint32_t detect_page_size_from_layout(std::ifstream& file, size_t file_size,
+                                      const uint8_t* page0, size_t page0_bytes) {
+    static constexpr uint32_t kCandidates[] = {4096, 8192, 16384, 32768, 65536};
+    if (!page0 || page0_bytes < FIL_HEADER_SIZE || file_size == 0) {
+        return detect_page_size_from_file_size(file_size);
+    }
+    if (!is_fsp_header_page_type(read_be<uint16_t>(page0, FIL_PAGE_TYPE_ABS))) {
+        return detect_page_size_from_file_size(file_size);
+    }
+    const uint32_t space_id = read_be<uint32_t>(page0, FIL_PAGE_SPACE_ID);
+
+    std::vector<uint8_t> probe(FIL_HEADER_SIZE);
+    for (const uint32_t candidate : kCandidates) {
+        if (file_size % candidate != 0) continue;
+        const size_t pages = file_size / candidate;
+        if (pages < 3 || pages > 1000000) continue;
+
+        size_t agreeing = 0;
+        for (size_t index = 1; index <= 4 && index < pages; ++index) {
+            file.clear();
+            file.seekg(static_cast<std::streamoff>(index * candidate), std::ios::beg);
+            file.read(reinterpret_cast<char*>(probe.data()),
+                      static_cast<std::streamsize>(probe.size()));
+            if (file.gcount() < static_cast<std::streamsize>(probe.size())) break;
+            const uint16_t type = read_be<uint16_t>(probe.data(), FIL_PAGE_TYPE_ABS);
+            // Type 0 is a freshly allocated page and proves nothing.
+            if (type == 0 || type == 0xFFFF) continue;
+            if (!is_valid_page_type(type) && !is_fsp_header_page_type(type)) continue;
+            if (read_be<uint32_t>(probe.data(), FIL_PAGE_SPACE_ID) != space_id) continue;
+            if (++agreeing >= 2) break;
+        }
+        if (agreeing >= 1) {
+            file.clear();
+            file.seekg(0, std::ios::beg);
+            return candidate;
+        }
+    }
+    file.clear();
+    file.seekg(0, std::ios::beg);
+    return detect_page_size_from_file_size(file_size);
+}
+
+} // namespace
+
 std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& ibd_path) {
     std::vector<IndexRecord> all_records;
 
@@ -3156,14 +3247,22 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
 
     uint32_t page_size = UNIV_PAGE_SIZE;
 
-    std::vector<uint8_t> first_page(page_size);
-    file.read(reinterpret_cast<char*>(first_page.data()), page_size);
+    std::vector<uint8_t> first_page(std::max<size_t>(UNIV_PAGE_SIZE, page_size_hint_));
+    file.read(reinterpret_cast<char*>(first_page.data()),
+              static_cast<std::streamsize>(first_page.size()));
     const size_t first_page_bytes = static_cast<size_t>(file.gcount());
-    if (first_page_bytes > 0) {
-        uint32_t detected = detect_page_size_from_fsp(first_page.data(), first_page_bytes);
-        if (detected >= UNIV_PAGE_SIZE_MIN && detected <= UNIV_PAGE_SIZE_MAX) {
-            page_size = detected;
+    if (first_page_bytes >= FIL_HEADER_SIZE) {
+        if (page_size_hint_ >= UNIV_PAGE_SIZE_MIN && page_size_hint_ <= UNIV_PAGE_SIZE_MAX &&
+            file_size % page_size_hint_ == 0 && file_size / page_size_hint_ >= 3) {
+            // An explicit hint (server configuration or a validated first page)
+            // outranks any heuristic.
+            page_size = page_size_hint_;
+        } else {
+            page_size = detect_page_size_from_layout(file, file_size,
+                                                     first_page.data(), first_page_bytes);
         }
+        file.clear();
+        file.seekg(0, std::ios::beg);
 
         uint8_t rf = detect_row_format_from_fsp(first_page.data(), first_page_bytes);
         if (rf == 2 || rf == 3) {
@@ -3365,14 +3464,20 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
 
     uint32_t page_size = UNIV_PAGE_SIZE;
 
-    std::vector<uint8_t> first_page(page_size);
-    file.read(reinterpret_cast<char*>(first_page.data()), page_size);
+    std::vector<uint8_t> first_page(std::max<size_t>(UNIV_PAGE_SIZE, page_size_hint_));
+    file.read(reinterpret_cast<char*>(first_page.data()),
+              static_cast<std::streamsize>(first_page.size()));
     const size_t first_page_bytes = static_cast<size_t>(file.gcount());
-    if (first_page_bytes > 0) {
-        uint32_t detected = detect_page_size_from_fsp(first_page.data(), first_page_bytes);
-        if (detected >= UNIV_PAGE_SIZE_MIN && detected <= UNIV_PAGE_SIZE_MAX) {
-            page_size = detected;
+    if (first_page_bytes >= FIL_HEADER_SIZE) {
+        if (page_size_hint_ >= UNIV_PAGE_SIZE_MIN && page_size_hint_ <= UNIV_PAGE_SIZE_MAX &&
+            file_size % page_size_hint_ == 0 && file_size / page_size_hint_ >= 3) {
+            page_size = page_size_hint_;
+        } else {
+            page_size = detect_page_size_from_layout(file, file_size,
+                                                     first_page.data(), first_page_bytes);
         }
+        file.clear();
+        file.seekg(0, std::ios::beg);
 
         uint8_t rf = detect_row_format_from_fsp(first_page.data(), first_page_bytes);
         if (rf == 2 || rf == 3) {

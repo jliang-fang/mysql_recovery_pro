@@ -383,6 +383,9 @@ struct XfsScanResult {
     uint64_t valid_extents_found = 0;
     uint64_t pages_recovered = 0;
     uint64_t total_records = 0;
+    /// Index pages rejected before structured decoding because their stored
+    /// InnoDB checksum does not match the page contents.
+    uint64_t checksum_rejected_pages = 0;
 
     std::map<uint64_t, std::vector<XfsPageInfo>> pages_by_index_id;
     std::vector<XfsExtentInfo> recovered_extents;

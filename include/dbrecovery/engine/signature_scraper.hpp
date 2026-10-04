@@ -164,6 +164,9 @@ struct PageVersion {
     
     std::vector<uint8_t> data;      ///< Page data
     bool is_selected;               ///< Whether this version is selected for recovery
+    /// Full parse of this version, so conflict resolution can emit exactly the
+    /// page that was found instead of a field-stripped reconstruction.
+    FoundPage snapshot;
     
     // LSN comparison for version selection
     bool is_older_than(const PageVersion& other) const {
@@ -251,7 +254,10 @@ public:
         bool filter_to_index_pages = false;       // Only index pages
         
         // Conflict resolution
-        PageConflictPolicy conflict_policy = PageConflictPolicy::EARLIEST_LSN;
+        // Newest wins: a doublewrite or stale copy of a logical page carries
+        // the same (space_id, page_number) but an older LSN and fewer records.
+        // Picking the oldest copy silently truncates the row set.
+        PageConflictPolicy conflict_policy = PageConflictPolicy::LATEST_LSN;
         
         // Multi-threading
         unsigned num_threads = 4;
@@ -431,8 +437,14 @@ private:
     /**
      * @brief Process a single page entry
      */
+    /// @param emit_immediately deliver to the caller right away; the batched
+    ///        scan() path passes false and delivers once per (space_id,
+    ///        page_number) after conflict resolution instead, which is what
+    ///        keeps duplicate copies of the same page from yielding duplicate
+    ///        rows downstream.
     bool process_page(uint64_t offset, const uint8_t* page_data,
-                      uint32_t page_size, std::function<void(const FoundPage&)> callback);
+                      uint32_t page_size, std::function<void(const FoundPage&)> callback,
+                      bool emit_immediately = true);
 
     /**
      * @brief Register page version for conflict detection

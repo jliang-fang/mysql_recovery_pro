@@ -7,10 +7,12 @@
 
 #include "dbrecovery/innodb/compressed_table_recovery.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <chrono>
 #include <fstream>
 #include <limits>
+#include <vector>
 #include <zlib.h>
 
 namespace dbrecovery {
@@ -285,13 +287,88 @@ std::vector<std::map<std::string, std::string>> CompressedTableRecovery::recover
 
 CompressedTableRecoveryManager::CompressedTableRecoveryManager() {}
 
+namespace {
+
+bool known_fsp_page_type(uint16_t type) {
+    switch (type) {
+        case FIL_PAGE_INDEX:
+        case FIL_PAGE_TYPE_FSP_HDR:
+        case FIL_PAGE_TYPE_FSP_HDR_LEGACY:
+        case FIL_PAGE_TYPE_XDES:
+        case FIL_PAGE_SDI:
+        case FIL_PAGE_SDI_ZIP:   // also FIL_PAGE_TYPE_BLOB (same value)
+        case FIL_PAGE_UNDO_LOG:
+        case FIL_PAGE_COMPRESSED:
+        case 2:    // FIL_PAGE_INODE
+        case 3:    // FIL_PAGE_IBUF_BITMAP? (legacy numbering)
+        case 5:    // FIL_PAGE_IBUF_BITMAP
+        case 11:   // FIL_PAGE_TYPE_XDES (legacy numbering)
+            return true;
+        default:
+            return false;
+    }
+}
+
+/**
+ * Observe the physical page stride from the layout itself.
+ *
+ * Not every server version populates the ZIP_SSIZE bits of FSP_SPACE_FLAGS the
+ * same way, so the declared stride alone can be wrong. A compressed tablespace
+ * is recognizable from structure instead: pages repeat every stride, and each
+ * page's own FIL_PAGE_OFFSET equals its index in that stride. Requiring three
+ * identity-matching pages keeps random payload bytes from being mistaken for a
+ * compressed layout.
+ *
+ * Returns page_size when no shorter stride can be proven.
+ */
+size_t observe_stride_impl(std::ifstream& file, size_t file_size, size_t page_size) {
+    if (file_size < page_size || page_size < 1024) return page_size;
+
+    size_t best = page_size;
+    size_t best_hits = 0;
+    std::vector<uint8_t> head(26);
+    for (size_t divisor = 2; divisor <= 32; divisor *= 2) {
+        const size_t stride = page_size / divisor;
+        if (stride < 1024) break;
+        size_t hits = 0;
+        const size_t limit = std::min<size_t>(file_size / stride, 4096);
+        for (size_t index = 0; index < limit; ++index) {
+            file.clear();
+            file.seekg(static_cast<std::streamoff>(index * stride), std::ios::beg);
+            file.read(reinterpret_cast<char*>(head.data()),
+                      static_cast<std::streamsize>(head.size()));
+            if (file.gcount() < static_cast<std::streamsize>(head.size())) break;
+            if (!known_fsp_page_type(read_be<uint16_t>(head.data(), FIL_PAGE_TYPE_ABS))) continue;
+            if (read_be<uint32_t>(head.data(), FIL_PAGE_OFFSET) != index) continue;
+            if (++hits >= 3 && hits > best_hits) {
+                best = stride;
+                best_hits = hits;
+            }
+        }
+    }
+    return best;
+}
+
+} // namespace
+
+size_t CompressedTableRecovery::observe_physical_stride(const std::string& file_path,
+                                                        size_t page_size) {
+    std::ifstream file(file_path, std::ios::binary | std::ios::ate);
+    if (!file) return page_size;
+    const size_t file_size = static_cast<size_t>(file.tellg());
+    file.seekg(0, std::ios::beg);
+    return observe_stride_impl(file, file_size, page_size);
+}
+
 CompressionStatus CompressedTableRecovery::classify(const std::string& file_path, size_t page_size) const {
     std::ifstream file(file_path, std::ios::binary);
     if (!file) return CompressionStatus::MALFORMED;
 
     std::vector<uint8_t> page0(page_size, 0);
     file.read(reinterpret_cast<char*>(page0.data()), page0.size());
-    if (file.gcount() < 46) return CompressionStatus::MALFORMED;
+    if (file.gcount() < FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t)) {
+        return CompressionStatus::MALFORMED;
+    }
 
     const auto metadata_result = parse_fsp_compression_metadata_detailed(
         page0.data(), static_cast<size_t>(file.gcount()), page_size);
@@ -303,37 +380,48 @@ CompressionStatus CompressedTableRecovery::classify(const std::string& file_path
         return CompressionStatus::MALFORMED;
     }
     const auto& metadata = *metadata_result.metadata;
+    if (metadata.declares_encryption) {
+        return CompressionStatus::COMPRESSED_AND_ENCRYPTED;
+    }
+
+    file.close();
+    const size_t observed = CompressedTableRecovery::observe_physical_stride(file_path, page_size);
+
+    // A proven compressed layout wins over the declared flags: the tablespace
+    // is compressed either way and the decoder is still unvalidated, so the
+    // input must stay out of the structured path. Server versions do not all
+    // populate ZIP_SSIZE identically, so a wrong declaration never downgrades
+    // a demonstrably compressed input to NOT_COMPRESSED.
+    if (observed < page_size) {
+        return CompressionStatus::RECOGNIZED_UNSUPPORTED;
+    }
     if (!metadata.is_compressed()) return CompressionStatus::NOT_COMPRESSED;
 
-    // Verify that the on-disk page stride matches the declared physical page size.
-    // Read the second physical page (stride = physical_page_size) and check for
-    // a valid InnoDB page type.  If the stride doesn't match, the file layout is
-    // inconsistent with the FSP flags declaration.
+    // Flags claim compression but the layout still looks like plain pages:
+    // verify the declared physical stride before reporting a mismatch.
     if (metadata.physical_page_size < page_size) {
-        file.seekg(0, std::ios::end);
-        const size_t file_size = static_cast<size_t>(file.tellg());
-        if (file_size >= metadata.physical_page_size * 2) {
-            file.seekg(static_cast<std::streamoff>(metadata.physical_page_size), std::ios::beg);
-            std::vector<uint8_t> page1(metadata.physical_page_size, 0);
-            file.read(reinterpret_cast<char*>(page1.data()), page1.size());
-            if (file.gcount() < static_cast<std::streamsize>(metadata.physical_page_size)) {
-                return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
-            }
-            const uint16_t page1_type = read_be<uint16_t>(page1.data(), FIL_PAGE_TYPE_ABS);
-            if (page1_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
-                return CompressionStatus::COMPRESSED_AND_ENCRYPTED;
-            }
-            // Accept any known InnoDB page type; anything else means the stride is wrong.
-            if (page1_type != FIL_PAGE_INDEX &&
-                page1_type != FIL_PAGE_TYPE_FSP_HDR &&
-                page1_type != FIL_PAGE_TYPE_XDES &&
-                page1_type != FIL_PAGE_SDI &&
-                page1_type != FIL_PAGE_SDI_ZIP &&
-                page1_type != FIL_PAGE_TYPE_BLOB &&
-                page1_type != FIL_PAGE_UNDO_LOG &&
-                page1_type != FIL_PAGE_COMPRESSED) {
-                return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
-            }
+        std::ifstream probe(file_path, std::ios::binary);
+        if (!probe) return CompressionStatus::MALFORMED;
+        probe.seekg(static_cast<std::streamoff>(metadata.physical_page_size), std::ios::beg);
+        std::vector<uint8_t> page1(metadata.physical_page_size, 0);
+        probe.read(reinterpret_cast<char*>(page1.data()),
+                   static_cast<std::streamsize>(page1.size()));
+        if (probe.gcount() < static_cast<std::streamsize>(metadata.physical_page_size)) {
+            return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
+        }
+        const uint16_t page1_type = read_be<uint16_t>(page1.data(), FIL_PAGE_TYPE_ABS);
+        if (page1_type == FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+            return CompressionStatus::COMPRESSED_AND_ENCRYPTED;
+        }
+        if (page1_type != FIL_PAGE_INDEX &&
+            page1_type != FIL_PAGE_TYPE_FSP_HDR &&
+            page1_type != FIL_PAGE_TYPE_XDES &&
+            page1_type != FIL_PAGE_SDI &&
+            page1_type != FIL_PAGE_SDI_ZIP &&
+            page1_type != FIL_PAGE_TYPE_BLOB &&
+            page1_type != FIL_PAGE_UNDO_LOG &&
+            page1_type != FIL_PAGE_COMPRESSED) {
+            return CompressionStatus::PHYSICAL_LENGTH_MISMATCH;
         }
     }
 
@@ -352,7 +440,12 @@ bool CompressedTableRecovery::decoder_is_validated() {
 bool CompressedTableRecovery::auto_detect_compression(const std::string& file_path) {
     const CompressionStatus status = classify(file_path, page_size_);
     if (status == CompressionStatus::RECOGNIZED_UNSUPPORTED) {
-        // Store the physical page size from FSP flags for metadata reporting
+        // Prefer the stride proven from the layout over the declared ZIP_SSIZE.
+        const size_t observed = CompressedTableRecovery::observe_physical_stride(file_path, page_size_);
+        if (observed > 0 && observed < page_size_) {
+            compressed_page_size_ = observed;
+            return true;
+        }
         std::ifstream file(file_path, std::ios::binary);
         std::vector<uint8_t> page0(page_size_, 0);
         file.read(reinterpret_cast<char*>(page0.data()), page0.size());

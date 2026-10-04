@@ -12,9 +12,11 @@
 #include "dbrecovery/disk/xfs_disk_carver.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
+#include "dbrecovery/export/csv_cell.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
 
 #include <chrono>
@@ -37,6 +39,22 @@
 namespace dbrecovery {
 namespace disk {
 namespace xfs {
+// Column order used for both export and duplicate suppression: InnoDB stores
+// variable and fixed columns in physical storage order.
+std::vector<std::string> ordered_column_names(const catalog::TableSchema& schema) {
+    std::vector<std::pair<uint32_t, std::string>> ordered;
+    ordered.reserve(schema.columns.size());
+    for (const auto& [ordinal, col] : schema.columns) {
+        const uint32_t phys_pos = col.physical_pos > 0 ? col.physical_pos : ordinal;
+        ordered.push_back({phys_pos, col.name});
+    }
+    std::sort(ordered.begin(), ordered.end());
+    std::vector<std::string> names;
+    names.reserve(ordered.size());
+    for (const auto& entry : ordered) names.push_back(entry.second);
+    return names;
+}
+
 
 // Use innodb namespace for read_be functions and InnoDBIndexParser
 using dbrecovery::innodb::read_be;
@@ -2257,11 +2275,35 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                       << index_id << std::endl;
         }
 
+        // The same page can be reachable twice (live file plus write-ahead
+        // copy), so byte-identical rows are collapsed before export.
+        std::set<std::string> seen_rows;
         for (const auto& page_info : pages) {
             if (use_schema) {
+                // Fail closed on checksum mismatch: a page whose stored InnoDB
+                // checksum disagrees with its bytes was altered after it was
+                // written, and decoding it can emit a row that never existed.
+                // Intact tablespaces validate cleanly for every supported
+                // version, so this only excludes damaged pages.
+                if (!dbrecovery::innodb::validate_page_checksum(
+                        page_info.data.data(), page_info.data.size(),
+                        /*strict=*/false).is_valid) {
+                    result.checksum_rejected_pages++;
+                    continue;
+                }
                 // Schema-aware parsing
                 auto records = parse_records_with_schema_xfs(page_info.data, *external_schema_);
-                all_records.insert(all_records.end(), records.begin(), records.end());
+                for (auto& record : records) {
+                    std::string key;
+                    for (const auto& col_name : ordered_column_names(*external_schema_)) {
+                        auto it = record.find(col_name);
+                        key += it == record.end() ? std::string("\x01") : it->second;
+                        key.push_back('\x02');
+                    }
+                    if (seen_rows.insert(std::move(key)).second) {
+                        all_records.push_back(std::move(record));
+                    }
+                }
             }
         }
 
@@ -2318,24 +2360,7 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
 
                         auto it = rec.find(col_name);
                         if (it != rec.end()) {
-                            std::string val = it->second;
-                            // Always quote values that may contain special characters
-                            // This is safer for TEXT, VARCHAR, BLOB, JSON fields
-                            bool needs_quote = val.find(',') != std::string::npos ||
-                                              val.find('"') != std::string::npos ||
-                                              val.find('\n') != std::string::npos ||
-                                              val.find('\r') != std::string::npos;
-
-                            if (needs_quote) {
-                                out << "\"";
-                                for (char c : val) {
-                                    if (c == '"') out << "\"\"";
-                                    else out << c;
-                                }
-                                out << "\"";
-                            } else {
-                                out << val;
-                            }
+                            out << dbrecovery::exporter::csv_cell_from_string(it->second, false);
                         } else {
                             out << "NULL";
                         }
@@ -2614,6 +2639,13 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
     parser.set_columns(columns);
     parser.set_recover_deleted(config_.recover_deleted);
     parser.set_bad_page_mode(2);
+    // Schema-aware export must only trust the on-page record chain, and only
+    // leaf pages carry user rows (interior pages hold node pointers).
+    parser.set_strict(true);
+    if (page_size >= 66) {
+        const uint16_t level = (static_cast<uint16_t>(data[64]) << 8) | data[65];
+        if (level != 0) return {};
+    }
 
     auto index_records = parser.parse_page(data, page_size, 0);
 
@@ -2621,12 +2653,23 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
         if (rec.is_deleted && !config_.recover_deleted) continue;
 
         std::map<std::string, std::string> record;
-        for (size_t i = 0; i < rec.fields.size() && i < columns.size(); i++) {
+        for (size_t i = 0; i < columns.size(); i++) {
             const auto& col = columns[i];
-            if (rec.fields[i].is_null) {
+            if (i >= rec.fields.size() || rec.fields[i].is_null) {
                 record[col.name] = "NULL";
+                continue;
+            }
+            const auto& field = rec.fields[i];
+            const bool binary = col.is_binary ||
+                field.type == innodb::IndexFieldValue::Type::BINARY_VAL;
+            if (binary && !field.raw_bytes.empty()) {
+                record[col.name] = dbrecovery::exporter::hex_encode_bytes(field.raw_bytes);
+            } else if (field.type == innodb::IndexFieldValue::Type::INT_VAL) {
+                record[col.name] = std::to_string(field.int_value);
+            } else if (field.type == innodb::IndexFieldValue::Type::UINT_VAL) {
+                record[col.name] = std::to_string(field.uint_value);
             } else {
-                record[col.name] = rec.fields[i].str_value;
+                record[col.name] = field.str_value;
             }
         }
         if (!record.empty()) {

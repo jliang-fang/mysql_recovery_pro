@@ -1214,7 +1214,9 @@ TEST_F(FSPFlagsCompressionTest, RejectsInvalidOrIncompleteMetadata) {
 
 TEST_F(FSPFlagsCompressionTest, ReportsDetailedMetadataBoundaries) {
     const auto page = create_fsp_page(16384, 2);
-    for (const size_t size : {41u, 42u, 45u}) {
+    // FSP_SPACE_FLAGS lives at FIL_PAGE_DATA + 16 (absolute 54), so any buffer
+    // shorter than 58 bytes is truncated and must never be read past the end.
+    for (const size_t size : {41u, 42u, 45u, 57u}) {
         EXPECT_EQ(parse_fsp_compression_metadata_detailed(page.data(), size, 16384).status,
                   FSPCompressionMetadataStatus::TRUNCATED);
     }
@@ -1222,7 +1224,7 @@ TEST_F(FSPFlagsCompressionTest, ReportsDetailedMetadataBoundaries) {
     for (const uint16_t page_type : {FIL_PAGE_TYPE_FSP_HDR, FIL_PAGE_TYPE_FSP_HDR_LEGACY}) {
         auto header = create_fsp_page(16384, 2);
         write_be<uint16_t>(header.data(), FIL_PAGE_TYPE_ABS, page_type);
-        const auto result = parse_fsp_compression_metadata_detailed(header.data(), 46, 16384);
+        const auto result = parse_fsp_compression_metadata_detailed(header.data(), 58, 16384);
         ASSERT_EQ(result.status, FSPCompressionMetadataStatus::OK);
         ASSERT_TRUE(result.metadata.has_value());
         EXPECT_EQ(result.metadata->logical_page_size, 16384u);

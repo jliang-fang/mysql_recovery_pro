@@ -292,6 +292,10 @@ struct Ext4ScanResult {
     uint64_t deleted_inodes_found = 0;
     uint64_t pages_recovered = 0;
     uint64_t total_records = 0;
+    /// Index pages rejected before structured decoding because their stored
+    /// InnoDB checksum does not match the page contents.  A page in this state
+    /// cannot support row-level claims: decoding it produced a fabricated row.
+    uint64_t checksum_rejected_pages = 0;
 
     std::map<uint64_t, std::vector<Ext4BlockInfo>> pages_by_index_id;
     std::vector<Ext4InodeInfo> recovered_inodes;

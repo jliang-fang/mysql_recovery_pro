@@ -460,6 +460,9 @@ std::optional<SchemalessRecord> SchemaAgnosticScanner::parse_record(
     record.is_deleted = hdr->is_deleted;
 
     // Store raw header
+    if (rec_header_pos + header_size > page_size) {
+        return std::nullopt;
+    }
     record.raw_header.assign(page_data + rec_header_pos, page_data + rec_header_pos + header_size);
 
     // Calculate data boundaries
@@ -479,6 +482,9 @@ std::optional<SchemalessRecord> SchemaAgnosticScanner::parse_record(
         data_end = rec_end;
     }
 
+    if (data_end < rec_offset || data_end > page_size) {
+        return std::nullopt;  // Unbounded record extent: cannot be trusted
+    }
     record.data_length = static_cast<uint16_t>(data_end - rec_offset);
 
     if (record.data_length < 8) {
@@ -971,14 +977,18 @@ std::vector<SchemalessRecord> SchemaAgnosticScanner::parse_ibd(const std::string
     size_t file_size = file.tellg();
     file.seekg(0);
 
-    // Detect page size from file size
-    std::vector<size_t> page_sizes = {16384, 8192, 32768, 4096, 65536};
-    size_t page_size = 16384;
-
-    for (size_t ps : page_sizes) {
-        if (ps != 0 && file_size % ps == 0 && file_size >= ps * 10) {
-            page_size = ps;
-            break;
+    // Prefer the caller's page size: InnoDB pages carry no size field and the
+    // file-size heuristic below assumes >= 10 pages, so a small tablespace
+    // would otherwise be read at the wrong stride.
+    size_t page_size = config_.page_size;
+    if (page_size == 0 || file_size % page_size != 0) {
+        std::vector<size_t> page_sizes = {16384, 8192, 32768, 4096, 65536};
+        page_size = 16384;
+        for (size_t ps : page_sizes) {
+            if (ps != 0 && file_size % ps == 0 && file_size >= ps * 10) {
+                page_size = ps;
+                break;
+            }
         }
     }
 

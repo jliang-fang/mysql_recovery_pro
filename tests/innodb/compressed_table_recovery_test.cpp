@@ -28,7 +28,7 @@ std::vector<uint8_t> make_fsp_page(size_t page_size, uint8_t zip_ssize,
     std::vector<uint8_t> page(page_size, 0);
     write_be16(page.data() + dbrecovery::innodb::FIL_PAGE_TYPE_ABS, page_type);
     write_be32(page.data() + dbrecovery::innodb::FSP_SPACE_FLAGS_OFFSET,
-               static_cast<uint32_t>(zip_ssize) << 1);
+               (static_cast<uint32_t>(zip_ssize) << 1) | 0x21);
     return page;
 }
 

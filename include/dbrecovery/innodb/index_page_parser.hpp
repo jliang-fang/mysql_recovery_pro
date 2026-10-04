@@ -647,6 +647,17 @@ public:
     void set_recover_deleted(bool enable) { recover_deleted_ = enable; }
 
     /**
+     * @brief Enable strict decoding for schema-aware recovery
+     *
+     * When strict decoding is enabled the parser only accepts records found by
+     * walking the on-page record chain. The brute-force page scans
+     * (parse_page_fast / parse_page_try) fabricate plausible-looking rows from
+     * unrelated bytes, which is acceptable for evidence but never acceptable
+     * for exportable structured recovery.
+     */
+    void set_strict(bool enable) { strict_ = enable; }
+
+    /**
      * @brief Set bad page handling mode
      * 0 = skip bad pages (default)
      * 1 = fast mode (page directory traversal)
@@ -668,6 +679,16 @@ public:
      * @brief Get current MySQL version
      */
     uint32_t get_mysql_version() const { return mysql_version_; }
+
+    /**
+     * @brief Pin the physical page size before parsing a file
+     *
+     * InnoDB pages carry no page-size field, so a hint taken from the server
+     * configuration (or from a correctly detected first page) is the only
+     * authoritative source. Without it `parse_ibd_force` falls back to layout
+     * detection, which must not guess 16 KiB for an 8 KiB tablespace.
+     */
+    void set_page_size_hint(uint32_t size) { page_size_hint_ = size; }
 
     /**
      * @brief Enable/disable debug output
@@ -946,10 +967,15 @@ private:
     bool verbose_ = false;
     bool recover_deleted_ = true;
     int bad_page_mode_ = 0;
+    bool strict_ = false;             // true = chain-only decoding for schema-aware export
     uint32_t off_page_flag_ = OFF_PAGE_FLAG_DYNAMIC;
     uint32_t mysql_version_ = 0;      // 0 = not set; callers must set explicitly (e.g. 50600/50700/80000/80400/90000)
     uint64_t target_index_id_ = 0;     // 0 = accept all
     uint8_t row_format_hint_ = 0;      // 0 = auto-detect
+    uint32_t page_size_hint_ = 0;      // 0 = derive from the file layout
+    /// Set when a field length could not be bounded by the record buffer.
+    /// The whole record is then rejected instead of exporting a shifted row.
+    bool field_size_guard_overflow_ = false;
 
     uint64_t total_records_ = 0;
     uint64_t total_pages_ = 0;

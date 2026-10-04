@@ -18,8 +18,11 @@ namespace innodb {
 // FIL_HEADER_SIZE = 38 bytes
 
 /// @brief Size of the FIL header (fixed at 38 bytes)
-constexpr uint16_t FIL_HEADER_SIZE      = 38;
-constexpr uint16_t FSP_SPACE_FLAGS_OFFSET = FIL_HEADER_SIZE + 4;
+constexpr uint16_t FIL_HEADER_SIZE = 38;
+/// @brief Offset of the tablespace header within page 0 (FIL_PAGE_DATA).
+constexpr uint16_t FSP_HEADER_OFFSET = FIL_HEADER_SIZE;
+/// @brief FSP_SPACE_FLAGS is 16 bytes into the tablespace header.
+constexpr uint16_t FSP_SPACE_FLAGS_OFFSET = FSP_HEADER_OFFSET + 16;
 
 struct FSPCompressionMetadata {
     uint32_t raw_flags;
@@ -27,6 +30,7 @@ struct FSPCompressionMetadata {
     uint8_t zip_ssize;
     size_t physical_page_size;
     bool declares_compression;
+    bool declares_encryption;
 
     bool is_compressed() const { return declares_compression; }
 };
@@ -54,8 +58,18 @@ struct FSPCompressionMetadataParseResult {
 /// POST_ANTELOPE bit (bit 0): MySQL 5.7+ sets this, 5.6 and earlier clear it.
 /// Indicates COMPACT+ row format (ANTELOPE format not used).
 constexpr uint32_t FSP_FLAGS_POST_ANTELOPE = 0x1;
-/// @brief ATOMIC_BLOBS bit (bit 5): MySQL 5.7+ sets this for atomic BLOB pointers.
-constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS  = 0x20;
+/// @brief ATOMIC_BLOBS bit (bit 5): MySQL uses this for atomic BLOB pointers.
+constexpr uint32_t FSP_FLAGS_ATOMIC_BLOBS = 0x20;
+/// @brief DATA_DIR bit (bit 10): tablespace resides in an external data directory.
+constexpr uint32_t FSP_FLAGS_DATA_DIR = 0x400;
+/// @brief SHARED bit (bit 11): shared/general tablespace.
+constexpr uint32_t FSP_FLAGS_SHARED = 0x800;
+/// @brief Temporary tablespace bit (bit 12).
+constexpr uint32_t FSP_FLAGS_TEMPORARY = 0x1000;
+/// @brief ENCRYPTION bit (bit 13).
+constexpr uint32_t FSP_FLAGS_ENCRYPTION = 0x2000;
+/// @brief PAGE_COMPRESSION bit (bit 14).
+constexpr uint32_t FSP_FLAGS_PAGE_COMPRESSION = 0x4000;
 
 /// @brief Offset of page type within FIL Header (relative to start of page)
 /// In InnoDB, FIL_PAGE_TYPE is at offset 24 (relative to page start)
@@ -150,7 +164,8 @@ inline FSPCompressionMetadataParseResult parse_fsp_compression_metadata_detailed
 
     return {FSPCompressionMetadataStatus::OK,
             FSPCompressionMetadata{flags, logical_page_size, zip_ssize,
-                                   physical_page_size, zip_ssize != 0}};
+                                   physical_page_size, zip_ssize != 0,
+                                   (flags & FSP_FLAGS_ENCRYPTION) != 0}};
 }
 
 inline std::optional<FSPCompressionMetadata> parse_fsp_compression_metadata(

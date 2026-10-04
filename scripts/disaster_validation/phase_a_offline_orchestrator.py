@@ -13,6 +13,7 @@ sealed ground truth before a case may report PASS.
 from __future__ import annotations
 
 import argparse
+import csv
 from dataclasses import asdict
 import json
 import os
@@ -379,7 +380,7 @@ class PhaseAOrchestrator:
         self.runner = runner
         self.run_id = run_id or (
             f"phase-a-{item.version.replace('.', '')}-{item.row_format.lower()}-"
-            f"{item.dataset_profile}-{int(time.time())}"
+            f"{item.dataset_profile}-p{item.page_size}-{int(time.time())}"
         )
         self.evidence_root = run_root
         self.capability = CAPABILITIES[item.version]
@@ -411,6 +412,13 @@ class PhaseAOrchestrator:
                 self.capability.image,
                 "--innodb-file-per-table=1",
                 f"--innodb-page-size={self.item.page_size}",
+                # MySQL 5.6 defaults to the Antelope file format, which silently
+                # downgrades ROW_FORMAT=DYNAMIC/COMPRESSED to COMPACT. Pin
+                # Barracuda so the requested row format is the one tested.
+                *(["--innodb-file-format=Barracuda",
+                   "--innodb-file-format-max=Barracuda",
+                   "--innodb-large-prefix=ON"]
+                  if self.item.version.startswith("5.") else []),
             ]
             _run_cmd(podman_argv, timeout=120, runner=self.runner)
             _wait_for_mysql(self.container_name, timeout=60, runner=self.runner)
@@ -487,38 +495,50 @@ class PhaseAOrchestrator:
                 blockers.append("sql_contract_rejected")
 
             if csv_ok and csv_result["artifact"].is_file():
-                csv_doc = csv_to_canonical_dataset(
-                    csv_path=csv_result["artifact"],
-                    database=self.database,
-                    table=self.table,
-                    schema=truth_doc["schema"],
-                    mysql_version=self.item.version,
-                )
-                (run_dir / "recovery-output" / "csv" / "recovered_typed.json").write_text(
-                    canonical_json(csv_doc) + "\n", encoding="utf-8")
-                comparisons["truth_vs_csv"] = compare(
-                    truth_doc, csv_doc, f"{self.run_id}_truth_vs_csv")
-                if not comparisons["truth_vs_csv"]["strict_pass"]:
-                    blockers.append("csv_strict_compare_failed")
+                # A CSV that the canonical decoder cannot parse is itself a
+                # failed case: record it instead of aborting the whole batch.
+                try:
+                    csv_doc = csv_to_canonical_dataset(
+                        csv_path=csv_result["artifact"],
+                        database=self.database,
+                        table=self.table,
+                        schema=truth_doc["schema"],
+                        mysql_version=self.item.version,
+                    )
+                except (ValueError, TypeError, KeyError, csv.Error) as error:
+                    csv_doc = None
+                    blockers.append(f"csv_parse_failed:{type(error).__name__}")
+                if csv_doc is not None:
+                    (run_dir / "recovery-output" / "csv" / "recovered_typed.json").write_text(
+                        canonical_json(csv_doc) + "\n", encoding="utf-8")
+                    comparisons["truth_vs_csv"] = compare(
+                        truth_doc, csv_doc, f"{self.run_id}_truth_vs_csv")
+                    if not comparisons["truth_vs_csv"]["strict_pass"]:
+                        blockers.append("csv_strict_compare_failed")
             elif csv_ok:
                 blockers.append("csv_artifact_missing")
 
             if sql_ok and sql_result["artifact"].is_file():
-                sql_rows = parse_recovered_sql(sql_result["artifact"])
-                sql_doc = sql_rows_to_canonical_dataset(
-                    sql_rows, self.database, self.table,
-                    truth_doc["schema"], self.item.version)
-                (run_dir / "import-validation" / "sql_typed.json").write_text(
-                    canonical_json(sql_doc) + "\n", encoding="utf-8")
-                comparisons["truth_vs_sql"] = compare(
-                    truth_doc, sql_doc, f"{self.run_id}_truth_vs_sql")
-                if not comparisons["truth_vs_sql"]["strict_pass"]:
-                    blockers.append("sql_strict_compare_failed")
-                if csv_doc is not None and sql_doc is not None:
-                    comparisons["csv_vs_sql"] = compare(
-                        csv_doc, sql_doc, f"{self.run_id}_csv_vs_sql")
-                    if not comparisons["csv_vs_sql"]["strict_pass"]:
-                        blockers.append("csv_sql_disagreement")
+                try:
+                    sql_rows = parse_recovered_sql(sql_result["artifact"])
+                    sql_doc = sql_rows_to_canonical_dataset(
+                        sql_rows, self.database, self.table,
+                        truth_doc["schema"], self.item.version)
+                except (ValueError, TypeError, KeyError) as error:
+                    sql_doc = None
+                    blockers.append(f"sql_parse_failed:{type(error).__name__}")
+                if sql_doc is not None:
+                    (run_dir / "import-validation" / "sql_typed.json").write_text(
+                        canonical_json(sql_doc) + "\n", encoding="utf-8")
+                    comparisons["truth_vs_sql"] = compare(
+                        truth_doc, sql_doc, f"{self.run_id}_truth_vs_sql")
+                    if not comparisons["truth_vs_sql"]["strict_pass"]:
+                        blockers.append("sql_strict_compare_failed")
+                    if csv_doc is not None:
+                        comparisons["csv_vs_sql"] = compare(
+                            csv_doc, sql_doc, f"{self.run_id}_csv_vs_sql")
+                        if not comparisons["csv_vs_sql"]["strict_pass"]:
+                            blockers.append("csv_sql_disagreement")
             elif sql_ok:
                 blockers.append("sql_artifact_missing")
 
@@ -592,7 +612,11 @@ class PhaseAOrchestrator:
                     runner=self.runner)
         row_fmt = f"ROW_FORMAT={self.item.row_format}"
         if self.item.row_format == "COMPRESSED":
-            row_fmt += " KEY_BLOCK_SIZE=8"
+            # KEY_BLOCK_SIZE must never exceed innodb_page_size (MySQL rejects
+            # the table outright), so derive it and keep a 2:1 ratio on every
+            # page size the matrix supports.
+            key_block = max(1, min(8, self.item.page_size // 2048))
+            row_fmt += f" KEY_BLOCK_SIZE={key_block}"
         has_json = self.capability.supports_json
         col_json = "`payload` JSON," if has_json else ""
         ddl = (
@@ -717,6 +741,8 @@ def main() -> None:
                         help="Dataset profiles: smoke, 100k, 1m")
     parser.add_argument("--row-formats", nargs="+", default=["DYNAMIC"],
                         help="Row formats: DYNAMIC, COMPACT, REDUNDANT, COMPRESSED")
+    parser.add_argument("--page-sizes", nargs="+", type=int, default=[16384],
+                        help="InnoDB page sizes to validate")
     parser.add_argument("--evidence-root", type=Path, default=EVIDENCE_ROOT,
                         help="Artifact evidence root")
     args = parser.parse_args()
@@ -727,25 +753,40 @@ def main() -> None:
     for version in args.versions:
         for scale in args.scales:
             for rf in args.row_formats:
-                item = matrix_item(version=version, filesystem="ext4",
-                                   scenario="baseline", dataset_profile=scale,
-                                   row_format=rf)
-                if item.status == "UNSUPPORTED":
-                    print(f"Skipping unsupported matrix combination: "
-                          f"{version} / {rf} / {scale} ({item.reason})")
-                    continue
-                print(f"\n=======================================================")
-                print(f"Executing Phase A: MySQL {version} | Format: {rf} | Scale: {scale}")
-                print(f"=======================================================")
-                orchestrator = PhaseAOrchestrator(args.evidence_root, item)
-                res = orchestrator.execute()
-                print(f"Result for {res['run_id']}: {res['status']}")
-                summary_results.append(res)
+                for page_size in args.page_sizes:
+                    item = matrix_item(version=version, filesystem="ext4",
+                                       scenario="baseline", dataset_profile=scale,
+                                       row_format=rf, page_size=page_size)
+                    if item.status == "UNSUPPORTED":
+                        print(f"Skipping unsupported matrix combination: "
+                              f"{version} / {rf} / {scale} / {page_size} ({item.reason})")
+                        continue
+                    print(f"\n=======================================================")
+                    print(f"Executing Phase A: MySQL {version} | Format: {rf} | "
+                          f"Page: {page_size} | Scale: {scale}")
+                    print(f"=======================================================")
+                    orchestrator = PhaseAOrchestrator(args.evidence_root, item)
+                    # One unusable matrix cell must never abort the batch: the
+                    # evidence for every other cell is already on disk.
+                    try:
+                        res = orchestrator.execute()
+                    except Exception as error:  # noqa: BLE001 - recorded, not fatal
+                        res = {"run_id": f"phase-a-{version.replace('.', '')}-{rf}-"
+                                         f"{scale}-p{page_size}",
+                               "status": "SETUP_ERROR",
+                               "reason": f"{type(error).__name__}: {error}"}
+                    print(f"Result for {res['run_id']}: {res['status']}")
+                    if res.get("reason"):
+                        print(f"  reason: {res['reason']}")
+                    summary_results.append(res)
 
     print("\n================== PHASE A SUMMARY ==================")
     all_pass = all(r["status"] == "PASS" for r in summary_results)
     for r in summary_results:
-        print(f"  [{r['status']}] {r['run_id']}")
+        line = f"  [{r['status']}] {r['run_id']}"
+        if r.get("reason"):
+            line += f" :: {r['reason']}"
+        print(line)
     print(f"Overall Phase A: {'ALL PASS' if all_pass else 'SOME FAILED'}\n")
 
 

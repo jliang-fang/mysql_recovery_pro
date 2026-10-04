@@ -476,6 +476,46 @@ inline std::string RecoveryCLI::escape_csv_field(const std::string& value) {
     return value;
 }
 
+// Apply the flag tokens that may follow a `name:type[:size][:flags]`
+// definition to a catalog column.
+//
+// The disk-carving schema parsers accept the same tokens the Phase A/B
+// validators emit (`:pk`, `:notnull`, `:unsigned`, `:signed` and a charset
+// name such as `utf8mb4`); anything else is rejected so a mistyped flag can
+// never silently produce a wrong decode.
+inline bool apply_schema_column_flags(catalog::ColumnInfo& col,
+                                      const std::vector<std::string>& flags) {
+    for (const auto& raw_flag : flags) {
+        std::string flag = raw_flag;
+        std::transform(flag.begin(), flag.end(), flag.begin(),
+                       [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+        while (!flag.empty() && std::isspace(static_cast<unsigned char>(flag.front()))) flag.erase(0, 1);
+        while (!flag.empty() && std::isspace(static_cast<unsigned char>(flag.back()))) flag.pop_back();
+        if (flag.empty()) continue;
+
+        if (flag == "pk" || flag == "primary" || flag == "key" ||
+            flag == "notnull" || flag == "not_null" || flag == "not null") {
+            col.is_nullable = false;
+        } else if (flag == "unsigned") {
+            col.is_signed = false;
+        } else if (flag == "signed") {
+            col.is_signed = true;
+        } else if (flag == "utf8mb4" || flag == "utf8mb3" || flag == "utf8" ||
+                   flag == "latin1" || flag == "ascii" || flag == "binary") {
+            // Mirrors MySQL's charset numbers; charset_mb_maxlen() maps them to
+            // the byte width used when reading variable-length columns.
+            if (flag == "utf8mb4") { col.charset_id = 45; col.collation_id = 45; }
+            else if (flag == "utf8" || flag == "utf8mb3") { col.charset_id = 33; col.collation_id = 33; }
+            else if (flag == "latin1") { col.charset_id = 8; col.collation_id = 8; }
+            else if (flag == "ascii") { col.charset_id = 11; col.collation_id = 11; }
+            else { col.charset_id = 63; col.collation_id = 63; }
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
 inline bool RecoveryCLI::export_data(const std::string& output_path, const std::string& format,
                                      const std::vector<std::map<std::string, std::string>>& records) {
     std::vector<std::string> headers;
@@ -495,31 +535,311 @@ inline bool RecoveryCLI::export_data(const std::string& output_path, const std::
     return false;
 }
 
+inline bool parse_disk_schema_string(const std::string& schema_str, uint32_t page_size,
+                                     catalog::TableSchema& out, const char* origin) {
+        if (schema_str.empty()) return false;
+        {
+            std::cout << "[INFO] Parsing schema from --schema option for " << origin << "\n";
+            auto trim_schema_token = [](std::string value) {
+                const auto first = value.find_first_not_of(" \t\r\n");
+                if (first == std::string::npos) return std::string{};
+                const auto last = value.find_last_not_of(" \t\r\n");
+                return value.substr(first, last - first + 1);
+            };
+            auto split_schema_columns = [&](const std::string& value) {
+                std::vector<std::string> columns;
+                size_t start = 0;
+                size_t depth = 0;
+                for (size_t i = 0; i < value.size(); ++i) {
+                    if (value[i] == '(') {
+                        ++depth;
+                    } else if (value[i] == ')') {
+                        if (depth == 0) return std::vector<std::string>{};
+                        --depth;
+                    } else if (value[i] == ',' && depth == 0) {
+                        columns.push_back(trim_schema_token(value.substr(start, i - start)));
+                        start = i + 1;
+                    }
+                }
+                if (depth != 0) return std::vector<std::string>{};
+                columns.push_back(trim_schema_token(value.substr(start)));
+                return columns;
+            };
+            auto parse_schema_integer = [&](const std::string& value, int* output) {
+                const std::string token = trim_schema_token(value);
+                if (token.empty()) return false;
+                int parsed = 0;
+                const char* begin = token.data();
+                const char* end = begin + token.size();
+                const auto conversion = std::from_chars(begin, end, parsed);
+                if (conversion.ec != std::errc{} || conversion.ptr != end || parsed < 0) {
+                    return false;
+                }
+                *output = parsed;
+                return true;
+            };
+            auto parse_type_expression = [&](const std::string& expression,
+                                             std::string* type,
+                                             std::vector<int>* arguments) {
+                const auto open = expression.find('(');
+                if (open == std::string::npos) {
+                    *type = trim_schema_token(expression);
+                    return !type->empty();
+                }
+                if (expression.back() != ')' || expression.find('(', open + 1) != std::string::npos) {
+                    return false;
+                }
+                *type = trim_schema_token(expression.substr(0, open));
+                const std::string argument_text = expression.substr(open + 1, expression.size() - open - 2);
+                if (argument_text.empty()) return false;
+                std::istringstream arguments_stream(argument_text);
+                std::string argument;
+                while (std::getline(arguments_stream, argument, ',')) {
+                    int parsed = 0;
+                    if (!parse_schema_integer(argument, &parsed)) return false;
+                    arguments->push_back(parsed);
+                }
+                return !type->empty() && !arguments->empty();
+            };
+
+            catalog::TableSchema parsed_schema;
+            parsed_schema.table_name = "recovered_table";
+            parsed_schema.page_size = page_size;
+            bool schema_valid = true;
+            int ordinal = 1;
+            const auto column_definitions = split_schema_columns(schema_str);
+            if (column_definitions.empty()) schema_valid = false;
+            for (const auto& col_def : column_definitions) {
+                if (!schema_valid || col_def.empty()) {
+                    schema_valid = false;
+                    break;
+                }
+
+                const auto separator = col_def.find(':');
+                if (separator == std::string::npos) {
+                    schema_valid = false;
+                    break;
+                }
+                // Extra colons are expected: `name:type[:size][:flags]`
+                // carries pk/notnull/charset flags after the type.
+                const std::string name = trim_schema_token(col_def.substr(0, separator));
+                const std::string type_and_flags = trim_schema_token(col_def.substr(separator + 1));
+                if (name.empty() || type_and_flags.empty()) {
+                    schema_valid = false;
+                    break;
+                }
+
+                std::istringstream token_stream(type_and_flags);
+                std::string type_expression;
+                token_stream >> type_expression;
+                std::vector<std::string> flags;
+                std::string flag;
+                while (token_stream >> flag) flags.push_back(flag);
+
+                // The canonical harness format is `name:type[:size][:flags]`
+                // (e.g. `id:bigint:pk:notnull`), so flags may also be
+                // colon-separated rather than space-separated. Split them
+                // off without breaking `decimal(12,4)` or `varchar(128)`.
+                if (type_and_flags.find(':') != std::string::npos) {
+                    std::string colon_parts;
+                    std::vector<std::string> tokens;
+                    int depth = 0;
+                    std::string current;
+                    for (char character : type_and_flags) {
+                        if (character == '(') ++depth;
+                        else if (character == ')') --depth;
+                        else if (character == ':' && depth == 0) {
+                            tokens.push_back(trim_schema_token(current));
+                            current.clear();
+                            continue;
+                        }
+                        current.push_back(character);
+                    }
+                    tokens.push_back(trim_schema_token(current));
+                    if (tokens.size() > 1 && !tokens[0].empty()) {
+                        type_expression = tokens[0];
+                        for (size_t index = 1; index < tokens.size(); ++index) {
+                            if (!tokens[index].empty()) flags.push_back(tokens[index]);
+                        }
+                    }
+                }
+
+                catalog::ColumnInfo col{};
+                col.name = name;
+                col.ordinal = static_cast<uint32_t>(ordinal);
+                col.physical_pos = static_cast<uint32_t>(ordinal);
+                col.is_nullable = true;
+                col.is_signed = true;
+                col.charset_id = 255;
+                col.collation_id = 255;
+
+                std::string type_str;
+                std::vector<int> arguments;
+                if (!parse_type_expression(type_expression, &type_str, &arguments)) {
+                    schema_valid = false;
+                    break;
+                }
+                std::transform(type_str.begin(), type_str.end(), type_str.begin(),
+                               [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
+
+                uint32_t server_type = 0;
+                if (type_str == "INT" || type_str == "INTEGER") {
+                    server_type = 3; col.column_length = 4;
+                } else if (type_str == "BIGINT") {
+                    server_type = 8; col.column_length = 8;
+                } else if (type_str == "SMALLINT") {
+                    server_type = 2; col.column_length = 2;
+                } else if (type_str == "TINYINT") {
+                    server_type = 1; col.column_length = 1;
+                } else if (type_str == "MEDIUMINT") {
+                    server_type = 9; col.column_length = 3;
+                } else if (type_str == "FLOAT") {
+                    server_type = 4; col.column_length = 4;
+                } else if (type_str == "DOUBLE") {
+                    server_type = 5; col.column_length = 8;
+                } else if (type_str == "DECIMAL" || type_str == "NUMERIC") {
+                    if (arguments.size() != 2 || arguments[0] <= 0 || arguments[1] < 0 ||
+                        arguments[1] > arguments[0]) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 246;
+                    col.numeric_precision = arguments[0];
+                    col.numeric_scale = arguments[1];
+                    col.column_length = static_cast<uint32_t>(arguments[0]);
+                } else if (type_str == "VARCHAR" || type_str == "VARBINARY" || type_str == "CHAR") {
+                    if (arguments.size() != 1 || arguments[0] <= 0) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = type_str == "CHAR" ? 254 : 253;
+                    col.column_length = static_cast<uint32_t>(arguments[0]);
+                    col.is_variable_length = type_str != "CHAR";
+                    if (type_str == "VARBINARY") {
+                        col.charset_id = 63;
+                        col.collation_id = 63;
+                    }
+                } else if (type_str == "TEXT") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 252;
+                    col.is_variable_length = true;
+                } else if (type_str == "BLOB") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 252;
+                    col.is_variable_length = true;
+                    col.charset_id = 63;
+                    col.collation_id = 63;
+                } else if (type_str == "JSON") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 245;
+                    col.is_variable_length = true;
+                } else if (type_str == "ENUM") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 247; col.column_length = 1;
+                } else if (type_str == "SET") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 248; col.column_length = 1;
+                } else if (type_str == "DATETIME") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 12; col.column_length = 8;
+                } else if (type_str == "DATE") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 10; col.column_length = 3;
+                } else if (type_str == "GEOMETRY") {
+                    if (!arguments.empty()) {
+                        schema_valid = false;
+                        break;
+                    }
+                    server_type = 255; col.is_variable_length = true;
+                } else {
+                    schema_valid = false;
+                    break;
+                }
+
+                const auto conversion = catalog::convert_column_type_id(
+                    server_type, catalog::TypeIdDomain::kMysqlServer);
+                if (!conversion.ok) {
+                    schema_valid = false;
+                    break;
+                }
+                col.mysql_type_id = conversion.parser_type;
+                if (!apply_schema_column_flags(col, flags)) {
+                    schema_valid = false;
+                    break;
+                }
+                if (!schema_valid) break;
+                parsed_schema.columns[static_cast<uint32_t>(ordinal)] = col;
+                ++ordinal;
+            }
+
+            if (!schema_valid || !parsed_schema.validate()) {
+                std::cerr << "[ERROR] Invalid --schema definition\n";
+                return false;
+            }
+            out = parsed_schema;
+            std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
+            for (const auto& [ord, col] : parsed_schema.columns) {
+                std::cout << "  [" << ord << "] " << col.name << " mysql_type=" << col.mysql_type_id
+                          << " is_signed=" << col.is_signed << "\n";
+            }
+        }
+    return out.columns.empty() ? false : true;
+}
+
+
+// Render a recovered binary value as 0x<hex>.
+//
+// The index parser already returns hex text for binary columns, but other
+// paths hand back raw bytes; both forms must converge on one representation
+// so CSV and SQL agree byte for byte.
+inline std::string encode_binary_record(const std::string& value) {
+    if (value.size() >= 2 && value.size() % 2 == 0 &&
+        value.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos) {
+        std::string lowered = "0x";
+        lowered.reserve(value.size() + 2);
+        for (char character : value) lowered.push_back(static_cast<char>(std::tolower(character)));
+        return lowered;
+    }
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string encoded = "0x";
+    encoded.reserve(value.size() * 2 + 2);
+    for (unsigned char byte : value) {
+        encoded.push_back(digits[byte >> 4]);
+        encoded.push_back(digits[byte & 0x0f]);
+    }
+    return encoded;
+}
+
 inline int RecoveryCLI::run(int argc, char** argv) {
     const std::string result_json_path = parser_.get_option("result-json", "");
     std::optional<dbrecovery::tools::UnifiedRecoveryResult> unified_result;
-    auto write_result_json = [&](nlohmann::json result) {
-        if (result_json_path.empty()) {
-            return true;
-        }
+    // Shared writer for every mode that must produce an auditable
+    // format_version 2 contract (disk carving, DROP TABLE, failures, ...).
+    auto emit_result_contract = [&](const ResultContract& contract,
+                                    nlohmann::json details_source) {
+        if (result_json_path.empty()) return true;
 
-        const std::string explicit_table = parser_.get_option("table-name", "");
-        const std::string input_ibd = parser_.get_option("ibd", "");
-        const std::string input_source = !input_ibd.empty()
-            ? input_ibd : parser_.get_option("device-path", "");
-        std::string fallback_table = explicit_table;
-        if (fallback_table.empty() && !input_ibd.empty()) {
-            try {
-                fallback_table = fs::path(input_ibd).stem().string();
-            } catch (...) {
-            }
-        }
-        if (fallback_table.empty()) fallback_table = "recovered_table";
-
-        const ResultContract contract = unified_result.has_value()
-            ? result_contract_from_unified(
-                  *unified_result, fallback_table, input_source)
-            : result_contract_from_legacy(result, fallback_table, input_source);
         nlohmann::json output = result_contract_object(contract);
 
         static const std::set<std::string> canonical_keys = {
@@ -533,7 +853,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             "compression_classification_basis", "decoder_validated", "compression_rejection_reason"
         };
         nlohmann::json details = nlohmann::json::object();
-        for (const auto& [key, value] : result.items()) {
+        for (const auto& [key, value] : details_source.items()) {
             if (!canonical_keys.contains(key)) details[key] = value;
         }
         if (!details.empty()) output["details"] = std::move(details);
@@ -559,6 +879,71 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
         return true;
     };
+    // Build the format_version 2 contract for filesystem/raw carving runs.
+    // Carving never returns importable rows: independent validation is the
+    // only path to importability, and evidence-only output must be labelled
+    // as such instead of being reported as a successful recovery.
+    auto make_carving_contract = [&](const std::string& method,
+                                     uint64_t structured_rows,
+                                     uint64_t evidence_fragments,
+                                     uint64_t pages_scanned,
+                                     const std::string& schema_source,
+                                     const std::string& schema_trust_level,
+                                     const std::string& classification,
+                                     bool success,
+                                     const std::string& rejection_reason,
+                                     const std::string& reason,
+                                     uint64_t checksum_mismatches = 0) {
+        ResultContract contract;
+        contract.recovery_method = method;
+        contract.structured_rows = structured_rows;
+        contract.evidence_fragments = evidence_fragments;
+        contract.total_pages_scanned = pages_scanned;
+        contract.checksum_mismatches = checksum_mismatches;
+        contract.schema_source = schema_source;
+        contract.schema_trust_level = schema_trust_level;
+        contract.classification = classification;
+        contract.success = success;
+        contract.export_success = structured_rows > 0 &&
+                                  schema_trust_level != "EVIDENCE_ONLY";
+        contract.export_rejection_reason =
+            contract.export_success ? "" : (rejection_reason.empty() ? reason : rejection_reason);
+        contract.importable = false;
+        contract.reason = reason;
+        contract.logical_page_size =
+            static_cast<uint64_t>(parser_.get_int_option("page-size", 16384).value_or(16384));
+        contract.compression_status = "UNKNOWN";
+        contract.compression_classification_basis = "filesystem_carving";
+        contract.damage_level = structured_rows == 0
+            ? common::DamageLevel::L3_SEVERE : common::DamageLevel::NONE;
+        return contract;
+    };
+
+    auto write_result_json = [&](nlohmann::json result) {
+        if (result_json_path.empty()) {
+            return true;
+        }
+
+        const std::string explicit_table = parser_.get_option("table-name", "");
+        const std::string input_ibd = parser_.get_option("ibd", "");
+        const std::string input_source = !input_ibd.empty()
+            ? input_ibd : parser_.get_option("device-path", "");
+        std::string fallback_table = explicit_table;
+        if (fallback_table.empty() && !input_ibd.empty()) {
+            try {
+                fallback_table = fs::path(input_ibd).stem().string();
+            } catch (...) {
+            }
+        }
+        if (fallback_table.empty()) fallback_table = "recovered_table";
+
+        const ResultContract contract = unified_result.has_value()
+            ? result_contract_from_unified(
+                  *unified_result, fallback_table, input_source)
+            : result_contract_from_legacy(result, fallback_table, input_source);
+        return emit_result_contract(contract, result);
+    };
+
 
     // 解析参数
     bool show_version_only = parser_.get_bool_option("version", false);
@@ -2942,6 +3327,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         bool raw_block_source = false;
         std::optional<dbrecovery::safety::AuthorizedRawDevice> authorized_raw_device;
+        // Populated when a filesystem-specific scanner fails and the generic
+        // raw carver takes over, so the final contract cannot hide the reason.
+        std::vector<std::string> filesystem_fallback_errors;
 
 #ifdef __linux__
         struct stat source_status {};
@@ -3039,170 +3427,26 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::optional<catalog::TableSchema> xfs_schema = load_schema_from_file(schema_file_path);
 
             // Also try --schema command line string if no schema file
+            // Also try --schema command line string if no schema file
             if (!xfs_schema.has_value() && !schema_str.empty()) {
-                std::cout << "[INFO] Parsing schema from --schema option for XFS recovery\n";
                 catalog::TableSchema parsed_schema;
-                parsed_schema.table_name = "recovered_table";
-                parsed_schema.page_size = page_size;
-
-                // Parse schema string: "col1:type[:size][:pk],col2:type..."
-                // Support both formats:
-                //   - "name:type:size:pk" (colon-separated, current test format)
-                //   - "name type:size:extra" (space-separated for type)
-                std::istringstream ss(schema_str);
-                std::string col_def;
-                int ordinal = 1;
-                while (std::getline(ss, col_def, ',')) {
-                    catalog::ColumnInfo col;
-
-                    // Trim whitespace
-                    col_def.erase(0, col_def.find_first_not_of(" \t"));
-                    col_def.erase(col_def.find_last_not_of(" \t") + 1);
-
-                    if (col_def.empty()) continue;
-
-                    // Split by colon
-                    std::istringstream cs(col_def);
-                    std::string token;
-                    std::vector<std::string> parts;
-                    while (std::getline(cs, token, ':')) {
-                        // Trim each part
-                        token.erase(0, token.find_first_not_of(" \t"));
-                        token.erase(token.find_last_not_of(" \t") + 1);
-                        parts.push_back(token);
-                    }
-
-                    if (parts.size() >= 2) {
-                        // parts[0] = column name
-                        // parts[1] = type (INT, VARCHAR, BIGINT, etc.)
-                        // parts[2] = size (optional)
-                        // parts[3] = flags (pk, etc.)
-                        col.name = parts[0];
-                        std::string type_str = parts[1];
-                        std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
-
-                        col.ordinal = ordinal;
-                        col.physical_pos = ordinal;
-
-                        // Convert SQL types to InnoDB internal type IDs
-                        // ColumnInfo doesn't have 'type' field, only mysql_type_id
-                        // The actual type handling is done in IndexPageParser based on mysql_type_id
-                        if (type_str == "INT" || type_str == "INTEGER") {
-                            col.mysql_type_id = 3;  // MYSQL_TYPE_LONG
-                            col.column_length = 4;
-                        } else if (type_str == "BIGINT") {
-                            col.mysql_type_id = 8;  // MYSQL_TYPE_LONGLONG
-                            col.column_length = 8;
-                        } else if (type_str == "SMALLINT") {
-                            col.mysql_type_id = 2;  // MYSQL_TYPE_SHORT
-                            col.column_length = 2;
-                        } else if (type_str == "TINYINT") {
-                            col.mysql_type_id = 1;  // MYSQL_TYPE_TINY
-                            col.column_length = 1;
-                        } else if (type_str == "FLOAT") {
-                            col.mysql_type_id = 4;  // MYSQL_TYPE_FLOAT
-                            col.column_length = 4;
-                        } else if (type_str == "DOUBLE") {
-                            col.mysql_type_id = 5;  // MYSQL_TYPE_DOUBLE
-                            col.column_length = 8;
-                        } else if (type_str == "DECIMAL") {
-                            col.mysql_type_id = 246;  // MYSQL_TYPE_NEWDECIMAL (more common)
-                            // parts[2] = precision, parts[3] = scale
-                            if (parts.size() >= 3) {
-                                try {
-                                    col.numeric_precision = std::stoi(parts[2]);
-                                    col.column_length = col.numeric_precision;
-                                } catch (...) {
-                                    col.numeric_precision = 10;
-                                }
-                            }
-                            if (parts.size() >= 4) {
-                                try {
-                                    col.numeric_scale = std::stoi(parts[3]);
-                                } catch (...) {
-                                    col.numeric_scale = 0;
-                                }
-                            }
-                        } else if (type_str == "VARCHAR" || type_str == "CHAR") {
-                            col.mysql_type_id = 15;  // MYSQL_TYPE_VARCHAR
-                            col.is_variable_length = true;
-                            if (parts.size() >= 3) {
-                                col.column_length = std::stoi(parts[2]);
-                            }
-                        } else if (type_str == "TEXT" || type_str == "BLOB") {
-                            col.mysql_type_id = (type_str == "TEXT") ? 252 : 251;  // MYSQL_TYPE_TEXT/BLOB
-                            col.is_variable_length = true;
-                        } else if (type_str == "JSON") {
-                            col.mysql_type_id = 245;  // MYSQL_TYPE_JSON
-                            col.is_variable_length = true;
-                        } else if (type_str == "DATETIME") {
-                            col.mysql_type_id = 12;  // MYSQL_TYPE_DATETIME
-                            col.column_length = 8;
-                        } else if (type_str == "TIMESTAMP") {
-                            col.mysql_type_id = 7;  // MYSQL_TYPE_TIMESTAMP
-                            col.column_length = 4;
-                        } else if (type_str == "DATE") {
-                            col.mysql_type_id = 10;  // MYSQL_TYPE_DATE
-                            col.column_length = 3;
-                        } else if (type_str == "TIME") {
-                            col.mysql_type_id = 11;  // MYSQL_TYPE_TIME
-                            col.column_length = 3;
-                        } else if (type_str == "ENUM") {
-                            col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
-                            col.column_length = 1;
-                        } else if (type_str == "SET") {
-                            col.mysql_type_id = 248;  // MYSQL_TYPE_SET
-                            col.column_length = 1;
-                        } else if (type_str == "GEOMETRY") {
-                            col.mysql_type_id = 255;  // MYSQL_TYPE_GEOMETRY
-                            col.is_variable_length = true;
-                        } else {
-                            std::cerr << "[ERROR] Unsupported --schema type for column '"
-                                      << col.name << "': " << parts[1] << "\n";
-                            return 1;
-                        }
-
-                        col.is_nullable = true;
-                        col.is_signed = true;  // Default signed for INT types
-
-                        // Check for pk and unsigned flags
-                        for (size_t i = 2; i < parts.size(); i++) {
-                            std::string flag = parts[i];
-                            std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
-                            if (flag == "PK" || flag == "PRIMARY" || flag == "KEY") {
-                                col.is_nullable = false;
-                                // NOTE: INT PRIMARY KEY columns are SIGNED by default in MySQL
-                                // (AUTO_INCREMENT requires signed integer)
-                                // Do NOT set is_signed = false here
-                            }
-                            if (flag == "UNSIGNED") {
-                                col.is_signed = false;
-                            }
-                            if (flag == "SIGNED") {
-                                col.is_signed = true;
-                            }
-                        }
-
-                        parsed_schema.columns[ordinal] = col;
-                        ordinal++;
-                    } else {
-                        std::cerr << "[ERROR] Missing --schema type for column definition: "
-                                  << col_def << "\n";
-                        return 1;
-                    }
+                if (parse_disk_schema_string(schema_str, page_size, parsed_schema, "XFS recovery")) {
+                    xfs_schema = parsed_schema;
+                } else {
+                    std::cerr << "[ERROR] Invalid --schema definition\n";
+                    nlohmann::json details{
+                        {"mode", "disk_carving"}, {"filesystem", "xfs"},
+                        {"device_path", device_path}, {"schema", "invalid"}};
+                    emit_result_contract(
+                        make_carving_contract("xfs_disk_carving", 0, 0, 0, "NONE",
+                                              "EVIDENCE_ONLY", "forensic_evidence",
+                                              false, "invalid_schema_definition",
+                                              "invalid --schema definition"),
+                        details);
+                    return 1;
                 }
-
-                xfs_schema = parsed_schema;
-                std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
-                for (const auto& [ord, col] : parsed_schema.columns) {
-                    std::cout << "  [" << ord << "] " << col.name << " mysql_type=" << col.mysql_type_id
-                              << " len=" << col.column_length << "\n";
-                }
-                std::cout << "[WARN] Schema is applied to ALL recovered index_ids.\n";
-                std::cout << "[WARN] Different tables have different column structures.\n";
-                std::cout << "[WARN] Use --target-index-ids to filter specific table(s).\n";
-                std::cout << "[WARN] Use --exclude-system-tables to skip system data.\n";
             }
+
 
             // Set schema if available
             if (xfs_schema.has_value()) {
@@ -3254,11 +3498,48 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                 std::cout << "\n✅ XFS Recovery completed: " << output_dir << "\n";
                 if (!write_recovery_report()) return 1;
+                {
+                    const bool has_schema = xfs_schema.has_value();
+                    auto contract = make_carving_contract(
+                        "xfs_disk_carving", xfs_result.total_records,
+                        /*evidence_fragments=*/0, xfs_result.pages_recovered,
+                        has_schema ? "EXTERNAL" : "NONE",
+                        has_schema ? "EXTERNAL" : "EVIDENCE_ONLY",
+                        xfs_result.total_records > 0 && has_schema
+                            ? "structured_recovery" : "forensic_evidence",
+                        /*success=*/xfs_result.total_records > 0 && has_schema,
+                        has_schema ? "" : "no_schema_for_structured_decode",
+                        xfs_result.total_records > 0
+                            ? "carving output requires independent validation before import"
+                            : "no_structured_rows",
+                        /*checksum_mismatches=*/xfs_result.checksum_rejected_pages);
+                    nlohmann::json details{
+                        {"mode", "disk_carving"}, {"filesystem", "xfs"},
+                        {"device_path", device_path},
+                        {"pages_recovered", xfs_result.pages_recovered},
+                        {"total_records", xfs_result.total_records},
+                        {"checksum_rejected_pages", xfs_result.checksum_rejected_pages},
+                        {"index_ids", xfs_result.records_by_index_id.size()},
+                        {"errors", xfs_result.errors}};
+                    if (!emit_result_contract(contract, details)) return 1;
+                }
                 return 0;
             } else {
                 std::cerr << "[ERROR] XFS disk carving failed.\n";
                 for (const auto& err : xfs_result.errors) {
                     std::cerr << "  - " << err << "\n";
+                }
+                {
+                    nlohmann::json details{
+                        {"mode", "disk_carving"}, {"filesystem", "xfs"},
+                        {"device_path", device_path},
+                        {"errors", xfs_result.errors}};
+                    if (!emit_result_contract(
+                            make_carving_contract(
+                                "xfs_disk_carving", 0, 0, 0, "NONE", "EVIDENCE_ONLY",
+                                "forensic_evidence", false, "xfs_scan_failed",
+                                "xfs disk carving failed"),
+                            details)) return 1;
                 }
                 return 1;
             }
@@ -3277,7 +3558,14 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             ext4_config.verbose = verbose;
             ext4_config.scan_freed_blocks = true;
             ext4_config.scan_deleted_inodes = true;
-            ext4_config.scan_allocated_innodb_blocks = parser_.get_bool_option("scan-allocated", false);
+            // After DROP/TRUNCATE the freed blocks are often handed straight
+            // back out, so a deleted tablespace can still sit in blocks the
+            // bitmap calls allocated. When the caller names its target index
+            // IDs the contamination risk is bounded to those indexes, so the
+            // allocated scan is enabled automatically.
+            ext4_config.scan_allocated_innodb_blocks =
+                parser_.get_bool_option("scan-allocated", false) ||
+                !target_index_ids_str.empty();
             ext4_config.exclude_system_tables = exclude_system_tables;
 
             // Parse target index IDs
@@ -3300,259 +3588,49 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     std::cerr << "[ERROR] Cannot hand authorized raw source to ext4 recovery\n";
                     return 1;
                 }
+            } else {
+                // Regular image files are not covered by the raw-device safety gate,
+                // so the ext4 scanner must open and adopt the source itself (this
+                // mirrors what the XFS carver already does in its own scan()).
+                struct stat image_status {};
+                if (::stat(device_path.c_str(), &image_status) != 0 ||
+                    !S_ISREG(image_status.st_mode)) {
+                    std::cerr << "[ERROR] Cannot open ext4 image source: " << device_path << "\n";
+                    return 1;
+                }
+                const int source_fd = ::open(device_path.c_str(), O_RDONLY | O_CLOEXEC);
+                if (source_fd < 0 ||
+                    !ext4_recovery.adopt_fd(source_fd,
+                                            static_cast<uint64_t>(image_status.st_size))) {
+                    std::cerr << "[ERROR] Cannot adopt ext4 image source: " << device_path << "\n";
+                    return 1;
+                }
             }
 
             // Load and set external schema for schema-aware recovery (same logic as XFS)
             std::optional<catalog::TableSchema> ext4_schema = load_schema_from_file(schema_file_path);
 
             // Also try --schema command line string if no schema file
+            // Also try --schema command line string if no schema file
             if (!ext4_schema.has_value() && !schema_str.empty()) {
-                std::cout << "[INFO] Parsing schema from --schema option for ext4 recovery\n";
-                auto trim_schema_token = [](std::string value) {
-                    const auto first = value.find_first_not_of(" \t\r\n");
-                    if (first == std::string::npos) return std::string{};
-                    const auto last = value.find_last_not_of(" \t\r\n");
-                    return value.substr(first, last - first + 1);
-                };
-                auto split_schema_columns = [&](const std::string& value) {
-                    std::vector<std::string> columns;
-                    size_t start = 0;
-                    size_t depth = 0;
-                    for (size_t i = 0; i < value.size(); ++i) {
-                        if (value[i] == '(') {
-                            ++depth;
-                        } else if (value[i] == ')') {
-                            if (depth == 0) return std::vector<std::string>{};
-                            --depth;
-                        } else if (value[i] == ',' && depth == 0) {
-                            columns.push_back(trim_schema_token(value.substr(start, i - start)));
-                            start = i + 1;
-                        }
-                    }
-                    if (depth != 0) return std::vector<std::string>{};
-                    columns.push_back(trim_schema_token(value.substr(start)));
-                    return columns;
-                };
-                auto parse_schema_integer = [&](const std::string& value, int* output) {
-                    const std::string token = trim_schema_token(value);
-                    if (token.empty()) return false;
-                    int parsed = 0;
-                    const char* begin = token.data();
-                    const char* end = begin + token.size();
-                    const auto conversion = std::from_chars(begin, end, parsed);
-                    if (conversion.ec != std::errc{} || conversion.ptr != end || parsed < 0) {
-                        return false;
-                    }
-                    *output = parsed;
-                    return true;
-                };
-                auto parse_type_expression = [&](const std::string& expression,
-                                                 std::string* type,
-                                                 std::vector<int>* arguments) {
-                    const auto open = expression.find('(');
-                    if (open == std::string::npos) {
-                        *type = trim_schema_token(expression);
-                        return !type->empty();
-                    }
-                    if (expression.back() != ')' || expression.find('(', open + 1) != std::string::npos) {
-                        return false;
-                    }
-                    *type = trim_schema_token(expression.substr(0, open));
-                    const std::string argument_text = expression.substr(open + 1, expression.size() - open - 2);
-                    if (argument_text.empty()) return false;
-                    std::istringstream arguments_stream(argument_text);
-                    std::string argument;
-                    while (std::getline(arguments_stream, argument, ',')) {
-                        int parsed = 0;
-                        if (!parse_schema_integer(argument, &parsed)) return false;
-                        arguments->push_back(parsed);
-                    }
-                    return !type->empty() && !arguments->empty();
-                };
-
                 catalog::TableSchema parsed_schema;
-                parsed_schema.table_name = "recovered_table";
-                parsed_schema.page_size = page_size;
-                bool schema_valid = true;
-                int ordinal = 1;
-                const auto column_definitions = split_schema_columns(schema_str);
-                if (column_definitions.empty()) schema_valid = false;
-                for (const auto& col_def : column_definitions) {
-                    if (!schema_valid || col_def.empty()) {
-                        schema_valid = false;
-                        break;
-                    }
-
-                    const auto separator = col_def.find(':');
-                    if (separator == std::string::npos || col_def.find(':', separator + 1) != std::string::npos) {
-                        schema_valid = false;
-                        break;
-                    }
-                    const std::string name = trim_schema_token(col_def.substr(0, separator));
-                    const std::string type_and_flags = trim_schema_token(col_def.substr(separator + 1));
-                    if (name.empty() || type_and_flags.empty()) {
-                        schema_valid = false;
-                        break;
-                    }
-
-                    std::istringstream token_stream(type_and_flags);
-                    std::string type_expression;
-                    token_stream >> type_expression;
-                    std::vector<std::string> flags;
-                    std::string flag;
-                    while (token_stream >> flag) flags.push_back(flag);
-
-                    catalog::ColumnInfo col{};
-                    col.name = name;
-                    col.ordinal = static_cast<uint32_t>(ordinal);
-                    col.physical_pos = static_cast<uint32_t>(ordinal);
-                    col.is_nullable = true;
-                    col.is_signed = true;
-                    col.charset_id = 255;
-                    col.collation_id = 255;
-
-                    std::string type_str;
-                    std::vector<int> arguments;
-                    if (!parse_type_expression(type_expression, &type_str, &arguments)) {
-                        schema_valid = false;
-                        break;
-                    }
-                    std::transform(type_str.begin(), type_str.end(), type_str.begin(),
-                                   [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
-
-                    uint32_t server_type = 0;
-                    if (type_str == "INT" || type_str == "INTEGER") {
-                        server_type = 3; col.column_length = 4;
-                    } else if (type_str == "BIGINT") {
-                        server_type = 8; col.column_length = 8;
-                    } else if (type_str == "SMALLINT") {
-                        server_type = 2; col.column_length = 2;
-                    } else if (type_str == "TINYINT") {
-                        server_type = 1; col.column_length = 1;
-                    } else if (type_str == "MEDIUMINT") {
-                        server_type = 9; col.column_length = 3;
-                    } else if (type_str == "FLOAT") {
-                        server_type = 4; col.column_length = 4;
-                    } else if (type_str == "DOUBLE") {
-                        server_type = 5; col.column_length = 8;
-                    } else if (type_str == "DECIMAL" || type_str == "NUMERIC") {
-                        if (arguments.size() != 2 || arguments[0] <= 0 || arguments[1] < 0 ||
-                            arguments[1] > arguments[0]) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 246;
-                        col.numeric_precision = arguments[0];
-                        col.numeric_scale = arguments[1];
-                        col.column_length = static_cast<uint32_t>(arguments[0]);
-                    } else if (type_str == "VARCHAR" || type_str == "VARBINARY" || type_str == "CHAR") {
-                        if (arguments.size() != 1 || arguments[0] <= 0) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = type_str == "CHAR" ? 254 : 253;
-                        col.column_length = static_cast<uint32_t>(arguments[0]);
-                        col.is_variable_length = type_str != "CHAR";
-                        if (type_str == "VARBINARY") {
-                            col.charset_id = 63;
-                            col.collation_id = 63;
-                        }
-                    } else if (type_str == "TEXT") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 252;
-                        col.is_variable_length = true;
-                    } else if (type_str == "BLOB") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 252;
-                        col.is_variable_length = true;
-                        col.charset_id = 63;
-                        col.collation_id = 63;
-                    } else if (type_str == "JSON") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 245;
-                        col.is_variable_length = true;
-                    } else if (type_str == "ENUM") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 247; col.column_length = 1;
-                    } else if (type_str == "SET") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 248; col.column_length = 1;
-                    } else if (type_str == "DATETIME") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 12; col.column_length = 8;
-                    } else if (type_str == "DATE") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 10; col.column_length = 3;
-                    } else if (type_str == "GEOMETRY") {
-                        if (!arguments.empty()) {
-                            schema_valid = false;
-                            break;
-                        }
-                        server_type = 255; col.is_variable_length = true;
-                    } else {
-                        schema_valid = false;
-                        break;
-                    }
-
-                    const auto conversion = catalog::convert_column_type_id(
-                        server_type, catalog::TypeIdDomain::kMysqlServer);
-                    if (!conversion.ok) {
-                        schema_valid = false;
-                        break;
-                    }
-                    col.mysql_type_id = conversion.parser_type;
-                    for (const auto& raw_flag : flags) {
-                        std::string normalized_flag = raw_flag;
-                        std::transform(normalized_flag.begin(), normalized_flag.end(), normalized_flag.begin(),
-                                       [](unsigned char character) { return static_cast<char>(std::toupper(character)); });
-                        if (normalized_flag == "PK" || normalized_flag == "PRIMARY" || normalized_flag == "KEY") {
-                            col.is_nullable = false;
-                        } else if (normalized_flag == "UNSIGNED") {
-                            col.is_signed = false;
-                        } else if (normalized_flag == "SIGNED") {
-                            col.is_signed = true;
-                        } else {
-                            schema_valid = false;
-                            break;
-                        }
-                    }
-                    if (!schema_valid) break;
-                    parsed_schema.columns[static_cast<uint32_t>(ordinal)] = col;
-                    ++ordinal;
-                }
-
-                if (!schema_valid || !parsed_schema.validate()) {
+                if (parse_disk_schema_string(schema_str, page_size, parsed_schema, "ext4 recovery")) {
+                    ext4_schema = parsed_schema;
+                } else {
                     std::cerr << "[ERROR] Invalid --schema definition\n";
+                    nlohmann::json details{
+                        {"mode", "disk_carving"}, {"filesystem", "ext4"},
+                        {"device_path", device_path}, {"schema", "invalid"}};
+                    emit_result_contract(
+                        make_carving_contract("ext4_disk_carving", 0, 0, 0, "NONE",
+                                              "EVIDENCE_ONLY", "forensic_evidence",
+                                              false, "invalid_schema_definition",
+                                              "invalid --schema definition"),
+                        details);
                     return 1;
                 }
-                ext4_schema = parsed_schema;
-                std::cout << "[INFO] Schema parsed: " << parsed_schema.columns.size() << " columns\n";
-                for (const auto& [ord, col] : parsed_schema.columns) {
-                    std::cout << "  [" << ord << "] " << col.name << " mysql_type=" << col.mysql_type_id
-                              << " is_signed=" << col.is_signed << "\n";
-                }
             }
+
 
             // Set schema if available
             if (ext4_schema.has_value()) {
@@ -3594,11 +3672,38 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
                 std::cout << "\n✅ ext4 Recovery completed: " << output_dir << "\n";
                 if (!write_recovery_report()) return 1;
+                {
+                    const bool has_schema = ext4_schema.has_value();
+                    auto contract = make_carving_contract(
+                        "ext4_disk_carving", ext4_result.total_records,
+                        /*evidence_fragments=*/0, ext4_result.total_blocks_scanned,
+                        has_schema ? "EXTERNAL" : "NONE",
+                        has_schema ? "EXTERNAL" : "EVIDENCE_ONLY",
+                        ext4_result.total_records > 0 && has_schema
+                            ? "structured_recovery" : "forensic_evidence",
+                        /*success=*/ext4_result.total_records > 0 && has_schema,
+                        has_schema ? "" : "no_schema_for_structured_decode",
+                        ext4_result.total_records > 0
+                            ? "carving output requires independent validation before import"
+                            : "no_structured_rows",
+                        /*checksum_mismatches=*/ext4_result.checksum_rejected_pages);
+                    nlohmann::json details{
+                        {"mode", "disk_carving"}, {"filesystem", "ext4"},
+                        {"device_path", device_path},
+                        {"block_size", ext4_result.block_size},
+                        {"block_groups", ext4_result.group_count},
+                        {"pages_recovered", ext4_result.pages_recovered},
+                        {"total_records", ext4_result.total_records},
+                        {"checksum_rejected_pages", ext4_result.checksum_rejected_pages},
+                        {"errors", ext4_result.errors}};
+                    if (!emit_result_contract(contract, details)) return 1;
+                }
                 return 0;
             } else {
                 std::cerr << "[ERROR] ext4 recovery failed. Falling back to raw disk carving.\n";
                 for (const auto& err : ext4_result.errors) {
                     std::cerr << "  - " << err << "\n";
+                    filesystem_fallback_errors.push_back("ext4: " + err);
                 }
                 // Fall through to generic carving below
             }
@@ -3706,109 +3811,19 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         // Load external schema if provided
         std::optional<catalog::TableSchema> external_schema = load_schema_from_file(schema_file_path);
 
-        // Also try --schema command line string if no schema file
+        // Also try --schema command line string if no schema file.
+        // The generic carver must use the same parser as the filesystem-specific
+        // paths: two parsers for one flag let a truncated image fall through to
+        // a path whose schema grammar rejects `bigint(20)`.
         if (!external_schema.has_value() && !schema_str.empty()) {
-            std::cout << "[INFO] Parsing schema from --schema option: " << schema_str << "\n";
             catalog::TableSchema parsed_schema;
-            parsed_schema.table_name = "recovered_table";
-            parsed_schema.page_size = page_size;
-
-            // Parse schema string: "col1:type[:size][:pk],col2:type..."
-            std::istringstream ss(schema_str);
-            std::string col_def;
-            int ordinal = 1;
-            while (std::getline(ss, col_def, ',')) {
-                catalog::ColumnInfo col;
-                std::istringstream cs(col_def);
-                std::string token;
-                std::vector<std::string> parts;
-                while (std::getline(cs, token, ':')) {
-                    parts.push_back(token);
-                }
-                if (parts.empty()) continue;
-
-                col.name = parts[0];
-                col.is_nullable = true;
-                col.column_length = 0;
-
-                if (parts.size() < 2) {
-                    std::cerr << "[ERROR] Missing --schema type for column '" << col.name << "'\n";
-                    return 1;
-                }
-
-                std::string type_str = parts[1];
-                std::transform(type_str.begin(), type_str.end(), type_str.begin(), ::toupper);
-
-                // Parse type
-                if (type_str == "INT" || type_str == "INTEGER") {
-                        col.mysql_type_id = 3;  // LONG
-                        col.column_length = 4;
-                    } else if (type_str == "BIGINT") {
-                        col.mysql_type_id = 8;  // LONGLONG
-                        col.column_length = 8;
-                    } else if (type_str == "VARCHAR") {
-                        col.mysql_type_id = 253;  // VAR_STRING
-                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 255;
-                    } else if (type_str == "TEXT") {
-                        col.mysql_type_id = 252;  // BLOB
-                        col.column_length = 65535;
-                    } else if (type_str == "DATETIME") {
-                        col.mysql_type_id = 12;  // DATETIME
-                        col.column_length = 8;
-                    } else if (type_str == "DATE") {
-                        col.mysql_type_id = 10;  // DATE
-                        col.column_length = 3;
-                    } else if (type_str == "DOUBLE") {
-                        col.mysql_type_id = 5;  // DOUBLE
-                        col.column_length = 8;
-                    } else if (type_str == "FLOAT") {
-                        col.mysql_type_id = 4;  // FLOAT
-                        col.column_length = 4;
-                    } else if (type_str == "ENUM") {
-                        // ENUM type - InnoDB type 247 (server type) mapped to internal type
-                        col.mysql_type_id = 247;  // MYSQL_TYPE_ENUM
-                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 4;
-                    } else if (type_str == "JSON") {
-                        // JSON type - stored as BLOB externally
-                        col.mysql_type_id = 245;  // MYSQL_TYPE_JSON
-                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
-                    } else if (type_str == "GEOMETRY") {
-                        // GEOMETRY type - spatial data
-                        col.mysql_type_id = 255;  // MYSQL_TYPE_GEOMETRY
-                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
-                    } else if (type_str == "BLOB" || type_str == "TEXT") {
-                        // BLOB/TEXT type
-                        col.mysql_type_id = 252;  // MYSQL_TYPE_BLOB
-                        col.column_length = parts.size() > 2 ? std::stoul(parts[2]) : 65535;
-                    } else if (type_str == "TINYINT") {
-                        col.mysql_type_id = 1;  // TINY
-                        col.column_length = 1;
-                    } else if (type_str == "SMALLINT") {
-                        col.mysql_type_id = 2;  // SHORT
-                        col.column_length = 2;
-                    } else if (type_str == "MEDIUMINT") {
-                        col.mysql_type_id = 9;  // INT24
-                        col.column_length = 4;
-                    } else {
-                        std::cerr << "[ERROR] Unsupported --schema type for column '"
-                                  << col.name << "': " << parts[1] << "\n";
-                        return 1;
-                    }
-
-                // Check for PK flag
-                for (size_t i = 2; i < parts.size(); i++) {
-                    std::string flag = parts[i];
-                    std::transform(flag.begin(), flag.end(), flag.begin(), ::toupper);
-                    if (flag == "PK" || flag == "PRIMARY") {
-                        col.is_nullable = false;
-                    }
-                }
-
-                parsed_schema.columns[ordinal++] = col;
+            if (parse_disk_schema_string(schema_str, page_size, parsed_schema,
+                                         "raw disk carving")) {
+                external_schema = parsed_schema;
+            } else {
+                std::cerr << "[ERROR] Invalid --schema definition for raw disk carving\n";
+                filesystem_fallback_errors.push_back("invalid --schema definition");
             }
-
-            external_schema = parsed_schema;
-            std::cout << "[INFO] Successfully parsed " << parsed_schema.columns.size() << " columns from --schema\n";
         }
 
         // Also try FRM file if provided (for MySQL 5.6/5.7)
@@ -3873,11 +3888,53 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
             if (!write_recovery_report()) return 1;
+            {
+                const bool has_schema = external_schema.has_value();
+                nlohmann::json details{
+                    {"mode", "disk_carving"},
+                    {"filesystem", filesystem_type},
+                    {"device_path", device_path},
+                    {"total_records", result.total_records},
+                    {"checksum_rejected_pages", result.checksum_rejected_pages},
+                    {"index_ids", result.records_by_index_id.size()},
+                    {"output_files", result.output_files},
+                    {"filesystem_fallback_errors", filesystem_fallback_errors},
+                    {"errors", result.errors}};
+                if (!emit_result_contract(
+                        make_carving_contract(
+                            filesystem_fallback_errors.empty()
+                                ? "raw_disk_carving" : "raw_disk_carving_fallback",
+                            result.total_records, 0, stats_.total_pages_scanned,
+                            has_schema ? "EXTERNAL" : "NONE",
+                            has_schema ? "EXTERNAL" : "EVIDENCE_ONLY",
+                            result.total_records > 0 && has_schema
+                                ? "structured_recovery" : "forensic_evidence",
+                            /*success=*/result.total_records > 0 && has_schema,
+                            has_schema ? "" : "no_schema_for_structured_decode",
+                            result.total_records > 0
+                                ? "carving output requires independent validation before import"
+                                : "no_structured_rows",
+                            /*checksum_mismatches=*/result.checksum_rejected_pages),
+                        details)) return 1;
+            }
             return 0;
         } else {
             std::cerr << "[ERROR] Disk carving failed.\n";
             for (const auto& err : result.errors) {
                 std::cerr << "  - " << err << "\n";
+            }
+            {
+                nlohmann::json details{
+                    {"mode", "disk_carving"}, {"filesystem", filesystem_type},
+                    {"device_path", device_path},
+                    {"filesystem_fallback_errors", filesystem_fallback_errors},
+                    {"errors", result.errors}};
+                if (!emit_result_contract(
+                        make_carving_contract("raw_disk_carving", 0, 0, 0, "NONE",
+                                              "EVIDENCE_ONLY", "forensic_evidence",
+                                              false, "disk_carving_failed",
+                                              "disk carving failed"),
+                        details)) return 1;
             }
             return 1;
         }
@@ -3885,8 +3942,9 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
     // DROP TABLE recovery mode
     if (drop_table_recovery) {
-        if (system_tablespace.empty() && data_dir.empty()) {
-            std::cerr << "[ERROR] DROP TABLE recovery requires --system-tablespace or --data-dir\n";
+        if (system_tablespace.empty() && data_dir.empty() && device_path.empty()) {
+            std::cerr << "[ERROR] DROP TABLE recovery requires --system-tablespace, "
+                         "--data-dir, or --device-path\n";
             show_help(argv[0]);
             return 1;
         }
@@ -3937,8 +3995,21 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         config.device_path = device_path;
         config.page_size = page_size;
         config.schema_file = schema_file_path;
-        config.export_csv = false;
-        config.export_sql = false;
+        if (!target_index_ids_str.empty()) {
+            std::istringstream id_stream(target_index_ids_str);
+            std::string id_str;
+            while (std::getline(id_stream, id_str, ',')) {
+                try {
+                    config.target_index_ids.push_back(std::stoull(id_str));
+                } catch (...) {
+                    std::cerr << "[WARN] Invalid --target-index-ids value: " << id_str << "\n";
+                }
+            }
+        }
+        // Structured export is only possible when an external schema was
+        // supplied; without one the raw scan is evidence-only by design.
+        config.export_csv = !schema_file_path.empty();
+        config.export_sql = !schema_file_path.empty();
         config.export_json = false;
         recovery.set_config(config);
         if (authorized_raw_device.has_value()) {
@@ -3973,25 +4044,39 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
             std::cout << "\n✅ Recovery completed: " << output_dir << "\n";
             if (!write_recovery_report()) return 1;
-            if (!write_result_json({
-                    {"mode", "drop_table_recovery"},
-                    {"success", false},
-                    {"classification", "forensic_evidence"},
-                    {"structured_rows", 0},
-                    {"evidence_fragments", result.total_records},
-                    {"schema_source", "EVIDENCE_ONLY"},
-                    {"schema_trust_level", "EVIDENCE_ONLY"},
-                    {"recovery_method", "drop_table_recovery"},
-                    {"export_success", false},
-                    {"export_rejection_reason", "DROP TABLE recovery output requires independent schema and page-integrity validation"},
-                    {"importable", false},
-                    {"reason", "DROP TABLE recovery output requires independent schema and page-integrity validation"},
-                    {"source_inputs", {{"system_tablespace", system_tablespace}, {"data_dir", data_dir}}},
-                    {"tables_found", result.tables_found},
-                    {"tables_recovered", result.tables_recovered},
-                    {"artifacts", nlohmann::json::array()}})) {
-                return 1;
-            }
+            // Structured rows exist only when a schema was supplied; without
+            // one the raw fragments are evidence and must never be exported.
+            ResultContract contract;
+            contract.recovery_method = "drop_table_recovery";
+            contract.structured_rows = result.total_records;
+            contract.evidence_fragments = result.total_records;
+            contract.total_pages_scanned = 0;
+            contract.classification = result.total_records > 0
+                ? "structured_recovery" : "forensic_evidence";
+            contract.success = result.total_records > 0;
+            contract.schema_source = schema_file_path.empty() ? "NONE" : "EXTERNAL";
+            contract.schema_trust_level = schema_file_path.empty() ? "EVIDENCE_ONLY" : "EXTERNAL";
+            contract.export_success = result.total_records > 0 && !schema_file_path.empty();
+            contract.export_rejection_reason = contract.export_success
+                ? "" : (schema_file_path.empty() ? "no_schema_for_structured_decode"
+                                                 : "no_structured_rows");
+            contract.importable = false;
+            contract.reason = contract.export_success
+                ? "carving output requires independent validation before import"
+                : contract.export_rejection_reason;
+            contract.logical_page_size = page_size;
+            contract.damage_level = result.total_records > 0
+                ? common::DamageLevel::NONE : common::DamageLevel::L3_SEVERE;
+            nlohmann::json details{
+                {"mode", "drop_table_recovery"},
+                {"source_inputs", {{"system_tablespace", system_tablespace},
+                                   {"data_dir", data_dir},
+                                   {"device_path", device_path}}},
+                {"tables_found", result.tables_found},
+                {"tables_recovered", result.tables_recovered},
+                {"target_index_ids", config.target_index_ids},
+                {"errors", result.errors}};
+            if (!emit_result_contract(contract, details)) return 1;
             return 0;
         } else {
             std::cerr << "[ERROR] DROP TABLE recovery failed.\n";
@@ -4168,12 +4253,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
     std::vector<std::string> recovered_column_order;  // 用于保持列顺序
     bool specialized_structured_export_allowed = true;
     std::string specialized_export_rejection_reason;
+    std::string specialized_compression_status;
+    std::string specialized_compression_rejection_reason;
+    size_t specialized_logical_page_size = 0;
+    size_t specialized_physical_page_size = 0;
     bool unvalidated_tde_candidate_rejected = false;
     bool shared_specialized_handled = false;
 
     struct PhysicalFormat {
         std::string kind = "none";
         std::optional<dbrecovery::innodb::FSPCompressionMetadata> compression;
+        std::string compression_status = "NOT_COMPRESSED";
+        std::string compression_rejection_reason;
+        size_t logical_page_size = 0;
+        size_t physical_page_size = 0;
     };
 
     auto classify_physical_format = [](const std::string& path, uint32_t page_sz) -> PhysicalFormat {
@@ -4194,14 +4287,34 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         const auto enc_status = tmp_enc.classify(path, page_sz);
 
         PhysicalFormat result;
+        result.logical_page_size = page_sz;
+        result.physical_page_size = page_sz;
+        result.compression_status = dbrecovery::innodb::CompressedTableRecoveryStats::status_to_string(comp_status);
+        if (comp_status != dbrecovery::innodb::CompressionStatus::NOT_COMPRESSED) {
+            // Record the stride proven from the layout when FSP_SPACE_FLAGS do
+            // not describe it; evidence reports must show the real geometry.
+            const size_t observed = dbrecovery::innodb::CompressedTableRecovery::observe_physical_stride(path, page_sz);
+            if (observed > 0 && observed < page_sz) result.physical_page_size = observed;
+        }
         if (comp_status == dbrecovery::innodb::CompressionStatus::RECOGNIZED_UNSUPPORTED) {
             result.compression = dbrecovery::innodb::parse_fsp_compression_metadata(
                 page0.data(), bytes_read, page_sz);
+            result.compression_rejection_reason = "decoder is not fixture-validated";
             result.kind = enc_status == dbrecovery::innodb::TDEStatus::ENCRYPTED_UNSUPPORTED
                 ? "compressed+encrypted" : "compressed";
+        } else if (comp_status == dbrecovery::innodb::CompressionStatus::COMPRESSED_AND_ENCRYPTED) {
+            result.compression = dbrecovery::innodb::parse_fsp_compression_metadata(
+                page0.data(), bytes_read, page_sz);
+            result.compression_rejection_reason =
+                "compressed and encrypted tablespaces are unsupported";
+            result.kind = "compressed+encrypted";
         } else if (comp_status == dbrecovery::innodb::CompressionStatus::CORRUPTED_METADATA) {
+            result.compression_rejection_reason =
+                "compressed FSP metadata is corrupted or invalid";
             result.kind = "corrupted_metadata";
         } else if (comp_status == dbrecovery::innodb::CompressionStatus::PHYSICAL_LENGTH_MISMATCH) {
+            result.compression_rejection_reason =
+                "declared compressed physical stride mismatches the file layout";
             result.kind = "physical_length_mismatch";
         } else if (enc_status == dbrecovery::innodb::TDEStatus::ENCRYPTED_UNSUPPORTED) {
             result.kind = "encrypted";
@@ -4999,6 +5112,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (format.kind != "none") {
                 shared_specialized_handled = true;
                 specialized_structured_export_allowed = false;
+                specialized_compression_status = format.compression_status;
+                specialized_logical_page_size = format.logical_page_size;
+                specialized_physical_page_size = format.physical_page_size;
+                specialized_compression_rejection_reason = format.compression_rejection_reason;
                 if (format.kind == "encrypted" || format.kind == "compressed+encrypted") {
                     unvalidated_tde_candidate_rejected = true;
                     specialized_export_rejection_reason = "tde_candidate_UNVALIDATED";
@@ -5036,7 +5153,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         const std::string field_name = k < ures.column_names.size()
                             ? ures.column_names[k]
                             : (std::string("field_") + (k < 10 ? "000" : k < 100 ? "00" : k < 1000 ? "0" : "") + std::to_string(k));
-                        m[field_name] = r.fields[k];
+                        // Binary columns are carried as 0x<hex>: the parser
+                        // already hands them back as hex text, and prefixing
+                        // keeps CSV cells unambiguous while letting SQL emit
+                        // UNHEX(...) instead of a quoted string.
+                        if (k < ures.column_is_binary.size() && ures.column_is_binary[k]
+                            && !r.fields[k].empty()) {
+                            m[field_name] = encode_binary_record(r.fields[k]);
+                        } else {
+                            m[field_name] = r.fields[k];
+                        }
                     }
                     recovered_records.push_back(std::move(m));
                 }
@@ -5119,6 +5245,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (format.kind != "none") {
                 shared_specialized_handled = true;
                 specialized_structured_export_allowed = false;
+                specialized_compression_status = format.compression_status;
+                specialized_logical_page_size = format.logical_page_size;
+                specialized_physical_page_size = format.physical_page_size;
+                specialized_compression_rejection_reason = format.compression_rejection_reason;
                 if (format.kind == "encrypted" || format.kind == "compressed+encrypted") {
                     unvalidated_tde_candidate_rejected = true;
                     specialized_export_rejection_reason = "tde_candidate_UNVALIDATED";
@@ -5231,6 +5361,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             if (format.kind != "none") {
                 shared_specialized_handled = true;
                 specialized_structured_export_allowed = false;
+                specialized_compression_status = format.compression_status;
+                specialized_logical_page_size = format.logical_page_size;
+                specialized_physical_page_size = format.physical_page_size;
+                specialized_compression_rejection_reason = format.compression_rejection_reason;
                 if (format.kind == "encrypted" || format.kind == "compressed+encrypted") {
                     unvalidated_tde_candidate_rejected = true;
                     specialized_export_rejection_reason = "tde_candidate_UNVALIDATED";
@@ -5568,7 +5702,16 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
             }
         }
-        if (dbrecovery::exporter::Exporter::export_to_sql(recovered_records, "recovered_table", recovered_column_order, output_path)) {
+        std::set<std::string> binary_columns;
+        if (unified_result.has_value()) {
+            for (size_t index = 0; index < unified_result->column_names.size(); ++index) {
+                if (index < unified_result->column_is_binary.size()
+                    && unified_result->column_is_binary[index]) {
+                    binary_columns.insert(unified_result->column_names[index]);
+                }
+            }
+        }
+        if (dbrecovery::exporter::Exporter::export_to_sql(recovered_records, "recovered_table", recovered_column_order, output_path, &binary_columns)) {
             std::cout << "[INFO] Exported " << recovered_records.size() << " records to SQL: " << output_path << "\n";
             recovery_artifacts.push_back({
                 {"path", output_path},
@@ -5673,6 +5816,20 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     ? "evidence-empty: no structured rows recovered"
                     : "structured rows recovered; independent validation is required before import")},
             {"source_inputs", {{"ibd", ibd_path}}},
+            {"logical_page_size", specialized_logical_page_size
+                ? specialized_logical_page_size
+                : (unified_result.has_value() ? unified_result->logical_page_size : 0)},
+            {"physical_page_size", specialized_physical_page_size
+                ? specialized_physical_page_size
+                : (unified_result.has_value() ? unified_result->physical_page_size : 0)},
+            {"compression_status", specialized_compression_status.empty()
+                ? (unified_result.has_value() ? unified_result->compression_status
+                                              : std::string("NOT_COMPRESSED"))
+                : specialized_compression_status},
+            {"compression_rejection_reason", specialized_compression_rejection_reason.empty()
+                ? (unified_result.has_value() ? unified_result->compression_rejection_reason
+                                              : std::string(""))
+                : specialized_compression_rejection_reason},
             {"artifacts", recovery_artifacts},
             {"recovery_type", recovery_type},
             {"mysql_version", mysql_version},

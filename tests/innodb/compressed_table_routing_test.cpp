@@ -82,7 +82,7 @@ std::vector<uint8_t> make_compressed_ibd(size_t logical_page_size,
     uint32_t ratio = static_cast<uint32_t>(logical_page_size / physical_page_size);
     uint32_t zip_ssize = 0;
     while ((1u << zip_ssize) < ratio) ++zip_ssize;
-    write_be32(p0 + FSP_SPACE_FLAGS_OFFSET, (zip_ssize << 1));
+    write_be32(p0 + FSP_SPACE_FLAGS_OFFSET, (zip_ssize << 1) | 0x21);
 
     // Physical sizing marker: first page of each stride carries the FIL page
     // type so scan_pages() can identify data pages. Layout-only — pages are
@@ -107,6 +107,19 @@ protected:
         std::filesystem::remove_all(dir_);
     }
 };
+
+TEST_F(CompressedRoutingTest, ClassifyRecognizesEncryptedCompressedFlags) {
+    const std::string path = dir_ + "/comp_encrypted.ibd";
+    auto data = make_compressed_ibd(16384, 8192, 16384 * 8);
+    uint32_t flags = 0;
+    flags = (static_cast<uint32_t>(1) << 1) | FSP_FLAGS_POST_ANTELOPE |
+            FSP_FLAGS_ATOMIC_BLOBS | FSP_FLAGS_ENCRYPTION;
+    write_be32(data.data() + FSP_SPACE_FLAGS_OFFSET, flags);
+    write_ibd_file(path, data);
+
+    CompressedTableRecovery reco(16384);
+    EXPECT_EQ(reco.classify(path, 16384), CompressionStatus::COMPRESSED_AND_ENCRYPTED);
+}
 
 TEST_F(CompressedRoutingTest, ClassifyRecognizesCompressedFlagsAsUnsupported) {
     const std::string path = dir_ + "/comp_8k.ibd";

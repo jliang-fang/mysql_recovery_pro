@@ -13,6 +13,8 @@
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include <fstream>
+#include <memory>
+#include <map>
 #include <sstream>
 #include <algorithm>
 #include <chrono>
@@ -1153,7 +1155,9 @@ std::vector<OrphanedPageScanner::OrphanedPage> OrphanedPageScanner::scan_by_inde
     engine::SignatureBasedScraper::ScanConfig config;
     config.min_page_size = page_size;
     config.max_page_size = page_size;
-    config.validate_checksums = true;
+    // Orphaned pages frequently carry a stale FIL checksum after unlink;
+    // bounding happens via the INDEX page type and index-id filter instead.
+    config.validate_checksums = false;
     config.filter_to_index_pages = true;
 
     std::vector<engine::FoundPage> found_pages;
@@ -1203,7 +1207,9 @@ OrphanedPageScanner::scan_by_index_ids(const std::vector<uint64_t>& index_ids, u
     engine::SignatureBasedScraper::ScanConfig config;
     config.min_page_size = page_size;
     config.max_page_size = page_size;
-    config.validate_checksums = true;
+    // Orphaned pages frequently carry a stale FIL checksum after unlink;
+    // bounding happens via the INDEX page type and index-id filter instead.
+    config.validate_checksums = false;
     config.filter_to_index_pages = true;
 
     std::vector<engine::FoundPage> found_pages;
@@ -1251,7 +1257,9 @@ std::vector<OrphanedPageScanner::OrphanedPage> OrphanedPageScanner::scan_all(
     engine::SignatureBasedScraper::ScanConfig config;
     config.min_page_size = page_size;
     config.max_page_size = page_size;
-    config.validate_checksums = true;
+    // Orphaned pages frequently carry a stale FIL checksum after unlink;
+    // bounding happens via the INDEX page type and index-id filter instead.
+    config.validate_checksums = false;
     config.filter_to_index_pages = true;
 
     std::vector<engine::FoundPage> found_pages;
@@ -1431,10 +1439,15 @@ DropTableRecovery::Result DropTableRecovery::recover(
             // Apply loaded schema to recovered tables
             if (has_schema && !loaded_schema.columns.empty()) {
                 if (result.recovered_tables.empty()) {
-                    RecoveredTableMetadata meta;
+                    // Only synthesize a container when no system-tablespace
+                    // entry exists AND the schema-driven raw scan cannot be
+                    // used (no device source), so it never masks index IDs.
+                    RecoveredTableMetadata meta{};
                     meta.table_name = "recovered";
                     meta.schema = loaded_schema;
-                    result.recovered_tables.push_back(meta);
+                    if (config_.device_path.empty()) {
+                        result.recovered_tables.push_back(meta);
+                    }
                 } else {
                     for (auto& table : result.recovered_tables) {
                         loaded_schema.table_name = table.table_name;
@@ -1451,14 +1464,15 @@ DropTableRecovery::Result DropTableRecovery::recover(
                 }
             }
 
-            if (!primary_index_ids.empty() && !config_.device_path.empty()) {
-                if (progress) progress(0.3, "Scanning raw device for orphaned pages...");
-
-                RawDiskIOEngine engine;
+            // Open the raw source once; both the metadata-driven and the
+            // schema-driven recovery paths below read from this descriptor.
+            std::unique_ptr<RawDiskIOEngine> raw_engine;
+            if (!config_.device_path.empty()) {
+                raw_engine = std::make_unique<RawDiskIOEngine>();
                 if (authorized_raw_device_.has_value()) {
                     const int owned_fd = authorized_raw_device_->duplicate_fd();
                     if (owned_fd < 0 ||
-                        !engine.adopt_fd(owned_fd, authorized_raw_device_->size_bytes())) {
+                        !raw_engine->adopt_fd(owned_fd, authorized_raw_device_->size_bytes())) {
                         result.errors.push_back(
                             "could not adopt authorized raw-device descriptor");
                         return result;
@@ -1471,11 +1485,72 @@ DropTableRecovery::Result DropTableRecovery::recover(
                             "raw block-device recovery requires an authorized descriptor");
                         return result;
                     }
-                    if (!engine.open(config_.device_path)) {
+                    if (!raw_engine->open(config_.device_path)) {
                         result.errors.push_back("could not open raw recovery image");
                         return result;
                     }
                 }
+            }
+
+            // Schema-driven path: DROP TABLE removed the table's own pages from
+            // the directory tree, so no system-tablespace metadata may have
+            // survived. Discover orphaned INDEX pages on the raw source and
+            // decode ONLY the requested index IDs with the provided schema;
+            // anything else stays unattributed evidence (no cross-table rows).
+            if (primary_index_ids.empty() && has_schema &&
+                !loaded_schema.columns.empty() && raw_engine != nullptr) {
+                if (progress) progress(0.3, "Scanning raw source for orphaned pages...");
+
+                OrphanedPageScanner scanner(*raw_engine);
+                auto all_pages = scanner.scan_all(config_.page_size);
+
+                std::map<uint64_t, std::vector<OrphanedPageScanner::OrphanedPage>> by_index;
+                for (auto& page : all_pages) {
+                    by_index[page.index_id].push_back(std::move(page));
+                }
+
+                std::vector<uint64_t> wanted = config_.target_index_ids;
+                if (wanted.empty() && by_index.size() == 1) {
+                    wanted.push_back(by_index.begin()->first);
+                }
+                if (wanted.empty()) {
+                    std::ostringstream oss;
+                    oss << "schema-driven DROP recovery needs --target-index-ids; found index IDs:";
+                    for (const auto& [id, pages] : by_index) {
+                        oss << " " << id << "(" << pages.size() << ")";
+                    }
+                    result.errors.push_back(oss.str());
+                } else {
+                    if (progress) progress(0.6, "Extracting records from orphaned pages...");
+                    size_t decoded = 0;
+                    for (uint64_t index_id : wanted) {
+                        auto it = by_index.find(index_id);
+                        if (it == by_index.end() || it->second.empty()) continue;
+                        auto records = extract_records(it->second, loaded_schema);
+                        if (records.empty()) continue;
+                        RecoveredTableMetadata meta{};
+                        meta.schema_name = "recovered";
+                        meta.table_id = index_id;
+                        meta.table_name = "index_" + std::to_string(index_id);
+                        meta.primary_index_id = index_id;
+                        meta.schema = loaded_schema;
+                        meta.schema.table_name = meta.table_name;
+                        if (!export_data(meta.table_name, meta.schema, records)) {
+                            result.errors.push_back("failed to export recovered records");
+                            continue;
+                        }
+                        result.records_per_table[index_id] = records.size();
+                        result.total_records += records.size();
+                        result.recovered_tables.push_back(std::move(meta));
+                        decoded++;
+                    }
+                    result.tables_recovered = static_cast<uint32_t>(decoded);
+                    result.tables_found = static_cast<uint32_t>(by_index.size());
+                }
+            } else if (!primary_index_ids.empty() && raw_engine != nullptr) {
+                if (progress) progress(0.3, "Scanning raw device for orphaned pages...");
+
+                RawDiskIOEngine& engine = *raw_engine;
 
                 OrphanedPageScanner page_scanner(engine);
                 auto orphaned_pages = page_scanner.scan_by_index_ids(
@@ -1683,6 +1758,14 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
     parser.set_columns(col_defs, false, n_pk);
     parser.set_recover_deleted(false);  // Only recover non-deleted records
     parser.set_bad_page_mode(0);  // Normal mode for properly structured pages
+    // Chain-only decoding: brute-force page scans fabricate plausible rows
+    // from unrelated bytes, which would be cross-table contamination here.
+    parser.set_strict(true);
+
+    // The same page can be reachable more than once on a raw source (the
+    // dropped file's own blocks plus write-ahead copies), so identical rows
+    // must be collapsed before they reach the exporter.
+    std::set<std::string> seen_rows;
 
     // Process each orphaned page
     for (const auto& page : pages) {
@@ -1692,9 +1775,12 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
         uint16_t page_type = (static_cast<uint16_t>(page.data[24]) << 8) | page.data[25];
         if (page_type != 0x45BF) continue;
 
-        // Check if this is a leaf page (level 0)
-        // Page header: offset 26-27 = level (big-endian)
-        uint16_t level = (static_cast<uint16_t>(page.data[26]) << 8) | page.data[27];
+        // Check if this is a leaf page (level 0).
+        // PAGE_LEVEL lives at offset 64 of the page (FIL header is 38 bytes,
+        // then PAGE_LEVEL after PAGE_N_RECS/PAGE_MAX_TRX_ID); reading 26-27
+        // would consume bytes of FIL_PAGE_FILE_FLUSH_LSN and drop leaf pages.
+        if (page.data.size() < 66) continue;
+        uint16_t level = (static_cast<uint16_t>(page.data[64]) << 8) | page.data[65];
         if (level != 0) continue;  // Skip non-leaf pages
 
         try {
@@ -1720,10 +1806,42 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
                 }
 
                 std::map<std::string, std::string> record_map;
-                for (size_t i = 0; i < rec.fields.size() && i < col_defs.size(); i++) {
-                    record_map[col_defs[i].name] = rec.fields[i].str_value;
+                for (size_t i = 0; i < col_defs.size(); i++) {
+                    const auto& def = col_defs[i];
+                    if (i >= rec.fields.size() || rec.fields[i].is_null) {
+                        // Empty string is the NULL marker the CSV/SQL writers
+                        // emit for nullable columns.
+                        record_map[def.name] = "";
+                        continue;
+                    }
+                    const auto& field = rec.fields[i];
+                    const bool binary = def.is_binary ||
+                        field.type == innodb::IndexFieldValue::Type::BINARY_VAL;
+                    if (binary) {
+                        static constexpr char digits[] = "0123456789abcdef";
+                        std::string encoded = "0x";
+                        for (uint8_t byte : field.raw_bytes) {
+                            encoded.push_back(digits[byte >> 4]);
+                            encoded.push_back(digits[byte & 0x0f]);
+                        }
+                        record_map[def.name] = encoded;
+                    } else if (field.type == innodb::IndexFieldValue::Type::INT_VAL) {
+                        record_map[def.name] = std::to_string(field.int_value);
+                    } else if (field.type == innodb::IndexFieldValue::Type::UINT_VAL) {
+                        record_map[def.name] = std::to_string(field.uint_value);
+                    } else {
+                        record_map[def.name] = field.str_value;
+                    }
                 }
-                all_records.push_back(std::move(record_map));
+                std::string key;
+                for (const auto& [idx, col] : schema.columns) {
+                    auto it = record_map.find(col.name);
+                    key += it == record_map.end() ? std::string("\x01") : it->second;
+                    key.push_back('\x02');
+                }
+                if (seen_rows.insert(std::move(key)).second) {
+                    all_records.push_back(std::move(record_map));
+                }
             }
         } catch (...) {
             // Continue with next page if parsing fails
@@ -1761,7 +1879,14 @@ bool DropTableRecovery::export_data(
                     first = false;
                     auto it = rec.find(col.name);
                     if (it != rec.end()) {
-                        csv_file << "\"" << it->second << "\"";
+                        // RFC4180: quote every field and double embedded quotes so
+                        // values containing quotes/commas/newlines stay one cell.
+                        csv_file << "\"";
+                        for (char c : it->second) {
+                            if (c == '"') csv_file << '"';
+                            csv_file << c;
+                        }
+                        csv_file << "\"";
                     }
                 }
                 csv_file << "\n";
@@ -1789,10 +1914,20 @@ bool DropTableRecovery::export_data(
                     if (!first) sql_file << ", ";
                     first = false;
                     auto it = rec.find(col.name);
-                    if (it != rec.end()) {
-                        sql_file << "'" << it->second << "'";
-                    } else {
+                    if (it == rec.end() || it->second.empty()) {
                         sql_file << "NULL";
+                    } else if (it->second.size() > 2 && it->second[0] == '0' &&
+                               it->second[1] == 'x') {
+                        // Binary columns are hex-encoded; emit a literal so the
+                        // bytes round-trip instead of becoming ASCII text.
+                        sql_file << "UNHEX('" << it->second.substr(2) << "')";
+                    } else {
+                        std::string escaped;
+                        for (char c : it->second) {
+                            if (c == '\'') { escaped += "''"; continue; }
+                            escaped.push_back(c);
+                        }
+                        sql_file << "'" << escaped << "'";
                     }
                 }
                 sql_file << ");\n";

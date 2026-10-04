@@ -106,8 +106,8 @@ public:
     /**
      * @brief Auto-detect compressed page size from IBD file page 0
      *
-     * Reads FSP_SPACE_FLAGS at absolute offset 42 (FIL_HEADER_SIZE + 4)
-     * in big-endian format, extracts ZIP_SSIZE at bits 1-4, and calculates
+     * Reads FSP_SPACE_FLAGS at absolute offset 54
+     * (FIL_PAGE_DATA + FSP_SPACE_FLAGS = 38 + 16) in big-endian format,
      * compressed_page_size = 16384 / (1 << zip_ssize).
      *
      * Canonical FSP classification only. This never inspects the custom
@@ -140,6 +140,15 @@ public:
      * instead of claiming successful recovery.
      */
     static bool decoder_is_validated();
+
+    /**
+     * @brief Prove the physical page stride from the file layout
+     *
+     * Returns page_size when no shorter stride can be proven. Used to record
+     * the on-disk stride for evidence reports even when FSP_SPACE_FLAGS do not
+     * describe it correctly.
+     */
+    static size_t observe_physical_stride(const std::string& file_path, size_t page_size);
 
     std::vector<std::map<std::string, std::string>> recover();
     const CompressedTableRecoveryStats& get_stats() const { return stats_; }

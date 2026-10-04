@@ -6,9 +6,11 @@
 #include "dbrecovery/recovery/ext4_recovery.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/common/mysql_version_detector.hpp"
 #include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
+#include "dbrecovery/export/csv_cell.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -1033,15 +1035,18 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
     // Safety check: ensure we don't read beyond the admitted source
     const uint64_t max_offset = source_size_;
 
-    // InnoDB pages are 16KB, spanning multiple ext4 blocks.
-    // We must read at 16KB-aligned boundaries, so step by blocks_per_page.
+    // InnoDB pages span several ext4 blocks, but a file's first block can start
+    // at any group block, so the physical page start is NOT a multiple of
+    // blocks_per_page. Step by one filesystem block and accept only offsets
+    // whose FIL header validates, otherwise pages whose start is off by one
+    // block are silently skipped.
     uint32_t blocks_per_page = config_.page_size / block_size;
     if (blocks_per_page == 0) blocks_per_page = 16;
 
-    uint32_t scan_step = blocks_per_page;  // Step by InnoDB page size
+    uint32_t scan_step = 1;  // one filesystem block at a time
     uint32_t max_offsets = (blocks_per_group > 524288) ? 524288 : blocks_per_group;
 
-    for (uint32_t blk = 0; blk < max_offsets; blk += blocks_per_page) {
+    for (uint32_t blk = 0; blk < max_offsets; blk += scan_step) {
         // Only scan blocks that are freed (bit=0 in bitmap)
         uint32_t byte_idx = blk / 8;
         uint32_t bit_idx = blk % 8;
@@ -1053,8 +1058,8 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
         uint64_t blk_offset = 0;
         uint64_t disk_offset = 0;
         if (!checked_multiply(group_index, blocks_per_group, group_offset) ||
-            !checked_multiply(blk, block_size, blk_offset) ||
-            !checked_add(group_offset, blk_offset, disk_offset) ||
+            !checked_add(group_offset, blk, group_offset) ||
+            !checked_multiply(group_offset, block_size, disk_offset) ||
             !contains_range(max_offset, disk_offset, config_.page_size)) {
             break;
         }
@@ -1151,14 +1156,15 @@ void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std
     // Safety check: ensure we don't read beyond the admitted source
     const uint64_t max_offset = source_size_;
 
-    // InnoDB pages are 16KB, spanning multiple ext4 blocks.
-    // We must read at 16KB-aligned boundaries, so step by blocks_per_page.
+    // One filesystem block at a time: a tablespace does not necessarily start on
+    // a page-size boundary inside its block group (see scan_freed_blocks).
     uint32_t blocks_per_page = config_.page_size / block_size;
     if (blocks_per_page == 0) blocks_per_page = 16;
+    const uint32_t scan_step = 1;
 
     uint32_t max_offsets = (blocks_per_group > 524288) ? 524288 : blocks_per_group;
 
-    for (uint32_t blk = 0; blk < max_offsets; blk += blocks_per_page) {
+    for (uint32_t blk = 0; blk < max_offsets; blk += scan_step) {
         // Only scan blocks that are allocated (bit=1 in bitmap)
         uint32_t byte_idx = blk / 8;
         uint32_t bit_idx = blk % 8;
@@ -1170,8 +1176,8 @@ void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std
         uint64_t blk_offset = 0;
         uint64_t disk_offset = 0;
         if (!checked_multiply(group_index, blocks_per_group, group_offset) ||
-            !checked_multiply(blk, block_size, blk_offset) ||
-            !checked_add(group_offset, blk_offset, disk_offset) ||
+            !checked_add(group_offset, blk, group_offset) ||
+            !checked_multiply(group_offset, block_size, disk_offset) ||
             !contains_range(max_offset, disk_offset, config_.page_size)) {
             break;
         }
@@ -1412,6 +1418,8 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
     bool use_schema = external_schema_.has_value() && !external_schema_->columns.empty();
     std::vector<dbrecovery::innodb::IndexColumnDef> index_columns;
     std::vector<std::string> schema_diagnostics;
+    uint64_t interior_pages_skipped = 0;
+    uint64_t checksum_rejected_pages = 0;
 
     if (use_schema && config_.target_index_ids.empty()) {
         schema_diagnostics.push_back(
@@ -1481,6 +1489,11 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) !=
                 config_.target_index_ids.end();
 
+        // A single page can be reachable twice on a raw source (live file plus
+        // a write-ahead copy); byte-identical rows are collapsed so exported
+        // row counts can match the source table.
+        std::set<std::string> seen_rows;
+
         // Write header
         if (use_schema_for_index) {
             // Write column names from schema
@@ -1500,6 +1513,29 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         for (const auto& page : pages) {
             if (page.data.size() < config_.page_size) continue;
 
+            // With a declared schema only leaf pages (PAGE_LEVEL == 0) may be
+            // decoded as rows. Interior pages hold node pointers, and decoding
+            // them as user records produces high-confidence garbage rows.
+            if (use_schema_for_index && page.data.size() >= 66) {
+                const uint16_t page_level = read_be<uint16_t>(page.data.data(), 64);
+                if (page_level != 0) {
+                    interior_pages_skipped++;
+                    continue;
+                }
+            }
+
+            // Fail closed on checksum mismatch: a page whose stored InnoDB
+            // checksum disagrees with its bytes has been altered after it was
+            // written, and decoding it can emit a row that never existed.
+            // Untouched pages validate (measured 0 mismatches on intact
+            // tablespaces for 5.6-9.0), so this only excludes damaged pages.
+            if (use_schema_for_index &&
+                !dbrecovery::innodb::validate_page_checksum(
+                    page.data.data(), config_.page_size, /*strict=*/false).is_valid) {
+                checksum_rejected_pages++;
+                continue;
+            }
+
             try {
                 dbrecovery::innodb::InnoDBIndexParser parser;
                 parser.set_recover_deleted(true);
@@ -1518,47 +1554,51 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                 }
 
                 if (use_schema_for_index) {
-                    // Schema-aware parsing
                     parser.set_columns(index_columns);
-                    auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
+                    // Compacting an allocated tablespace keeps history records in
+                    // the page chain; they must not be exported as live rows.
+                    parser.set_recover_deleted(false);
+                    // Schema-aware export must only take rows proven by the on-page
+                    // record chain; brute-force scans fabricate plausible rows.
+                    parser.set_strict(true);
+                    parser.set_target_index_id(index_id);
+                }
+                auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
 
-                    for (const auto& rec : records) {
-                        bool first = true;
-                        for (size_t i = 0; i < rec.fields.size() && i < index_columns.size(); i++) {
-                            if (!first) out << ",";
-                            first = false;
+                for (const auto& rec : records) {
+                    // Skip empty records
+                    if (rec.fields.empty() && rec.raw_data.empty()) continue;
+                    // Skip records the parser itself marks as deleted history.
+                    if (rec.is_deleted) continue;
 
-                            if (rec.fields[i].is_null) {
-                                out << "NULL";
+                    if (use_schema_for_index && !rec.fields.empty()) {
+                        // Schema-aware row: emit exactly one CSV field per declared
+                        // column so the artifact always has index_columns.size()
+                        // columns, and so embedded NUL bytes / commas cannot
+                        // corrupt the textual layout.
+                        std::string row;
+                        for (size_t i = 0; i < index_columns.size(); i++) {
+                            if (i > 0) row += ",";
+                            if (i >= rec.fields.size()) {
+                                continue;
+                            }
+                            const auto& field = rec.fields[i];
+                            if (field.is_null) {
+                                row += "NULL";
                             } else {
-                                // Quote string values and escape special characters
-                                std::string val = rec.fields[i].str_value;
-                                if (val.find(',') != std::string::npos ||
-                                    val.find('"') != std::string::npos ||
-                                    val.find('\n') != std::string::npos) {
-                                    out << "\"";
-                                    for (char c : val) {
-                                        if (c == '"') out << "\"\"";
-                                        else out << c;
-                                    }
-                                    out << "\"";
-                                } else {
-                                    out << val;
-                                }
+                                row += dbrecovery::exporter::csv_column_value(
+                                    field, index_columns[i].is_binary);
                             }
                         }
-                        out << "\n";
-                        total_records++;
+                        if (seen_rows.insert(row).second) {
+                            out << row << "\n";
+                            total_records++;
+                        }
+                        continue;
                     }
-                } else {
-                    // Schema-less parsing: use parsed fields (same as XFS schemaless)
-                    auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
 
-                    for (const auto& rec : records) {
-                        // Skip empty records
-                        if (rec.fields.empty() && rec.raw_data.empty()) continue;
-
-                        bool first_field = true;
+                    bool first_field = true;
+                    if (!rec.fields.empty()) {
 
                         // If we have parsed fields, output them
                         if (!rec.fields.empty()) {
@@ -1568,31 +1608,8 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
 
                                 if (field.is_null) {
                                     out << "NULL";
-                                } else if (!field.str_value.empty()) {
-                                    // Quote strings with special chars
-                                    const auto& val = field.str_value;
-                                    if (val.find(',') != std::string::npos ||
-                                        val.find('"') != std::string::npos ||
-                                        val.find('\n') != std::string::npos) {
-                                        out << "\"";
-                                        for (char c : val) {
-                                            if (c == '"') out << "\"\"";
-                                            else out << c;
-                                        }
-                                        out << "\"";
-                                    } else {
-                                        out << val;
-                                    }
-                                } else if (field.int_value != 0 || field.type == dbrecovery::innodb::IndexFieldValue::Type::INT_VAL) {
-                                    out << field.int_value;
                                 } else {
-                                    // Fallback: hex-encode raw bytes
-                                    out << "0x";
-                                    for (uint8_t byte : field.raw_bytes) {
-                                        out << std::hex << std::setw(2) << std::setfill('0')
-                                            << static_cast<int>(byte);
-                                    }
-                                    out << std::dec;
+                                    out << dbrecovery::exporter::csv_column_value(field, false);
                                 }
                             }
                         } else {
@@ -1634,10 +1651,19 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
     }
 
     result.total_records = total_records;
+    result.checksum_rejected_pages = checksum_rejected_pages;
     result.success = true;
 
     if (config_.verbose) {
         std::cout << "[INFO] Exported " << total_records << " records to CSV files\n";
+        if (interior_pages_skipped > 0) {
+            std::cout << "[INFO] Skipped " << interior_pages_skipped
+                      << " interior (non-leaf) index page(s) for schema-aware decoding\n";
+        }
+        if (checksum_rejected_pages > 0) {
+            std::cout << "[INFO] Rejected " << checksum_rejected_pages
+                      << " index page(s): InnoDB checksum does not match page contents\n";
+        }
     }
 
     return result;

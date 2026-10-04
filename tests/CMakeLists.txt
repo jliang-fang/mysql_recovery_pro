@@ -427,6 +427,11 @@ add_executable(test_drop_table_authorization drop_table_authorization_test.cpp)
 target_link_libraries(test_drop_table_authorization PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_drop_table_authorization PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
 
+# A page that straddles a 1 MiB scan chunk must still be recovered.
+add_executable(test_signature_scraper_boundary signature_scraper_boundary_test.cpp)
+target_link_libraries(test_signature_scraper_boundary PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_signature_scraper_boundary PROPERTIES ENVIRONMENT "DBREC_TEST_TMPDIR=${DBREC_TEST_TMPDIR_VALUE}")
+
 add_executable(test_recovery_idempotency test_recovery_idempotency.cpp)
 target_link_libraries(test_recovery_idempotency PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_recovery_idempotency)

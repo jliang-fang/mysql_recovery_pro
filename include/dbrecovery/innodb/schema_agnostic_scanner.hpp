@@ -222,6 +222,8 @@ public:
         bool verbose = false;           // Debug output
         size_t max_fields_per_record = 256;  // Safety limit
         size_t min_string_length = 2;   // Minimum string length to detect
+        /// Physical page size. 0 = derive it from the file size.
+        uint32_t page_size = 0;
 
         Config() = default;
     };

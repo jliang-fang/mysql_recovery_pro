@@ -47,7 +47,7 @@ std::vector<MetadataCorruption> MetadataCorruptionRepairer::detect_corruptions(c
             MetadataCorruption c;
             c.type = MetadataCorruptionType::FSP_SPACE_FLAGS_INVALID;
             c.page_no = 0;
-            c.offset = 38 + 4;  // FSP_SPACE_FLAGS offset
+            c.offset = innodb::FSP_SPACE_FLAGS_OFFSET;
             std::ostringstream oss;
             oss << "Invalid row format in space flags: " << (int)row_format;
             c.description = oss.str();
@@ -163,21 +163,23 @@ std::optional<FspHeaderInfo> MetadataCorruptionRepairer::parse_fsp_header(const 
 
     FspHeaderInfo fsp = {};
 
-    // FSP Header 结构 (Page 0, offset 38):
+    // FSP Header structure (page 0, beginning at FIL_PAGE_DATA = 38):
     // +0-3: space_id
-    // +4-7: space_flags
-    // +8-15: size (页数)
-    // +16-23: free_limit
-    // +24-27: free_len
-    // +28-31: frag_n_used
+    // +4-7: unused / not used
+    // +8-11: size (pages)
+    // +12-15: free_limit
+    // +16-19: space_flags
+    // +20-23: frag_n_used
     // ...
 
-    fsp.space_id = dbrecovery::innodb::read_be<uint32_t>(page0, 38 + 0);
-    fsp.space_flags = dbrecovery::innodb::read_be<uint32_t>(page0, 38 + 4);
-    fsp.size = dbrecovery::innodb::read_be<uint64_t>(page0, 38 + 8);
-    fsp.free_limit = dbrecovery::innodb::read_be<uint64_t>(page0, 38 + 16);
-    fsp.free_len = dbrecovery::innodb::read_be<uint32_t>(page0, 38 + 24);
-    fsp.frag_n_used = dbrecovery::innodb::read_be<uint32_t>(page0, 38 + 28);
+    constexpr size_t fsp_header = dbrecovery::innodb::FSP_HEADER_OFFSET;
+    fsp.space_id = dbrecovery::innodb::read_be<uint32_t>(page0, fsp_header);
+    fsp.space_flags = dbrecovery::innodb::read_be<uint32_t>(
+        page0, dbrecovery::innodb::FSP_SPACE_FLAGS_OFFSET);
+    fsp.size = dbrecovery::innodb::read_be<uint32_t>(page0, fsp_header + 8);
+    fsp.free_limit = dbrecovery::innodb::read_be<uint32_t>(page0, fsp_header + 12);
+    fsp.free_len = 0;
+    fsp.frag_n_used = dbrecovery::innodb::read_be<uint32_t>(page0, fsp_header + 20);
     fsp.lsn = dbrecovery::innodb::read_be<uint64_t>(page0, 16);  // FIL_PAGE_LSN
 
     // 验证
@@ -200,13 +202,12 @@ bool MetadataCorruptionRepairer::repair_fsp_header(uint8_t* data, size_t size) {
     auto inferred = infer_space_id(data, size);
     uint32_t space_id = inferred.value_or(1);
 
-    // 写入 FSP header
-    dbrecovery::innodb::write_be<uint32_t>(page0, 38 + 0, space_id);      // space_id
-    dbrecovery::innodb::write_be<uint32_t>(page0, 38 + 4, 0x20000000);    // space_flags (DYNAMIC)
-    dbrecovery::innodb::write_be<uint64_t>(page0, 38 + 8, size / page_size_);  // size
-    dbrecovery::innodb::write_be<uint64_t>(page0, 38 + 16, size / page_size_);  // free_limit
-    dbrecovery::innodb::write_be<uint32_t>(page0, 38 + 24, 0);            // free_len
-    dbrecovery::innodb::write_be<uint32_t>(page0, 38 + 28, 0);            // frag_n_used
+    constexpr size_t fsp_header = dbrecovery::innodb::FSP_HEADER_OFFSET;
+    dbrecovery::innodb::write_be<uint32_t>(page0, fsp_header, space_id);
+    dbrecovery::innodb::write_be<uint32_t>(page0, fsp_header + 8, size / page_size_);
+    dbrecovery::innodb::write_be<uint32_t>(page0, fsp_header + 12, size / page_size_);
+    dbrecovery::innodb::write_be<uint32_t>(page0, dbrecovery::innodb::FSP_SPACE_FLAGS_OFFSET, 0x21);
+    dbrecovery::innodb::write_be<uint32_t>(page0, fsp_header + 20, 0);
 
     return true;
 }
@@ -217,7 +218,8 @@ bool MetadataCorruptionRepairer::repair_space_flags(uint8_t* data, size_t size, 
     }
 
     uint8_t* page0 = data;
-    dbrecovery::innodb::write_be<uint32_t>(page0, 38 + 4, correct_flags);
+    dbrecovery::innodb::write_be<uint32_t>(
+        page0, dbrecovery::innodb::FSP_SPACE_FLAGS_OFFSET, correct_flags);
 
     return true;
 }
@@ -235,8 +237,9 @@ bool MetadataCorruptionRepairer::repair_space_id_mismatch(uint8_t* data, size_t 
         dbrecovery::innodb::write_be<uint32_t>(page, 34, correct_space_id);
     }
 
-    // 更新 FSP header 的 space_id
-    dbrecovery::innodb::write_be<uint32_t>(data, 38 + 0, correct_space_id);
+    // Update the page-0 FSP header space ID.
+    dbrecovery::innodb::write_be<uint32_t>(
+        data, dbrecovery::innodb::FSP_HEADER_OFFSET, correct_space_id);
 
     return true;
 }

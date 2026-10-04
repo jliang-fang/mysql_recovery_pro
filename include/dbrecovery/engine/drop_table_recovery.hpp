@@ -356,6 +356,10 @@ public:
         std::string output_directory;   // Output for recovered data
         std::string device_path;        // Optional: raw device for deep scan
         std::string schema_file;        // Optional: JSON schema file path
+        // Only decode these clustered index IDs when no system-tablespace
+        // metadata survived; empty means "resolve from metadata" (and a
+        // schema-driven scan then fails closed if the source is ambiguous).
+        std::vector<uint64_t> target_index_ids;
 
         uint32_t page_size = 16384;
         bool scan_deleted_only = true;  // Only scan deleted records

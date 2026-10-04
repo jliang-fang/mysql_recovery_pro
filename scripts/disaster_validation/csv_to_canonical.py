@@ -37,6 +37,10 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
     - Decimal numbers appear as numeric strings.
     - Integers appear as numeric strings.
     """
+    if isinstance(raw_text, (bytes, bytearray, memoryview)):
+        # The SQL exporter emits binary columns as UNHEX(...); the SQL parser
+        # decodes those to raw bytes, which is already the canonical form.
+        return bytes(raw_text)
     if raw_text is None or (column_def.get("nullable", True) and raw_text in ("", "NULL")):
         return None
 

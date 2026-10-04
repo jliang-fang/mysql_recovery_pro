@@ -8,6 +8,7 @@
 #include <sstream>
 #include <iostream>
 #include <cstdint>
+#include <set>
 #include <utility>
 
 #include "dbrecovery/innodb/index_page_parser.hpp"
@@ -139,10 +140,17 @@ public:
     // Batch INSERT: groups multiple rows into single INSERT statement
     std::string get_result_batch(size_t batch_size) const;
 
+    // Columns whose stored values are 0x<hex> and must be emitted as
+    // UNHEX('...') so the bytes round-trip through a real server.
+    void set_binary_columns(const std::set<std::string>& columns) {
+        binary_columns_ = columns;
+    }
+
 private:
     std::string table_name_;
     std::vector<std::string> column_order_;
     std::vector<std::string> sql_statements_;
+    std::set<std::string> binary_columns_;
 };
 
 /**
@@ -246,7 +254,8 @@ public:
     static bool export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
                               const std::string& table_name,
                               const std::vector<std::string>& column_order,
-                              const std::string& output_path);
+                              const std::string& output_path,
+                              const std::set<std::string>* binary_columns = nullptr);
 
     /**
      * @brief 导出为 IBD

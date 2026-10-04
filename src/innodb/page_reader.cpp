@@ -497,8 +497,8 @@ InnoDBFileReader::InnoDBFileReader(const std::string& file_path, uint32_t page_s
     // 🔧 优化：如果指定了页大小提示且有效，直接使用
     // 注意：提示应该仅在用户明确指定时使用，自动检测优先
     if (page_size_hint_ > 0 && page_size_hint_ <= 65536 && file_size_ % page_size_hint_ == 0) {
-        std::cout << "[WARN] Using page_size_hint (this should only be used when auto-detection fails): " 
-                  << page_size_ << std::endl;
+        std::cout << "[INFO] Using caller-supplied page_size_hint: "
+                  << page_size_hint_ << std::endl;
         page_size_ = static_cast<uint32_t>(page_size_hint_);
         total_pages_ = static_cast<uint32_t>(file_size_ / page_size_);
         is_valid_ = (total_pages_ > 0 || file_size_ > 0);

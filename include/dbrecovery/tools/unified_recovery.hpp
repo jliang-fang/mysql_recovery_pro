@@ -36,6 +36,9 @@ struct UnifiedRecoveryResult {
     std::vector<recovery::SalvagedRow> evidence_fragments;
     std::string recovery_method = "none";
     std::vector<std::string> column_names;
+    /// Parallel to column_names: true for columns whose bytes must be hex
+    /// encoded on export (BINARY/VARBINARY/BLOB and their text aliases).
+    std::vector<bool> column_is_binary;
     report::RecoveryReport report;
     std::string result_classification = "forensic_evidence";
     bool ddl_variation_detected = false;

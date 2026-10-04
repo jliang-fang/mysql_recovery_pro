@@ -531,6 +531,12 @@ UnifiedRecoveryResult run_unified_recovery(
         parser.set_recover_deleted(true);
         parser.set_bad_page_mode(2);
         parser.set_verbose(verbose);
+        // The logical page size is already known (CLI flag or page 0). Pin it:
+        // re-deriving it inside parse_ibd_force() can read an 8 KiB tablespace
+        // as 16 KiB pages and silently drop half of the records.
+        if (page_size >= 4096 && page_size <= 65536) {
+            parser.set_page_size_hint(page_size);
+        }
         innodb::g_verbose = verbose;
 
         std::vector<innodb::IndexColumnDef> index_columns;
@@ -632,12 +638,15 @@ UnifiedRecoveryResult run_unified_recovery(
 #endif
 
         result.column_names.clear();
+        result.column_is_binary.clear();
         if (!index_columns.empty()) {
             result.column_names.reserve(index_columns.size());
+            result.column_is_binary.reserve(index_columns.size());
             for (size_t i = 0; i < index_columns.size(); ++i) {
                 result.column_names.push_back(index_columns[i].name.empty()
                     ? "field_" + std::string(i < 10 ? "000" : i < 100 ? "00" : i < 1000 ? "0" : "") + std::to_string(i)
                     : index_columns[i].name);
+                result.column_is_binary.push_back(index_columns[i].is_binary);
             }
         }
 
@@ -684,7 +693,7 @@ UnifiedRecoveryResult run_unified_recovery(
         }
 
         // Phase 2: Heuristic fallback
-        if (total_recovered==0 && !schemaless_recovery) {
+        if (total_recovered==0) {
             innodb::HeuristicScanner hs(page_size);
             std::set<std::string> seen;
             std::vector<innodb::IndexRecord> extra;
@@ -708,24 +717,46 @@ UnifiedRecoveryResult run_unified_recovery(
                         sr.field_nulls.push_back(f.is_null);
                     }
                     sr.page_no = ir.page_no;
+                    if (have_schema) {
+                        // With an authoritative schema the record layout is
+                        // known, so bytes that the index parser refused to
+                        // decode are unverifiable — evidence, never rows.
+                        sr.salvage_level = recovery::SalvageLevel::FRAGMENT;
+                        sr.recovery_method = "heuristic_scanner_evidence";
+                        result.evidence_fragments.push_back(std::move(sr));
+                        continue;
+                    }
                     result.records.push_back(std::move(sr));
                 }
-                if (all_recs.empty()) total_recovered = result.records.size();
-                else {
-                    // merge heuristic into all_recs path
-                    for (auto &ir: extra) all_recs.push_back(ir);
-                    total_recovered = all_recs.size();
+                if (!have_schema) {
+                    if (all_recs.empty()) total_recovered = result.records.size();
+                    else {
+                        // merge heuristic into all_recs path
+                        for (auto &ir: extra) all_recs.push_back(ir);
+                        total_recovered = all_recs.size();
+                    }
+                    if (result.recovery_method=="index_parser") result.recovery_method="index_parser+heuristic";
+                    else result.recovery_method="heuristic_scanner";
                 }
-                if (result.recovery_method=="index_parser") result.recovery_method="index_parser+heuristic";
-                else result.recovery_method="heuristic_scanner";
             }
         }
 
         // Phase 3: SchemaAgnostic
         if ((total_recovered==0 || total_recovered<100) && all_recs.empty()) {
-            innodb::SchemaAgnosticScanner::Config cfg; cfg.recover_deleted=true;
+            innodb::SchemaAgnosticScanner::Config cfg;
+            cfg.recover_deleted=true;
+            // The scanner assumes 16 KiB pages; a pinned smaller page size must
+            // reach it, otherwise it splits pages at the wrong stride and
+            // reads record headers out of payload bytes.
+            cfg.page_size = static_cast<uint32_t>(page_size);
             innodb::SchemaAgnosticScanner sa(cfg);
-            auto sa_recs = sa.parse_ibd(ibd_path);
+            std::vector<innodb::SchemalessRecord> sa_recs;
+            try {
+                sa_recs = sa.parse_ibd(ibd_path);
+            } catch (const std::exception& e) {
+                result.schema_diagnostics.push_back(
+                    std::string("schema_agnostic scan failed: ") + e.what());
+            }
             for (auto &sr2: sa_recs) {
                 recovery::SalvagedRow sr; sr.salvage_level=recovery::SalvageLevel::STRUCTURED; sr.confidence=0.5; sr.recovery_method="schema_agnostic";
                 for (auto &f: sr2.fields) {
@@ -733,9 +764,17 @@ UnifiedRecoveryResult run_unified_recovery(
                     sr.field_nulls.push_back(f.is_null);
                 }
                 sr.page_no = sr2.page_no;
+                if (have_schema) {
+                    // Same gate as Phase 2: schema-aware export must never be
+                    // populated from a schema-agnostic guess.
+                    sr.salvage_level = recovery::SalvageLevel::FRAGMENT;
+                    sr.recovery_method = "schema_agnostic_evidence";
+                    result.evidence_fragments.push_back(std::move(sr));
+                    continue;
+                }
                 result.records.push_back(std::move(sr));
             }
-            if (!sa_recs.empty()) {
+            if (!sa_recs.empty() && !have_schema) {
                 total_recovered = result.records.size();
                 result.recovery_method = result.recovery_method=="none" ? "schema_agnostic" : result.recovery_method+"+schema_agnostic";
             }
@@ -794,11 +833,25 @@ UnifiedRecoveryResult run_unified_recovery(
                 }
                 if (!pages.empty()) {
                     auto sr = eng.salvage_pages(pages);
-                    for (auto &r: sr.rows) result.records.push_back(std::move(r));
+                    const bool schema_safe = !have_schema || !all_recs.empty();
+                    if (schema_safe) {
+                        for (auto &r: sr.rows) result.records.push_back(std::move(r));
+                    } else {
+                        // The schema-aware index parser found no record at all
+                        // on an intact input, so salvaged rows cannot be tied
+                        // to the declared columns: keep them as evidence.
+                        for (auto &r: sr.rows) {
+                            r.salvage_level = recovery::SalvageLevel::FRAGMENT;
+                            r.evidence.strategy = "salvage_without_index_parser";
+                            result.evidence_fragments.push_back(std::move(r));
+                        }
+                    }
                     for (auto &e: sr.evidence_fragments) result.evidence_fragments.push_back(std::move(e));
                     if (!sr.rows.empty() || !sr.evidence_fragments.empty()) {
                         result.damage_level = sr.damage.level;
-                        if (!sr.rows.empty() && result.recovery_method=="none") result.recovery_method="salvage_engine";
+                        if (schema_safe && !sr.rows.empty() && result.recovery_method=="none") {
+                            result.recovery_method="salvage_engine";
+                        }
                     }
                     // Export: CSV only rows, never fragments — enforced by caller
                 }

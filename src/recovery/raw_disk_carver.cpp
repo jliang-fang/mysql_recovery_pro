@@ -3,6 +3,7 @@
 #include "dbrecovery/innodb/binary_reader.hpp"
 #include "dbrecovery/innodb/schema_agnostic_scanner.hpp"
 #include "dbrecovery/innodb/index_page_parser.hpp"
+#include "dbrecovery/innodb/innodb_checksum.hpp"
 #include "dbrecovery/innodb/frm_parser.hpp"
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
@@ -958,6 +959,16 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
 
         for (const auto& page_data : pages) {
             if (matched_schema.has_value()) {
+                // Fail closed on checksum mismatch: a page whose stored InnoDB
+                // checksum disagrees with its bytes was altered after it was
+                // written, and decoding it can emit a row that never existed.
+                if (page_data.size() >= config_.page_size &&
+                    !innodb::validate_page_checksum(page_data.data(),
+                                                    config_.page_size,
+                                                    /*strict=*/false).is_valid) {
+                    result.checksum_rejected_pages++;
+                    continue;
+                }
                 // 使用schema-aware解析
                 auto records = parse_records_with_schema(page_data, *matched_schema);
                 all_records.insert(all_records.end(), records.begin(), records.end());

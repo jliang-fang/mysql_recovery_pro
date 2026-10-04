@@ -35,7 +35,7 @@ class MatrixItem:
 
 CAPABILITIES = {
     "5.6": VersionCapability(
-        version="5.6", image="docker.m.daocloud.io/mysql:5.6",
+        version="5.6", image="localhost/mysql:5.6",
         image_digest="sha256:897086d07d1efa876224b147397ea8d3147e61dd84dce963aace1d5e9dc2802d",
         page_sizes=frozenset({4096, 8192, 16384}),
         row_formats=frozenset({"COMPACT", "REDUNDANT", "DYNAMIC", "COMPRESSED"}),
@@ -44,7 +44,7 @@ CAPABILITIES = {
         connection_collation="utf8mb4_unicode_ci",
     ),
     "5.7": VersionCapability(
-        version="5.7", image="docker.m.daocloud.io/mysql:5.7",
+        version="5.7", image="localhost/mysql:5.7",
         image_digest="sha256:dab0a802b44617303694fb17d166501de279c3031ddeb28c56ecf7fcab5ef0da",
         page_sizes=frozenset({4096, 8192, 16384, 32768, 65536}),
         row_formats=frozenset({"COMPACT", "REDUNDANT", "DYNAMIC", "COMPRESSED"}),
@@ -53,7 +53,7 @@ CAPABILITIES = {
         connection_collation="utf8mb4_unicode_ci",
     ),
     "8.0": VersionCapability(
-        version="8.0", image="docker.m.daocloud.io/mysql:8.0",
+        version="8.0", image="localhost/mysql:8.0",
         image_digest="sha256:62fb722c78b24245ddff1796a0fcee4a49cc5b87e0aaaf20c92d1da9e0a2497b",
         page_sizes=frozenset({4096, 8192, 16384, 32768, 65536}),
         row_formats=frozenset({"DYNAMIC", "COMPRESSED"}),
@@ -62,8 +62,8 @@ CAPABILITIES = {
         connection_collation="utf8mb4_0900_ai_ci",
     ),
     "8.4": VersionCapability(
-        version="8.4", image="docker.m.daocloud.io/mysql:8.4",
-        image_digest="sha256:14690274f4967ba207939c97dd79a8d6604f1d532218ea6be69c0001ddd2d45f",
+        version="8.4", image="localhost/mysql:8.4",
+        image_digest="sha256:80f4933e3835f9dc4d35a28ec500d7986cb4414e6c6821c5461239cb7beb8995",
         page_sizes=frozenset({4096, 8192, 16384, 32768, 65536}),
         row_formats=frozenset({"DYNAMIC", "COMPRESSED"}),
         schema_sources=frozenset({"SDI", "EXTERNAL"}), supports_json=True,
@@ -71,7 +71,7 @@ CAPABILITIES = {
         connection_collation="utf8mb4_0900_ai_ci",
     ),
     "9.0": VersionCapability(
-        version="9.0", image="docker.m.daocloud.io/mysql:9.0",
+        version="9.0", image="localhost/mysql:9.0",
         image_digest="sha256:0cf8b60f74e235c4dd4beb762b10ec6da3dce30265f5f1d40c2c11fa7872ebd9",
         page_sizes=frozenset({4096, 8192, 16384, 32768, 65536}),
         row_formats=frozenset({"DYNAMIC", "COMPRESSED"}),
@@ -108,6 +108,13 @@ def matrix_item(version: str, filesystem: str, scenario: str, dataset_profile: s
     if row_format not in capability.row_formats:
         return MatrixItem(version, filesystem, scenario, dataset_profile, page_size, row_format,
                           "UNSUPPORTED", "unsupported_row_format")
+    if row_format == "COMPRESSED" and page_size > 16384:
+        # A KEY_BLOCK_SIZE smaller than the page size is required, and InnoDB
+        # refuses compressed tables entirely above 16 KiB pages ("Table storage
+        # engine ... doesn't have this option"). The cell is unsupported, not a
+        # skipped or failed case.
+        return MatrixItem(version, filesystem, scenario, dataset_profile, page_size, row_format,
+                          "UNSUPPORTED", "compressed_row_format_unsupported_above_16k_pages")
     if scenario == "tde-unvalidated" and not capability.supports_tde:
         return MatrixItem(version, filesystem, scenario, dataset_profile, page_size, row_format,
                           "UNSUPPORTED", "tde_not_supported")
@@ -125,3 +132,20 @@ def expand_matrix(versions: Iterable[str], filesystems: Iterable[str], scenarios
         for scenario in scenarios
         for dataset_profile in dataset_profiles
     ]
+
+
+def unsupported_cells(versions, filesystems, scenarios, dataset_profiles,
+                      page_sizes, row_formats) -> list[MatrixItem]:
+    """Every requested combination the version matrix rejects, with its reason."""
+    cells = []
+    for version in versions:
+        for filesystem in filesystems:
+            for scenario in scenarios:
+                for profile in dataset_profiles:
+                    for page_size in page_sizes:
+                        for row_format in row_formats:
+                            item = matrix_item(version, filesystem, scenario, profile,
+                                               page_size, row_format)
+                            if item.status == "UNSUPPORTED":
+                                cells.append(item)
+    return cells

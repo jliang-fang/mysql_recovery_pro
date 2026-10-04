@@ -111,6 +111,9 @@ public:
     struct RecoveryResult {
         bool success = false;
         uint64_t total_records = 0;
+        /// Index pages rejected before structured decoding because their stored
+        /// InnoDB checksum does not match the page contents.
+        uint64_t checksum_rejected_pages = 0;
         std::map<uint64_t, std::vector<std::map<std::string, std::string>>> records_by_index_id;
         std::map<uint64_t, catalog::TableSchema> inferred_schemas; // index_id -> inferred schema
         std::vector<std::string> output_files;

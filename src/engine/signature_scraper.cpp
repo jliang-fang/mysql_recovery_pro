@@ -127,8 +127,14 @@ SignatureBasedScraper::ScanStats SignatureBasedScraper::scan(
 
         uint64_t offset = 0;
         while (offset < scan_limit) {
-            size_t to_read = std::min(chunk_size, static_cast<size_t>(scan_limit - offset));
-            size_t bytes_read = engine_.read(offset, chunk_buffer, to_read);
+            // Read one page past the chunk so a page that straddles the chunk
+            // boundary is still seen as a complete page; the buffer is already
+            // sized for it. Advancing by exactly chunk_size keeps the 512-byte
+            // grids of neighbouring windows aligned, which is why pos==0 is
+            // only processed for the first window.
+            const size_t requested = static_cast<size_t>(std::min<uint64_t>(
+                chunk_size + page_size, scan_limit - offset));
+            size_t bytes_read = engine_.read(offset, chunk_buffer, requested);
 
             if (bytes_read == 0) break;
 
@@ -137,11 +143,14 @@ SignatureBasedScraper::ScanStats SignatureBasedScraper::scan(
 
             // Sliding window scan through the chunk in 512-byte steps
             for (size_t pos = 0; pos + page_size <= bytes_read; pos += SLIDING_STEP) {
+                if (offset > 0 && pos == 0) continue;  // covered by the previous window
                 const uint8_t* page_data = chunk_buffer + pos;
-                process_page(offset + pos, page_data, page_size, callback);
+                // Delivered once after conflict resolution below.
+                process_page(offset + pos, page_data, page_size, callback, false);
             }
 
-            offset += bytes_read;
+            if (bytes_read <= chunk_size) break;  // final window
+            offset += chunk_size;
 
             // Progress callback
             if (progress_callback_) {
@@ -273,7 +282,8 @@ bool SignatureBasedScraper::parse_page_header(const uint8_t* page_data, uint32_t
 
 bool SignatureBasedScraper::process_page(uint64_t offset, const uint8_t* page_data,
                                           uint32_t page_size,
-                                          std::function<void(const FoundPage&)> callback) {
+                                          std::function<void(const FoundPage&)> callback,
+                                          bool emit_immediately) {
     stats_.pages_checked++;
 
     // Step 1: Check offset 24 for valid page_type (BIG-ENDIAN)
@@ -353,7 +363,7 @@ bool SignatureBasedScraper::process_page(uint64_t offset, const uint8_t* page_da
     stats_.pages_matched++;
 
     // Build found page
-    FoundPage page;
+    FoundPage page{};  // zero-init: n_records is only filled when page_size >= 56
     page.disk_offset = offset;
     page.page_number = page_number;
     page.lsn = lsn;
@@ -384,9 +394,10 @@ bool SignatureBasedScraper::process_page(uint64_t offset, const uint8_t* page_da
     version.space_id = innodb::read_be<uint32_t>(page_data, 34);  // Correct: offset 34-37
     version.data = page.data;
     version.is_selected = false;
+    version.snapshot = page;
     register_page_version(version);
 
-    if (callback) {
+    if (emit_immediately && callback) {
         callback(page);
     }
 
@@ -503,6 +514,24 @@ std::vector<std::vector<FoundPage>> SignatureBasedScraper::reconstruct_chains(
     return chains;
 }
 
+namespace {
+
+// A PageVersion keeps only the fields conflict resolution needs; the full
+// parse lives in `snapshot` so callers receive the same FoundPage shape they
+// would have got from a direct emission.
+FoundPage snapshot_of(const PageVersion& version) {
+    if (!version.snapshot.data.empty()) return version.snapshot;
+    FoundPage page;
+    page.disk_offset = version.disk_offset;
+    page.page_number = version.page_number;
+    page.space_id = version.space_id;
+    page.lsn = version.lsn;
+    page.data = version.data;
+    return page;
+}
+
+} // namespace
+
 std::vector<FoundPage> SignatureBasedScraper::resolve_conflicts(
     const std::vector<std::vector<PageVersion>>& versions,
     PageConflictPolicy policy,
@@ -515,23 +544,25 @@ std::vector<FoundPage> SignatureBasedScraper::resolve_conflicts(
         if (version_group.size() <= 1) {
             // No conflict - take the only version
             if (!version_group.empty()) {
-                FoundPage page;
-                page.disk_offset = version_group[0].disk_offset;
-                page.page_number = version_group[0].page_number;
-                page.space_id = version_group[0].space_id;
-                page.lsn = version_group[0].lsn;
-                page.data = version_group[0].data;
-                resolved.push_back(std::move(page));
+                resolved.push_back(snapshot_of(version_group[0]));
             }
             continue;
         }
 
         stats.total_conflicts++;
 
-        // Sort versions by LSN
+        // Sort versions by LSN. Copies flushed from the same write share an
+        // LSN, so the tie-break goes to the fuller page: PAGE_N_RECS is the
+        // only in-page evidence of how much of the record heap survived.
         auto sorted = version_group;
         std::sort(sorted.begin(), sorted.end(),
-            [](const PageVersion& a, const PageVersion& b) { return a.lsn < b.lsn; });
+            [](const PageVersion& a, const PageVersion& b) {
+                if (a.lsn != b.lsn) return a.lsn < b.lsn;
+                if (a.snapshot.n_records != b.snapshot.n_records) {
+                    return a.snapshot.n_records < b.snapshot.n_records;
+                }
+                return a.disk_offset < b.disk_offset;
+            });
 
         size_t selected_idx = 0;
 
@@ -577,14 +608,7 @@ std::vector<FoundPage> SignatureBasedScraper::resolve_conflicts(
                 break;
         }
 
-        const auto& selected = sorted[selected_idx];
-        FoundPage page;
-        page.disk_offset = selected.disk_offset;
-        page.page_number = selected.page_number;
-        page.space_id = selected.space_id;
-        page.lsn = selected.lsn;
-        page.data = selected.data;
-        resolved.push_back(std::move(page));
+        resolved.push_back(snapshot_of(sorted[selected_idx]));
     }
 
     return resolved;

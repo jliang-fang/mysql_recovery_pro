@@ -142,8 +142,12 @@ bool Exporter::export_to_sql(const std::vector<std::map<std::string, std::string
 bool Exporter::export_to_sql(const std::vector<std::map<std::string, std::string>>& records,
                              const std::string& table_name,
                              const std::vector<std::string>& column_order,
-                             const std::string& output_path) {
+                             const std::string& output_path,
+                             const std::set<std::string>* binary_columns) {
     dbrecovery::exporter::SQLOutputter outputter(table_name, column_order);
+    if (binary_columns != nullptr) {
+        outputter.set_binary_columns(*binary_columns);
+    }
 
     for (const auto& record : records) {
         if (!outputter.export_record(record)) {

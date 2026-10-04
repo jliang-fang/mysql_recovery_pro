@@ -239,15 +239,15 @@ int MySQLVersionDetector::check_checksum_type(const uint8_t* page_data, size_t p
 }
 
 int MySQLVersionDetector::check_fsp_flags(const uint8_t* page_data, size_t page_size) {
-    // 检查FSP Header中的FSP_SPACE_FLAGS（page 0，offset 38起，4字节big-endian）
+    // FSP_SPACE_FLAGS is at FIL_PAGE_DATA + FSP_SPACE_FLAGS (absolute 54).
     // flags位定义（参考 fil0fil.h FSP_SPACE_FLAGS bit布局）：
     //   bit 0  : POST_ANTELOPE （MySQL 5.7+，COMPACT+/ANTELOPE格式）
     //   bit 1  : ZIP_SSIZE（压缩页大小）
     //   bit 5  : ATOMIC_BLOBS（MySQL 5.7+，原子BLOB指针）
     //   bit 6  : PAGE_COMPRESSION
     // 仅对FSP_HDR页（page 0）有效；非FSP页无法判断，返回0（不确定）
-    // read_be32 at FSP_SPACE_FLAGS_OFFSET (42) requires 46 bytes; the old
-    // < 42 check allowed out-of-bounds reads on 42..45 byte buffers.
+    // read_be32 at FSP_SPACE_FLAGS_OFFSET (54) requires 58 bytes.
+    // The lower bound prevents a four-byte out-of-bounds read.
     if (page_size < innodb::FSP_SPACE_FLAGS_OFFSET + sizeof(uint32_t)) return 0;
 
     const auto metadata = innodb::parse_fsp_compression_metadata_detailed(

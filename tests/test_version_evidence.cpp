@@ -133,13 +133,14 @@ std::vector<uint8_t> truncate_page(size_t size) {
 }
 
 TEST(MultiPageEvidenceTest, FspFlagsRejectsTruncatedBuffers) {
-    // read_be32 at FSP_SPACE_FLAGS_OFFSET (42) requires 46 bytes. Any buffer
+    // read_be32 at FSP_SPACE_FLAGS_OFFSET (54) requires 58 bytes. Any buffer
     // shorter than that must return "indeterminate" (0) and must not read
     // past the end. Regression for the old `< 42` check that allowed
     // out-of-bounds reads on 42..45 byte pages.
     EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(41).data(), 41), 0);
     EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(42).data(), 42), 0);
     EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(45).data(), 45), 0);
+    EXPECT_EQ(MySQLVersionDetector::check_fsp_flags(truncate_page(57).data(), 57), 0);
 }
 
 TEST(MultiPageEvidenceTest, FspFlagsReadsAtCanonicalBoundary) {
@@ -150,8 +151,8 @@ TEST(MultiPageEvidenceTest, FspFlagsReadsAtCanonicalBoundary) {
     set_fsp_flags(page, innodb::FSP_FLAGS_POST_ANTELOPE | innodb::FSP_FLAGS_ATOMIC_BLOBS);
     EXPECT_GT(MySQLVersionDetector::check_fsp_flags(page.data(), page.size()), 0);
 
-    // Exactly 46 bytes carries the complete 4-byte flags field.
-    EXPECT_GT(MySQLVersionDetector::check_fsp_flags(truncate_page(46).data(), 46), 0);
+    // Exactly 58 bytes carries the complete 4-byte flags field.
+    EXPECT_GT(MySQLVersionDetector::check_fsp_flags(truncate_page(58).data(), 58), 0);
 }
 
 // ==================== Insufficient / empty evidence ====================
