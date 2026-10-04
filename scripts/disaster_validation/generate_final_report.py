@@ -380,6 +380,9 @@ def _build_defects(phase_a, phase_b, corruption=()) -> list[dict[str, Any]]:
                              "mutated-input": case.get("output_sha256")},
         })
     return defects
+
+
+def _build_fail_closed(phase_a, phase_b, corruption=()) -> list[dict[str, Any]]:
     """Prove every rejected input produced evidence only, never importable rows."""
     entries = []
     for case in phase_a:
@@ -411,6 +414,25 @@ def _build_defects(phase_a, phase_b, corruption=()) -> list[dict[str, Any]]:
                 "contract_complete": run.get("contract_complete"),
                 "reason": run.get("reason"),
                 "csv_or_sql_written": run.get("classification") == "structured_recovery",
+            })
+    for case in corruption:
+        # Only the fail-closed outcomes belong here: an evidence-only corruption
+        # run must prove it emitted no importable artifact.
+        if case["verdict"] not in ("PASS_EVIDENCE_ONLY", "SETUP_ERROR"):
+            continue
+        for label, run in (case.get("runs") or {}).items():
+            entries.append({
+                "case": case["case"],
+                "phase": "CORRUPTION",
+                "recovery_method": label,
+                "classification": run.get("classification"),
+                "structured_rows": run.get("structured_rows"),
+                "evidence_fragments": run.get("evidence_fragments"),
+                "export_success": run.get("export_success"),
+                "importable": run.get("importable"),
+                "contract_complete": run.get("contract_complete"),
+                "reason": run.get("reason") or "; ".join(case.get("reasons") or []),
+                "csv_or_sql_written": bool(run.get("export_success")),
             })
     return entries
 
@@ -767,7 +789,7 @@ def main() -> int:
 
     unsupported = unsupported_combinations()
     defects = _build_defects(phase_a, phase_b, corruption)
-    fail_closed = _build_fail_closed(phase_a, phase_b)
+    fail_closed = _build_fail_closed(phase_a, phase_b, corruption)
     gaps = _build_validation_gaps(phase_a, phase_b, corruption)
 
     doc: dict[str, Any] = {
@@ -857,8 +879,8 @@ def main() -> int:
             "裸块设备（/dev/nvme0n2）真实介质阶段：需单独授权后由 device_safety 预检 + "
             "approval token 双门执行，本轮未执行。",
             "页损坏/TDE 矩阵已覆盖的范围以本报告 corruption_matrix 为准；未执行的部分："
-            "SDI/.frm 元数据损坏、压缩元数据篡改、跨 5.6/8.0/8.4/9.0 与 xfs 的损坏矩阵、"
-            "以及 100k/1m 规模样本。",
+            "SDI/.frm 元数据损坏、压缩元数据篡改、MySQL 5.6/8.0/9.0 的损坏矩阵、"
+            "xfs 上的 8.4 与 TDE 用例、以及 100k/1m 规模样本。",
         ],
     }
 
