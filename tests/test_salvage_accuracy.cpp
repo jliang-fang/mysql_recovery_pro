@@ -18,6 +18,49 @@ static std::vector<uint8_t> make_clean_index_page_sa() {
     return p;
 }
 
+// A non-leaf page whose free space between PAGE_HEAP_TOP and the page
+// directory holds stale bytes but whose own checksum is intact is NOT damaged.
+// InnoDB reuses that gap after a split; a real 1m/8.4 tablespace contains such
+// a page (page 37, 217 non-zero bytes, valid checksum). Treating it as damage
+// set the page-integrity gate, demoted all 1,000,000 parsed rows to evidence
+// fragments and exported zero rows.
+TEST(SalvageAccuracy, NonLeafStaleFreeSpaceWithValidChecksumIsNotDamage) {
+    auto page = make_clean_index_page_sa();
+    // level = 1 (non-leaf), heap_top = 200, n_dir_slots = 2
+    page[64]=0x00; page[65]=0x01;
+    page[38]=0x00; page[39]=0x02;
+    page[40]=0x00; page[41]=0xC8;
+    for (size_t i = 200; i < 16364; ++i) page[i] = 0xAB;
+    // keep the page's own checksum self-consistent so it stays "intact"
+    page[16368]=page[0]; page[16369]=page[1]; page[16370]=page[2]; page[16371]=page[3];
+
+    auto dmg = SalvageEngine::assess_damage(page.data(), page.size());
+    EXPECT_FALSE(dmg.free_space_corrupt)
+        << "stale free space on a checksum-intact page must not be reported as damage";
+    EXPECT_LT(static_cast<int>(dmg.level),
+              static_cast<int>(dbrecovery::common::DamageLevel::L3_SEVERE))
+        << "stale free space must never escalate a page to severe damage";
+}
+
+// The same bytes on a page whose checksum is actually broken are still
+// reported: the exemption is for checksum-intact pages only.
+TEST(SalvageAccuracy, NonLeafFreeSpaceCorruptionIsReportedWhenChecksumFails) {
+    auto page = make_clean_index_page_sa();
+    page[64]=0x00; page[65]=0x01;
+    page[38]=0x00; page[39]=0x02;
+    page[40]=0x00; page[41]=0xC8;
+    for (size_t i = 200; i < 16364; ++i) page[i] = 0xAB;
+    // Declare CRC32C (so the 5.6 folded-LSN bypass cannot apply) and store a
+    // checksum that does not match the page contents.
+    page[0]=0xDE; page[1]=0xAD; page[2]=0xBE; page[3]=0xEF;
+    page[16368]=0xDE; page[16369]=0xAD; page[16370]=0xBE; page[16371]=0xEF;
+    page[16380]=0xEB; page[16381]=0xDA; page[16382]=0xCD; page[16383]=0xDB;
+
+    auto dmg = SalvageEngine::assess_damage(page.data(), page.size());
+    EXPECT_FALSE(dmg.checksum_valid);
+    EXPECT_TRUE(dmg.free_space_corrupt);
+}
+
 TEST(SalvageAccuracy, CleanPageZeroFalsePositive) {
     SalvageEngine::Config cfg; cfg.min_confidence=0.3; cfg.include_evidence_fragments=false;
     SalvageEngine eng(cfg);

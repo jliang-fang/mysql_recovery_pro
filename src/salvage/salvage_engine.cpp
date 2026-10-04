@@ -241,9 +241,17 @@ DamageReport SalvageEngine::assess_damage(const uint8_t* data, size_t size) {
     // and the page directory start should be zero-filled.  A non-zero byte
     // in this region indicates data corruption (e.g. a bitflip in free space
     // that would not be caught by checksum or FIL-header validation).
+    //
+    // The page's own checksum is authoritative here.  InnoDB reuses the free
+    // space of a non-leaf page when it splits, so bytes can appear below the
+    // current heap_top while the page is still exactly as the server wrote it;
+    // a measured 1m-page tablespace has such a page (page 37, 217 non-zero
+    // bytes between heap_top and the directory) with a valid checksum.  That
+    // is not damage, and treating it as damage made the whole tablespace
+    // forensic-only and exported zero rows.
     if ((page_type == 0x45BF || page_type == 0x00BF) && size >= 66) {
         uint16_t page_level = (static_cast<uint16_t>(data[64]) << 8) | data[65];
-        if (page_level > 0) {
+        if (page_level > 0 && !report.checksum_valid) {
             uint16_t heap_top = (static_cast<uint16_t>(data[40]) << 8) | data[41];
             uint16_t n_dir_slots = (static_cast<uint16_t>(data[38]) << 8) | data[39];
             // Directory starts at: page_size - 8 (trailer) - 2 * n_dir_slots
