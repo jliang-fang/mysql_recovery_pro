@@ -8,6 +8,7 @@
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
+#include "dbrecovery/export/csv_cell.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
 #include "dbrecovery/salvage/evidence_serializer.hpp"
 #include "nlohmann/json.hpp"
@@ -956,6 +957,11 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
 
         // 对每个inex_id的页进行解析
         std::vector<std::map<std::string, std::string>> all_records;
+        // The same page is reachable through several scan strategies (live
+        // extents, freed blocks, signature hits). Byte-identical rows must be
+        // collapsed, otherwise the artifact carries duplicate primary keys and
+        // can never be compared against truth.
+        std::set<std::string> seen_rows;
 
         for (const auto& page_data : pages) {
             if (matched_schema.has_value()) {
@@ -971,7 +977,19 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
                 }
                 // 使用schema-aware解析
                 auto records = parse_records_with_schema(page_data, *matched_schema);
-                all_records.insert(all_records.end(), records.begin(), records.end());
+                for (auto& record : records) {
+                    std::string key;
+                    key.reserve(128);
+                    for (const auto& kv : record) {
+                        key += kv.first;
+                        key.push_back('\x01');
+                        key += kv.second;
+                        key.push_back('\x02');
+                    }
+                    if (seen_rows.insert(std::move(key)).second) {
+                        all_records.push_back(std::move(record));
+                    }
+                }
             }
         }
 
@@ -1005,20 +1023,10 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
                         first = true;
                         for (const auto& kv : rec) {
                             if (!first) out << ",";
-                            // CSV转义
-                            std::string val = kv.second;
-                            if (val.find(',') != std::string::npos ||
-                                val.find('"') != std::string::npos ||
-                                val.find('\n') != std::string::npos) {
-                                out << "\"";
-                                for (char c : val) {
-                                    if (c == '"') out << "\"\"";
-                                    else out << c;
-                                }
-                                out << "\"";
-                            } else {
-                                out << val;
-                            }
+                            // Values are already rendered as CSV cells by
+                            // csv_column_value(); re-quoting them here would
+                            // double-escape quotes and commas.
+                            out << kv.second;
                             first = false;
                         }
                         out << "\n";
@@ -1359,6 +1367,10 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
     uint16_t page_type = read_be<uint16_t>(data, FIL_PAGE_TYPE_ABS);
     if (page_type != FIL_PAGE_INDEX) return records;
 
+    // Interior pages hold node pointers, not user rows: decoding them with a
+    // declared schema fabricates rows whose primary keys are link bytes.
+    if (page_size > 66 && read_be<uint16_t>(data, 64) != 0) return records;
+
     // 将TableSchema转换为IndexColumnDef列表
     // CRITICAL: 必须按physical_pos顺序排列，与InnoDB存储顺序一致
     std::vector<innodb::IndexColumnDef> columns;
@@ -1408,7 +1420,12 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
             if (rec.fields[i].is_null) {
                 record[col.name] = "NULL";
             } else {
-                record[col.name] = rec.fields[i].str_value;
+                // Render through the shared cell encoder: binary columns become
+                // 0x<hex> and control bytes are blanked, so a raw BLOB can never
+                // put a NUL into the CSV row (a NUL makes the artifact
+                // unparseable and the round-trip comparison crash).
+                record[col.name] = dbrecovery::exporter::csv_column_value(
+                    rec.fields[i], col.is_binary);
             }
         }
         if (!record.empty()) {

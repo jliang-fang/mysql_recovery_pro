@@ -805,9 +805,12 @@ class ScenarioDriver:
                 recovered = csv_to_canonical_dataset(
                     csv_path=csvs[0], database=truth["database"], table=truth["table"],
                     schema=truth["schema"], mysql_version=self.item.version)
-            except (ValueError, TypeError, KeyError) as error:
+            except Exception as error:
+                # A CSV the standard reader cannot parse is a product defect in
+                # the artifact, never an environment interruption: it must be
+                # scored as a failure with the concrete decoder error.
                 entry["status"] = "FAIL"
-                entry["reason"] = f"csv_parse_failed:{type(error).__name__}"
+                entry["reason"] = f"csv_parse_failed:{type(error).__name__}:{error}"
                 blockers.append(f"{label}_csv_parse_failed")
                 comparison[label] = entry
                 continue

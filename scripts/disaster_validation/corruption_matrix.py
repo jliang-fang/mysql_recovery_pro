@@ -448,6 +448,9 @@ class CorruptionScenarioDriver(ScenarioDriver):
 
     def execute(self) -> dict[str, Any]:
         self.run = ValidationRun.create(self.config.evidence_root, self.config.run_id, self.item)
+        # "setup" failures are environmental; "verify" failures happen after the
+        # recovery binary has produced its artifacts and are product defects.
+        stage = "setup"
         self.run.transition("PRECHECKED", {
             "version": self.item.version,
             "image": self.capability.image,
@@ -484,6 +487,7 @@ class CorruptionScenarioDriver(ScenarioDriver):
             self.run.transition("RECOVERY_ATTEMPTED", {
                 "returncodes": {key: value.get("returncode")
                                 for key, value in (recovery.get("runs") or {}).items()}})
+            stage = "verify"
             verification = self._verify(recovery)
             verdict, reasons = _corruption_verdict(verification, self.mutation)
             self.record.update({
@@ -502,19 +506,29 @@ class CorruptionScenarioDriver(ScenarioDriver):
                 "verdict_reasons": reasons,
             })
             self.run.transition("REPORTED", {"verdict": verdict, "reasons": reasons})
-        except Exception as error:  # noqa: BLE001 - seal setup diagnostics when possible
+        except Exception as error:  # noqa: BLE001 - classify, then seal diagnostics
+            # Once recovery has produced its artifacts, anything that breaks the
+            # verification (unparseable CSV, comparator crash, contract mismatch)
+            # is a product defect; earlier failures are environmental.
+            failed_after_recovery = stage == "verify"
+            status = "PRODUCT_FAIL" if failed_after_recovery else "SETUP_ERROR"
             self.record.update({
                 "kind": "corruption_matrix", "mutation": self.mutation,
                 "scenario": self.item.scenario, "filesystem": self.item.filesystem,
-                "version": self.item.version, "status": "SETUP_ERROR",
+                "version": self.item.version, "status": status,
                 "error": f"{type(error).__name__}: {error}",
+                "verdict_reasons": [f"verification raised {type(error).__name__}: {error}"],
             })
             try:
                 self._stop_mysql()
             except Exception:
                 pass
             try:
-                self.run.transition("FAILED_SETUP", {"error": self.record["error"]})
+                if failed_after_recovery and self.run.state == "RECOVERY_ATTEMPTED":
+                    self.run.transition("REPORTED", {"verdict": status,
+                                                     "error": self.record["error"]})
+                else:
+                    self.run.transition("FAILED_SETUP", {"error": self.record["error"]})
             except RunLifecycleError:
                 pass
         finally:
@@ -561,6 +575,10 @@ def _corruption_verdict(verification: dict[str, Any], mutation: str) -> tuple[st
         comparison = entry.get("comparison") or {}
         if not comparison:
             return "PRODUCT_FAIL", [f"{label}: structured output was not compared to truth"]
+        if comparison.get("status") != "COMPARABLE":
+            return "PRODUCT_FAIL", [
+                f"{label}: comparison not comparable: "
+                f"{comparison.get('prerequisites') or comparison.get('status')}"]
         mismatches = int(comparison.get("field_mismatches") or 0)
         false_positives = int(comparison.get("false_positives") or 0)
         if mismatches or false_positives:
