@@ -1423,6 +1423,10 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
     parser.set_columns(columns);
     parser.set_recover_deleted(config_.recover_deleted);
     parser.set_bad_page_mode(2);
+    // Schema-aware export must only take rows proven by the on-page record
+    // chain; without strict mode parse_page falls back to brute-force scans
+    // that fabricate plausible rows (the same defect class fixed in ext4).
+    parser.set_strict(true);
 
     auto index_records = parser.parse_page(data, page_size, 0);
 

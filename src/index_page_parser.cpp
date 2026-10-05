@@ -1167,6 +1167,135 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
     bool is_compact) {
     std::vector<IndexRecord> records;
 
+    // The record chain of a B-tree leaf page is in non-decreasing key order by
+    // definition. When a schema declares only fixed-size integer primary-key
+    // columns, a chain record whose key order is violated could not have been
+    // written by InnoDB that way — its key bytes were corrupted after the
+    // fact, and the decoded row is a fabrication (e.g. a bit-flipped sign byte
+    // turning pk 13834 into 72057594037941770). Restricted to strict schema
+    // mode, leaf pages, and integer pks: InnoDB's sign-bit encoding preserves
+    // raw-byte order for signed and unsigned fixed ints alike, so a plain
+    // lexicographic comparison on the stored bytes is the key ordering. For
+    // other pk types (strings, var-length) raw order is collation- or
+    // length-dependent, so the guard stays off rather than risk dropping real
+    // rows.
+    auto integer_pk_key_order_applies = [this]() -> bool {
+        if (!strict_ || columns_.empty() || n_pk_cols_ == 0 ||
+            n_pk_cols_ > columns_.size()) {
+            return false;
+        }
+        for (uint32_t i = 0; i < n_pk_cols_; ++i) {
+            const uint8_t t = columns_[i].col_type;
+            // TINY(2), SHORT(3), LONG(4), INT24(10), LONGLONG(9): fixed-size
+            // integers whose InnoDB storage is order-preserving.
+            if (!(t == 2 || t == 3 || t == 4 || t == 9 || t == 10)) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    auto record_key = [this](const IndexRecord& rec,
+                             std::vector<uint8_t>& key) -> bool {
+        if (rec.fields.size() < n_pk_cols_) return false;
+        key.clear();
+        for (uint32_t i = 0; i < n_pk_cols_; ++i) {
+            const auto& field = rec.fields[i];
+            if (field.is_null) return false;
+            const uint32_t expected = columns_[i].storage_size();
+            if (expected == 0 || field.raw_bytes.size() != expected) {
+                return false;
+            }
+            key.insert(key.end(), field.raw_bytes.begin(), field.raw_bytes.end());
+        }
+        return true;
+    };
+
+    auto drop_key_order_violations = [&]() {
+        const bool is_leaf = (page_hdr.level == 0);
+        if (!is_compact || !is_leaf || !integer_pk_key_order_applies()) return;
+
+        // Pair each surviving record with its comparable key; records whose
+        // key cannot be proven (null/short) are kept but excluded from the
+        // ordering test so they cannot trigger or mask a violation.
+        std::vector<bool> keyable(records.size(), false);
+        std::vector<std::vector<uint8_t>> keys(records.size());
+        for (size_t i = 0; i < records.size(); ++i) {
+            if (!records[i].is_deleted) {
+                keyable[i] = record_key(records[i], keys[i]);
+            }
+        }
+
+        // A violation key[i] < key[i-1] names a corrupted pair but not which
+        // side. Drop the side whose removal restores local order; if the
+        // window cannot decide (both or neither side works), drop both — a
+        // bounded loss is always preferable to a fabricated row.
+        std::vector<bool> dropped(records.size(), false);
+        bool any_dropped = false;
+        for (size_t i = 0; i < records.size(); ++i) {
+            if (!keyable[i] || dropped[i]) continue;
+            // Find previous surviving comparable record.
+            ssize_t prev = -1;
+            for (ssize_t j = static_cast<ssize_t>(i) - 1; j >= 0; --j) {
+                if (keyable[j] && !dropped[j]) { prev = j; break; }
+            }
+            if (prev < 0) continue;
+            if (keys[i] >= keys[prev]) continue;
+
+            ssize_t next = -1;
+            for (size_t j = i + 1; j < records.size(); ++j) {
+                if (keyable[j] && !dropped[j]) { next = static_cast<ssize_t>(j); break; }
+            }
+            ssize_t prev_prev = -1;
+            for (ssize_t j = prev - 1; j >= 0; --j) {
+                if (keyable[j] && !dropped[j]) { prev_prev = j; break; }
+            }
+            const bool has_pp = prev_prev >= 0;
+            const bool has_next = next >= 0;
+
+            // Removing `prev` must leave its neighbours ordered around key[i].
+            auto side_ordered = [&](size_t lower, size_t upper,
+                                    bool has_lower, bool has_upper) {
+                if (!has_lower || !has_upper) return true;
+                return keys[lower] <= keys[upper];
+            };
+            const bool drop_prev_ok =
+                side_ordered(prev_prev >= 0 ? prev_prev : prev, i, has_pp, true) &&
+                side_ordered(i, next >= 0 ? next : i, true, has_next);
+            const bool drop_cur_ok =
+                side_ordered(prev, next >= 0 ? next : prev, true, has_next);
+
+            if (drop_prev_ok && !drop_cur_ok) {
+                dropped[prev] = true;
+                any_dropped = true;
+            } else if (drop_cur_ok && !drop_prev_ok) {
+                dropped[i] = true;
+                any_dropped = true;
+            } else {
+                dropped[prev] = true;
+                dropped[i] = true;
+                any_dropped = true;
+            }
+        }
+
+        if (!any_dropped) return;
+
+        size_t kept = 0;
+        for (size_t i = 0; i < records.size(); ++i) {
+            if (dropped[i]) {
+                key_order_violations_dropped_++;
+                continue;
+            }
+            // Never self-move: records[kept] = std::move(records[i]) when
+            // kept == i leaves the vector in an unspecified state.
+            if (kept != i) {
+                records[kept] = std::move(records[i]);
+            }
+            kept++;
+        }
+        records.resize(kept);
+    };
+
     size_t header_size = is_compact ? REC_HEADER_SIZE_NEW : REC_HEADER_SIZE_OLD;
 
     // Start at the INFIMUM record origin
@@ -1268,6 +1397,8 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
             current_origin = hdr->next_offset;
         }
     }
+
+    drop_key_order_violations();
 
     return records;
 }

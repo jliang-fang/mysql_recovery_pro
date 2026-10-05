@@ -498,3 +498,8 @@ gtest_discover_tests(test_schema_type_conversion)
 add_executable(test_index_page_parser_json innodb/index_page_parser_json_test.cpp)
 target_link_libraries(test_index_page_parser_json PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
 gtest_discover_tests(test_index_page_parser_json)
+
+# Clustered-leaf key-order guard regression tests
+add_executable(test_index_page_parser_pk_order innodb/index_page_parser_pk_order_test.cpp)
+target_link_libraries(test_index_page_parser_pk_order PRIVATE dbrecovery_innodb GTest::GTest GTest::Main)
+gtest_discover_tests(test_index_page_parser_pk_order)

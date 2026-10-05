@@ -1,0 +1,369 @@
+// Clustered-leaf key-order guard regression test.
+//
+// Defect: a bit-flip in the first byte of a signed BIGINT pk (0x80 -> 0x81)
+// left a leaf record's chain structure valid while fabricating pk
+// 72057594037941770 out of row 13834. The checksum gate could not catch it
+// (the validator does not model this 5.6 tablespace), and a clean duplicate
+// page elsewhere supplied the true row, yielding 20001 rows instead of 20000.
+//
+// Fix: in strict schema-aware mode with a fixed-size integer pk, the record
+// chain's non-decreasing key order is enforced; an order-violating record is
+// dropped (or the ambiguous pair) instead of exported.
+
+#include <gtest/gtest.h>
+#include <cstdint>
+#include <cstring>
+#include <vector>
+
+#include "dbrecovery/innodb/index_page_parser.hpp"
+
+namespace {
+
+using dbrecovery::innodb::IndexColumnDef;
+using dbrecovery::innodb::InnoDBIndexParser;
+
+constexpr size_t PAGE_SIZE = 16384;
+constexpr uint16_t INFIMUM_ORIGIN = 99;
+
+// Big-endian write helpers
+void be16(std::vector<uint8_t>& p, size_t off, uint16_t v) {
+    p[off] = static_cast<uint8_t>(v >> 8);
+    p[off + 1] = static_cast<uint8_t>(v & 0xFF);
+}
+void be32(std::vector<uint8_t>& p, size_t off, uint32_t v) {
+    for (int i = 0; i < 4; i++) p[off + i] = static_cast<uint8_t>((v >> (8 * (3 - i))) & 0xFF);
+}
+void be64(std::vector<uint8_t>& p, size_t off, uint64_t v) {
+    for (int i = 0; i < 8; i++) p[off + i] = static_cast<uint8_t>((v >> (8 * (7 - i))) & 0xFF);
+}
+
+// Write a 5-byte COMPACT record header at `hdr_off`.
+// bits layout (24b): instant(1)|version(1)|deleted(1)|min_rec(1)|n_owned(4)|
+//                    heap_no(13)|rec_type(3) | next_offset(16s)
+void write_rec_header(std::vector<uint8_t>& p, size_t hdr_off,
+                      bool deleted, uint16_t heap_no, int16_t next_offset) {
+    uint32_t bits = 0;
+    if (deleted) bits |= 1u << 21;
+    bits |= static_cast<uint32_t>(0) << 16;               // n_owned = 0
+    bits |= (heap_no & 0x1FFF) << 3;
+    bits |= 0;                                            // rec_type conventional
+    p[hdr_off]     = static_cast<uint8_t>((bits >> 16) & 0xFF);
+    p[hdr_off + 1] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+    p[hdr_off + 2] = static_cast<uint8_t>(bits & 0xFF);
+    be16(p, hdr_off + 3, static_cast<uint16_t>(next_offset));
+}
+
+// Schema: id BIGINT pk (type 9), signed_value INT (type 4), name VARCHAR (type 16)
+std::vector<IndexColumnDef> make_columns() {
+    IndexColumnDef pk;
+    pk.name = "id";
+    pk.col_type = 9;
+    pk.is_nullable = false;
+    pk.is_unsigned = false;
+    pk.physical_pos = 1;
+    pk.ordinal_position = 1;
+    pk.col_length = 8;
+
+    IndexColumnDef sv;
+    sv.name = "signed_value";
+    sv.col_type = 4;
+    sv.is_nullable = false;
+    sv.is_unsigned = false;
+    sv.physical_pos = 2;
+    sv.ordinal_position = 2;
+    sv.col_length = 4;
+
+    IndexColumnDef name;
+    name.name = "name";
+    name.col_type = 16;
+    name.is_nullable = true;
+    name.is_unsigned = false;
+    name.physical_pos = 3;
+    name.ordinal_position = 3;
+    name.col_length = 16;
+    name.mb_minlen = 1;
+    name.mb_maxlen = 1;
+    name.char_set_id = 45;
+
+    return {pk, sv, name};
+}
+
+// Build one user record body: [varchar size byte(s)][null bitmap] are NOT part
+// of body — they're before the header. Body: pk(8) trx(6) rollptr(7) sv(4)
+// name(N)
+struct RecSpec {
+    uint64_t pk_storage;   // stored 8 bytes (sign-flipped encoding)
+    int32_t sv;
+    std::string name;
+};
+
+// Lay out records into the page; returns origin offsets of user records.
+std::vector<size_t> write_user_records(std::vector<uint8_t>& page,
+                                       size_t& cursor,
+                                       const std::vector<RecSpec>& specs,
+                                       bool varchar_not_null) {
+    std::vector<size_t> origins;
+    for (size_t r = 0; r < specs.size(); ++r) {
+        const auto& s = specs[r];
+        // variable-size bytes + null bitmap precede the 5B header.
+        // name is VARCHAR: 1 length byte (if not null); nullable cols: 1 bitmap byte.
+        const uint8_t name_len = static_cast<uint8_t>(s.name.size());
+        // layout at header_start-2: [name_len][null_bitmap][header5][body]
+        const size_t hdr_off = cursor + 2;
+        const size_t origin = hdr_off + 5;
+        // var-size bytes read backward from pos=hdr_off: first read is
+        // null bitmap (1 byte at hdr_off-1), then name size (1 byte at hdr_off-2).
+        page[hdr_off - 1] = 0x00;              // null bitmap: name not null
+        page[hdr_off - 2] = name_len;          // name length
+        // body
+        be64(page, origin, s.pk_storage);
+        // trx_id 6B, roll_ptr 7B: arbitrary but fixed
+        for (int i = 0; i < 13; i++) page[origin + 8 + i] = static_cast<uint8_t>(0x10 + i);
+        // signed_value INT stored as value ^ 0x80000000 (sign-flip encoding)
+        be32(page, origin + 21, static_cast<uint32_t>(s.sv) ^ 0x80000000u);
+        std::memcpy(&page[origin + 25], s.name.data(), s.name.size());
+
+        const size_t rec_end = origin + 25 + s.name.size();
+        write_rec_header(page, hdr_off, false, static_cast<uint16_t>(2 + r),
+                         /*next_offset=*/0);  // patched below
+        origins.push_back(origin);
+        cursor = rec_end;
+    }
+    // Patch next offsets: each record's next = (next_origin - this_origin).
+    for (size_t r = 0; r + 1 < origins.size(); ++r) {
+        const size_t hdr_off = origins[r] - 5;
+        const int16_t next = static_cast<int16_t>(origins[r + 1] - origins[r]);
+        be16(page, hdr_off + 3, static_cast<uint16_t>(next));
+    }
+    // Last user record points back to SUPREMUM (origin = INFIMUM_ORIGIN + 13+8).
+    if (!origins.empty()) {
+        const size_t hdr_off = origins.back() - 5;
+        const uint16_t supremum_origin = INFIMUM_ORIGIN + 8 + 13;  // 99+21=120
+        const int16_t next = static_cast<int16_t>(supremum_origin) -
+                             static_cast<int16_t>(origins.back());
+        be16(page, hdr_off + 3, static_cast<uint16_t>(next));
+    }
+    return origins;
+}
+
+// Build a valid COMPACT leaf INDEX page containing the given user records.
+std::vector<uint8_t> build_leaf_page(const std::vector<RecSpec>& specs,
+                                     uint64_t index_id) {
+    std::vector<uint8_t> page(PAGE_SIZE, 0);
+
+    // FIL header: page_no (4), prev(8)/next(12) none, LSN(16), type(24)=INDEX,
+    // flush lsn(26), space_id(34)
+    be32(page, 4, 88);
+    be32(page, 8, 0xFFFFFFFFu);
+    be32(page, 12, 0xFFFFFFFFu);
+    be64(page, 16, 3555714);
+    be16(page, 24, 0x45BF);            // FIL_PAGE_INDEX
+    be32(page, 34, 6);                 // space id
+
+    // System records: infimum (origin 99) and supremum (origin 120).
+    // Infimum record: 5B hdr at 94 + "infimum\0" (8B). Supremum: 5B hdr at 115
+    // + "supremum" (8B).
+    std::memcpy(&page[INFIMUM_ORIGIN], "infimum", 8);
+    std::memcpy(&page[INFIMUM_ORIGIN + 21], "supremum", 8);
+    // infimum header (heap_no=0, next = first user record origin - 99)
+    // filled after records laid out.
+
+    // PAGE header at 38
+    const size_t records_start = INFIMUM_ORIGIN + 21 + 8;  // after supremum
+    size_t cursor = records_start;
+    auto origins = write_user_records(page, cursor, specs, true);
+
+    const uint16_t heap_top = static_cast<uint16_t>(cursor);
+    const uint16_t n_recs = static_cast<uint16_t>(specs.size());
+    const uint16_t n_heap = static_cast<uint16_t>(specs.size() + 2) | 0x8000;
+
+    // PAGE_N_DIR_SLOTS=2, HEAP_TOP, N_HEAP (bit15 = compact), N_RECS, LEVEL=0,
+    // INDEX_ID
+    be16(page, 38, 2);
+    be16(page, 40, heap_top);
+    be16(page, 42, n_heap);
+    be16(page, 44, 0);              // page_free
+    be16(page, 46, 0);              // garbage
+    be16(page, 54, n_recs);
+    be16(page, 64, 0);              // level 0 = leaf
+    be64(page, 66, index_id);
+
+    // Infimum header at 94: heap_no=0, next -> first user record
+    if (!origins.empty()) {
+        write_rec_header(page, 94, false, 0,
+                         static_cast<int16_t>(origins[0] - INFIMUM_ORIGIN));
+    }
+    // Supremum header at 115: heap_no=1, next=0
+    write_rec_header(page, 115, false, 1, 0);
+
+    // FIL trailer: low4 lsn at ps-4 (matches FIL_PAGE_LSN low4)
+    be32(page, PAGE_SIZE - 4, 3555714 & 0xFFFFFFFFu);
+    // old checksum field at ps-8: leave 0 (gate not under test)
+    return page;
+}
+
+uint64_t pk_storage(int64_t v) {
+    return static_cast<uint64_t>(v) ^ 0x8000000000000000ULL;
+}
+
+// ---------------------------------------------------------------------------
+
+TEST(PkOrderGuard, DropsLeadingRecordCorruptedAboveSuccessor) {
+    // This is the real defect shape: the first record's pk byte is flipped
+    // upward (0x80..01 -> 0x81..ff), so its key now exceeds every successor.
+    // Truth order is 1,2,3; record 0 reads 0x81FF.. and record 1 reads 0x80..02,
+    // so 0x81FF.. > 0x80..02 is a violation provable at the leading edge.
+    std::vector<RecSpec> specs = {
+        {0x81FFFFFFFFFFFFFFull, -10, "b10"},   // corrupted: was pk 2
+        {pk_storage(3), -3, "c3"},
+        {pk_storage(4), -4, "d4"},
+    };
+    auto page = build_leaf_page(specs, /*index_id=*/22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+
+    ASSERT_EQ(records.size(), 2u);
+    EXPECT_EQ(records[0].fields[0].int_value, 3);
+    EXPECT_EQ(records[1].fields[0].int_value, 4);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 1u);
+}
+
+TEST(PkOrderGuard, KeepsMonotonicChain) {
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(2), -2, "b2"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 3u);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+}
+
+TEST(PkOrderGuard, DoesNotFireOutsideStrictMode) {
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_recover_deleted(false);
+    // strict off: guard must not drop rows (non-strict callers accept
+    // brute-force candidates anyway).
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+    EXPECT_EQ(records.size(), 3u);
+}
+
+TEST(PkOrderGuard, DoesNotFireForNonIntegerPk) {
+    // pk column declared fixed-length BINARY — guard must stay off even in
+    // strict mode (order for non-integer pk types is not provable from raw
+    // bytes alone).
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    auto cols = make_columns();
+    cols[0].col_type = 29;      // STRING/BINARY family: not an integer type
+    cols[0].is_binary = true;
+    cols[0].col_length = 8;
+    cols[0].mb_minlen = 1;
+    cols[0].mb_maxlen = 1;
+
+    InnoDBIndexParser parser;
+    parser.set_columns(cols, false, 1);
+    parser.set_strict(true);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+    EXPECT_EQ(records.size(), 3u);
+}
+
+TEST(PkOrderGuard, UnsignedBigintPk) {
+    // Unsigned BIGINT: stored raw BE — order preserved. Leading record is
+    // corrupted above its successor (0x81FF.. vs 0x..03).
+    std::vector<RecSpec> specs = {
+        {0x81FFFFFFFFFFFFFFull, -10, "b10"},   // corrupted
+        {3, -3, "c3"},
+        {4, -4, "d4"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    auto cols = make_columns();
+    cols[0].is_unsigned = true;
+
+    InnoDBIndexParser parser;
+    parser.set_columns(cols, false, 1);
+    parser.set_strict(true);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 2u);
+    EXPECT_EQ(records[0].fields[0].str_value, "3");
+    EXPECT_EQ(records[1].fields[0].str_value, "4");
+    EXPECT_EQ(parser.key_order_violations_dropped(), 1u);
+}
+
+TEST(PkOrderGuard, AmbiguousViolationDropsBothSides) {
+    // 1, 10, 3: with no further neighbours the middle pair cannot be resolved
+    // (dropping either side leaves the other two ordered). Fail bounded: both
+    // are dropped rather than risking a fabricated row.
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records[0].fields[0].int_value, 1);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 2u);
+}
+
+TEST(PkOrderGuard, InteriorPageIsNotKeyOrdered) {
+    // The guard must not run on interior pages (level != 0): their record
+    // bodies are node pointers, not schema rows.
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+    // Force PAGE_LEVEL = 1 (interior).
+    page[64] = 0x00;
+    page[65] = 0x01;
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_recover_deleted(false);
+
+    parser.parse_page(page.data(), page.size(), 88);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+}
+
+} // namespace

@@ -701,6 +701,16 @@ public:
      */
     void set_target_index_id(uint64_t index_id) { target_index_id_ = index_id; }
 
+    /**
+     * @brief Records dropped by the clustered-leaf key-order guard
+     *
+     * In strict schema-aware mode with a fixed-size integer primary key, a
+     * leaf record whose stored key bytes violate the chain's non-decreasing
+     * order is proven corrupted (InnoDB could not have written it there) and
+     * is dropped instead of exported. Returns how many rows the guard removed.
+     */
+    uint64_t key_order_violations_dropped() const { return key_order_violations_dropped_; }
+
     // ---- Page Parsing ----
 
     /**
@@ -976,6 +986,11 @@ private:
     /// Set when a field length could not be bounded by the record buffer.
     /// The whole record is then rejected instead of exporting a shifted row.
     bool field_size_guard_overflow_ = false;
+
+    /// Records dropped by the clustered-leaf key-order guard (strict schema
+    /// mode, integer pk): their stored key bytes cannot be part of an
+    /// InnoDB-written chain, so they are corruptions rather than real rows.
+    uint64_t key_order_violations_dropped_ = 0;
 
     uint64_t total_records_ = 0;
     uint64_t total_pages_ = 0;
