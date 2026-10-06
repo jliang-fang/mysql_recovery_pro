@@ -207,6 +207,147 @@ class RealMediaDropAdapter:
         )
 
 
+def _phase_b_scenario_runner(runner: Any = None) -> Callable[[MatrixItem, AdapterContext], dict[str, Any]]:
+    """Return a callable dispatching Phase B disposable filesystem disaster scenarios."""
+    from .phase_b_general import ScenarioConfig, ScenarioDriver, _run
+
+    resolved_runner = runner if runner is not None else _run
+
+    def run(item: MatrixItem, context: AdapterContext) -> dict[str, Any]:
+        rows = 20000 if item.dataset_profile == "smoke" else (
+            100000 if item.dataset_profile == "100k" else 1000000)
+        config = ScenarioConfig(
+            evidence_root=context.evidence_root.parent,
+            run_id=context.case_id,
+            item=item,
+            rows=rows,
+            image_mb=2048,
+            fresh_import=True,
+        )
+        driver = ScenarioDriver(config, runner=resolved_runner)
+        return driver.execute()
+
+    return run
+
+
+class PhaseBDisasterAdapter:
+    """Dispatches filesystem disaster scenarios on isolated media images."""
+
+    capabilities = AdapterCapabilities(
+        name="phase-b-filesystem-disaster",
+        version=1,
+        execution_class="disposable",
+        versions=frozenset({"5.6", "5.7", "8.0", "8.4", "9.0"}),
+        filesystems=frozenset({"ext4", "xfs"}),
+        scenarios=frozenset({"drop", "truncate", "rm-rf"}),
+        dataset_profiles=frozenset({"smoke", "100k", "1m"}),
+        page_sizes=frozenset({4096, 8192, 16384, 32768, 65536}),
+        row_formats=frozenset({"DYNAMIC"}),
+    )
+
+    def __init__(self, runner: Callable[[MatrixItem, AdapterContext], dict[str, Any]] | None = None) -> None:
+        self.runner = runner
+
+    def run(self, item: MatrixItem, context: AdapterContext) -> AdapterResult:
+        if self.runner is None:
+            return AdapterResult("FAILED_SETUP", "phase_b_runner_not_configured")
+        try:
+            record = self.runner(item, context)
+        except Exception as error:
+            return AdapterResult("ABORTED", f"phase_b_error:{type(error).__name__}:{error}")
+        status = str(record.get("status", "NOT_COMPUTABLE")).upper()
+        verification = record.get("verification", {})
+        runs = verification.get("runs", {})
+        comparisons = {}
+        for label, run in runs.items():
+            if isinstance(run, dict) and "comparison" in run:
+                comparisons[label] = run["comparison"]
+        strict_pass = bool(comparisons) and all(
+            entry.get("strict_pass") is True for entry in comparisons.values()
+        )
+        case_root = context.evidence_root.parent / context.case_id
+        return AdapterResult(
+            status="PASS" if (status == "PASS" and strict_pass) else status,
+            reason=";".join(verification.get("blockers", [])) if verification.get("blockers") else record.get("error", ""),
+            case_root=case_root,
+            manifest_sha256=record.get("seal"),
+            lifecycle_state="SEALED",
+            comparison=comparisons,
+            export_eligible=strict_pass,
+        )
+
+
+def _corruption_scenario_runner(runner: Any = None) -> Callable[[MatrixItem, AdapterContext], dict[str, Any]]:
+    """Return a callable dispatching bounded physical corruption matrix runs."""
+    from .corruption_matrix import CorruptionScenarioDriver
+    from .phase_b_general import ScenarioConfig, _run
+
+    resolved_runner = runner if runner is not None else _run
+
+    def run(item: MatrixItem, context: AdapterContext) -> dict[str, Any]:
+        mutation_map = {
+            "corruption-l1": "checksum_body_flip",
+            "corruption-l2": "page_type_flip",
+            "corruption-l3": "record_chain_break",
+            "corruption-l4": "tail_truncate_partial_page",
+            "tde-unvalidated": "tde_candidate",
+        }
+        mutation = mutation_map.get(item.scenario, "checksum_body_flip")
+        rows = 20000 if item.dataset_profile == "smoke" else (
+            100000 if item.dataset_profile == "100k" else 1000000)
+        config = ScenarioConfig(
+            evidence_root=context.evidence_root.parent,
+            run_id=context.case_id,
+            item=item,
+            rows=rows,
+            image_mb=2048,
+            fresh_import=False,
+        )
+        driver = CorruptionScenarioDriver(config, mutation=mutation, runner=resolved_runner)
+        return driver.execute()
+
+    return run
+
+
+class CorruptionMatrixAdapter:
+    """Dispatches bounded physical mutations and verifies fail-closed boundaries."""
+
+    capabilities = AdapterCapabilities(
+        name="corruption-fail-closed",
+        version=1,
+        execution_class="disposable",
+        versions=frozenset({"5.6", "5.7", "8.0", "8.4", "9.0"}),
+        filesystems=frozenset({"ext4", "xfs"}),
+        scenarios=frozenset({"corruption-l1", "corruption-l2", "corruption-l3", "corruption-l4", "tde-unvalidated"}),
+        dataset_profiles=frozenset({"smoke", "100k", "1m"}),
+        page_sizes=frozenset({4096, 8192, 16384, 32768, 65536}),
+        row_formats=frozenset({"DYNAMIC", "COMPACT", "REDUNDANT", "COMPRESSED"}),
+    )
+
+    def __init__(self, runner: Callable[[MatrixItem, AdapterContext], dict[str, Any]] | None = None) -> None:
+        self.runner = runner
+
+    def run(self, item: MatrixItem, context: AdapterContext) -> AdapterResult:
+        if self.runner is None:
+            return AdapterResult("FAILED_SETUP", "corruption_runner_not_configured")
+        try:
+            record = self.runner(item, context)
+        except Exception as error:
+            return AdapterResult("ABORTED", f"corruption_error:{type(error).__name__}:{error}")
+        status = str(record.get("status", "NOT_COMPUTABLE")).upper()
+        case_root = context.evidence_root.parent / context.case_id
+        is_pass = status in ("PASS_BOUNDED_STRUCTURED", "PASS_EVIDENCE_ONLY", "PASS")
+        return AdapterResult(
+            status="PASS" if is_pass else ("FAIL" if status == "PRODUCT_FAIL" else status),
+            reason=";".join(record.get("verdict_reasons", [])) or record.get("error", ""),
+            case_root=case_root,
+            manifest_sha256=record.get("seal"),
+            lifecycle_state="SEALED",
+            comparison=record.get("verification", {}).get("runs"),
+            export_eligible=False,
+        )
+
+
 def _podman_available() -> bool:
     return shutil.which("podman") is not None
 
@@ -214,20 +355,33 @@ def _podman_available() -> bool:
 def default_adapters() -> tuple[ValidationAdapter, ...]:
     """Return the production adapter set.
 
-    The baseline adapter is wired to the audited Phase A runner when podman
-    is available; otherwise it stays registered but will fail closed with
-    FAILED_SETUP so missing prerequisites can never silently produce PASS.
+    The baseline, Phase B disaster, and corruption adapters are wired to audited
+    runners when podman is available; otherwise they stay registered but will
+    fail closed with FAILED_SETUP so missing prerequisites can never produce PASS.
     """
     if _podman_available():
         baseline = OfflineExperimentAdapter(
             baseline_runner=_phase_a_baseline_runner())
+        disaster = PhaseBDisasterAdapter(
+            runner=_phase_b_scenario_runner())
+        corruption = CorruptionMatrixAdapter(
+            runner=_corruption_scenario_runner())
     else:
         baseline = OfflineExperimentAdapter()
-    return (baseline, RealMediaDropAdapter())
+        disaster = PhaseBDisasterAdapter()
+        corruption = CorruptionMatrixAdapter()
+    return (baseline, disaster, corruption, RealMediaDropAdapter())
 
 
-def adapter_for(item: MatrixItem, adapters: tuple[ValidationAdapter, ...]) -> ValidationAdapter | None:
-    matches = tuple(adapter for adapter in adapters if adapter.capabilities.supports(item))
+def adapter_for(item: MatrixItem, adapters: tuple[ValidationAdapter, ...],
+                allow_real_media: bool = False) -> ValidationAdapter | None:
+    matches = [adapter for adapter in adapters if adapter.capabilities.supports(item)]
+    if len(matches) > 1:
+        # Resolve real-media vs disposable: if allow_real_media is false, exclude real-media
+        if not allow_real_media:
+            matches = [a for a in matches if a.capabilities.execution_class != "real-media"]
+        else:
+            matches = [a for a in matches if a.capabilities.execution_class == "real-media"]
     if len(matches) > 1:
         raise ValueError(f"multiple adapters declare support for matrix case: {item}")
     return matches[0] if matches else None

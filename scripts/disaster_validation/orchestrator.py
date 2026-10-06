@@ -242,7 +242,7 @@ class DisasterOrchestrator:
         if item.status != "PLANNED":
             return CaseResult(request.case_id, item, "UNSUPPORTED", item.reason,
                               None, None, None)
-        adapter = adapter_for(item, self.adapters)
+        adapter = adapter_for(item, self.adapters, allow_real_media=config.allow_real_media)
         if adapter is None:
             return CaseResult(request.case_id, item, "UNSUPPORTED", "no_audited_adapter",
                               None, None, None)

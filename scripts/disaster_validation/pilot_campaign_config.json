@@ -1,0 +1,11 @@
+{
+  "orchestration_version": 1,
+  "run_id": "comprehensive-pilot-20261006",
+  "evidence_root": "/app/mysql_recovery_artifacts/campaign_2026-10-06",
+  "versions": ["5.6", "5.7", "8.0", "8.4", "9.0"],
+  "filesystems": ["ext4", "xfs"],
+  "scenarios": ["baseline", "drop", "truncate", "rm-rf", "corruption-l1", "corruption-l2", "tde-unvalidated"],
+  "dataset_profiles": ["smoke"],
+  "page_sizes": [16384],
+  "row_formats": ["DYNAMIC"]
+}

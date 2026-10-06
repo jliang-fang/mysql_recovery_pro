@@ -617,6 +617,11 @@ UnifiedRecoveryResult run_unified_recovery(
             }
         }
         // SDI schema extraction is handled by the caller (FRM/schema_str).
+        if (have_schema) {
+            // A declared schema makes this an exportable structured path: only
+            // on-page record-chain rows may become structured output.
+            parser.set_strict(true);
+        }
         // Version gates: (1) schema trust — with no authoritative schema the
         // pipeline must not treat parse results as structured recovery, and
         // (2) format safety — a UNKNOWN version means even bounded SDI scanning

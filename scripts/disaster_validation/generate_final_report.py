@@ -27,7 +27,7 @@ ROOT = Path("/app/mysql_recovery_artifacts")
 ALL_VERSIONS = ("5.6", "5.7", "8.0", "8.4", "9.0")
 ALL_FILESYSTEMS = ("ext4", "xfs")
 ALL_SCENARIOS = ("baseline", "drop", "truncate", "rm-rf")
-ALL_PROFILES = ("smoke",)
+ALL_PROFILES = ("smoke", "100k", "1m")
 ALL_PAGE_SIZES = (4096, 8192, 16384, 32768, 65536)
 ALL_ROW_FORMATS = ("REDUNDANT", "COMPACT", "DYNAMIC", "COMPRESSED")
 
@@ -253,6 +253,18 @@ def source_fingerprint() -> str:
     return digest.hexdigest()
 
 
+def _git_commit() -> str:
+    try:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                              text=True, timeout=10, check=False, cwd=str(REPO))
+        commit = proc.stdout.strip()
+        if proc.returncode == 0 and len(commit) == 40:
+            return commit
+    except Exception:
+        pass
+    return "UNAVAILABLE"
+
+
 def environment() -> dict[str, Any]:
     def output(argv: list[str]) -> str:
         try:
@@ -274,7 +286,7 @@ def environment() -> dict[str, Any]:
         "cmake": output(["cmake", "--version"]).splitlines()[:1],
         "host_filesystem": output(["bash", "-lc",
                                    "findmnt -no FSTYPE,OPTIONS / | head -1"]),
-        "git_commit": "UNAVAILABLE - git binary is not installed on this host",
+        "git_commit": _git_commit(),
         # Without a VCS the build identity is still auditable: a stable hash
         # over every translation unit that goes into the recovery binary.
         "source_fingerprint": source_fingerprint(),

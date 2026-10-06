@@ -829,6 +829,9 @@ public:
         uint64_t records_skipped = 0;
         uint64_t pages_skipped_corrupt = 0;
         uint64_t dedup_removed = 0;
+        /// Active clustered-leaf rows rejected because their verified integer
+        /// PRIMARY-key bytes violate the B-tree record-chain order.
+        uint64_t key_order_violations_dropped = 0;
     };
     const Stats& get_stats() const { return stats_; }
 

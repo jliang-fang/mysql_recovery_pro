@@ -709,6 +709,9 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
             parser.set_columns(col_defs, false, n_pk);
             parser.set_recover_deleted(true);
             parser.set_bad_page_mode(2);  // Try mode for truncated pages
+            // Schema-aware output must remain chain-proven even when this
+            // recovery path permits deleted forensic evidence.
+            parser.set_strict(true);
 
             auto index_records = parser.parse_ibd_force(ibd_path);
             if (!index_records.empty()) {

@@ -4577,6 +4577,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         index_parser.set_columns(index_columns, false, n_pk);
+        index_parser.set_strict(true);
         std::cout << "[INFO] Schema set from .frm file (" << index_columns.size()
                   << " columns, " << n_pk << " PK columns)\n";
         return true;
@@ -4965,6 +4966,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         }
 
         index_parser.set_columns(index_columns, false, n_pk);
+        index_parser.set_strict(true);
         std::cout << "[INFO] Schema set from --schema option (" << index_columns.size()
                   << " columns, " << n_pk << " PK columns)\n";
         return true;
@@ -5267,6 +5269,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
 
         // Try FRM schema if provided
         bool has_frm_schema = parse_schema_from_frm(frm_path, index_parser, verbose);
+        if (has_frm_schema) index_parser.set_strict(true);
 
         auto records = index_parser.parse_ibd_force(ibd_path);
 
@@ -5414,6 +5417,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         }
                     }
                     index_parser.set_columns(columns);
+                    index_parser.set_strict(true);
                     if (verbose) {
                         std::cout << "[INFO] Loaded " << columns.size() << " columns from SDI schema\n";
                     }

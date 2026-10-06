@@ -1179,9 +1179,10 @@ std::vector<IndexRecord> InnoDBIndexParser::follow_record_chain(
     // other pk types (strings, var-length) raw order is collation- or
     // length-dependent, so the guard stays off rather than risk dropping real
     // rows.
-    auto integer_pk_key_order_applies = [this]() -> bool {
+    auto integer_pk_key_order_applies = [this, &page_hdr]() -> bool {
         if (!strict_ || columns_.empty() || n_pk_cols_ == 0 ||
-            n_pk_cols_ > columns_.size()) {
+            n_pk_cols_ > columns_.size() || has_row_id_ ||
+            target_index_id_ == 0 || page_hdr.index_id != target_index_id_) {
             return false;
         }
         for (uint32_t i = 0; i < n_pk_cols_; ++i) {
@@ -2994,6 +2995,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
 
     stats_.pages_valid++;
     stats_.records_recovered += records.size();
+    stats_.key_order_violations_dropped = key_order_violations_dropped_;
 
     return records;
 }
@@ -3548,6 +3550,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
     }
 
     stats_.records_recovered = all_records.size();
+    stats_.key_order_violations_dropped = key_order_violations_dropped_;
     total_records_ += all_records.size();
     total_pages_ += total_pages;
 
@@ -3733,10 +3736,12 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
         bool is_compact = ph->is_compact_format;
         auto page_records = follow_record_chain(page_buf.data(), page_size, *ph, page_no, is_compact);
 
-        // Check if record chain broke prematurely - use fallback if needed
+        // Check if record chain broke prematurely. Strict schema recovery is
+        // chain-only: page-directory and brute-force scans are forensic
+        // evidence, not rows eligible for structured export.
         uint16_t expected = ph->n_recs;
 
-        if (expected > 0 && page_records.size() < expected * 4 / 5) {
+        if (!strict_ && expected > 0 && page_records.size() < expected * 4 / 5) {
             // Try parse_page_fast for page directory scan
             auto fast_records = parse_page_fast(page_buf.data(), page_size, page_no);
             if (fast_records.size() > page_records.size()) {
@@ -3750,8 +3755,8 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
             }
         }
 
-        // If still not enough, try brute force
-        if (expected > 0 && page_records.size() < expected * 2 / 3) {
+        // If still not enough, try brute force only outside strict mode.
+        if (!strict_ && expected > 0 && page_records.size() < expected * 2 / 3) {
             auto try_records = parse_page_try(page_buf.data(), page_size, page_no);
             if (try_records.size() > page_records.size()) {
                 std::set<uint16_t> seen_heap;
@@ -3783,6 +3788,7 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
     csv_file.close();
 
     stats_.records_recovered = record_count;
+    stats_.key_order_violations_dropped = key_order_violations_dropped_;
     total_records_ += record_count;
     total_pages_ += total_pages;
 

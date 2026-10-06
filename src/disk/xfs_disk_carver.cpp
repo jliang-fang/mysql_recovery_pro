@@ -2658,6 +2658,9 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
     // Schema-aware export must only trust the on-page record chain, and only
     // leaf pages carry user rows (interior pages hold node pointers).
     parser.set_strict(true);
+    // The carver does not bind the supplied schema to an authoritative PRIMARY
+    // INDEX_ID at this boundary. Keep chain-only decoding, but do not enable
+    // destructive order filtering for an index that could be secondary.
     if (page_size >= 66) {
         const uint16_t level = (static_cast<uint16_t>(data[64]) << 8) | data[65];
         if (level != 0) return {};

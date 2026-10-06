@@ -101,7 +101,8 @@ struct RecSpec {
 std::vector<size_t> write_user_records(std::vector<uint8_t>& page,
                                        size_t& cursor,
                                        const std::vector<RecSpec>& specs,
-                                       bool varchar_not_null) {
+                                       bool varchar_not_null,
+                                       uint32_t n_pk_cols = 1) {
     std::vector<size_t> origins;
     for (size_t r = 0; r < specs.size(); ++r) {
         const auto& s = specs[r];
@@ -115,15 +116,25 @@ std::vector<size_t> write_user_records(std::vector<uint8_t>& page,
         // null bitmap (1 byte at hdr_off-1), then name size (1 byte at hdr_off-2).
         page[hdr_off - 1] = 0x00;              // null bitmap: name not null
         page[hdr_off - 2] = name_len;          // name length
-        // body
+        // Record layout is [pk fields][trx_id][roll_ptr][remaining fields].
+        // The normal fixtures use one BIGINT pk; composite fixtures treat the
+        // INT signed_value field as the second PK field and omit system bytes
+        // until after it.
         be64(page, origin, s.pk_storage);
+        const size_t system_offset = n_pk_cols == 2 ? origin + 12 : origin + 8;
+        if (n_pk_cols == 2) {
+            be32(page, origin + 8, static_cast<uint32_t>(s.sv) ^ 0x80000000u);
+        }
         // trx_id 6B, roll_ptr 7B: arbitrary but fixed
-        for (int i = 0; i < 13; i++) page[origin + 8 + i] = static_cast<uint8_t>(0x10 + i);
-        // signed_value INT stored as value ^ 0x80000000 (sign-flip encoding)
-        be32(page, origin + 21, static_cast<uint32_t>(s.sv) ^ 0x80000000u);
-        std::memcpy(&page[origin + 25], s.name.data(), s.name.size());
+        for (int i = 0; i < 13; i++) page[system_offset + i] = static_cast<uint8_t>(0x10 + i);
+        if (n_pk_cols != 2) {
+            // signed_value INT stored as value ^ 0x80000000 (sign-flip encoding)
+            be32(page, origin + 21, static_cast<uint32_t>(s.sv) ^ 0x80000000u);
+        }
+        const size_t name_offset = origin + 25;
+        std::memcpy(&page[name_offset], s.name.data(), s.name.size());
 
-        const size_t rec_end = origin + 25 + s.name.size();
+        const size_t rec_end = name_offset + s.name.size();
         write_rec_header(page, hdr_off, false, static_cast<uint16_t>(2 + r),
                          /*next_offset=*/0);  // patched below
         origins.push_back(origin);
@@ -148,7 +159,8 @@ std::vector<size_t> write_user_records(std::vector<uint8_t>& page,
 
 // Build a valid COMPACT leaf INDEX page containing the given user records.
 std::vector<uint8_t> build_leaf_page(const std::vector<RecSpec>& specs,
-                                     uint64_t index_id) {
+                                     uint64_t index_id,
+                                     uint32_t n_pk_cols = 1) {
     std::vector<uint8_t> page(PAGE_SIZE, 0);
 
     // FIL header: page_no (4), prev(8)/next(12) none, LSN(16), type(24)=INDEX,
@@ -171,7 +183,7 @@ std::vector<uint8_t> build_leaf_page(const std::vector<RecSpec>& specs,
     // PAGE header at 38
     const size_t records_start = INFIMUM_ORIGIN + 21 + 8;  // after supremum
     size_t cursor = records_start;
-    auto origins = write_user_records(page, cursor, specs, true);
+    auto origins = write_user_records(page, cursor, specs, true, n_pk_cols);
 
     const uint16_t heap_top = static_cast<uint16_t>(cursor);
     const uint16_t n_recs = static_cast<uint16_t>(specs.size());
@@ -223,6 +235,7 @@ TEST(PkOrderGuard, DropsLeadingRecordCorruptedAboveSuccessor) {
     InnoDBIndexParser parser;
     parser.set_columns(make_columns(), false, 1);
     parser.set_strict(true);
+    parser.set_target_index_id(22);
     parser.set_recover_deleted(false);
 
     auto records = parser.parse_page(page.data(), page.size(), 88);
@@ -231,6 +244,7 @@ TEST(PkOrderGuard, DropsLeadingRecordCorruptedAboveSuccessor) {
     EXPECT_EQ(records[0].fields[0].int_value, 3);
     EXPECT_EQ(records[1].fields[0].int_value, 4);
     EXPECT_EQ(parser.key_order_violations_dropped(), 1u);
+    EXPECT_EQ(parser.get_stats().key_order_violations_dropped, 1u);
 }
 
 TEST(PkOrderGuard, KeepsMonotonicChain) {
@@ -244,6 +258,7 @@ TEST(PkOrderGuard, KeepsMonotonicChain) {
     InnoDBIndexParser parser;
     parser.set_columns(make_columns(), false, 1);
     parser.set_strict(true);
+    parser.set_target_index_id(22);
     parser.set_recover_deleted(false);
 
     auto records = parser.parse_page(page.data(), page.size(), 88);
@@ -290,6 +305,7 @@ TEST(PkOrderGuard, DoesNotFireForNonIntegerPk) {
     InnoDBIndexParser parser;
     parser.set_columns(cols, false, 1);
     parser.set_strict(true);
+    parser.set_target_index_id(22);
     parser.set_recover_deleted(false);
 
     auto records = parser.parse_page(page.data(), page.size(), 88);
@@ -313,6 +329,7 @@ TEST(PkOrderGuard, UnsignedBigintPk) {
     InnoDBIndexParser parser;
     parser.set_columns(cols, false, 1);
     parser.set_strict(true);
+    parser.set_target_index_id(22);
     parser.set_recover_deleted(false);
 
     auto records = parser.parse_page(page.data(), page.size(), 88);
@@ -320,12 +337,34 @@ TEST(PkOrderGuard, UnsignedBigintPk) {
     EXPECT_EQ(records[0].fields[0].str_value, "3");
     EXPECT_EQ(records[1].fields[0].str_value, "4");
     EXPECT_EQ(parser.key_order_violations_dropped(), 1u);
+    EXPECT_EQ(parser.get_stats().key_order_violations_dropped, 1u);
 }
 
 TEST(PkOrderGuard, AmbiguousViolationDropsBothSides) {
-    // 1, 10, 3: with no further neighbours the middle pair cannot be resolved
-    // (dropping either side leaves the other two ordered). Fail bounded: both
-    // are dropped rather than risking a fabricated row.
+    // 1, 10, 3 leaves two equally plausible explanations: dropping 10 yields
+    // 1 <= 3, while dropping 3 yields 1 <= 10. The guard therefore makes a
+    // bounded loss and removes both sides rather than exporting a candidate
+    // it cannot prove.
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records[0].fields[0].int_value, 1);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 2u);
+}
+
+TEST(PkOrderGuard, DoesNotFireWithoutSelectedClusteredIndex) {
     std::vector<RecSpec> specs = {
         {pk_storage(1), -1, "a1"},
         {pk_storage(10), -10, "b10"},
@@ -338,10 +377,87 @@ TEST(PkOrderGuard, AmbiguousViolationDropsBothSides) {
     parser.set_strict(true);
     parser.set_recover_deleted(false);
 
+    EXPECT_EQ(parser.parse_page(page.data(), page.size(), 88).size(), 3u);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+}
+
+TEST(PkOrderGuard, DoesNotFireForMismatchedClusteredIndex) {
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(23);
+    parser.set_recover_deleted(false);
+
+    EXPECT_EQ(parser.parse_page(page.data(), page.size(), 88).size(), 3u);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+}
+
+TEST(PkOrderGuard, DoesNotFireForImplicitRowId) {
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(10), -10, "b10"},
+        {pk_storage(3), -3, "c3"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), true, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    EXPECT_EQ(parser.parse_page(page.data(), page.size(), 88).size(), 3u);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+}
+
+TEST(PkOrderGuard, CompositeKeyUsesVerifiedFieldOrder) {
+    // The first user field is BIGINT id; the second is INT signed_value. For
+    // equal ids the second verified key field decides the bytewise ordering.
+    std::vector<RecSpec> specs = {
+        {pk_storage(1), -1, "a1"},
+        {pk_storage(1), 10, "b10"},
+        {pk_storage(1), 3, "c3"},
+        {pk_storage(1), 4, "d4"},
+    };
+    auto page = build_leaf_page(specs, 22, /*n_pk_cols=*/2);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 2);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
     auto records = parser.parse_page(page.data(), page.size(), 88);
-    ASSERT_EQ(records.size(), 1u);
-    EXPECT_EQ(records[0].fields[0].int_value, 1);
-    EXPECT_EQ(parser.key_order_violations_dropped(), 2u);
+    ASSERT_EQ(records.size(), 3u);
+    EXPECT_EQ(records[0].fields[1].int_value, -1);
+    EXPECT_EQ(records[1].fields[1].int_value, 3);
+    EXPECT_EQ(records[2].fields[1].int_value, 4);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 1u);
+}
+
+TEST(PkOrderGuard, SignedBigintOrderingCrossesZero) {
+    std::vector<RecSpec> specs = {
+        {pk_storage(-5), -1, "negative"},
+        {pk_storage(0), 0, "zero"},
+        {pk_storage(6), 1, "positive"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    EXPECT_EQ(parser.parse_page(page.data(), page.size(), 88).size(), 3u);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
 }
 
 TEST(PkOrderGuard, InteriorPageIsNotKeyOrdered) {
@@ -360,6 +476,7 @@ TEST(PkOrderGuard, InteriorPageIsNotKeyOrdered) {
     InnoDBIndexParser parser;
     parser.set_columns(make_columns(), false, 1);
     parser.set_strict(true);
+    parser.set_target_index_id(22);
     parser.set_recover_deleted(false);
 
     parser.parse_page(page.data(), page.size(), 88);

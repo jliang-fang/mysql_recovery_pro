@@ -1428,6 +1428,11 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
     // that fabricate plausible rows (the same defect class fixed in ext4).
     parser.set_strict(true);
 
+    // The schema currently arrives without a selected, authoritative index
+    // binding: callers may intentionally decode several observed indexes. Keep
+    // strict chain-only decoding, but leave the destructive PRIMARY-key order
+    // guard disabled until that binding is available at the recovery boundary.
+
     auto index_records = parser.parse_page(data, page_size, 0);
 
     // 转换为map格式

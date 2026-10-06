@@ -86,6 +86,27 @@ VALID_FILESYSTEMS = frozenset({"ext4", "xfs"})
 VALID_SCENARIOS = frozenset({"baseline", "drop", "truncate", "rm-rf", "corruption-l1", "corruption-l2", "corruption-l3", "corruption-l4", "tde-unvalidated"})
 VALID_DATASET_PROFILES = frozenset({"smoke", "100k", "1m"})
 
+# Expected recovery classification per matrix combination.  A cell where
+# recovery is expected to fail closed must NEVER be reported as a structured
+# PASS; requiring the classification explicitly prevents silent grade inflation.
+EXPECTATION_STRUCTURED = "STRUCTURED_REQUIRED"
+EXPECTATION_EVIDENCE_ONLY = "EVIDENCE_ONLY_REQUIRED"
+EXPECTATION_UNSUPPORTED = "UNSUPPORTED"
+
+
+def matrix_expectation(item: MatrixItem) -> str:
+    """The required recovery classification for a matrix cell."""
+    if item.status == "UNSUPPORTED":
+        return EXPECTATION_UNSUPPORTED
+    if item.row_format in ("REDUNDANT", "COMPRESSED"):
+        # COMPRESSED has no fixture-validated decompression backend;
+        # REDUNDANT lacks an authoritative layout descriptor for hidden clustered
+        # system columns.  Both fail closed as evidence-only.
+        return EXPECTATION_EVIDENCE_ONLY
+    if item.scenario.startswith("corruption-") or item.scenario == "tde-unvalidated":
+        return EXPECTATION_EVIDENCE_ONLY
+    return EXPECTATION_STRUCTURED
+
 
 def matrix_item(version: str, filesystem: str, scenario: str, dataset_profile: str,
                 page_size: int = 16384, row_format: str = "DYNAMIC") -> MatrixItem:

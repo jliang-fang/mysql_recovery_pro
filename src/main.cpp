@@ -1884,6 +1884,7 @@ int main(int argc, char** argv) {
                     if (n_pk == 0) n_pk = 1;
                     index_columns = std::move(converted_columns);
                     index_parser.set_columns(index_columns, false, n_pk);
+                    index_parser.set_strict(true);
                     std::cout << "[INFO] Schema extracted from SDI (" << index_columns.size()
                               << " columns, " << n_pk << " PK columns)\\n";
                 }
@@ -2060,6 +2061,7 @@ int main(int argc, char** argv) {
 
             if (n_pk == 0 && !index_columns.empty()) n_pk = 1;
             index_parser.set_columns(index_columns, false, n_pk);
+            index_parser.set_strict(true);
             std::cout << "[INFO] Schema set from --schema option (" << index_columns.size() << " columns, " << n_pk << " PK columns)\n";
         }
 
