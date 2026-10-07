@@ -935,6 +935,14 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
             progress(pct, "Recovering index_id " + std::to_string(index_id));
         }
 
+        // 如果用户指定了 target_index_ids，只对目标索引应用 schema
+        if (!config_.target_index_ids.empty() &&
+            std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) ==
+                config_.target_index_ids.end()) {
+            processed++;
+            continue;
+        }
+
         // 查找是否有匹配的schema
         std::optional<catalog::TableSchema> matched_schema;
 
@@ -1418,20 +1426,26 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
         columns.push_back(std::move(*converted));
     }
 
+    // 计算主键列数 (通过 ColumnInfo 的 PRI_KEY 标志或 flags)
+    uint32_t n_pk_cols = 0;
+    for (const auto& [phys_pos, col] : sorted_cols) {
+        if ((col.flags & 1) != 0 || (col.col_flags & 1) != 0 || n_pk_cols == 0) {
+            n_pk_cols++;
+        } else {
+            break;
+        }
+    }
+    if (n_pk_cols == 0) n_pk_cols = 1;
+
     // 使用InnoDBIndexParser进行schema-aware解析
     innodb::InnoDBIndexParser parser;
-    parser.set_columns(columns);
+    parser.set_columns(columns, false, n_pk_cols);
     parser.set_recover_deleted(config_.recover_deleted);
     parser.set_bad_page_mode(2);
     // Schema-aware export must only take rows proven by the on-page record
     // chain; without strict mode parse_page falls back to brute-force scans
     // that fabricate plausible rows (the same defect class fixed in ext4).
     parser.set_strict(true);
-
-    // The schema currently arrives without a selected, authoritative index
-    // binding: callers may intentionally decode several observed indexes. Keep
-    // strict chain-only decoding, but leave the destructive PRIMARY-key order
-    // guard disabled until that binding is available at the recovery boundary.
 
     auto index_records = parser.parse_page(data, page_size, 0);
 
