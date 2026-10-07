@@ -1,10 +1,101 @@
 #!/usr/bin/env python3
 """Three-way comparison for sealed typed recovery results."""
 
+import math
+import re
 from collections import defaultdict
 from typing import Any, Dict, Optional
 
 from .manifest import canonical_json
+
+
+_FLOAT_BASE_TYPES = {"float", "double", "real"}
+
+
+def _base_type(declared_type: str) -> str:
+    """Reduce 'varchar(20)' / 'bigint unsigned' to its base type token."""
+    base = str(declared_type or "").lower().split("(", 1)[0].strip()
+    return base.split()[0] if " " in base else base
+
+
+def _canonical_plain(value: Any) -> Any:
+    """Unwrap one canonical {"type": ..., "value": ...} cell to a plain value."""
+    if isinstance(value, dict) and "type" in value:
+        if value.get("type") == "null":
+            return None
+        return value.get("value")
+    return value
+
+
+def _print_resolution(text: str) -> float:
+    """Half the place value of the last printed digit of a decimal literal.
+
+    A comparison-side float may have been rendered through a text protocol or a
+    lossy text export rather than through a shortest round-trip representation:
+    MySQL's text protocol prints FLOAT with ~6 significant digits, so the
+    canonical truth text "2993.38" can name the stored value 2993.376953125
+    while the recovery CSV prints the same bits as "2993.377". The printed
+    digit grid bounds how far a text may legitimately drift from the stored
+    value it denotes; this returns that bound for one side.
+    """
+    token = str(text).strip().lower()
+    if not token or token in ("nan", "inf", "+inf", "-inf", "infinity"):
+        return 0.0
+    match = re.fullmatch(r"([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?", token)
+    if not match:
+        return 0.0
+    integer, fraction, exponent = match.group(2), match.group(3), match.group(4)
+    digits = (integer or "") + (fraction or "")
+    digits = digits.lstrip("0") or "0"
+    if exponent is not None:
+        magnitude = int(exponent)
+        last_place = magnitude - len(digits) + 1
+        # Normalize: resolution is a half-ulp of the last printed digit.
+        return 0.5 * (10.0 ** last_place)
+    if fraction:
+        return 0.5 * (10.0 ** (-len(fraction)))
+    return 0.5
+
+
+def _parse_numeric(value: Any) -> Optional[float]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _values_equal(expected: Any, actual: Any, base_type: str) -> bool:
+    """Type-aware field equality for canonical comparison cells.
+
+    FLOAT/DOUBLE columns are compared numerically with a tolerance bounded by
+    the print resolution of each side's rendered text: both sides may name the
+    same stored IEEE-754 value through different-precision roundings. Anything
+    the texts cannot account for still fails closed. All other types keep
+    exact canonical equality — decimal, strings and binary values must match
+    byte-for-byte.
+    """
+    if expected == actual:
+        return True
+    if base_type not in _FLOAT_BASE_TYPES:
+        return False
+    plain_expected = _canonical_plain(expected)
+    plain_actual = _canonical_plain(actual)
+    if plain_expected is None or plain_actual is None:
+        return False
+    number_expected = _parse_numeric(plain_expected)
+    number_actual = _parse_numeric(plain_actual)
+    if number_expected is None or number_actual is None:
+        return False
+    if not (math.isfinite(number_expected) and math.isfinite(number_actual)):
+        return False
+    tolerance = _print_resolution(str(plain_expected)) + _print_resolution(str(plain_actual))
+    return abs(number_expected - number_actual) <= tolerance * (1.0 + 1e-9)
 
 
 def _index(document: Optional[Dict[str, Any]]):
@@ -84,6 +175,13 @@ def compare(expected: Optional[Dict[str, Any]], actual: Optional[Dict[str, Any]]
     expected_keys = set(expected_rows)
     actual_keys = set(actual_rows)
     common = expected_keys & actual_keys
+    # Declared column types drive field-level equivalence: schema fingerprints
+    # are compared for equality below, so expected and actual name the same
+    # declared type for every column once the documents are comparable.
+    declared_types = {
+        str(column.get("name")): _base_type(column.get("type", ""))
+        for column in (expected or {}).get("schema", {}).get("columns", [])
+    }
     field_mismatches = []
     for key in sorted(common):
         expected_row = expected_rows[key]
@@ -92,8 +190,14 @@ def compare(expected: Optional[Dict[str, Any]], actual: Optional[Dict[str, Any]]
             expected_values = expected_row.get("values", {})
             actual_values = actual_row.get("values", {})
             names = sorted(set(expected_values) | set(actual_values))
-            fields = [name for name in names if expected_values.get(name) != actual_values.get(name)]
-            field_mismatches.append({"pk": expected_row["pk"], "fields": fields})
+            fields = [
+                name for name in names
+                if not _values_equal(expected_values.get(name),
+                                     actual_values.get(name),
+                                     declared_types.get(name, ""))
+            ]
+            if fields:
+                field_mismatches.append({"pk": expected_row["pk"], "fields": fields})
     correct = len(common) - len(field_mismatches)
     false_negatives = expected_keys - actual_keys
     false_positives = actual_keys - expected_keys

@@ -2204,7 +2204,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 uint8_t raw = data[offset];
-                val.int_value = raw;
+                val.uint_value = raw;
+                val.int_value = static_cast<int64_t>(raw);
                 val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
@@ -2219,7 +2220,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::INT_VAL;
             if (col.is_unsigned) {
                 uint16_t raw = read_be<uint16_t>(data, offset);
-                val.int_value = raw;
+                val.uint_value = raw;
+                val.int_value = static_cast<int64_t>(raw);
                 val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
@@ -2234,7 +2236,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::INT_VAL;
             uint32_t raw = read_be<uint32_t>(data, offset);
             if (col.is_unsigned) {
-                val.int_value = raw;
+                val.uint_value = raw;
+                val.int_value = static_cast<int64_t>(raw);
                 val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
@@ -2250,7 +2253,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::INT_VAL;
             uint64_t raw = read_be<uint64_t>(data, offset);
             if (col.is_unsigned) {
-                val.int_value = static_cast<int64_t>(raw);  // may overflow for > INT64_MAX
+                val.uint_value = raw;
+                val.int_value = static_cast<int64_t>(raw);
                 val.str_value = std::to_string(raw);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
@@ -2268,7 +2272,8 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                          (static_cast<uint32_t>(data[offset + 1]) << 8) |
                          static_cast<uint32_t>(data[offset + 2]);
             if (col.is_unsigned) {
-                val.int_value = v;
+                val.uint_value = v;
+                val.int_value = static_cast<int64_t>(v);
                 val.str_value = std::to_string(v);
                 val.type = IndexFieldValue::Type::UINT_VAL;
             } else {
@@ -2295,7 +2300,12 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             val.type = IndexFieldValue::Type::DOUBLE_VAL;
             std::memcpy(&val.float_value, data + offset, 8);
             std::ostringstream oss;
-            oss << std::setprecision(15) << val.float_value;
+            // CSV / canonical comparison must round-trip every IEEE-754 double,
+            // including DBL_MAX. The default stream precision rounds DBL_MAX to
+            // 1.79769313486232e+308, which parses as infinity in Python and
+            // makes an otherwise valid recovery artifact non-comparable.
+            oss << std::setprecision(std::numeric_limits<double>::max_digits10)
+                << val.float_value;
             val.str_value = oss.str();
             break;
         }
@@ -2526,7 +2536,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
         }
         case 14: {  // YEAR (1 byte) - InnoDB type 14
             val.type = IndexFieldValue::Type::UINT_VAL;
-            val.uint_value = data[offset] + 1900;
+            // YEAR is stored as an offset from 1900, except the zero year.
+            // Keep the numeric value in uint_value so CSV export does not fall
+            // through to a stale/string representation.
+            val.uint_value = data[offset] == 0 ? 0 : static_cast<uint64_t>(data[offset]) + 1900;
+            val.int_value = static_cast<int64_t>(val.uint_value);
             val.str_value = std::to_string(val.uint_value);
             break;
         }
@@ -2540,9 +2554,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     bits = (bits << 8) | data[offset + i];
                 }
                 val.uint_value = bits;
-                // Output as hexadecimal for readability
+                val.int_value = static_cast<int64_t>(bits);
+                // Keep a decimal representation in str_value only as a
+                // diagnostic; csv_column_value uses UINT_VAL/uint_value.
                 char buf[24];
-                snprintf(buf, sizeof(buf), "0x%0*lX", static_cast<int>(field_size * 2), bits);
+                snprintf(buf, sizeof(buf), "%llu", static_cast<unsigned long long>(bits));
                 val.str_value = buf;
             } else {
                 val.str_value = "<BIT_SIZE_ERR>";

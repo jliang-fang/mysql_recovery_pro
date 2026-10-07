@@ -1,6 +1,7 @@
 #pragma once
 
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -42,9 +43,43 @@ inline std::string csv_escape_text(const std::string& value) {
     return escaped;
 }
 
-// Render one decoded field. Control bytes are blanked so a single row can never
-// span lines, and binary columns become 0x<hex> which csv_to_canonical.py and
-// UNHEX() both understand.
+// Emit one control byte as a backslash escape so the rendered text stays on a
+// single physical line AND is reversible. \t \n \r \\ keep their conventional
+// two-letter forms; every other byte < 0x20 becomes \u00XX.
+inline void escape_control_byte(std::string& out, unsigned char character) {
+    static constexpr char hex_digits[] = "0123456789abcdef";
+    switch (character) {
+        case '\t': out += "\\t"; return;
+        case '\n': out += "\\n"; return;
+        case '\r': out += "\\r"; return;
+        case '\\': out += "\\\\"; return;
+        default:
+            out += "\\u00";
+            out.push_back(hex_digits[character >> 4]);
+            out.push_back(hex_digits[character & 0x0f]);
+            return;
+    }
+}
+
+// Render a recovered text cell without losing bytes: control characters become
+// backslash escapes (parsed back by _parse_csv_cell), then normal CSV quoting
+// rules apply for comma/quote/newline-containing content.
+inline std::string csv_escape_text_preserving_controls(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size());
+    for (unsigned char character : value) {
+        if (character < 0x20 || character == '\\') {
+            escape_control_byte(escaped, character);
+        } else {
+            escaped.push_back(static_cast<char>(character));
+        }
+    }
+    return csv_escape_text(escaped);
+}
+
+// Render one decoded field. Control bytes are escaped (not blanked) so the
+// exported text round-trips exactly; binary columns become 0x<hex> which
+// csv_to_canonical.py and UNHEX() both understand.
 inline std::string csv_column_value(const innodb::IndexFieldValue& field,
                                     bool is_binary_column) {
     using FieldType = innodb::IndexFieldValue::Type;
@@ -57,10 +92,14 @@ inline std::string csv_column_value(const innodb::IndexFieldValue& field,
             return std::to_string(field.int_value);
         case FieldType::UINT_VAL:
             return std::to_string(field.uint_value);
-        case FieldType::FLOAT_VAL:
+        case FieldType::FLOAT_VAL: {
+            std::ostringstream out;
+            out << std::setprecision(7) << static_cast<float>(field.float_value);
+            return out.str();
+        }
         case FieldType::DOUBLE_VAL: {
             std::ostringstream out;
-            out << field.float_value;
+            out << std::setprecision(std::numeric_limits<double>::max_digits10) << field.float_value;
             return out.str();
         }
         case FieldType::NULL_VAL:
@@ -69,13 +108,7 @@ inline std::string csv_column_value(const innodb::IndexFieldValue& field,
             break;
     }
     if (!field.str_value.empty()) {
-        std::string sanitized;
-        sanitized.reserve(field.str_value.size());
-        for (unsigned char character : field.str_value) {
-            if (character < 0x20 && character != '\t') sanitized.push_back(' ');
-            else sanitized.push_back(static_cast<char>(character));
-        }
-        return csv_escape_text(sanitized);
+        return csv_escape_text_preserving_controls(field.str_value);
     }
     if (!field.raw_bytes.empty()) return hex_encode_bytes(field.raw_bytes);
     return std::string{};
@@ -87,13 +120,7 @@ inline std::string csv_cell_from_string(const std::string& value, bool is_binary
     if (is_binary && (value.rfind("0x", 0) == 0 || value.rfind("0X", 0) == 0)) {
         return value;
     }
-    std::string sanitized;
-    sanitized.reserve(value.size());
-    for (unsigned char character : value) {
-        if (character < 0x20 && character != '\t') sanitized.push_back(' ');
-        else sanitized.push_back(static_cast<char>(character));
-    }
-    return csv_escape_text(sanitized);
+    return csv_escape_text_preserving_controls(value);
 }
 
 } // namespace exporter

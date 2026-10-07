@@ -274,6 +274,86 @@ class ComparatorTests(unittest.TestCase):
         self.assertEqual(result["status"], "COMPARABLE")
         self.assertTrue(result["strict_pass"])
 
+    def _float_schema(self):
+        return {
+            "columns": [
+                {"name": "id", "type": "bigint", "nullable": False},
+                {"name": "c_float", "type": "float", "nullable": True},
+                {"name": "c_double", "type": "double", "nullable": True},
+                {"name": "c_decimal", "type": "decimal(10,2)", "nullable": True},
+            ],
+            "primary_key": ["id"],
+        }
+
+    def _doc_with_value(self, column, value, schema):
+        """Build a canonical document whose float cell carries an explicit text.
+
+        ``build_ground_truth`` always encodes floats via repr(), so a document
+        holding a truncated text-protocol rendering (e.g. "2993.38" for the
+        stored 2993.376953125) is constructed by patching the canonical cell.
+        """
+        row = {"id": 1}
+        row.update({c["name"]: None for c in schema["columns"] if c["name"] != "id"})
+        doc = build_ground_truth("db", "t", schema, [row])
+        doc["rows"][0]["values"][column] = {"type": "float", "value": value}
+        doc["rows"][0]["row_hash"] = hashlib.sha256(
+            canonical_json(doc["rows"][0]["values"]).encode("utf-8")).hexdigest()
+        return doc
+
+    def test_float_text_protocol_rendering_is_equivalent(self):
+        # MySQL's text protocol prints FLOAT with ~6 significant digits while
+        # the recovery CSV prints ~7; both name the same stored float bits.
+        schema = self._float_schema()
+        expected = self._doc_with_value("c_float", "2993.38", schema)
+        actual = self._doc_with_value("c_float", "2993.377", schema)
+        result = compare(expected, actual, "float-print-precision")
+        self.assertEqual(result["status"], "COMPARABLE")
+        self.assertEqual(result["field_mismatches"], [])
+        self.assertEqual(result["correct_rows"], 1)
+        self.assertTrue(result["strict_pass"])
+
+    def test_float_difference_beyond_print_resolution_still_fails(self):
+        schema = self._float_schema()
+        expected = self._doc_with_value("c_float", "2993.38", schema)
+        actual = self._doc_with_value("c_float", "2994.0", schema)
+        result = compare(expected, actual, "float-corrupt")
+        self.assertEqual(result["field_mismatches"], [
+            {"pk": [{"type": "int", "value": 1}], "fields": ["c_float"]}])
+        self.assertFalse(result["strict_pass"])
+
+    def test_float_null_vs_value_still_fails(self):
+        schema = self._float_schema()
+        expected = self._doc_with_value("c_float", "2993.38", schema)
+        actual = build_ground_truth("db", "t", schema,
+                                    [{"id": 1, "c_float": None, "c_double": None,
+                                      "c_decimal": None}])
+        result = compare(expected, actual, "float-null")
+        self.assertEqual(result["field_mismatches"][0]["fields"], ["c_float"])
+        self.assertFalse(result["strict_pass"])
+
+    def test_double_long_rendering_is_equivalent(self):
+        schema = self._float_schema()
+        expected = self._doc_with_value("c_double", "0.1", schema)
+        actual = self._doc_with_value("c_double", "0.10000000000000001", schema)
+        result = compare(expected, actual, "double-print-precision")
+        self.assertEqual(result["field_mismatches"], [])
+        self.assertTrue(result["strict_pass"])
+
+    def test_decimal_and_text_tolerance_does_not_leak(self):
+        schema = self._float_schema()
+        expected = self._doc_with_value("c_decimal", "12.34", schema)
+        expected["rows"][0]["values"]["c_decimal"] = {"type": "decimal", "value": "12.34"}
+        expected["rows"][0]["row_hash"] = hashlib.sha256(
+            canonical_json(expected["rows"][0]["values"]).encode("utf-8")).hexdigest()
+        actual = self._doc_with_value("c_decimal", "12.34", schema)
+        actual["rows"][0]["values"]["c_decimal"] = {"type": "decimal", "value": "12.35"}
+        actual["rows"][0]["row_hash"] = hashlib.sha256(
+            canonical_json(actual["rows"][0]["values"]).encode("utf-8")).hexdigest()
+        result = compare(expected, actual, "decimal-strict")
+        self.assertEqual(result["field_mismatches"], [
+            {"pk": [{"type": "int", "value": 1}], "fields": ["c_decimal"]}])
+        self.assertFalse(result["strict_pass"])
+
     def test_three_way_reports_incomplete_member(self):
         report = compare_three_way(self.expected, self.expected, None)
         self.assertEqual(report["status"], "NOT_COMPUTABLE")

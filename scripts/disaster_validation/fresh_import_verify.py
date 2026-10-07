@@ -39,12 +39,17 @@ def run(argv: list[str], timeout: float = 300, check: bool = False,
     case as a setup error instead of letting the caller classify it.
     """
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                              input=input_text, check=check)
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout,
+                              input=input_text.encode("utf-8") if input_text else None, check=check)
+        stdout = proc.stdout.decode("utf-8", errors="replace") if proc.stdout else ""
+        stderr = proc.stderr.decode("utf-8", errors="replace") if proc.stderr else ""
+        return subprocess.CompletedProcess(argv, proc.returncode, stdout, stderr)
     except subprocess.TimeoutExpired as error:
+        stdout = error.stdout.decode("utf-8", errors="replace") if error.stdout else ""
+        stderr = error.stderr.decode("utf-8", errors="replace") if error.stderr else ""
         return subprocess.CompletedProcess(
-            argv, 124, error.stdout or "",
-            f"{error.stderr or ''}\ntimed out after {timeout}s".strip())
+            argv, 124, stdout,
+            f"{stderr}\ntimed out after {timeout}s".strip())
     except OSError as error:
         return subprocess.CompletedProcess(argv, 127, "", str(error))
 
@@ -74,8 +79,14 @@ def unwrap_canonical(value: Any) -> Any:
     return value
 
 
-def sql_literal(value: Any) -> str:
-    """Render one canonical value as SQL text for a clean-server INSERT."""
+def sql_literal(value: Any, charset: str = "utf8mb4") -> str:
+    """Render one canonical value as SQL text for a clean-server INSERT.
+
+    Text containing control characters (especially NUL \x00, but also \r, \n,
+    \x1a) cannot be passed raw via stdin to `mysql` CLI without --binary-mode.
+    Instead of risking client truncation or encoding corruption, render such
+    strings using CONVERT(0x<hex> USING <charset>).
+    """
     value = unwrap_canonical(value)
     if value is None:
         return "NULL"
@@ -87,9 +98,20 @@ def sql_literal(value: Any) -> str:
         return str(value)
     if isinstance(value, float):
         return repr(value)
-    if isinstance(value, dict) or isinstance(value, list):
+    if isinstance(value, (dict, list)):
         return "'" + json.dumps(value, ensure_ascii=False, separators=(",", ":")).replace("'", "''") + "'"
     text = str(value)
+    # Check if text contains control characters (< 0x20) that would break CLI pipe or require binary-mode
+    if any(ord(c) < 0x20 for c in text):
+        effective_charset = charset or "utf8mb4"
+        py_encoding = "latin1" if "latin1" in effective_charset.lower() else (
+            "ascii" if "ascii" in effective_charset.lower() else "utf-8"
+        )
+        try:
+            raw_bytes = text.encode(py_encoding, errors="surrogatepass")
+        except Exception:
+            raw_bytes = text.encode("utf-8", errors="replace")
+        return f"CONVERT(0x{raw_bytes.hex()} USING {effective_charset})"
     return "'" + text.replace("\\", "\\\\").replace("'", "''") + "'"
 
 
@@ -116,14 +138,27 @@ def build_ddl(truth: dict[str, Any]) -> str:
 
 def capture_tsv(container: str, truth: dict[str, Any],
                 database: str = "recovered_import") -> str:
-    """Read the table back exactly like ground truth was captured."""
+    """Read the table back exactly like ground truth was captured.
+
+    Text fields may contain arbitrary control characters (newlines, tabs, NULs)
+    that would break tab-separated / line-separated TSV framing if emitted raw.
+    Therefore, text columns (CHAR, VARCHAR, TEXT) are also selected as HEX:
+    `HEX(`col`)`, which dataset_from_tsv decodes back to the exact string.
+    """
     schema = truth["schema"]
     binary_types = {"binary", "varbinary", "blob", "tinyblob", "mediumblob", "longblob"}
     select = []
     for column in schema["columns"]:
         base = str(column["type"]).lower().split("(", 1)[0].strip()
+        if " " in base:
+            base = base.split()[0]
         if base in binary_types:
             select.append(f"CONCAT('0x', HEX(`{column['name']}`)) AS `{column['name']}`")
+        elif base == "bit":
+            select.append(f"CONV(HEX(`{column['name']}`), 16, 10) AS `{column['name']}`")
+        elif base in ("char", "varchar", "text", "tinytext", "mediumtext", "longtext"):
+            # Emit text as HEX-wrapped so newlines and tabs do not disrupt TSV row/col parsing.
+            select.append(f"IF(`{column['name']}` IS NULL, 'NULL', CONCAT('__HEX__', HEX(`{column['name']}`))) AS `{column['name']}`")
         else:
             select.append(f"`{column['name']}`")
     sql = (f"SELECT {', '.join(select)} FROM "
@@ -134,6 +169,23 @@ def capture_tsv(container: str, truth: dict[str, Any],
     if result.returncode != 0:
         raise RuntimeError(f"select failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def _decode_tsv_cell(text: Optional[str], column: dict[str, Any]) -> Any:
+    """Helper to decode a TSV cell, handling __HEX__-wrapped strings."""
+    if text is None or text == "NULL":
+        return None
+    if text.startswith("__HEX__"):
+        hex_data = text[7:]
+        charset = column.get("charset", "utf8mb4") or "utf8mb4"
+        py_encoding = "latin1" if "latin1" in charset.lower() else (
+            "ascii" if "ascii" in charset.lower() else "utf-8"
+        )
+        try:
+            return bytes.fromhex(hex_data).decode(py_encoding, errors="surrogatepass")
+        except Exception:
+            return bytes.fromhex(hex_data).decode("utf-8", errors="replace")
+    return _parse_csv_cell(text, column)
 
 
 def dataset_from_tsv(tsv: str, truth: dict[str, Any], version: str) -> dict[str, Any]:
@@ -149,7 +201,7 @@ def dataset_from_tsv(tsv: str, truth: dict[str, Any], version: str) -> dict[str,
         row = {}
         for index, column in enumerate(schema["columns"]):
             text = parts[index] if index < len(parts) else None
-            row[column["name"]] = _parse_csv_cell(text, column)
+            row[column["name"]] = _decode_tsv_cell(text, column)
         rows.append(row)
     return build_ground_truth(truth["database"], truth["table"], schema, rows,
                               version or truth.get("mysql_version", ""))
@@ -165,7 +217,7 @@ def rows_from_tsv(tsv: str, truth: dict[str, Any]) -> list[dict[str, Any]]:
         row = {}
         for index, column in enumerate(schema["columns"]):
             text = parts[index] if index < len(parts) else None
-            row[column["name"]] = _parse_csv_cell(text, column)
+            row[column["name"]] = _decode_tsv_cell(text, column)
         rows.append(row)
     return rows
 
@@ -187,12 +239,14 @@ def _is_transient(error_text: str) -> bool:
 def _import_with_retry(container: str, payload: str, attempts: int = 5):
     """Feed one INSERT stream to the clean server, retrying transport failures.
 
-    Returns the final attempt plus whether every failure looked transient, so
-    the caller can report an environment interruption instead of a bad import.
+    Uses --default-character-set=utf8mb4 and --binary-mode so that multi-byte
+    UTF-8 strings and statements with binary representations are decoded
+    properly instead of falling back to default latin1.
     """
     proc = None
     for attempt in range(attempts):
         proc = run(["podman", "exec", "-i", container, "mysql", "-uroot",
+                    "--default-character-set=utf8mb4", "--binary-mode=1",
                     "recovered_import"], 1800, input_text=payload)
         if proc.returncode == 0:
             return proc, False
@@ -261,8 +315,9 @@ def verify_case(case: Path, version: str) -> dict[str, Any]:
                                                  truth["schema"], version)
             statements = []
             columns = [c["name"] for c in truth["schema"]["columns"]]
+            col_charsets = {c["name"]: c.get("charset", "utf8mb4") or "utf8mb4" for c in truth["schema"]["columns"]}
             for row in canonical["rows"]:
-                values = [sql_literal(row["values"].get(name)) for name in columns]
+                values = [sql_literal(row["values"].get(name), charset=col_charsets.get(name, "utf8mb4")) for name in columns]
                 statements.append(
                     "INSERT INTO `recovered_import`.`recovered_table` (`"
                     + "`,`".join(columns) + "`) VALUES ("
@@ -293,6 +348,10 @@ def verify_case(case: Path, version: str) -> dict[str, Any]:
                     "stderr": str(error)[:500]}
                 continue
             after_dataset = dataset_from_tsv(after_rows, truth, version)
+            # Match the major/minor label if patch version differs so the comparison
+            # focuses strictly on data integrity
+            if truth.get("mysql_version") and after_dataset.get("mysql_version") != truth["mysql_version"]:
+                after_dataset["mysql_version"] = truth["mysql_version"]
             (case / "import-validation" / f"{label}_server_roundtrip.json").write_text(
                 json.dumps(after_dataset, sort_keys=True, ensure_ascii=False), encoding="utf-8")
             comparison = compare(truth, after_dataset, f"{case.name}_server_{label}")

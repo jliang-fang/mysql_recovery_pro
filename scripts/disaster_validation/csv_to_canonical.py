@@ -27,6 +27,48 @@ from scripts.disaster_harness.ground_truth import (
 from scripts.disaster_harness.manifest import canonical_json, sha256_bytes
 
 
+def _unescape_csv_text(text: str) -> str:
+    """Decode the backslash escapes emitted by csv_escape_text_preserving_controls.
+
+    The recovery CSV renderer writes \\t \\n \\r \\\\ and \\u00XX for bytes that
+    would otherwise break single-line CSV records. Mirror that exact alphabet
+    here so the canonical dataset sees the original bytes again.
+    """
+    if "\\" not in text:
+        return text
+    out: List[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if char != "\\" or i + 1 >= n:
+            out.append(char)
+            i += 1
+            continue
+        nxt = text[i + 1]
+        if nxt == "t":
+            out.append("\t")
+            i += 2
+        elif nxt == "n":
+            out.append("\n")
+            i += 2
+        elif nxt == "r":
+            out.append("\r")
+            i += 2
+        elif nxt == "\\":
+            out.append("\\")
+            i += 2
+        elif nxt == "u" and i + 5 < n + 1 and i + 5 <= n and re.fullmatch(
+                r"[0-9a-fA-F]{4}", text[i + 2:i + 6]):
+            out.append(chr(int(text[i + 2:i + 6], 16)))
+            i += 6
+        else:
+            # Unknown escape: keep both characters verbatim so nothing is lost.
+            out.append(char)
+            i += 1
+    return "".join(out)
+
+
 def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
     """Parse a CSV cell string back to a Python object matching column_def type.
 
@@ -46,6 +88,23 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
 
     raw_type = str(column_def.get("type", column_def.get("data_type", ""))).lower()
     base_type = raw_type.split("(", 1)[0].strip()
+    if " " in base_type:
+        base_type = base_type.split()[0]
+    unsigned = "unsigned" in raw_type
+
+    # BIT fields are exported as decimal unsigned integers by the recovery
+    # decoder.  Treat them as numeric rather than TEXT so canonical truth (which
+    # represents a BIT value as an integer) can compare byte-for-byte.
+    if base_type == "bit":
+        if raw_text == "" or raw_text == "NULL":
+            return None
+        return int(raw_text, 0)
+
+    # YEAR is a numeric one-byte on-page field and is emitted as a decimal year.
+    if base_type == "year":
+        if raw_text == "" or raw_text == "NULL":
+            return None
+        return int(raw_text)
 
     # Nullable empty strings vs NULL:
     # If the column is numeric or date/time and cell is empty or 'NULL', treat as None if nullable
@@ -90,7 +149,10 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
             return bytes.fromhex(raw_text)
         return raw_text.encode("utf-8")
 
-    # Strings, dates, times, enums, sets
+    # Strings, dates, times, enums, sets: undo the control-byte escapes the CSV
+    # renderer applies so the canonical value holds the original bytes.
+    if isinstance(raw_text, str) and "\\" in raw_text:
+        return _unescape_csv_text(raw_text)
     return raw_text
 
 

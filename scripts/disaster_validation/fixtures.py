@@ -152,16 +152,40 @@ class Column:
         return column
 
     def char_length(self) -> int:
-        """Byte length InnoDB records in the data dictionary for this column."""
+        """Physical byte length used by the parser-domain schema.
+
+        ``column_length`` is not a generic fallback width: for fixed numeric and
+        temporal fields it must match the on-page byte width.  Emitting 255 for
+        an INT/UNSIGNED/DATE field shifts every following field and can make a
+        raw-carving result look structured while every later value is wrong.
+        """
+        fixed_lengths = {
+            PARSER_TINY: 1, PARSER_SHORT: 2, PARSER_INT24: 3,
+            PARSER_LONG: 4, PARSER_FLOAT: 4, PARSER_DOUBLE: 8,
+            PARSER_LONGLONG: 8, PARSER_YEAR: 1, PARSER_NEWDATE: 3,
+            PARSER_TIMESTAMP2: 4, PARSER_DATETIME2: 5, PARSER_TIME2: 3,
+        }
+        if self.parser_type in fixed_lengths:
+            return fixed_lengths[self.parser_type]
+        if self.parser_type == PARSER_NEWDECIMAL:
+            integer_digits = max(0, self.precision - self.scale)
+            fractional_digits = max(0, self.scale)
+            def decimal_group_bytes(digits: int) -> int:
+                remainder = digits % 9
+                return (digits // 9) * 4 + (0 if remainder == 0 else
+                        1 if remainder <= 2 else 2 if remainder <= 4 else
+                        3 if remainder <= 6 else 4)
+            return decimal_group_bytes(integer_digits) + decimal_group_bytes(fractional_digits)
+        if self.parser_type == PARSER_BIT:
+            # IndexColumnDef::fixed_size receives bit count, not bytes.
+            return self.length
         if self.length:
             return self.length
-        if self.parser_type == PARSER_STRING:
-            return 1
-        if self.parser_type in (PARSER_TINY_BLOB,):
+        if self.parser_type == PARSER_TINY_BLOB:
             return 255
-        if self.parser_type in (PARSER_BLOB,):
+        if self.parser_type == PARSER_BLOB:
             return 65535
-        if self.parser_type in (PARSER_MEDIUM_BLOB,):
+        if self.parser_type == PARSER_MEDIUM_BLOB:
             return 16777215
         if self.parser_type in (PARSER_LONG_BLOB, PARSER_JSON):
             return 4294967295
@@ -291,8 +315,12 @@ def bit_column(name: str, width: int, *, table: str = "", nullable: bool = True)
         else:
             value = _entropy(table or name, name, row) % (1 << width)
         return f"b'{value:0{width}b}'"
+    # IndexColumnDef::fixed_size expects the number of *bits* for type 17 and
+    # computes (col_length + 7) / 8 internally.  Passing a byte count makes
+    # BIT(64) look like one byte, shifts YEAR and every following field, and
+    # produces convincing but wrong rows during raw recovery.
     return Column(name=name, ddl_type=f"BIT({width})", parser_type=PARSER_BIT,
-                  literal=literal, nullable=nullable, length=(width + 7) // 8)
+                  literal=literal, nullable=nullable, length=width)
 
 
 def year_column(name: str, *, table: str = "", nullable: bool = True) -> Column:
@@ -689,7 +717,11 @@ class TableSpec:
                 "name": column.name,
                 "type": column.parser_type,
                 "is_nullable": bool(column.nullable) and not column.key,
-                "is_signed": not column.unsigned,
+                # Schema consumers historically understand is_unsigned; use that
+                # canonical spelling instead of is_signed so unsigned integer
+                # columns cannot silently be decoded as signed in a raw-carving
+                # recovery path.
+                "is_unsigned": column.unsigned,
                 "char_length": column.char_length(),
                 "physical_pos": position[column.name],
                 "ordinal_position": position[column.name],
