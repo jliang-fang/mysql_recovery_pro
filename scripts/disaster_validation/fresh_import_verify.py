@@ -127,8 +127,8 @@ def build_ddl(truth: dict[str, Any]) -> str:
             pieces.append("NOT NULL")
         if column.get("charset"):
             pieces.append(f"CHARACTER SET {column['charset']}")
-        if column.get("collation"):
-            pieces.append(f"COLLATE {column['collation']}")
+            if column.get("collation"):
+                pieces.append(f"COLLATE {column['collation']}")
         parts.append(" ".join(pieces))
     if pk:
         ordered = [c["name"] for c in schema["columns"] if c["name"] in pk]
@@ -256,23 +256,37 @@ def _import_with_retry(container: str, payload: str, attempts: int = 5):
     return proc, True
 
 
-def verify_case(case: Path, version: str) -> dict[str, Any]:
-    """Import every recovered CSV artifact of a case and compare to truth."""
-    truth_path = case / "truth" / "ground_truth.json"
-    if not truth_path.is_file():
-        return {"case": case.name, "status": "SETUP_ERROR", "reason": "no ground truth"}
-    truth = json.loads(truth_path.read_text(encoding="utf-8"))
+def verify_case(case: Path, version: str, *, container_name: str | None = None) -> dict[str, Any]:
+    """Import recovered CSV artifacts into a fresh server and compare to truth.
 
-    csvs = sorted((case / "recovery-output").rglob("*.csv"))
-    if not csvs:
+    A legacy single-table case stores ``truth/ground_truth.json``.  Stage 1
+    qualification stores one sealed truth document per table below ``truth/``;
+    each table's recovery CSV stays in its corresponding recovery-output
+    directory.  Both layouts deliberately use the same clean-server gate.
+    """
+    legacy_truth = case / "truth" / "ground_truth.json"
+    truth_paths = ([legacy_truth] if legacy_truth.is_file() else
+                   sorted((case / "truth").glob("*/ground_truth.json")))
+    if not truth_paths:
+        return {"case": case.name, "status": "SETUP_ERROR", "reason": "no ground truth"}
+
+    multi_table = len(truth_paths) > 1
+    csv_groups: list[tuple[Path, list[Path]]] = []
+    for truth_path in truth_paths:
+        table = truth_path.parent.name if multi_table else ""
+        csvs = (sorted((case / "recovery-output" / table).glob("*.csv"))
+                if table else sorted((case / "recovery-output").rglob("*.csv")))
+        csv_groups.append((truth_path, csvs))
+    if not any(csvs for _, csvs in csv_groups):
         return {"case": case.name, "status": "EVIDENCE_ONLY", "reason": "no CSV artifact"}
 
     datadir = Path(f"/tmp/fresh-import-{case.name}")
     if datadir.exists():
         shutil.rmtree(datadir)
     datadir.mkdir(parents=True)
-    container = f"fresh-import-{case.name}"
-    run(["podman", "rm", "-f", container], 60)
+    container = container_name or f"fresh-import-{case.name}"
+    if container_name is None:
+        run(["podman", "rm", "-f", container], 60)
     run(["podman", "run", "-d", "--name", container,
          "-v", f"{datadir}:/var/lib/mysql:Z",
          "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes", f"localhost/mysql:{version}"], 300)
@@ -290,87 +304,100 @@ def verify_case(case: Path, version: str) -> dict[str, Any]:
 
     results: dict[str, Any] = {"case": case.name, "version": version, "artifacts": {}}
     try:
-        ddl = build_ddl(truth)
-        (case / "import-validation" / "ddl.sql").parent.mkdir(exist_ok=True)
-        (case / "import-validation" / "ddl.sql").write_text(ddl + "\n", encoding="utf-8")
-        create_db = run(["podman", "exec", container, "mysql", "-uroot",
-                         "-e", "CREATE DATABASE IF NOT EXISTS `recovered_import`;"], 120)
-        if create_db.returncode != 0:
-            return {**results, "status": "FAIL",
-                    "reason": "cannot create import database",
+        for truth_path, csvs in csv_groups:
+            truth = json.loads(truth_path.read_text(encoding="utf-8"))
+            table_label = truth_path.parent.name if multi_table else ""
+            if not truth.get("schema", {}).get("columns"):
+                results["artifacts"][table_label or "schema"] = {
+                    "status": "FAIL", "reason": "truth has no schema"}
+                continue
+            if not csvs:
+                results["artifacts"][table_label or "recovery"] = {
+                    "status": "FAIL", "reason": "no recovered CSV artifact for table"}
+                continue
+
+            ddl = build_ddl(truth)
+            import_dir = case / "import-validation"
+            import_dir.mkdir(exist_ok=True)
+            ddl_name = f"{table_label}_ddl.sql" if table_label else "ddl.sql"
+            (import_dir / ddl_name).write_text(ddl + "\n", encoding="utf-8")
+            create_db = run(["podman", "exec", container, "mysql", "-uroot",
+                             "-e", "CREATE DATABASE IF NOT EXISTS `recovered_import`;"], 120)
+            if create_db.returncode != 0:
+                results["artifacts"][table_label or "database"] = {
+                    "status": "FAIL", "reason": "cannot create import database",
                     "stderr": create_db.stderr.strip()[:400]}
-        ddl_run = run(["podman", "exec", container, "mysql", "-uroot", "-e", ddl], 120)
-        if ddl_run.returncode != 0:
-            return {**results, "status": "FAIL",
-                    "reason": "DDL rejected by fresh server",
-                    "stderr": ddl_run.stderr.strip()[:400]}
+                continue
+            reset_table = run(["podman", "exec", container, "mysql", "-uroot", "-e",
+                               "DROP TABLE IF EXISTS `recovered_import`.`recovered_table`;"], 120)
+            ddl_run = run(["podman", "exec", container, "mysql", "-uroot", "-e", ddl], 120)
+            if reset_table.returncode != 0 or ddl_run.returncode != 0:
+                failed = reset_table if reset_table.returncode != 0 else ddl_run
+                results["artifacts"][table_label or "ddl"] = {
+                    "status": "FAIL", "reason": "DDL rejected by fresh server",
+                    "stderr": failed.stderr.strip()[:400]}
+                continue
 
-        if not truth.get("schema", {}).get("columns"):
-            return {**results, "status": "FAIL", "reason": "truth has no schema"}
-
-        for csv_path in csvs:
-            label = csv_path.stem
-            from scripts.disaster_validation.csv_to_canonical import csv_to_canonical_dataset
-            canonical = csv_to_canonical_dataset(csv_path, truth["database"], truth["table"],
-                                                 truth["schema"], version)
-            statements = []
             columns = [c["name"] for c in truth["schema"]["columns"]]
-            col_charsets = {c["name"]: c.get("charset", "utf8mb4") or "utf8mb4" for c in truth["schema"]["columns"]}
-            for row in canonical["rows"]:
-                values = [sql_literal(row["values"].get(name), charset=col_charsets.get(name, "utf8mb4")) for name in columns]
-                statements.append(
-                    "INSERT INTO `recovered_import`.`recovered_table` (`"
-                    + "`,`".join(columns) + "`) VALUES ("
-                    + ", ".join(values) + ");")
-            statements.insert(0, "TRUNCATE TABLE `recovered_import`.`recovered_table`;")
-            payload = "\n".join(statements) + "\n"
-            logs = case / "import-validation" / f"{label}.sql"
-            logs.write_text(payload, encoding="utf-8")
-            proc, transient = _import_with_retry(container, payload)
-            if proc.returncode != 0:
-                # A dropped connection or a server mid-shutdown says nothing
-                # about the recovered rows: record it as an environment
-                # interruption, never as a recovery defect.
+            col_charsets = {c["name"]: c.get("charset", "utf8mb4") or "utf8mb4"
+                            for c in truth["schema"]["columns"]}
+            for csv_path in csvs:
+                base_label = csv_path.stem
+                label = f"{table_label}_{base_label}" if table_label else base_label
+                from scripts.disaster_validation.csv_to_canonical import csv_to_canonical_dataset
+                canonical = csv_to_canonical_dataset(csv_path, truth["database"], truth["table"],
+                                                     truth["schema"], version)
+                statements = []
+                for row in canonical["rows"]:
+                    values = [sql_literal(row["values"].get(name),
+                                          charset=col_charsets.get(name, "utf8mb4"))
+                              for name in columns]
+                    statements.append(
+                        "INSERT INTO `recovered_import`.`recovered_table` (`"
+                        + "`,`".join(columns) + "`) VALUES ("
+                        + ", ".join(values) + ");")
+                statements.insert(0, "TRUNCATE TABLE `recovered_import`.`recovered_table`;")
+                payload = "\n".join(statements) + "\n"
+                (import_dir / f"{label}.sql").write_text(payload, encoding="utf-8")
+                proc, transient = _import_with_retry(container, payload)
+                if proc.returncode != 0:
+                    results["artifacts"][label] = {
+                        "status": "SETUP_ERROR" if transient else "FAIL",
+                        "reason": ("import interrupted by a transient server/client failure"
+                                   if transient else "import rejected"),
+                        "stderr": proc.stderr.strip()[:500]}
+                    continue
+                try:
+                    after_rows = capture_tsv(container, truth)
+                except RuntimeError as error:
+                    transient = _is_transient(str(error))
+                    results["artifacts"][label] = {
+                        "status": "SETUP_ERROR" if transient else "FAIL",
+                        "reason": ("post-import read-back interrupted by a transient failure"
+                                   if transient else "post-import read-back failed"),
+                        "stderr": str(error)[:500]}
+                    continue
+                after_dataset = dataset_from_tsv(after_rows, truth, version)
+                if truth.get("mysql_version") and after_dataset.get("mysql_version") != truth["mysql_version"]:
+                    after_dataset["mysql_version"] = truth["mysql_version"]
+                (import_dir / f"{label}_server_roundtrip.json").write_text(
+                    json.dumps(after_dataset, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+                comparison = compare(truth, after_dataset, f"{case.name}_server_{label}")
                 results["artifacts"][label] = {
-                    "status": "SETUP_ERROR" if transient else "FAIL",
-                    "reason": ("import interrupted by a transient server/client failure"
-                               if transient else "import rejected"),
-                    "stderr": proc.stderr.strip()[:500]}
-                continue
-            try:
-                after_rows = capture_tsv(container, truth)
-            except RuntimeError as error:
-                transient = _is_transient(str(error))
-                results["artifacts"][label] = {
-                    "status": "SETUP_ERROR" if transient else "FAIL",
-                    "reason": ("post-import read-back interrupted by a transient failure"
-                               if transient else "post-import read-back failed"),
-                    "stderr": str(error)[:500]}
-                continue
-            after_dataset = dataset_from_tsv(after_rows, truth, version)
-            # Match the major/minor label if patch version differs so the comparison
-            # focuses strictly on data integrity
-            if truth.get("mysql_version") and after_dataset.get("mysql_version") != truth["mysql_version"]:
-                after_dataset["mysql_version"] = truth["mysql_version"]
-            (case / "import-validation" / f"{label}_server_roundtrip.json").write_text(
-                json.dumps(after_dataset, sort_keys=True, ensure_ascii=False), encoding="utf-8")
-            comparison = compare(truth, after_dataset, f"{case.name}_server_{label}")
-            results["artifacts"][label] = {
-                "status": "PASS" if comparison.get("strict_pass") else "FAIL",
-                "expected_rows": comparison.get("expected_rows"),
-                "actual_rows": comparison.get("actual_rows"),
-                "correct_rows": comparison.get("correct_rows"),
-                "field_mismatches": len(comparison.get("field_mismatches", [])),
-                "false_positives": len(comparison.get("false_positives", [])),
-                "false_negatives": len(comparison.get("false_negatives", [])),
-                "strict_pass": comparison.get("strict_pass"),
-                "stdout_tail": proc.stdout.strip()[-300:],
-            }
+                    "status": "PASS" if comparison.get("strict_pass") else "FAIL",
+                    "expected_rows": comparison.get("expected_rows"),
+                    "actual_rows": comparison.get("actual_rows"),
+                    "correct_rows": comparison.get("correct_rows"),
+                    "field_mismatches": len(comparison.get("field_mismatches", [])),
+                    "false_positives": len(comparison.get("false_positives", [])),
+                    "false_negatives": len(comparison.get("false_negatives", [])),
+                    "strict_pass": comparison.get("strict_pass"),
+                    "stdout_tail": proc.stdout.strip()[-300:],
+                }
         statuses = [entry["status"] for entry in results["artifacts"].values()]
         if statuses and all(s == "PASS" for s in statuses):
             results["status"] = "PASS"
         elif any(s == "SETUP_ERROR" for s in statuses):
-            # A transport interruption must never be scored as a failed import.
             results["status"] = "SETUP_ERROR"
             results["reason"] = "clean-instance import was interrupted"
         elif any(s == "EVIDENCE_ONLY" for s in statuses):

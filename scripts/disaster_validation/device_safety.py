@@ -19,7 +19,7 @@ from scripts.disaster_harness.manifest import canonical_json, sha256_bytes
 ALLOWED_DEVICE = "/dev/nvme0n2"
 TOKEN_VERSION = 1
 PREFLIGHT_VERSION = 1
-_DESTRUCTIVE_ACTIONS = frozenset({"format", "mount", "drop", "truncate", "rm-rf", "corrupt"})
+_DESTRUCTIVE_ACTIONS = frozenset({"setrw", "format", "mount", "drop", "truncate", "rm-rf", "corrupt", "unmount"})
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 

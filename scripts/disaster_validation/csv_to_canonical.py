@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import csv
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 import json
 from pathlib import Path
@@ -129,8 +130,45 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
     if base_type == "json":
         if raw_text == "" or raw_text == "NULL":
             return None
+        return raw_text.strip()
+
+    if base_type == "set":
+        if raw_text == "" and column_def.get("nullable", True):
+            # Could be NULL or empty set. If empty text was decoded, it represents empty set.
+            return []
+        if raw_text == "NULL":
+            return None
+        return sorted(raw_text.split(",")) if raw_text else []
+
+    if base_type == "date":
+        if raw_text == "" or raw_text == "NULL":
+            return None
         try:
-            return json.loads(raw_text)
+            return date.fromisoformat(raw_text.strip())
+        except Exception:
+            return raw_text
+
+    if base_type in ("datetime", "timestamp"):
+        if raw_text == "" or raw_text == "NULL":
+            return None
+        try:
+            return datetime.fromisoformat(raw_text.strip())
+        except Exception:
+            return raw_text
+
+    if base_type == "time":
+        if raw_text == "" or raw_text == "NULL":
+            return None
+        try:
+            s_t = raw_text.strip()
+            sign = -1 if s_t.startswith("-") else 1
+            raw = s_t.lstrip("-")
+            parts = raw.split(":")
+            h, m = int(parts[0]), int(parts[1])
+            sec_parts = parts[2].split(".")
+            s = int(sec_parts[0])
+            us = int(sec_parts[1].ljust(6, "0")[:6]) if len(sec_parts) > 1 else 0
+            return timedelta(hours=h, minutes=m, seconds=s, microseconds=us) * sign
         except Exception:
             return raw_text
 
@@ -151,8 +189,18 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
 
     # Strings, dates, times, enums, sets: undo the control-byte escapes the CSV
     # renderer applies so the canonical value holds the original bytes.
-    if isinstance(raw_text, str) and "\\" in raw_text:
-        return _unescape_csv_text(raw_text)
+    if isinstance(raw_text, str):
+        val = _unescape_csv_text(raw_text) if "\\" in raw_text else raw_text
+        # If the column has a non-utf8 charset (e.g. latin1, ascii), decode the
+        # raw bytes represented by surrogateescape into the intended charset.
+        col_charset = str(column_def.get("charset") or "").lower()
+        if "latin1" in col_charset:
+            try:
+                raw_b = val.encode("utf-8", errors="surrogateescape")
+                val = raw_b.decode("latin1")
+            except Exception:
+                pass
+        return val
     return raw_text
 
 
@@ -176,7 +224,7 @@ def csv_to_canonical_dataset(
     if not csv_path.is_file():
         raise FileNotFoundError(f"recovered CSV file does not exist: {csv_path}")
 
-    with open(csv_path, mode="r", encoding="utf-8", errors="replace", newline="") as f:
+    with open(csv_path, mode="r", encoding="utf-8", errors="surrogateescape", newline="") as f:
         # Detect delimiter / header
         reader = csv.reader(f)
         header = next(reader, None)

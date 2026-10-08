@@ -697,9 +697,13 @@ class TableSpec:
                 + ", ".join(rendered) + ";")
 
     def schema_json(self) -> dict[str, Any]:
-        """Parser-domain schema document for `--schema-file`.
+        """Parser-domain schema document for the recovery CLI's ``--schema-file``.
 
-        physical_pos follows InnoDB's actual clustered-index layout: the key
+        ``TableSchema.from_json`` accepts the same object shape as an SDI
+        schema: ``table_name`` plus a ``columns`` array using the parser-domain
+        ``type`` property.  Keeping this separate from the historic list-shaped
+        Phase B helper prevents ``--schema-file`` from silently degrading to
+        schema-less carving.
         columns first (in key order), then every remaining column in table
         declaration order.  Declaring key columns first keeps this identical to
         declaration order, but computing it explicitly means a table whose key

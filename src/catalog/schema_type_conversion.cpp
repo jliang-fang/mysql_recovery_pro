@@ -128,7 +128,8 @@ std::optional<innodb::IndexColumnDef> build_index_column(
     column.is_nullable = source.is_nullable;
     column.is_unsigned = !source.is_signed;
     column.char_set_id = source.charset_id;
-    column.is_binary = (source.charset_id == 63 || source.collation_id == 63);
+    column.is_binary = (source.charset_id == 63 || source.collation_id == 63) &&
+                       column.col_type != innodb::mysql_types::JSON;
     column.precision = source.numeric_precision > 0
         ? static_cast<uint16_t>(source.numeric_precision) : 0;
     column.scale = source.numeric_scale > 0

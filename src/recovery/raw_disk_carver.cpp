@@ -1426,13 +1426,33 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
         columns.push_back(std::move(*converted));
     }
 
-    // 计算主键列数 (通过 ColumnInfo 的 PRI_KEY 标志或 flags)
+    // 计算主键列数: 优先从 schema.indexes 中查找主键定义
+    std::set<std::string> pk_names;
+    for (const auto& idx : schema.indexes) {
+        if (idx.is_primary) {
+            for (const auto& cname : idx.columns) {
+                pk_names.insert(cname);
+            }
+        }
+    }
+
     uint32_t n_pk_cols = 0;
-    for (const auto& [phys_pos, col] : sorted_cols) {
-        if ((col.flags & 1) != 0 || (col.col_flags & 1) != 0 || n_pk_cols == 0) {
-            n_pk_cols++;
-        } else {
-            break;
+    if (!pk_names.empty()) {
+        for (const auto& [phys_pos, col] : sorted_cols) {
+            if (pk_names.count(col.name) > 0) {
+                n_pk_cols++;
+            } else {
+                break; // PK columns must precede non-PK in clustered index physical order
+            }
+        }
+    }
+    if (n_pk_cols == 0) {
+        for (const auto& [phys_pos, col] : sorted_cols) {
+            if ((col.flags & 1) != 0 || (col.col_flags & 1) != 0 || n_pk_cols == 0) {
+                n_pk_cols++;
+            } else {
+                break;
+            }
         }
     }
     if (n_pk_cols == 0) n_pk_cols = 1;

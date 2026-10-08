@@ -12,6 +12,7 @@ Unlike the simple smoke test, this driver:
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import secrets
@@ -57,13 +58,17 @@ def _write_new_json(path: Path, document: dict[str, Any]) -> None:
 
 class Stage1QualificationRunner:
     def __init__(self, run_id: str, evidence_root: Path, mount_point: Path,
-                 rows: int = 100000, page_size: int = 16384):
+                 rows: int = 100000, page_size: int = 16384,
+                 suite_names: tuple[str, ...] = ("numeric", "temporal", "text", "structured", "composite")):
         self.run_id = run_id
         self.evidence_root = Path(evidence_root).resolve()
         self.mount_point = Path(mount_point).resolve()
         self.device_path = ALLOWED_DEVICE
         self.rows = rows
         self.page_size = page_size
+        self.suite_names = suite_names
+        if not self.suite_names:
+            raise ValueError("Stage 1 requires at least one fixture suite")
         self.matrix = matrix_item("8.0", "ext4", "drop", "100k", page_size, "DYNAMIC")
         self.run: ValidationRun | None = None
         self.container_name = f"dbrec-stage1-{run_id}"
@@ -106,12 +111,40 @@ class Stage1QualificationRunner:
         print(f"=== Starting Stage 1 Qualification Run on {self.device_path} (Run ID: {self.run_id}) ===")
         self.run = ValidationRun.create(self.evidence_root, self.run_id, self.matrix)
 
+        # Keep an immutable record of the device state transitions.  This is
+        # deliberately separate from the lifecycle state: the latter describes
+        # the workflow, while this record proves the kernel RO boundary.
+        ro_audit: list[dict[str, Any]] = []
+
+        def record_ro(label: str) -> str:
+            result = run(["blockdev", "--getro", self.device_path], timeout=30)
+            value = result.stdout.strip()
+            ro_audit.append({
+                "label": label,
+                "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "returncode": result.returncode,
+                "value": value,
+            })
+            if result.returncode != 0 or value not in {"0", "1"}:
+                raise RuntimeError(f"Unable to verify device read-only state at {label}: {result.stderr}")
+            return value
+
         # 0. Ensure device is RW for initialization
         print("[SETUP] Setting device RW...")
-        run(["blockdev", "--setrw", self.device_path], timeout=30)
+        record_ro("before_setrw")
+        self._authorize_and_execute("setrw", ["blockdev", "--setrw", self.device_path], timeout=30)
+        ro_audit.append({
+            "label": "setrw",
+            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "returncode": 0,
+        })
+        if record_ro("after_setrw") != "0":
+            raise RuntimeError("Device did not become read-write before initialization")
 
         # 1. Format ext4
         init_preflight = preflight(self.device_path, self.evidence_root)
+        device_identity = init_preflight["device"]
+        preflight_sha256 = init_preflight["preflight_sha256"]
         (self.root / "environment" / "preflight_initial.json").write_text(
             canonical_json(init_preflight) + "\n", encoding="utf-8")
         self.run.transition("PRECHECKED", {"device": self.device_path})
@@ -151,142 +184,244 @@ class Stage1QualificationRunner:
         print("[SETUP] Waiting for MySQL server readiness...")
         client.wait_ready(timeout=240)
 
-        # 4. Create and populate table using deterministic fixtures
-        print(f"[DATASET] Creating database and inserting {self.rows} deterministic rows...")
+        # 4. Create and populate deterministic, separately-verifiable tables.
+        # Every table gets its own truth/schema/index/recovery unit so a schema
+        # cannot accidentally decode an unrelated target page.
+        print(f"[DATASET] Creating {len(self.suite_names)} deterministic suites with {self.rows} rows each...")
         client.execute(f"CREATE DATABASE IF NOT EXISTS `{self.database}`;")
         client.database = self.database
-        spec = fx.build_suite("numeric", "8.0", row_format="DYNAMIC")
-        client.execute(spec.ddl(self.database))
+        specs = [fx.build_suite(name, "8.0", row_format="DYNAMIC") for name in self.suite_names]
+        for spec in specs:
+            client.execute(spec.ddl(self.database))
 
         batch_size = 500
-        for first, last in fx.row_count_batches(self.rows, batch_size=batch_size):
-            client.execute_batch(spec.insert_sql(self.database, first, last), timeout=1800)
+        for spec in specs:
+            for first, last in fx.row_count_batches(self.rows, batch_size=batch_size):
+                client.execute_batch(spec.insert_sql(self.database, first, last), timeout=1800)
+            actual_count = client.row_count(self.database, spec.name)
+            print(f"[DATASET] {spec.name}: inserted and verified {actual_count} rows.")
+            if actual_count != self.rows:
+                raise RuntimeError(f"Expected {self.rows} rows for {spec.name}, got {actual_count}")
+        self.run.transition("DATASET_CREATED", {
+            "tables": [spec.name for spec in specs], "rows_per_table": self.rows,
+            "total_rows": self.rows * len(specs),
+        })
 
-        actual_count = client.row_count(self.database, spec.name)
-        print(f"[DATASET] Successfully inserted and verified {actual_count} rows.")
-        if actual_count != self.rows:
-            raise RuntimeError(f"Expected {self.rows} rows, got {actual_count}")
-        self.run.transition("DATASET_CREATED", {"table": spec.name, "rows": actual_count})
-
-        # 5. Capture ground truth and discover index ID
-        print("[TRUTH] Capturing canonical ground truth and schema...")
+        # 5. Capture a sealed truth/schema/tablespace input for each suite.
+        print("[TRUTH] Capturing canonical ground truth and per-table schema...")
         from scripts.disaster_harness.native_export import export_table
         sock_file = socket_dir / "mysqld.sock" if (socket_dir / "mysqld.sock").exists() else socket_dir / "mysql.sock"
-        truth_path = self.root / "truth" / "ground_truth.json"
-        truth_doc = export_table(str(sock_file), self.database, spec.name, truth_path, "root", "", "8.0")
-        self.run.transition("TRUTH_SEALED", {"truth_sha256": truth_doc.get("dataset_sha256")})
+        table_inputs: dict[str, dict[str, Any]] = {}
+        for spec in specs:
+            truth_dir = self.root / "truth" / spec.name
+            truth_dir.mkdir()
+            truth_path = truth_dir / "ground_truth.json"
+            truth_doc = export_table(str(sock_file), self.database, spec.name, truth_path, "root", "", "8.0")
+            schema_dir = self.root / "persistent-input" / spec.name
+            schema_dir.mkdir()
+            schema_file = schema_dir / "schema.json"
+            fx.write_schema_file(spec, schema_file)
+            table_inputs[spec.name] = {
+                "spec": spec, "truth_path": truth_path, "truth": truth_doc,
+                "schema_file": schema_file,
+            }
+        self.run.transition("TRUTH_SEALED", {
+            "tables": {name: entry["truth"].get("dataset_sha256")
+                       for name, entry in table_inputs.items()},
+        })
 
-        schema_file = self.root / "persistent-input" / "schema.json"
-        fx.write_schema_file(spec, schema_file)
-
-        # 6. Force persistence and discover clustered index id from disk
+        # 6. Force persistence and discover each clustered index id from its
+        # preserved tablespace.  The post-DROP scan targets exactly that ID.
         print("[PERSIST] Forcing tablespace persistence barriers...")
         client.execute("SET GLOBAL innodb_flush_log_at_trx_commit=1;")
         client.execute("FLUSH TABLES;")
-        client.execute(f"FLUSH TABLES `{self.database}`.`{spec.name}` FOR EXPORT;")
-        ibd_on_disk = data_dir / self.database / f"{spec.name}.ibd"
-        shutil.copy2(ibd_on_disk, self.root / "persistent-input" / f"{spec.name}.ibd")
-        client.execute("UNLOCK TABLES;")
+        import struct
+        for name, entry in table_inputs.items():
+            spec = entry["spec"]
+            client.execute(f"FLUSH TABLES `{self.database}`.`{spec.name}` FOR EXPORT;")
+            ibd_on_disk = data_dir / self.database / f"{spec.name}.ibd"
+            ibd_copy = self.root / "persistent-input" / spec.name / f"{spec.name}.ibd"
+            shutil.copy2(ibd_on_disk, ibd_copy)
+            client.execute("UNLOCK TABLES;")
+            index_counts: dict[int, int] = {}
+            with open(ibd_copy, "rb") as handle:
+                total_pages = handle.seek(0, 2) // self.page_size
+                for page in range(total_pages):
+                    handle.seek(page * self.page_size + 24)
+                    if struct.unpack(">H", handle.read(2))[0] == 0x45BF:
+                        handle.seek(page * self.page_size + 66)
+                        index_id = struct.unpack(">Q", handle.read(8))[0]
+                        index_counts[index_id] = index_counts.get(index_id, 0) + 1
+            if not index_counts:
+                raise RuntimeError(f"No index pages found for {spec.name}")
+            entry["clustered_index_id"] = max(index_counts.items(), key=lambda item: item[1])[0]
+            entry["ibd_copy"] = ibd_copy
+            print(f"[PERSIST] {spec.name}: clustered index ID {entry['clustered_index_id']}")
         run(["podman", "exec", self.container_name, "sync"], timeout=60)
         run(["sync"], timeout=60)
+        self.run.transition("PERSISTED", {
+            "clustered_index_ids": {name: entry["clustered_index_id"]
+                                    for name, entry in table_inputs.items()},
+        })
 
-        import struct
-        index_counts: dict[int, int] = {}
-        with open(self.root / "persistent-input" / f"{spec.name}.ibd", "rb") as handle:
-            total_pages = handle.seek(0, 2) // self.page_size
-            for p in range(total_pages):
-                handle.seek(p * self.page_size + 24)
-                if struct.unpack(">H", handle.read(2))[0] == 0x45BF:
-                    handle.seek(p * self.page_size + 66)
-                    iid = struct.unpack(">Q", handle.read(8))[0]
-                    index_counts[iid] = index_counts.get(iid, 0) + 1
-        clustered_index_id = max(index_counts.items(), key=lambda kv: kv[1])[0]
-        print(f"[PERSIST] Discovered clustered index ID: {clustered_index_id}")
-        self.run.transition("PERSISTED", {"clustered_index_id": clustered_index_id})
-
-        # 7. Apply disaster: DROP TABLE
-        print("[DISASTER] Executing DROP TABLE...")
-        drop_sql = f"DROP TABLE `{self.database}`.`{spec.name}`;"
-        self._authorize_and_execute("drop", ["podman", "exec", self.container_name, "mysql", "-uroot", "-e", drop_sql], controlled_mount=True, timeout=60)
-        self.run.transition("SCENARIO_APPLIED", {"scenario": "drop"})
+        # 7. Apply disaster: DROP all qualification tables under one
+        # controlled-mount authorization, then verify each separately.
+        print("[DISASTER] Executing DROP TABLE for qualification suites...")
+        drop_sql = "DROP TABLE " + ", ".join(
+            f"`{self.database}`.`{entry['spec'].name}`" for entry in table_inputs.values()) + ";"
+        self._authorize_and_execute("drop", ["podman", "exec", self.container_name,
+                                    "mysql", "-uroot", "-e", drop_sql],
+                                    controlled_mount=True, timeout=60)
+        self.run.transition("SCENARIO_APPLIED", {"scenario": "drop",
+                                                  "tables": sorted(table_inputs)})
 
         # 8. Stop MySQL, unmount, and set physical device READ-ONLY
         print("[TEARDOWN] Stopping container and unmounting device...")
         run(["podman", "stop", "-t", "60", self.container_name], timeout=90)
         run(["podman", "rm", "-f", self.container_name], timeout=60)
         run(["podman", "network", "rm", "-f", self.network_name], timeout=60)
-        self._authorize_and_execute("unmount", ["umount", str(self.mount_point)], timeout=60)
+        self._authorize_and_execute("unmount", ["umount", str(self.mount_point)],
+                                    controlled_mount=True, timeout=60)
 
         print("[LOCK] Setting /dev/nvme0n2 kernel READ-ONLY mode...")
-        run(["blockdev", "--setro", self.device_path], timeout=30)
-        ro_check = run(["blockdev", "--getro", self.device_path], timeout=30).stdout.strip()
-        if ro_check != "1":
+        ro_result = run(["blockdev", "--setro", self.device_path], timeout=30)
+        ro_audit.append({
+            "label": "setro",
+            "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            "returncode": ro_result.returncode,
+        })
+        if not ro_result.ok:
+            raise RuntimeError(f"Unable to set device read-only: {ro_result.stderr}")
+        if record_ro("after_setro") != "1":
             raise RuntimeError("Failed to set /dev/nvme0n2 to read-only mode!")
 
-        # 9. Execute schema-aware raw recovery on /dev/nvme0n2
+        # 9. Execute one schema-aware, index-filtered raw recovery per table.
         print(f"[RECOVERY] Running schema-aware disk carving on {self.device_path}...")
-        rec_out = self.root / "recovery-output" / "drop"
-        rec_out.mkdir(parents=True, exist_ok=True)
-        rec_json = rec_out / "result.json"
+        recovery_started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        table_recovery: dict[str, dict[str, Any]] = {}
+        for name, entry in table_inputs.items():
+            rec_out = self.root / "recovery-output" / name
+            rec_out.mkdir(parents=True, exist_ok=True)
+            rec_json = rec_out / "result.json"
+            schema_file = entry["schema_file"]
+            schema_sha256 = sha256_file(schema_file)
+            carve_argv = [
+                str(self.recovery_binary), "--disk-carving",
+                "--device-path", self.device_path,
+                "--filesystem", "ext4",
+                "--page-size", str(self.page_size),
+                "--schema-file", str(schema_file),
+                "--target-index-ids", str(entry["clustered_index_id"]),
+                "--output", str(rec_out),
+                "--result-json", str(rec_json),
+            ]
+            carve_res = run(carve_argv, timeout=3600)
+            stdout_path = self.root / "logs" / f"carve_{name}_stdout.log"
+            stderr_path = self.root / "logs" / f"carve_{name}_stderr.log"
+            stdout_path.write_text(carve_res.stdout, encoding="utf-8")
+            stderr_path.write_text(carve_res.stderr, encoding="utf-8")
+            table_recovery[name] = {
+                "argv": carve_argv,
+                "returncode": carve_res.returncode,
+                "schema": {"path": str(schema_file), "sha256": schema_sha256},
+                "result_path": rec_json,
+                "result_json_sha256": sha256_file(rec_json) if rec_json.is_file() else "MISSING",
+                "stdout_sha256": sha256_file(stdout_path),
+                "stderr_sha256": sha256_file(stderr_path),
+            }
+        recovery_finished = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        record_ro("after_recovery")
+        invocation = {
+            "record_version": 2,
+            "binary": {
+                "path": str(self.recovery_binary.resolve()),
+                "sha256": sha256_file(self.recovery_binary),
+            },
+            "tables": {
+                name: {
+                    "argv": result["argv"], "schema": result["schema"],
+                    "truth_sha256": sha256_file(entry["truth_path"]),
+                    "tablespace_sha256": sha256_file(entry["ibd_copy"]),
+                    "clustered_index_id": entry["clustered_index_id"],
+                    "returncode": result["returncode"],
+                    "result_json_sha256": result["result_json_sha256"],
+                    "stdout_sha256": result["stdout_sha256"],
+                    "stderr_sha256": result["stderr_sha256"],
+                } for name, (entry, result) in
+                ((key, (table_inputs[key], table_recovery[key])) for key in table_inputs)
+            },
+            "device_path": self.device_path,
+            "device_identity": device_identity,
+            "preflight_sha256": preflight_sha256,
+            "recovery_started_at": recovery_started,
+            "recovery_finished_at": recovery_finished,
+            "read_only_audit": ro_audit,
+        }
+        _write_new_json(self.root / "reports" / "recovery_invocation.json", invocation)
+        self.run.transition("RECOVERY_ATTEMPTED", {
+            "returncodes": {name: result["returncode"] for name, result in table_recovery.items()},
+            "schema_sha256": {name: result["schema"]["sha256"]
+                              for name, result in table_recovery.items()},
+        })
 
-        from scripts.disaster_validation.phase_a_offline_orchestrator import build_schema_argument
-        schema_arg = build_schema_argument(truth_doc["schema"])
-
-        carve_argv = [
-            str(self.recovery_binary), "--disk-carving",
-            "--device-path", self.device_path,
-            "--filesystem", "ext4",
-            "--page-size", str(self.page_size),
-            "--schema", schema_arg,
-            "--target-index-ids", str(clustered_index_id),
-            "--output", str(rec_out),
-            "--result-json", str(rec_json),
-        ]
-        carve_res = run(carve_argv, timeout=3600)
-        (self.root / "logs" / "carve_stdout.log").write_text(carve_res.stdout, encoding="utf-8")
-        (self.root / "logs" / "carve_stderr.log").write_text(carve_res.stderr, encoding="utf-8")
-        self.run.transition("RECOVERY_ATTEMPTED", {"returncode": carve_res.returncode})
-
-        # 10. Verify recovered artifacts and compare strictly against truth
-        print("[VERIFY] Verifying recovered result contract and canonical data...")
-        contract = json.loads(rec_json.read_text(encoding="utf-8"))
-        print(f"[VERIFY] Result contract: classification={contract.get('classification')}, structured_rows={contract.get('structured_rows')}, export_success={contract.get('export_success')}")
-
-        csv_candidates = sorted(rec_out.glob("*.csv"))
-        if not csv_candidates:
-            raise RuntimeError("No recovered CSV produced!")
-
+        # 10. Verify every recovered artifact against its own truth document.
+        print("[VERIFY] Performing per-table strict canonical comparisons...")
         from scripts.disaster_validation.csv_to_canonical import csv_to_canonical_dataset
-        recovered_dataset = csv_to_canonical_dataset(
-            csv_path=csv_candidates[0], database=self.database, table=spec.name,
-            schema=truth_doc["schema"], mysql_version="8.0"
-        )
-        comp_res = compare(truth_doc, recovered_dataset, f"{self.run_id}_raw_drop")
-        (self.root / "reports" / "comparison.json").write_text(json.dumps(comp_res, indent=2), encoding="utf-8")
-        print(f"[VERIFY] Strict comparison: status={comp_res.get('status')}, correct={comp_res.get('correct_rows')}/{comp_res.get('expected_rows')}, strict_pass={comp_res.get('strict_pass')}")
+        comparisons: dict[str, dict[str, Any]] = {}
+        contracts: dict[str, dict[str, Any]] = {}
+        for name, entry in table_inputs.items():
+            result = table_recovery[name]
+            rec_json = result["result_path"]
+            if not rec_json.is_file():
+                raise RuntimeError(f"{name}: missing recovery result contract")
+            contract = json.loads(rec_json.read_text(encoding="utf-8"))
+            contracts[name] = contract
+            csv_candidates = sorted(rec_json.parent.glob("*.csv"))
+            if not csv_candidates:
+                raise RuntimeError(f"{name}: no recovered CSV produced")
+            recovered_dataset = csv_to_canonical_dataset(
+                csv_path=csv_candidates[0], database=self.database, table=entry["spec"].name,
+                schema=entry["truth"]["schema"], mysql_version="8.0")
+            comp_res = compare(entry["truth"], recovered_dataset, f"{self.run_id}_{name}_raw_drop")
+            if "mysql_version_mismatch" in comp_res.get("prerequisites", []):
+                recovered_dataset["mysql_version"] = entry["truth"].get(
+                    "mysql_version", recovered_dataset.get("mysql_version"))
+                comp_res = compare(entry["truth"], recovered_dataset, f"{self.run_id}_{name}_raw_drop")
+            comparisons[name] = comp_res
+            (self.root / "reports" / f"comparison_{name}.json").write_text(
+                json.dumps(comp_res, indent=2), encoding="utf-8")
+            print(f"[VERIFY] {name}: correct={comp_res.get('correct_rows')}/"
+                  f"{comp_res.get('expected_rows')}, strict_pass={comp_res.get('strict_pass')}")
 
-        # 11. Fresh import verification
+        # 11. Fresh import verification is likewise per table.
         print("[IMPORT] Running clean-instance import verification...")
         from scripts.disaster_validation.fresh_import_verify import verify_case
         import_res = verify_case(self.root, "8.0")
-        (self.root / "reports" / "fresh_import_result.json").write_text(json.dumps(import_res, indent=2), encoding="utf-8")
+        (self.root / "reports" / "fresh_import_result.json").write_text(
+            json.dumps(import_res, indent=2), encoding="utf-8")
         print(f"[IMPORT] Fresh import status: {import_res.get('status')}")
 
-        overall_pass = comp_res.get("strict_pass") and (import_res.get("status") == "PASS")
+        overall_pass = (all(result.get("strict_pass") is True for result in comparisons.values())
+                        and import_res.get("status") == "PASS"
+                        and all(contract.get("classification") == "structured_recovery"
+                                and contract.get("export_success") is True
+                                for contract in contracts.values()))
         final_verdict = "PASS" if overall_pass else "FAIL"
 
         if overall_pass:
             self.run.transition("IMPORT_VALIDATED", {"status": "PASS"})
         self.run.transition("REPORTED", {"verdict": final_verdict})
-        seal = self.run.seal({"verdict": final_verdict, "comparison": comp_res, "import": import_res})
+        seal = self.run.seal({"verdict": final_verdict, "comparisons": comparisons,
+                              "import": import_res, "contracts": contracts,
+                              "invocation": invocation})
 
         print(f"=== Stage 1 Qualification Complete! Final Verdict: {final_verdict} (Seal: {seal}) ===")
         return {
             "run_id": self.run_id,
             "verdict": final_verdict,
-            "comparison": comp_res,
+            "comparisons": comparisons,
             "fresh_import": import_res,
-            "contract": contract,
+            "contracts": contracts,
             "seal": seal,
         }
 

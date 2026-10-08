@@ -82,6 +82,17 @@ def _values_equal(expected: Any, actual: Any, base_type: str) -> bool:
     """
     if expected == actual:
         return True
+    if base_type == "json":
+        plain_expected = _canonical_plain(expected)
+        plain_actual = _canonical_plain(actual)
+        if plain_expected is None or plain_actual is None:
+            return plain_expected == plain_actual
+        try:
+            exp_obj = json.loads(plain_expected) if isinstance(plain_expected, str) else plain_expected
+            act_obj = json.loads(plain_actual) if isinstance(plain_actual, str) else plain_actual
+            return exp_obj == act_obj
+        except Exception:
+            return plain_expected == plain_actual
     if base_type not in _FLOAT_BASE_TYPES:
         return False
     plain_expected = _canonical_plain(expected)

@@ -33,6 +33,8 @@ from scripts.disaster_validation.adapters import (
     adapter_for,
 )
 from scripts.disaster_validation.csv_to_canonical import _parse_csv_cell
+from scripts.disaster_validation import fixtures as validation_fixtures
+from scripts.disaster_validation.stage1_qualification import Stage1QualificationRunner
 from scripts.disaster_validation.phase_a_offline_orchestrator import (
     REQUIRED_CONTRACT_KEYS,
     PhaseAOrchestrator,
@@ -127,9 +129,21 @@ class MatrixTests(unittest.TestCase):
         self.assertIsNone(_parse_csv_cell("", nullable_text))
         self.assertEqual(_parse_csv_cell("0100", blob), b"\x01\x00")
         self.assertEqual(_parse_csv_cell("not-hex", blob), b"not-hex")
+    def test_fixture_schema_file_uses_cli_object_shape(self):
+        spec = validation_fixtures.build_suite("numeric", "8.0", row_format="DYNAMIC")
+        document = spec.schema_json()
+        self.assertEqual(document["table_name"], "t_numeric")
+        self.assertIn("columns", document)
+        self.assertTrue(document["indexes"][0]["is_primary"])
+        self.assertEqual(document["columns"][0]["type"], 9)
+        self.assertNotIn("mysql_type_id", document["columns"][0])
 
+    def test_stage1_defaults_to_separately_verifiable_suites(self):
+        runner = Stage1QualificationRunner("stage1-test", Path("/tmp"), Path("/tmp/stage1-mount"))
+        self.assertEqual(runner.suite_names,
+                         ("numeric", "temporal", "text", "structured", "composite"))
+        self.assertEqual(runner.rows, 100000)
 
-class DeviceSafetyTests(unittest.TestCase):
     def test_rejects_any_device_other_than_authorized_target(self):
         with self.assertRaisesRegex(DeviceSafetyError, "only permits"):
             read_device_identity("/dev/null")
@@ -198,6 +212,8 @@ class DeviceSafetyTests(unittest.TestCase):
         report = preflight_report()
         token = issue_approval_token(report, "smoke-001", "format", nonce="a" * 32)
         validate_approval_token(token, IDENTITY, "smoke-001", "format", report["preflight_sha256"])
+        setrw_token = issue_approval_token(report, "smoke-001", "setrw", nonce="d" * 32)
+        validate_approval_token(setrw_token, IDENTITY, "smoke-001", "setrw", report["preflight_sha256"])
 
         with self.assertRaisesRegex(DeviceSafetyError, "action or run ID"):
             validate_approval_token(token, IDENTITY, "smoke-001", "mount", report["preflight_sha256"])

@@ -6087,6 +6087,31 @@ inline std::optional<dbrecovery::catalog::TableSchema> RecoveryCLI::load_schema_
 
                 schema.columns[ordinal++] = col_info;
             }
+
+            if (json.contains("indexes") && json["indexes"].is_array()) {
+                schema.indexes.clear();
+                for (const auto& idx_json : json["indexes"]) {
+                    catalog::IndexInfo idx;
+                    if (idx_json.contains("name")) idx.name = idx_json["name"].get<std::string>();
+                    if (idx_json.contains("is_primary")) idx.is_primary = idx_json["is_primary"].get<bool>();
+                    if (idx_json.contains("is_unique")) idx.is_unique = idx_json["is_unique"].get<bool>();
+                    if (idx_json.contains("columns") && idx_json["columns"].is_array()) {
+                        for (const auto& col_name : idx_json["columns"]) {
+                            idx.columns.push_back(col_name.get<std::string>());
+                        }
+                    }
+                    if (idx.is_primary) {
+                        for (const auto& col_name : idx.columns) {
+                            for (auto& [ord, col] : schema.columns) {
+                                if (col.name == col_name) {
+                                    col.flags |= 1;
+                                }
+                            }
+                        }
+                    }
+                    schema.indexes.push_back(std::move(idx));
+                }
+            }
         }
         // Format 3: Try from_json method
         else {

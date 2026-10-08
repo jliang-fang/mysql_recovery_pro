@@ -1485,36 +1485,8 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
             if (next_origin > static_cast<ssize_t>(data_start) && static_cast<size_t>(next_origin) < page_size) {
                 // Valid next_offset - next record header is at next_origin - REC_HEADER_SIZE_NEW
                 data_end = static_cast<size_t>(next_origin) - REC_HEADER_SIZE_NEW;
-            } else if (next_origin > 0 && static_cast<size_t>(next_origin) < 150) {
-                // CRITICAL FIX: next_origin points backward to SUPREMUM (origin ~112)
-                // This is the last user record on the page
-                // Use heap_top but limit to reasonable record size based on schema
-                // Calculate expected record size based on schema to prevent reading garbage
-                size_t expected_size = 0;
-                if (!columns_.empty()) {
-                    // Calculate total fixed field sizes + estimate for variable fields
-                    for (const auto& col : columns_) {
-                        if (!col.is_variable_length()) {
-                            expected_size += col.storage_size();
-                        } else {
-                            // Use a reasonable max for variable fields (255 bytes average)
-                            expected_size += 255;  // Average estimate
-                        }
-                    }
-                    // Add overhead: NULL bitmap + variable size bytes + TRX_ID + ROLL_PTR
-                    expected_size += (n_nullable_ + 7) / 8 + n_variable_ + DB_TRX_ID_SIZE + DB_ROLL_PTR_SIZE;
-                }
-                // Cap data_end to expected_size if heap_top gives unreasonable length
-                size_t heap_top_len = heap_top - data_start;
-                // Use 2x expected_size as threshold (variable fields can be larger than estimate)
-                if (expected_size > 0 && heap_top_len > expected_size * 2) {
-                    // Use expected size instead of heap_top for last record
-                    data_end = data_start + expected_size * 2;  // Allow 2x buffer for variable fields
-                } else {
-                    data_end = heap_top;
-                }
             } else {
-                // Out of bounds - likely last record on page
+                // Last user record on page (points backward to supremum ~112) or points beyond page bounds
                 data_end = heap_top;
             }
         } else {
@@ -2464,9 +2436,18 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     uint32_t minute = 63 - ((4032 & raw) >> 6);        // 63 = 0x3F, 4032 = 0xFC0
                     uint32_t second = 63 - (63 & raw);
 
-                    // 处理小数部分
                     int pad = col.datetime_precision;
-                    if (pad > 0 && field_size > 3) {
+                    if (pad == 0 || field_size <= 3) {
+                        second += 1;
+                        if (second >= 60) {
+                            second -= 60;
+                            minute += 1;
+                            if (minute >= 60) {
+                                minute -= 60;
+                                hour += 1;
+                            }
+                        }
+                    } else if (pad > 0 && field_size > 3) {
                         size_t fr_bytes = std::min(static_cast<size_t>(field_size - 3), static_cast<size_t>(3));
                         uint32_t fr = 0;
                         for (size_t i = 0; i < fr_bytes; i++) {
@@ -2474,6 +2455,14 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                         }
                         if (fr == 0) {
                             second += 1;
+                            if (second >= 60) {
+                                second -= 60;
+                                minute += 1;
+                                if (minute >= 60) {
+                                    minute -= 60;
+                                    hour += 1;
+                                }
+                            }
                             fractional = "0";
                         } else {
                             uint32_t display = (1 << (fr_bytes * 8)) - fr;

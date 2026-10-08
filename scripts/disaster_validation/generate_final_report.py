@@ -192,6 +192,115 @@ def collect_phase_b(evidence: Path) -> list[dict[str, Any]]:
     return cases
 
 
+def _raw_case_paths(evidence: Path) -> list[Path]:
+    """Find real-media Stage 1 cases without treating them as image cases."""
+    evidence = Path(evidence)
+    if evidence.is_dir() and (evidence / "run_state.json").is_file():
+        return [evidence]
+    candidates: list[Path] = []
+    for root in (evidence, *sorted(evidence.glob("raw_nvme_*"))):
+        if not root.is_dir():
+            continue
+        candidates.extend(case for case in sorted(root.glob("stage1-*/"))
+                         if (case / "run_state.json").is_file())
+        # The older live smoke run used a non-stage1 name.
+        candidates.extend(case for case in sorted(root.glob("nvme*-*/"))
+                         if (case / "run_state.json").is_file())
+    return sorted(set(candidates))
+
+
+def collect_raw_media(evidence: Path) -> list[dict[str, Any]]:
+    """Collect attempted real-device evidence independently from image runs."""
+    cases: list[dict[str, Any]] = []
+    for case in _raw_case_paths(evidence):
+        state = read_json(case / "run_state.json") or {}
+        manifest = read_json(case / "manifest.json") or {}
+        matrix = manifest.get("matrix") or state.get("matrix") or {}
+        comparison = (read_json(case / "reports" / "comparison.json") or
+                      manifest.get("comparison") or {})
+        import_result = (read_json(case / "reports" / "fresh_import_result.json") or
+                         read_json(case / "import-validation" / "fresh_import_result.json") or
+                         manifest.get("import") or {})
+        contract = manifest.get("contract")
+        if contract is None:
+            result_candidates = sorted(case.glob("recovery-output/**/result.json"))
+            contract = read_json(result_candidates[0]) if result_candidates else {}
+        if not contract:
+            contract = manifest.get("contract") or {}
+        invocation = read_json(case / "reports" / "recovery_invocation.json") or {}
+        attempted = bool(manifest or state.get("state") not in (None, "PLANNED"))
+        if not attempted:
+            continue
+        strict = comparison.get("strict_pass") is True
+        imported = import_result.get("status") == "PASS"
+        evidence_incomplete = not comparison and not import_result and not contract
+        if strict and imported and contract:
+            verdict = "PASS"
+        elif evidence_incomplete:
+            verdict = "NOT_COMPUTABLE"
+        elif state.get("state") in {"FAILED_SETUP", "ABORTED", "REJECTED"}:
+            verdict = "SETUP_ERROR"
+        elif manifest.get("verdict") == "NOT_COMPUTABLE":
+            verdict = "NOT_COMPUTABLE"
+        else:
+            verdict = "FAIL"
+        device = (contract.get("details") or {}).get("device_path")
+        if not device:
+            device = invocation.get("device_path")
+        artifacts = {}
+        for relative in (
+                "manifest.json", "run_state.json", "reports/comparison.json",
+                "reports/fresh_import_result.json", "reports/recovery_invocation.json"):
+            path = case / relative
+            if path.is_file():
+                artifacts[relative] = {"path": str(path), "sha256": sha256_file(path)}
+        cases.append({
+            "case": case.name,
+            "phase": "RAW_MEDIA",
+            "scope": "real_block_device",
+            "version": matrix.get("version"),
+            "filesystem": matrix.get("filesystem"),
+            "scenario": matrix.get("scenario"),
+            "dataset_profile": matrix.get("dataset_profile"),
+            "page_size": matrix.get("page_size"),
+            "device_path": device,
+            "attempted": True,
+            "verdict": verdict,
+            "status": "ATTEMPTED_PASS" if verdict == "PASS" else "ATTEMPTED_FAILED",
+            "lifecycle_state": state.get("state") or manifest.get("state"),
+            "comparison": {
+                "expected_rows": comparison.get("expected_rows"),
+                "actual_rows": comparison.get("actual_rows"),
+                "correct_rows": comparison.get("correct_rows"),
+                "field_mismatches": len(comparison.get("field_mismatches", []))
+                    if isinstance(comparison.get("field_mismatches"), list)
+                    else comparison.get("field_mismatches"),
+                "strict_pass": comparison.get("strict_pass"),
+                "false_negatives": len(comparison.get("false_negatives", [])),
+                "false_positives": len(comparison.get("false_positives", [])),
+            },
+            "fresh_import": import_result,
+            "contract": {
+                "classification": contract.get("classification"),
+                "structured_rows": contract.get("structured_rows"),
+                "export_success": contract.get("export_success"),
+                "importable": contract.get("importable"),
+                "schema_source": contract.get("schema_source"),
+                "reason": contract.get("reason"),
+            },
+            "invocation": invocation,
+            "artifacts": artifacts,
+            "failure_reasons": [
+                reason for reason in (
+                    None if strict else "strict_comparison_failed",
+                    None if imported else "fresh_import_failed",
+                    None if contract else "missing_result_contract",
+                ) if reason
+            ],
+        })
+    return cases
+
+
 def collect_corruption(evidence: Path) -> list[dict[str, Any]]:
     """Collect separately-scored destructive-copy validation evidence."""
     cases = []
@@ -450,7 +559,7 @@ def _build_fail_closed(phase_a, phase_b, corruption=()) -> list[dict[str, Any]]:
     return entries
 
 
-def _build_validation_gaps(phase_a, phase_b, corruption=()) -> list[str]:
+def _build_validation_gaps(phase_a, phase_b, corruption=(), raw_media=()) -> list[str]:
     gaps = []
     if not any(c.get("fresh_import") for c in phase_b):
         gaps.append("Phase B 未执行 CSV/SQL 全新实例重导入。")
@@ -459,6 +568,13 @@ def _build_validation_gaps(phase_a, phase_b, corruption=()) -> list[str]:
     else:
         gaps.append("损坏矩阵未把丢失行逐行归因到被破坏页的 page→主键映射：可恢复行已逐字段"
                     "比对为零差异，但丢失行只按数量记录，不对空实例重导入主张完整 round-trip。")
+    if raw_media:
+        for case in raw_media:
+            if case.get("verdict") != "PASS":
+                gaps.append("真实裸设备 Stage 1 已执行但未通过："
+                            f"{case.get('case')}，失败项={','.join(case.get('failure_reasons') or [])}。")
+    else:
+        gaps.append("真实裸设备（/dev/nvme0n2）Stage 1 尚无已执行证据；需单独授权后运行。")
     rows = max((c.get("rows_written") or 0) for c in phase_b) if phase_b else 0
     if rows < 1000000:
         gaps.append(f"Phase B 最大样本 {rows} 行，未达到百万行量级要求。")
@@ -546,6 +662,9 @@ def markdown(doc: dict[str, Any]) -> str:
         f"bounded structured PASS {summary.get('corruption_pass_bounded_structured', 0)} / "
         f"PRODUCT_FAIL {summary.get('corruption_product_fail', 0)} / "
         f"SETUP_ERROR {summary.get('corruption_setup_error', 0)} |")
+    raw_summary = summary.get("raw_media_total", 0)
+    add(f"| 真实裸设备 Stage 1 | {raw_summary}（PASS {summary.get('raw_media_pass', 0)} / "
+        f"已执行失败 {summary.get('raw_media_fail', 0)}） |")
     add("")
 
     add("## 2. 环境与版本矩阵")
@@ -585,6 +704,31 @@ def markdown(doc: dict[str, Any]) -> str:
                 classification=contract.get("classification"),
                 expected=comp.get("expected_rows"), actual=comp.get("actual_rows"),
                 mismatch=comp.get("field_mismatches"), verdict=case["verdict"]))
+    add("")
+
+    add("")
+
+    add("## 4b. 真实裸块设备 Stage 1")
+    add("")
+    raw_media = doc.get("raw_media") or []
+    if not raw_media:
+        add("_尚无真实裸设备 Stage 1 执行证据。_")
+    else:
+        add("| 用例 | 设备 | 结果 | 期望行 | 实际行 | 正确行 | strict | fresh import | 失败原因 |")
+        add("|---|---|---|---:|---:|---:|---|---|---|")
+        for case in raw_media:
+            comp = case.get("comparison") or {}
+            imp = case.get("fresh_import") or {}
+            reasons = ", ".join(case.get("failure_reasons") or [])
+            add("| {case} | {device} | **{verdict}** | {expected} | {actual} | {correct} | "
+                "{strict} | {import_status} | {reasons} |".format(
+                    case=case.get("case"), device=case.get("device_path"),
+                    verdict=case.get("status"), expected=comp.get("expected_rows"),
+                    actual=comp.get("actual_rows"), correct=comp.get("correct_rows"),
+                    strict=comp.get("strict_pass"), import_status=imp.get("status"),
+                    reasons=reasons.replace("|", "/")))
+            if case.get("artifacts"):
+                add(f"- `{case.get('case')}` artifacts: `{json.dumps(case['artifacts'], ensure_ascii=False)}`")
     add("")
 
     add("## 5. Phase B — 文件系统灾难场景（隔离磁盘镜像）")
@@ -725,9 +869,23 @@ def markdown(doc: dict[str, Any]) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate the disaster recovery validation report")
     parser.add_argument("--evidence-root", type=Path, default=ROOT)
+    parser.add_argument("--overwrite", action="store_true",
+                        help="replace report files in --evidence-root (otherwise use a unique report directory)")
     args = parser.parse_args()
 
-    evidence = args.evidence_root
+    evidence = args.evidence_root.resolve()
+    report_root = evidence
+    report_json = report_root / "disaster_recovery_validation_report.json"
+    report_md = report_root / "disaster_recovery_validation_report.md"
+    if not args.overwrite and (report_json.exists() or report_md.exists()):
+        stamp = datetime.datetime.now(datetime.timezone.utc).strftime("report-%Y%m%dT%H%M%SZ")
+        report_root = evidence / stamp
+        suffix = 1
+        while report_root.exists():
+            report_root = evidence / f"{stamp}-{suffix}"
+            suffix += 1
+        report_root.mkdir(mode=0o700)
+
     phase_a: list[dict[str, Any]] = []
     phase_b: list[dict[str, Any]] = []
     corruption: list[dict[str, Any]] = []
@@ -752,8 +910,17 @@ def main() -> int:
                 phase_b.extend(collect_phase_b(root))
                 break
 
-    # Corruption runs are intentionally scored separately: their expected
-    # evidence-only outcomes must not dilute normal recovery measurements.
+    raw_media: list[dict[str, Any]] = []
+    # Real block-device cases are intentionally collected separately from image
+    # matrices and never affect their cell de-duplication.
+    raw_media.extend(collect_raw_media(evidence))
+    for root in roots:
+        if root.is_dir() and root != evidence:
+            raw_media.extend(collect_raw_media(root))
+    raw_media = sorted({case["case"]: case for case in raw_media}.values(),
+                       key=lambda case: case["case"])
+
+    # Corruption runs are intentionally scored separately: their expected evidence-only outcomes must not dilute normal recovery measurements.
     for root in roots:
         if root.is_dir():
             corruption.extend(collect_corruption(root))
@@ -804,7 +971,9 @@ def main() -> int:
     unsupported = unsupported_combinations()
     defects = _build_defects(phase_a, phase_b, corruption)
     fail_closed = _build_fail_closed(phase_a, phase_b, corruption)
-    gaps = _build_validation_gaps(phase_a, phase_b, corruption)
+    gaps = _build_validation_gaps(phase_a, phase_b, corruption, raw_media)
+    raw_pass = sum(1 for case in raw_media if case["verdict"] == "PASS")
+    raw_fail = sum(1 for case in raw_media if case["verdict"] in {"FAIL", "NOT_COMPUTABLE", "SETUP_ERROR"})
 
     doc: dict[str, Any] = {
         "report_version": 3,
@@ -838,6 +1007,9 @@ def main() -> int:
                 1 for c in corruption if c["verdict"] == "PRODUCT_FAIL"),
             "corruption_setup_error": sum(
                 1 for c in corruption if c["verdict"] == "SETUP_ERROR"),
+            "raw_media_total": len(raw_media),
+            "raw_media_pass": raw_pass,
+            "raw_media_fail": raw_fail,
             "superseded_corruption_runs": superseded_corruption,
         },
         "capability_notes": [
@@ -863,6 +1035,7 @@ def main() -> int:
         ],
         "phase_a": phase_a,
         "phase_b": phase_b,
+        "raw_media": raw_media,
         "corruption_matrix": corruption,
         "setup_error_attempts": setup_attempts,
         "defects": defects,
@@ -890,19 +1063,17 @@ def main() -> int:
             "defects": _conclusion_defects(phase_a, phase_b),
         },
         "not_executed": [
-            "裸块设备（/dev/nvme0n2）真实介质阶段：需单独授权后由 device_safety 预检 + "
-            "approval token 双门执行，本轮未执行。",
             "页损坏/TDE 矩阵已覆盖的范围以本报告 corruption_matrix 为准；未执行的部分："
             "SDI/.frm 元数据损坏、压缩元数据篡改、MySQL 5.6/8.0/9.0 的损坏矩阵、"
             "xfs 上的 8.4 与 TDE 用例、以及 100k/1m 规模样本。",
         ],
     }
 
-    (evidence / "disaster_recovery_validation_report.json").write_text(
+    (report_root / "disaster_recovery_validation_report.json").write_text(
         json.dumps(doc, indent=1, ensure_ascii=False), encoding="utf-8")
-    (evidence / "disaster_recovery_validation_report.md").write_text(
+    (report_root / "disaster_recovery_validation_report.md").write_text(
         markdown(doc), encoding="utf-8")
-    print(f"wrote report to {evidence}")
+    print(f"wrote report to {report_root}")
     print(json.dumps(doc["results_summary"], indent=1))
     return 0
 

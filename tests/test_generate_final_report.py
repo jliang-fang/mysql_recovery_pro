@@ -20,6 +20,39 @@ class GenerateFinalReportTest(unittest.TestCase):
         self.assertIsInstance(report._build_validation_gaps([], [], []), list)
         self.assertEqual(report._conclusion_defects([], [], []), "none")
 
+    def test_collect_raw_media_classifies_attempted_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "raw_nvme_qualification"
+            case = root / "stage1-nvme80-100k-1"
+            (case / "reports").mkdir(parents=True)
+            (case / "recovery-output" / "drop").mkdir(parents=True)
+            (case / "run_state.json").write_text(json.dumps({
+                "state": "SEALED", "matrix": {"version": "8.0", "filesystem": "ext4",
+                "scenario": "drop", "dataset_profile": "100k", "page_size": 16384}
+            }), encoding="utf-8")
+            (case / "manifest.json").write_text(json.dumps({
+                "state": "SEALED", "verdict": "FAIL",
+                "matrix": {"version": "8.0", "filesystem": "ext4", "scenario": "drop",
+                           "dataset_profile": "100k", "page_size": 16384},
+                "contract": {"classification": "structured_recovery", "structured_rows": 99941,
+                             "export_success": True, "importable": False,
+                             "schema_source": "EXTERNAL"},
+                "comparison": {"expected_rows": 100000, "actual_rows": 99941,
+                               "correct_rows": 99941, "field_mismatches": [],
+                               "false_negatives": [1], "strict_pass": False},
+                "import": {"status": "FAIL"}
+            }), encoding="utf-8")
+            cases = report.collect_raw_media(root)
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0]["status"], "ATTEMPTED_FAILED")
+            self.assertEqual(cases[0]["verdict"], "FAIL")
+            self.assertEqual(cases[0]["comparison"]["actual_rows"], 99941)
+            self.assertIn("fresh_import_failed", cases[0]["failure_reasons"])
+
+    def test_collect_raw_media_empty_is_unexecuted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(report.collect_raw_media(Path(directory)), [])
+
     def test_corruption_cases_feed_defects_and_fail_closed(self):
         failing = {
             "case": "corruption-57-ext4-baseline-checksum_body_flip-1",

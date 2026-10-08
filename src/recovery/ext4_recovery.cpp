@@ -1427,7 +1427,17 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         use_schema = false;
     }
 
+    uint32_t n_pk_cols = 1;
     if (use_schema) {
+        std::set<std::string> pk_names;
+        for (const auto& idx : external_schema_->indexes) {
+            if (idx.is_primary) {
+                for (const auto& cname : idx.columns) {
+                    pk_names.insert(cname);
+                }
+            }
+        }
+
         std::vector<std::pair<uint32_t, catalog::ColumnInfo>> sorted_columns;
         sorted_columns.reserve(external_schema_->columns.size());
         for (const auto& [ordinal, column] : external_schema_->columns) {
@@ -1436,6 +1446,18 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         }
         std::sort(sorted_columns.begin(), sorted_columns.end(),
                   [](const auto& left, const auto& right) { return left.first < right.first; });
+
+        if (!pk_names.empty()) {
+            uint32_t count = 0;
+            for (const auto& [physical_pos, column] : sorted_columns) {
+                if (pk_names.count(column.name) > 0) {
+                    count++;
+                } else {
+                    break;
+                }
+            }
+            if (count > 0) n_pk_cols = count;
+        }
 
         std::vector<catalog::IndexColumnBuildRequest> requests;
         requests.reserve(sorted_columns.size());
@@ -1571,7 +1593,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                 }
 
                 if (use_schema_for_index) {
-                    parser.set_columns(index_columns);
+                    parser.set_columns(index_columns, false, n_pk_cols);
                     // Compacting an allocated tablespace keeps history records in
                     // the page chain; they must not be exported as live rows.
                     parser.set_recover_deleted(false);

@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, "/app/mysql_recovery_pro")
 
 from scripts.disaster_harness.comparator import compare
-from scripts.disaster_validation.lifecycle import ValidationRun
+from scripts.disaster_validation.device_safety import preflight_controlled_mount
 from scripts.disaster_validation.mysql_driver import run
 
 RUN_DIR = Path("/app/mysql_recovery_artifacts/raw_nvme_qualification/stage1-nvme80-100k-1791264383")
@@ -36,8 +36,9 @@ def main() -> int:
     print(f"=== Resuming Stage 1 Qualification on {DEVICE_PATH} (Workspace: {RUN_DIR}) ===")
     run_state = ValidationRun.load(RUN_DIR)
 
-    # 1. Unmount
-    print("[1/6] Unmounting test mount point...")
+    # 1. Prove the only mount is the expected controlled test mount, then unmount.
+    print("[1/6] Verifying and unmounting test mount point...")
+    preflight_controlled_mount(DEVICE_PATH, RUN_DIR.parent, MOUNT_POINT)
     run(["umount", str(MOUNT_POINT)], timeout=60)
     subprocess.run(["udevadm", "settle"], check=False)
 

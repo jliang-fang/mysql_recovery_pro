@@ -612,13 +612,26 @@ class ScenarioDriver:
         for column in truth["schema"]["columns"]:
             base = str(column["type"]).lower().split("(", 1)[0].strip()
             type_id = mapping.get(base, 0)
+            fixed_lengths = {
+                "tinyint": 1, "smallint": 2, "mediumint": 3, "int": 4,
+                "integer": 4, "bigint": 8, "float": 4, "double": 8,
+                "date": 3, "time": 3, "datetime": 5, "timestamp": 4,
+                "year": 1,
+            }
+            blob_lengths = {
+                "tinyblob": 255, "blob": 65535, "mediumblob": 16777215,
+                "longblob": 4294967295, "tinytext": 255, "text": 65535,
+                "mediumtext": 16777215, "longtext": 4294967295,
+                "json": 4294967295,
+            }
             entry = {
                 "name": column["name"],
-                "mysql_type_id": type_id,
+                "type": type_id,
                 "is_nullable": bool(column.get("nullable", True)) and column["name"] not in pk,
-                "is_signed": True,
-                "column_length": int(column.get("length") or 0) or 255,
-                "ordinal": int(column.get("ordinal", 0)),
+                "is_unsigned": False,
+                "char_length": fixed_lengths.get(
+                    base, blob_lengths.get(base, int(column.get("length") or 255))),
+                "ordinal_position": int(column.get("ordinal", 0)),
                 "physical_pos": int(column.get("ordinal", 0)),
                 # Numeric/time columns carry no charset in MySQL; only the
                 # actual character and binary columns may set one.
@@ -635,8 +648,18 @@ class ScenarioDriver:
             if base in ("datetime", "timestamp", "time"):
                 entry["datetime_precision"] = 0
             columns.append(entry)
+        document = {
+            "table_name": str(truth.get("table") or "recovered_table"),
+            "columns": columns,
+            "indexes": ([{
+                "name": "PRIMARY", "is_primary": True, "is_unique": True,
+                "columns": list(truth["schema"].get("primary_key") or []),
+            }] if truth["schema"].get("primary_key") else []),
+        }
         path = self.run_dir / "persistent-input" / "schema.json"
-        path.write_text(json.dumps(columns, indent=1), encoding="utf-8")
+        if path.exists():
+            raise ScenarioError(f"refusing to overwrite schema evidence: {path}")
+        path.write_text(json.dumps(document, indent=1), encoding="utf-8")
         return path
 
     def _discover_index_id(self) -> Optional[int]:
@@ -703,8 +726,6 @@ class ScenarioDriver:
         image = self.media.path
         truth_path = self.run_dir / "truth" / "ground_truth.json"
         truth = json.loads(truth_path.read_text(encoding="utf-8"))
-        from scripts.disaster_validation.phase_a_offline_orchestrator import build_schema_argument
-        schema_arg = build_schema_argument(truth["schema"])
         schema_file = self._write_schema_json(truth)
         index_id = self._discover_index_id()
 
@@ -718,7 +739,7 @@ class ScenarioDriver:
             "--device-path", str(image),
             "--filesystem", self.item.filesystem,
             "--page-size", str(self.item.page_size),
-            "--schema", schema_arg,
+            "--schema-file", str(schema_file),
             "--target-index-ids", str(index_id),
         ]
         if self.item.scenario == "baseline":
@@ -745,7 +766,6 @@ class ScenarioDriver:
 
         return {
             "image": str(image),
-            "schema_argument": schema_arg,
             "schema_file": str(schema_file),
             "clustered_index_id": index_id,
             "truth": str(truth_path),

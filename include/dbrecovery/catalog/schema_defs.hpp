@@ -646,6 +646,31 @@ struct TableSchema {
             }
         }
 
+        if (j.contains("indexes") && j["indexes"].is_array()) {
+            indexes.clear();
+            for (const auto& idx_json : j["indexes"]) {
+                IndexInfo idx;
+                if (idx_json.contains("name")) idx.name = idx_json["name"].get<std::string>();
+                if (idx_json.contains("is_primary")) idx.is_primary = idx_json["is_primary"].get<bool>();
+                if (idx_json.contains("is_unique")) idx.is_unique = idx_json["is_unique"].get<bool>();
+                if (idx_json.contains("columns") && idx_json["columns"].is_array()) {
+                    for (const auto& col_name : idx_json["columns"]) {
+                        idx.columns.push_back(col_name.get<std::string>());
+                    }
+                }
+                if (idx.is_primary) {
+                    for (const auto& col_name : idx.columns) {
+                        for (auto& [ord, col] : columns) {
+                            if (col.name == col_name) {
+                                col.flags |= 1; // Mark PRI_KEY flag
+                            }
+                        }
+                    }
+                }
+                indexes.push_back(std::move(idx));
+            }
+        }
+
         return validate();
     }
     
