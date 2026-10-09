@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import time
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Optional
 
@@ -60,6 +62,15 @@ def unwrap_canonical(value: Any) -> Any:
         kind = value.get("type")
         if kind == "null":
             return None
+        if kind == "set":
+            # Canonical SET is {"type": "set", "values": [...]}; join back to the
+            # comma-separated text MySQL expects.  Checked before the "value"-key
+            # guard below, which would otherwise silently import NULL for every
+            # SET cell because the canonical document uses "values".
+            members = value.get("values")
+            if not isinstance(members, list):
+                return None
+            return ",".join(str(member) for member in members)
         if "value" not in value:
             return None
         if kind == "binary":
@@ -72,6 +83,11 @@ def unwrap_canonical(value: Any) -> Any:
             if isinstance(payload, str) and payload.startswith("0x"):
                 return bytes.fromhex(payload[2:])
             return str(payload)
+        if kind == "duration_us":
+            # TIME columns canonicalise to microseconds; render as a timedelta so
+            # sql_literal can emit a real TIME literal instead of a bare integer
+            # the server rejects with ERROR 1292.
+            return timedelta(microseconds=int(value.get("value") or 0))
         if kind in ("int", "float", "decimal", "string", "bool"):
             return value.get("value")
         # json and anything else: re-serialise the decoded structure
@@ -98,13 +114,31 @@ def sql_literal(value: Any, charset: str = "utf8mb4") -> str:
         return str(value)
     if isinstance(value, float):
         return repr(value)
+    if isinstance(value, timedelta):
+        # MySQL TIME literals are H:MM:SS[.ffffff] with an optional sign; str()
+        # of a timedelta yields forms MySQL rejects for TIME ("1 day, 6:00:00"
+        # for >=24h negatives), so format from the microsecond total directly.
+        # Integer arithmetic only: total_seconds() returns a float and the
+        # round-trip through double loses one microsecond on ~0.5% of TIME(6)
+        # values, which then shows up as field mismatches after read-back.
+        total_us = ((value.days * 86400 + value.seconds) * 1_000_000
+                    + value.microseconds)
+        sign = "-" if total_us < 0 else ""
+        total_us = abs(total_us)
+        micro = total_us % 1_000_000
+        hours, remainder = divmod(total_us // 1_000_000, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        fraction = f".{micro:06d}".rstrip("0") if micro else ""
+        # Quoted: a bare 7:30:30 is a syntax error (ERROR 1064) in an VALUES list.
+        return f"'{sign}{hours}:{minutes:02d}:{seconds:02d}{fraction}'"
     if isinstance(value, (dict, list)):
         return "'" + json.dumps(value, ensure_ascii=False, separators=(",", ":")).replace("'", "''") + "'"
     text = str(value)
-    # Check if text contains control characters (< 0x20) that would break CLI pipe or require binary-mode
-    if any(ord(c) < 0x20 for c in text):
-        effective_charset = charset or "utf8mb4"
-        py_encoding = "latin1" if "latin1" in effective_charset.lower() else (
+    effective_charset = charset or "utf8mb4"
+    is_latin1 = "latin1" in effective_charset.lower()
+    # Check if text contains control characters (< 0x20) or latin1 high bytes that would break CLI pipe or require binary-mode
+    if any(ord(c) < 0x20 for c in text) or (is_latin1 and any(ord(c) >= 0x80 for c in text)):
+        py_encoding = "latin1" if is_latin1 else (
             "ascii" if "ascii" in effective_charset.lower() else "utf-8"
         )
         try:
@@ -120,15 +154,24 @@ def build_ddl(truth: dict[str, Any]) -> str:
     pk = set(schema.get("primary_key") or [])
     parts = []
     for column in schema["columns"]:
-        pieces = [f"`{column['name']}` {column['type']}"]
-        if column["name"] in pk:
-            pieces.append("NOT NULL")
-        elif not column.get("nullable", True):
-            pieces.append("NOT NULL")
+        col_type = column["type"]
+        # If column has elements (e.g. from schema.json), reconstruct ENUM/SET elements losslessly
+        if column.get("enum_values"):
+            elements_str = ",".join("'" + str(e).replace("'", "''") + "'" for e in column["enum_values"])
+            col_type = f"enum({elements_str})"
+        elif column.get("set_values"):
+            elements_str = ",".join("'" + str(e).replace("'", "''") + "'" for e in column["set_values"])
+            col_type = f"set({elements_str})"
+
+        pieces = [f"`{column['name']}` {col_type}"]
         if column.get("charset"):
             pieces.append(f"CHARACTER SET {column['charset']}")
             if column.get("collation"):
                 pieces.append(f"COLLATE {column['collation']}")
+        if column["name"] in pk:
+            pieces.append("NOT NULL")
+        elif not column.get("nullable", True):
+            pieces.append("NOT NULL")
         parts.append(" ".join(pieces))
     if pk:
         ordered = [c["name"] for c in schema["columns"] if c["name"] in pk]
@@ -165,10 +208,35 @@ def capture_tsv(container: str, truth: dict[str, Any],
            f"`{database}`.`recovered_table`")
     if truth["schema"].get("primary_key"):
         sql += " ORDER BY " + ", ".join(f"`{n}`" for n in truth["schema"]["primary_key"])
-    result = run(["podman", "exec", container, "mysql", "-uroot", "-N", "-B", "-e", sql], 600)
+    result = run(["podman", "exec", container, "mysql", "-uroot",
+                  "--default-character-set=utf8mb4", "-N", "-B", "-e", sql], 600)
     if result.returncode != 0:
         raise RuntimeError(f"select failed: {result.stderr.strip()}")
     return result.stdout
+
+
+_MICROS_PER_SECOND = Decimal(1_000_000)
+
+
+class _ExactTimedelta(timedelta):
+    """A timedelta whose ``total_seconds()`` is exact instead of a float.
+
+    ``ground_truth.canonical_value`` renders TIME cells as
+    ``int(td.total_seconds() * 1_000_000)``.  Going through double precision
+    loses one microsecond on roughly 0.5% of TIME(6) values, so that conversion
+    is not idempotent: the recovered CSV is canonicalised once (sealing truth at
+    value ``L``) and the imported table is canonicalised again on read-back
+    (turning ``L`` into ``L - 1``).  Returning an exact ``Decimal`` makes the
+    read-back conversion lossless.  The CSV path deliberately keeps the
+    original float behaviour: the sealed truth was produced through it, and
+    changing it would make the offline comparison disagree with truth by the
+    same one microsecond.
+    """
+
+    def total_seconds(self) -> Decimal:
+        microseconds = ((self.days * 86400 + self.seconds) * 1_000_000
+                        + self.microseconds)
+        return Decimal(microseconds) / _MICROS_PER_SECOND
 
 
 def _decode_tsv_cell(text: Optional[str], column: dict[str, Any]) -> Any:
@@ -185,7 +253,11 @@ def _decode_tsv_cell(text: Optional[str], column: dict[str, Any]) -> Any:
             return bytes.fromhex(hex_data).decode(py_encoding, errors="surrogatepass")
         except Exception:
             return bytes.fromhex(hex_data).decode("utf-8", errors="replace")
-    return _parse_csv_cell(text, column)
+    value = _parse_csv_cell(text, column)
+    if type(value) is timedelta:
+        return _ExactTimedelta(days=value.days, seconds=value.seconds,
+                               microseconds=value.microseconds)
+    return value
 
 
 def dataset_from_tsv(tsv: str, truth: dict[str, Any], version: str) -> dict[str, Any]:
@@ -316,7 +388,45 @@ def verify_case(case: Path, version: str, *, container_name: str | None = None) 
                     "status": "FAIL", "reason": "no recovered CSV artifact for table"}
                 continue
 
-            ddl = build_ddl(truth)
+            # Enrich a *copy* of the schema with ENUM/SET elements from
+            # persistent-input schema.json.  The copy is only used for the DDL:
+            # mutating `truth` itself would change the schema fingerprint that
+            # csv_to_canonical_dataset derives from truth["schema"], which no
+            # longer matches the sealed fingerprint (schema_mismatch).  The
+            # elements are also lossless (base64) where the sealed type string
+            # carries utf8mb3-mangled members such as 'emoji?'.
+            ddl_truth = truth
+            schema_file = case / "persistent-input" / table_label / "schema.json" if table_label else case / "persistent-input" / "schema.json"
+            if schema_file.is_file():
+                try:
+                    import base64
+                    s_json = json.loads(schema_file.read_text(encoding="utf-8"))
+                    key_by_column: dict[str, str] = {}
+                    members_by_column: dict[str, list] = {}
+                    for col_entry in s_json.get("columns", []):
+                        cname = col_entry.get("name")
+                        if not cname or not col_entry.get("elements"):
+                            continue
+                        if col_entry.get("type") == 22:
+                            key_by_column[cname] = "enum_values"
+                        elif col_entry.get("type") == 23:
+                            key_by_column[cname] = "set_values"
+                        else:
+                            continue
+                        members_by_column[cname] = [
+                            base64.b64decode(elem["name"]).decode("utf-8")
+                            for elem in col_entry["elements"] if "name" in elem
+                        ]
+                    if key_by_column:
+                        ddl_truth = json.loads(json.dumps(truth, ensure_ascii=False))
+                        for col in ddl_truth["schema"]["columns"]:
+                            key = key_by_column.get(col["name"])
+                            if key:
+                                col[key] = members_by_column[col["name"]]
+                except Exception:
+                    ddl_truth = truth
+
+            ddl = build_ddl(ddl_truth)
             import_dir = case / "import-validation"
             import_dir.mkdir(exist_ok=True)
             ddl_name = f"{table_label}_ddl.sql" if table_label else "ddl.sql"
@@ -330,7 +440,12 @@ def verify_case(case: Path, version: str, *, container_name: str | None = None) 
                 continue
             reset_table = run(["podman", "exec", container, "mysql", "-uroot", "-e",
                                "DROP TABLE IF EXISTS `recovered_import`.`recovered_table`;"], 120)
-            ddl_run = run(["podman", "exec", container, "mysql", "-uroot", "-e", ddl], 120)
+            # The DDL must be executed under a utf8mb4 connection: the client's
+            # default charset is latin1, and a CREATE TABLE sent without the flag
+            # reinterprets every non-ASCII ENUM/SET member as latin1 bytes, so a
+            # later utf8mb4 INSERT of the real value is rejected with ERROR 1265.
+            ddl_run = run(["podman", "exec", container, "mysql", "-uroot",
+                           "--default-character-set=utf8mb4", "-e", ddl], 120)
             if reset_table.returncode != 0 or ddl_run.returncode != 0:
                 failed = reset_table if reset_table.returncode != 0 else ddl_run
                 results["artifacts"][table_label or "ddl"] = {

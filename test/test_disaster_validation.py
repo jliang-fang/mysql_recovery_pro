@@ -33,6 +33,11 @@ from scripts.disaster_validation.adapters import (
     adapter_for,
 )
 from scripts.disaster_validation.csv_to_canonical import _parse_csv_cell
+from scripts.disaster_validation.fresh_import_verify import (
+    _decode_tsv_cell,
+    build_ddl,
+    sql_literal,
+)
 from scripts.disaster_validation import fixtures as validation_fixtures
 from scripts.disaster_validation.stage1_qualification import Stage1QualificationRunner
 from scripts.disaster_validation.phase_a_offline_orchestrator import (
@@ -42,7 +47,7 @@ from scripts.disaster_validation.phase_a_offline_orchestrator import (
     parse_recovered_sql,
     sql_rows_to_canonical_dataset,
 )
-from scripts.disaster_harness.ground_truth import build_ground_truth
+from scripts.disaster_harness.ground_truth import build_ground_truth, canonical_value
 from scripts.disaster_harness.native_export import connection_collation
 from scripts.disaster_harness.manifest import sha256_bytes
 
@@ -662,6 +667,85 @@ class DefaultAdapterSelectionTests(unittest.TestCase):
             adapters = default_adapters()
             baseline = adapter_for(item, adapters)
             self.assertIsNotNone(baseline.baseline_runner)
+
+
+class FreshImportLiteralTests(unittest.TestCase):
+    """The clean-server import renderer must emit literals MySQL accepts.
+
+    Two failures motivated these cases: TIME cells were rendered as bare
+    microsecond integers (ERROR 1292), and SET cells silently collapsed to
+    NULL because the canonical document keys them under "values" rather
+    "value".
+    """
+
+    def test_duration_us_renders_as_time_literal(self):
+        self.assertEqual(sql_literal({"type": "duration_us", "value": 27030000000}),
+                         "'7:30:30'")
+        self.assertEqual(sql_literal({"type": "duration_us", "value": -27030000000}),
+                         "'-7:30:30'")
+        self.assertEqual(sql_literal({"type": "duration_us", "value": 1234567}),
+                         "'0:00:01.234567'")
+        self.assertEqual(sql_literal({"type": "duration_us", "value": 0}), "'0:00:00'")
+
+    def test_negative_timedelta_beyond_one_day_is_not_strftime(self):
+        # str(timedelta) yields "-2 days, 13:00:00" for this value, which MySQL
+        # rejects; the renderer must format from the microsecond total.
+        self.assertEqual(sql_literal(timedelta(days=-2, hours=13)), "'-35:00:00'")
+
+    def test_set_canonical_joins_members(self):
+        self.assertEqual(
+            sql_literal({"type": "set", "values": ["read", "执行"]}, "utf8mb4"),
+            "'read,执行'")
+        self.assertEqual(sql_literal({"type": "set", "values": []}), "''")
+        self.assertEqual(sql_literal({"type": "null"}), "NULL")
+
+    def test_control_characters_become_hex_convert(self):
+        literal = sql_literal({"type": "string", "value": "tab\there\nnl"})
+        self.assertEqual(literal,
+                         "CONVERT(0x74616209686572650a6e6c USING utf8mb4)")
+
+    def test_latin1_high_bytes_become_hex_convert(self):
+        literal = sql_literal({"type": "string", "value": "café"}, "latin1")
+        self.assertEqual(literal, "CONVERT(0x636166e9 USING latin1)")
+
+    def test_read_back_time_cells_are_canonicalised_exactly(self):
+        # canonical_value goes through float seconds; reading TIME(6) back must
+        # not lose the microsecond the sealed truth holds (530 of the 200k
+        # cells in the Stage 1 fixture are not fixed points of that float path).
+        column = {"name": "c_time6", "type": "time", "nullable": True}
+        for microseconds in (33334701141, 259159183, 0, 999999, -33334701141):
+            sign = "-" if microseconds < 0 else ""
+            rest = abs(microseconds)
+            frac = rest % 1_000_000
+            hours, rem = divmod(rest // 1_000_000, 3600)
+            minutes, seconds = divmod(rem, 60)
+            text = (f"{sign}{hours}:{minutes:02d}:{seconds:02d}.{frac:06d}")
+            cell = _decode_tsv_cell(text, column)
+            canonical = canonical_value(cell, "time")
+            self.assertEqual(canonical,
+                             {"type": "duration_us", "value": microseconds})
+
+    def test_ddl_orders_charset_before_not_null(self):
+        ddl = build_ddl({
+            "schema": {
+                "columns": [{"name": "id_b", "type": "varchar(32)",
+                             "charset": "utf8mb4", "collation": "utf8mb4_0900_ai_ci",
+                             "nullable": False}],
+                "primary_key": ["id_b"],
+            }
+        })
+        self.assertIn("varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL", ddl)
+        self.assertNotIn("NOT NULL CHARACTER SET", ddl)
+
+    def test_ddl_preserves_4byte_enum_members(self):
+        ddl = build_ddl({
+            "schema": {
+                "columns": [{"name": "c_enum", "type": "enum('emoji?')",
+                             "enum_values": ["emoji🙂"], "nullable": True}],
+                "primary_key": [],
+            }
+        })
+        self.assertIn("enum('emoji🙂')", ddl)
 
 
 if __name__ == "__main__":
