@@ -393,7 +393,18 @@ struct IndexRecord {
         });
     }
 
+    /// True when any column still holds an off-page LOB pointer instead of the
+    /// payload itself.  Such a record must never be rendered: the pointer bytes
+    /// would be exported as if they were the column value.
+    bool has_unreconstructed_overflow() const {
+        return std::any_of(fields.begin(), fields.end(), [](const IndexFieldValue& field) {
+            return field.is_overflow;
+        });
+    }
+
     std::string to_csv_line() const {
+        if (has_unparsable_json_evidence()) return {};
+        if (has_unreconstructed_overflow()) return {};
         if (has_unparsable_json_evidence()) return {};
         // Pre-calculate approximate size to reduce allocations
         size_t estimated_size = fields.size() * 16;  // rough estimate
@@ -441,6 +452,7 @@ struct IndexRecord {
 
     std::string to_sql_values(const std::string& table_name = "recovered_table") const {
         if (has_unparsable_json_evidence()) return {};
+        if (has_unreconstructed_overflow()) return {};
         // Pre-calculate size
         size_t estimated_size = 50 + table_name.size() + fields.size() * 20;
         for (const auto& f : fields) {
@@ -711,6 +723,19 @@ public:
      */
     uint64_t key_order_violations_dropped() const { return key_order_violations_dropped_; }
 
+    /**
+     * @brief Records dropped by the off-page LOB pointer fail-closed guard
+     *
+     * When a column's variable-length prefix resolves to an off-page pointer,
+     * the record holds only the 20-byte pointer and no payload; this path
+     * never reassembles the external BLOB chain, so exporting the row would
+     * fabricate the column from pointer bytes. The whole record is dropped
+     * and counted here instead.
+     */
+    uint64_t overflow_pointer_records_dropped() const {
+        return overflow_pointer_records_dropped_;
+    }
+
     // ---- Page Parsing ----
 
     /**
@@ -832,6 +857,9 @@ public:
         /// Active clustered-leaf rows rejected because their verified integer
         /// PRIMARY-key bytes violate the B-tree record-chain order.
         uint64_t key_order_violations_dropped = 0;
+        /// Rows rejected because a LOB column still points off-page and the
+        /// external chain was never reassembled (fail-closed, no CSV row).
+        uint64_t overflow_pointer_records_dropped = 0;
     };
     const Stats& get_stats() const { return stats_; }
 
@@ -994,6 +1022,13 @@ private:
     /// mode, integer pk): their stored key bytes cannot be part of an
     /// InnoDB-written chain, so they are corruptions rather than real rows.
     uint64_t key_order_violations_dropped_ = 0;
+
+    /// Physical positions whose variable-length prefix resolved to an off-page
+    /// BLOB pointer (record carries the 20-byte pointer, not the payload).
+    /// Refilled for every record by read_null_and_varsizes().
+    std::vector<uint32_t> offpage_physical_pos_;
+    /// Records dropped by the off-page pointer fail-closed guard.
+    uint64_t overflow_pointer_records_dropped_ = 0;
 
     uint64_t total_records_ = 0;
     uint64_t total_pages_ = 0;

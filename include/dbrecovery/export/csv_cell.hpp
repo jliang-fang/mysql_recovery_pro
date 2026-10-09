@@ -83,8 +83,15 @@ inline std::string csv_escape_text_preserving_controls(const std::string& value)
 inline std::string csv_column_value(const innodb::IndexFieldValue& field,
                                     bool is_binary_column) {
     using FieldType = innodb::IndexFieldValue::Type;
-    if (!field.raw_bytes.empty() &&
-        (is_binary_column || field.type == FieldType::BINARY_VAL)) {
+    if (field.type == FieldType::NULL_VAL) {
+        // Row writers emit the literal NULL themselves; this path only ever
+        // renders values.
+        return std::string{};
+    }
+    if (is_binary_column || field.type == FieldType::BINARY_VAL) {
+        // Always 0x<hex>, including the empty value: an empty binary cell has
+        // to stay distinguishable from NULL, and 0x is what UNHEX()/the CSV
+        // adapter already decode back to zero bytes.
         return hex_encode_bytes(field.raw_bytes);
     }
     switch (field.type) {

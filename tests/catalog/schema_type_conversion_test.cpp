@@ -203,6 +203,52 @@ TEST(BuildIndexColumn, BinaryCharsetResetsMbMaxlen) {
     EXPECT_EQ(converted->mb_maxlen, 1u);
 }
 
+TEST(BuildIndexColumn, BlobFamilyIsAlwaysBigForTwoByteLengthPrefix) {
+    // InnoDB switches a BLOB/TEXT/JSON column to the 2-byte length prefix as
+    // soon as the value exceeds 127 bytes, even though TINYBLOB's own byte
+    // maximum (255) would fit in one byte.  Deriving is_big from the byte
+    // length alone made a 255-byte TINYBLOB decode as exactly 128 bytes and
+    // desynchronised every column after it, which is what fabricated the
+    // bogus 20-byte "off-page pointers" in the t_text artifact.
+    auto tinyblob = make_column(dbrecovery::innodb::mysql_types::TINY_BLOB, "c_tinyblob");
+    tinyblob.column_length = 255;
+    tinyblob.charset_id = 63;          // binary
+    std::vector<std::string> diagnostics;
+    auto converted = build_index_column(tinyblob, 1, 0,
+                                        TypeIdDomain::kInnodbParser, diagnostics);
+    ASSERT_TRUE(converted.has_value());
+    EXPECT_TRUE(converted->is_big) << "TINYBLOB must use the 2-byte length prefix";
+
+    // A non-BLOB type with the same 255-byte maximum keeps the 1-byte prefix.
+    auto varbinary = make_column(dbrecovery::innodb::mysql_types::VARCHAR, "c_varbinary");
+    varbinary.column_length = 255;
+    varbinary.charset_id = 63;
+    converted = build_index_column(varbinary, 2, 0,
+                                   TypeIdDomain::kInnodbParser, diagnostics);
+    ASSERT_TRUE(converted.has_value());
+    EXPECT_FALSE(converted->is_big) << "VARBINARY(255) is not part of the BLOB family";
+
+    // A VARCHAR whose byte maximum exceeds 255 stays big (64 * utf8mb4 = 256).
+    auto wide = make_column(dbrecovery::innodb::mysql_types::VARCHAR, "c_varchar");
+    wide.column_length = 64;
+    wide.charset_id = 45;
+    converted = build_index_column(wide, 3, 0,
+                                   TypeIdDomain::kInnodbParser, diagnostics);
+    ASSERT_TRUE(converted.has_value());
+    EXPECT_TRUE(converted->is_big);
+
+    // TEXT and JSON are BLOB-family too, at any declared byte length.
+    for (uint32_t type : {dbrecovery::innodb::mysql_types::BLOB,
+                          dbrecovery::innodb::mysql_types::JSON}) {
+        auto col = make_column(type, "family");
+        col.column_length = 11;
+        converted = build_index_column(col, 4, 0,
+                                       TypeIdDomain::kInnodbParser, diagnostics);
+        ASSERT_TRUE(converted.has_value());
+        EXPECT_TRUE(converted->is_big) << "parser type " << type << " must be big";
+    }
+}
+
 TEST(BuildIndexColumns, PublishesNothingWhenAnyColumnIsInvalid) {
     std::vector<IndexColumnBuildRequest> requests;
     requests.push_back({

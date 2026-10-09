@@ -698,7 +698,9 @@ std::vector<std::map<std::string, std::string>> TruncateRecovery::detect_residua
             // Preserve prior binary/mb_maxlen refinements.
             if (col.charset_id == 63) def.mb_maxlen = 1;
             else if (col.charset_id == 8 || col.charset_id == 83) def.mb_maxlen = 1;
-            if (def.is_variable_length()) def.is_big = (def.col_length * def.mb_maxlen > 255);
+            if (def.is_variable_length() && !innodb::is_blob_type(def.col_type)) {
+                def.is_big = (def.col_length * def.mb_maxlen > 255);
+            }
             def.is_binary = def.is_binary && (def.col_type != 31);
             col_defs.push_back(std::move(def));
         }

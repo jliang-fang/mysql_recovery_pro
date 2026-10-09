@@ -2453,6 +2453,9 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_sch
 
     for (const auto& rec : index_records) {
         if (rec.is_deleted && !config_.recover_deleted) continue;
+        // Fail closed: a LOB column that still points off-page carries only
+        // the 20-byte pointer; never export it as if it were column data.
+        if (rec.has_unreconstructed_overflow()) continue;
 
         std::map<std::string, std::string> record;
         for (size_t i = 0; i < rec.fields.size(); i++) {
@@ -2670,6 +2673,9 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
 
     for (const auto& rec : index_records) {
         if (rec.is_deleted && !config_.recover_deleted) continue;
+        // Fail closed: a LOB column that still points off-page carries only
+        // the 20-byte pointer; never export it as if it were column data.
+        if (rec.has_unreconstructed_overflow()) continue;
 
         std::map<std::string, std::string> record;
         for (size_t i = 0; i < columns.size(); i++) {

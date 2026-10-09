@@ -296,6 +296,10 @@ struct Ext4ScanResult {
     /// InnoDB checksum does not match the page contents.  A page in this state
     /// cannot support row-level claims: decoding it produced a fabricated row.
     uint64_t checksum_rejected_pages = 0;
+    /// Rows refused because a LOB column still pointed off-page and the
+    /// external chain was never reassembled.  These rows are recorded as
+    /// unrecoverable rather than exported with pointer bytes as data.
+    uint64_t overflow_records_dropped = 0;
 
     std::map<uint64_t, std::vector<Ext4BlockInfo>> pages_by_index_id;
     std::vector<Ext4InodeInfo> recovered_inodes;

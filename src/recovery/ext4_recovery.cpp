@@ -1484,6 +1484,8 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
 
     // Export recovered pages to CSV files with record parsing
     uint64_t total_records = 0;
+    // Rows refused because a LOB column still holds an off-page pointer.
+    uint64_t overflow_records_dropped = 0;
     uint32_t processed_index = 0;
 
     for (const auto& [index_id, pages] : scan_result.pages_by_index_id) {
@@ -1603,12 +1605,23 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     parser.set_target_index_id(index_id);
                 }
                 auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
+                // The parser drops off-page-pointer rows itself; count them here
+                // so the refusal is visible in the run's evidence.
+                overflow_records_dropped += parser.overflow_pointer_records_dropped();
 
                 for (const auto& rec : records) {
                     // Skip empty records
                     if (rec.fields.empty() && rec.raw_data.empty()) continue;
                     // Skip records the parser itself marks as deleted history.
                     if (rec.is_deleted) continue;
+                    // Fail closed: a LOB column that still points off-page has
+                    // no payload in the record. Exporting it would write the
+                    // 20 pointer bytes as the column value, so the whole row
+                    // is dropped instead of being counted as recovered.
+                    if (rec.has_unreconstructed_overflow()) {
+                        overflow_records_dropped++;
+                        continue;
+                    }
 
                     if (use_schema_for_index && !rec.fields.empty()) {
                         // Schema-aware row: emit exactly one CSV field per declared
@@ -1691,10 +1704,17 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
 
     result.total_records = total_records;
     result.checksum_rejected_pages = checksum_rejected_pages;
+    result.overflow_records_dropped = overflow_records_dropped;
     result.success = true;
 
     if (config_.verbose) {
         std::cout << "[INFO] Exported " << total_records << " records to CSV files\n";
+        if (overflow_records_dropped > 0) {
+            std::cout << "[INFO] Dropped " << overflow_records_dropped
+                      << " record(s): off-page LOB pointer not reassembled"
+                      << " (fail-closed, recorded as unrecoverable, no pointer"
+                      << " bytes exported)\n";
+        }
         if (interior_pages_skipped > 0) {
             std::cout << "[INFO] Skipped " << interior_pages_skipped
                       << " interior (non-leaf) index page(s) for schema-aware decoding\n";

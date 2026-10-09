@@ -1733,7 +1733,11 @@ std::vector<std::map<std::string, std::string>> DropTableRecovery::extract_recor
             def.mb_maxlen = 1;  // latin1, utf8
         }
 
-        if (def.is_variable_length()) {
+        // BLOB/TEXT/JSON switch to the 2-byte length prefix once the value
+        // exceeds 127 bytes regardless of the type's byte maximum; recomputing
+        // is_big from the byte length alone would undo that and let a TINYBLOB
+        // decode as exactly 128 bytes.
+        if (def.is_variable_length() && !innodb::is_blob_type(def.col_type)) {
             def.is_big = (def.col_length * def.mb_maxlen > 255);
         }
 

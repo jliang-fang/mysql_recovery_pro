@@ -1046,6 +1046,14 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                         if (size >= off_page_flag_) {
                             // Data is stored externally, inline is 20-byte pointer
                             var_size_by_physical[col.physical_pos] = 20;  // blob pointer size
+                            // Remember which columns took this branch: the payload
+                            // itself is not in the record, so exporting the 20
+                            // pointer bytes as a value would fabricate data.
+                            if (std::find(offpage_physical_pos_.begin(),
+                                          offpage_physical_pos_.end(),
+                                          col.physical_pos) == offpage_physical_pos_.end()) {
+                                offpage_physical_pos_.push_back(col.physical_pos);
+                            }
                         } else {
                             var_size_by_physical[col.physical_pos] = size;
                         }
@@ -1430,6 +1438,7 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     // Each record starts clean; the flag is set below if any field length
     // cannot be bounded by the record buffer.
     field_size_guard_overflow_ = false;
+    offpage_physical_pos_.clear();
 
     IndexRecord record;
     record.page_no = page_no;
@@ -1475,23 +1484,13 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         auto hdr = parse_new_record_header(page_data, rec_offset, page_size);
         if (!hdr) return std::nullopt;
 
-        if (hdr->next_offset != 0) {
-            ssize_t next_origin = static_cast<ssize_t>(rec_origin) + hdr->next_offset;
-            // Validate next_offset is reasonable
-            // For COMPACT format, next_offset can be ANY positive value representing
-            // the delta from current origin to next origin.
-            // We trust the next_offset unless it's clearly out of bounds.
-
-            if (next_origin > static_cast<ssize_t>(data_start) && static_cast<size_t>(next_origin) < page_size) {
-                // Valid next_offset - next record header is at next_origin - REC_HEADER_SIZE_NEW
-                data_end = static_cast<size_t>(next_origin) - REC_HEADER_SIZE_NEW;
-            } else {
-                // Last user record on page (points backward to supremum ~112) or points beyond page bounds
-                data_end = heap_top;
-            }
-        } else {
-            data_end = heap_top;
-        }
+        // In InnoDB COMPACT/DYNAMIC B-trees, records within an index page are
+        // ordered logically by user key, NOT by physical address. Thus,
+        // hdr->next_offset can be negative when pointing to an earlier slot.
+        // Therefore, next_origin does not bound this record's physical extent.
+        // The physical boundary is safely bounded by heap_top (or page upper bound),
+        // while the exact end is verified by calculated_data_end from variable sizes.
+        data_end = heap_top;
     } else {
         auto hdr = parse_old_record_header(page_data, rec_offset, page_size);
         if (!hdr) return std::nullopt;
@@ -1525,6 +1524,8 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
 
     if (!columns_.empty()) {
         field_size_guard_overflow_ = false;
+        // Refilled by the read_null_and_varsizes() call immediately below.
+        offpage_physical_pos_.clear();
         if (!is_compact) {
             // REDUNDANT's offset array also accounts for hidden clustered-index
             // system fields. The schema-only decoder cannot prove their exact
@@ -1589,6 +1590,15 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         return std::nullopt;
     }
 
+    // Fail closed on off-page LOB pointers: the row only holds the 20-byte
+    // pointer, the external chain is never reassembled here, and the pointer
+    // bytes must never be shipped as the column value. Drop the record and
+    // count it as unrecoverable instead of writing a fabricated row.
+    if (record.has_unreconstructed_overflow()) {
+        overflow_pointer_records_dropped_++;
+        return std::nullopt;
+    }
+
     return record;
 }
 
@@ -1637,8 +1647,40 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         pos_init_debug++;
     }
 
+    // Fail closed on off-page LOB pointers: read_null_and_varsizes() already
+    // recorded which columns resolved to an external pointer, and this path
+    // never reassembles the external BLOB chain. Flag the field so the caller
+    // drops the record rather than exporting 20 pointer bytes as column data.
+    auto mark_offpage_pointer = [this](const IndexColumnDef& col, IndexFieldValue& val) {
+        if (offpage_physical_pos_.empty()) return;
+        if (std::find(offpage_physical_pos_.begin(), offpage_physical_pos_.end(),
+                      col.physical_pos) == offpage_physical_pos_.end()) {
+            return;
+        }
+        val.is_overflow = true;
+        val.is_null = false;
+        val.type = IndexFieldValue::Type::OVERFLOW_PTR;
+        val.str_value.clear();
+        if (val.raw_bytes.size() >= 20) {
+            // InnoDB external BLOB pointer: space_id(4) page_no(4) offset(2)
+            // length(4) total_length(4), all little-endian.
+            auto le32 = [&val](size_t off) -> uint64_t {
+                return static_cast<uint64_t>(val.raw_bytes[off]) |
+                       (static_cast<uint64_t>(val.raw_bytes[off + 1]) << 8) |
+                       (static_cast<uint64_t>(val.raw_bytes[off + 2]) << 16) |
+                       (static_cast<uint64_t>(val.raw_bytes[off + 3]) << 24);
+            };
+            val.overflow_space_id = static_cast<uint32_t>(le32(0));
+            val.overflow_page_no = static_cast<uint32_t>(le32(4));
+            val.overflow_real_size = le32(16);
+        }
+    };
+
     // Step 1: Read PK columns first
-    for (size_t col_idx = 0; col_idx < n_pk_cols_ && col_idx < columns.size() && pos < data_end; col_idx++) {
+    // `pos <= data_end`: a zero-length trailing field sits exactly at data_end
+    // and must still be decoded -- stopping at `pos < data_end` would skip the
+    // column and later emit a fabricated NULL for it.
+    for (size_t col_idx = 0; col_idx < n_pk_cols_ && col_idx < columns.size() && pos <= data_end; col_idx++) {
         const auto& col = columns[col_idx];
 
         // CRITICAL FIX: Use col_idx to index into variable_sizes, not a separate size_idx!
@@ -1677,9 +1719,18 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
             }
         }
 
-        if (is_null || field_size == 0) {
+        // Only the null bitmap decides nullity. A zero-length field whose bit
+        // is clear is a real empty value ('' or an empty BLOB), and rendering
+        // it as NULL would erase the distinction the sealed truth keeps.
+        if (is_null) {
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
+            result.push_back(val);
+            continue;
+        }
+        if (field_size == 0) {
+            val = decode_column(page_data, pos, data_end, col, 0);
+            mark_offpage_pointer(col, val);
             result.push_back(val);
             continue;
         }
@@ -1695,6 +1746,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
                 break;
             }
             val = decode_column(page_data, pos, data_end, col, field_size);
+            mark_offpage_pointer(col, val);
             pos += field_size;
         }
         result.push_back(val);
@@ -1731,7 +1783,7 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
     //   row.update(self._read_trx_id_rollptr())    # Skip TRX_ID + ROLL_PTR
     //   row.update(self._read_field(the_rest_of_field,null_list,size_list))  # Read rest in colid_list order
 
-    for (size_t col_idx = n_pk_cols_; col_idx < columns.size() && pos < data_end; col_idx++) {
+    for (size_t col_idx = n_pk_cols_; col_idx < columns.size() && pos <= data_end; col_idx++) {
         const auto& col = columns[col_idx];
 
         // Determine field size
@@ -1764,11 +1816,16 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         }
 
         IndexFieldValue val;
-        if (is_null || field_size == 0) {
+        if (is_null) {
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
+        } else if (field_size == 0) {
+            // Empty value, not NULL: see the same rule in the PK loop above.
+            val = decode_column(page_data, pos, data_end, col, 0);
+            mark_offpage_pointer(col, val);
         } else if (pos + field_size <= data_end) {
             val = decode_column(page_data, pos, data_end, col, field_size);
+            mark_offpage_pointer(col, val);
             pos += field_size;
         }
         results_map[col_idx] = val;
@@ -1780,6 +1837,11 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         if (it != results_map.end()) {
             result.push_back(it->second);
         } else {
+            // The decode loop never reached this column (its bounds did not
+            // hold). Emitting NULL would fabricate a value for a column the
+            // record did not actually provide, so fail closed and let
+            // parse_user_record() drop the whole row.
+            field_size_guard_overflow_ = true;
             IndexFieldValue val;
             val.is_null = true;
             val.type = IndexFieldValue::Type::NULL_VAL;
@@ -2599,7 +2661,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 val.type = IndexFieldValue::Type::STRING_VAL;
                 // Decode as UTF-8 text
                 try {
-                    if (field_size > 0 && field_size <= max_size - offset) {
+                    if (field_size == 0) {
+                        // Zero length with the null bit clear is a genuine
+                        // empty string, not a failed decode.
+                        val.str_value.clear();
+                    } else if (field_size <= max_size - offset) {
                         val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
                     } else {
                         val.str_value = "<INVALID_SIZE>";
@@ -2632,7 +2698,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                 // TEXT column - decode as UTF-8
                 val.type = IndexFieldValue::Type::STRING_VAL;
                 try {
-                    if (field_size > 0 && field_size <= max_size - offset) {
+                    if (field_size == 0) {
+                        // Zero length with the null bit clear is a genuine
+                        // empty string, not a failed decode.
+                        val.str_value.clear();
+                    } else if (field_size <= max_size - offset) {
                         val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
                     } else {
                         val.str_value = "<INVALID_SIZE>";
@@ -2659,7 +2729,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             } else {
                 val.type = IndexFieldValue::Type::STRING_VAL;
                 try {
-                    if (field_size > 0 && field_size <= max_size - offset) {
+                    if (field_size == 0) {
+                        // Zero length with the null bit clear is a genuine
+                        // empty string, not a failed decode.
+                        val.str_value.clear();
+                    } else if (field_size <= max_size - offset) {
                         val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
                     } else {
                         val.str_value = "<INVALID_SIZE>";
@@ -2684,7 +2758,9 @@ IndexFieldValue InnoDBIndexParser::decode_column(
             } else {
                 val.type = IndexFieldValue::Type::STRING_VAL;
                 try {
-                    if (field_size > 0 && field_size <= max_size - offset) {
+                    if (field_size == 0) {
+                        val.str_value.clear();
+                    } else if (field_size <= max_size - offset) {
                         val.str_value = std::string(reinterpret_cast<const char*>(data + offset), field_size);
                         // Trim trailing spaces for CHAR columns
                         while (!val.str_value.empty() && val.str_value.back() == ' ') {
@@ -3001,6 +3077,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_page(
     stats_.pages_valid++;
     stats_.records_recovered += records.size();
     stats_.key_order_violations_dropped = key_order_violations_dropped_;
+    stats_.overflow_pointer_records_dropped = overflow_pointer_records_dropped_;
 
     return records;
 }
@@ -3556,6 +3633,7 @@ std::vector<IndexRecord> InnoDBIndexParser::parse_ibd_force(const std::string& i
 
     stats_.records_recovered = all_records.size();
     stats_.key_order_violations_dropped = key_order_violations_dropped_;
+    stats_.overflow_pointer_records_dropped = overflow_pointer_records_dropped_;
     total_records_ += all_records.size();
     total_pages_ += total_pages;
 
@@ -3794,6 +3872,7 @@ uint64_t InnoDBIndexParser::parse_ibd_force_streaming(const std::string& ibd_pat
 
     stats_.records_recovered = record_count;
     stats_.key_order_violations_dropped = key_order_violations_dropped_;
+    stats_.overflow_pointer_records_dropped = overflow_pointer_records_dropped_;
     total_records_ += record_count;
     total_pages_ += total_pages;
 

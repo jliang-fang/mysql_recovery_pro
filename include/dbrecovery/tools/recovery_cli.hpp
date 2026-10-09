@@ -3695,6 +3695,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                         {"pages_recovered", ext4_result.pages_recovered},
                         {"total_records", ext4_result.total_records},
                         {"checksum_rejected_pages", ext4_result.checksum_rejected_pages},
+                        {"overflow_records_dropped", ext4_result.overflow_records_dropped},
                         {"errors", ext4_result.errors}};
                     if (!emit_result_contract(contract, details)) return 1;
                 }

@@ -141,7 +141,14 @@ std::optional<innodb::IndexColumnDef> build_index_column(
     if (column.is_binary) {
         column.mb_maxlen = 1;
     }
-    column.is_big = column.col_length * column.mb_maxlen > 255;
+    // BLOB/TEXT/JSON columns switch to the 2-byte length prefix as soon as the
+    // value exceeds 127 bytes, even when the type's own byte maximum would fit
+    // in one byte (TINYBLOB = 255, VARBINARY(255) = 255).  Deriving is_big from
+    // the byte length alone made TINYBLOB values decode as exactly 128 bytes
+    // and desynchronised every column after them, which is what turned inline
+    // payloads into bogus 20-byte "pointers".
+    column.is_big = innodb::is_blob_type(column.col_type) ||
+                    column.col_length * column.mb_maxlen > 255;
     column.enum_values = source.enum_values;
     column.set_values = source.set_values;
     column.ordinal_position = ordinal_position;

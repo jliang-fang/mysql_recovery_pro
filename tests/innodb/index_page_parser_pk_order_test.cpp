@@ -483,4 +483,263 @@ TEST(PkOrderGuard, InteriorPageIsNotKeyOrdered) {
     EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
 }
 
+TEST(PkOrderGuard, CompositeIntVarcharExtractsSystemFieldsAfterSecondPk) {
+    // Tests schema with composite PK: (id_a INT, id_b VARCHAR(16))
+    // Verifies that DB_TRX_ID (6B) and DB_ROLL_PTR (7B) are skipped only AFTER
+    // the second primary key column (id_b), so non-PK columns are not shifted.
+    IndexColumnDef col_a;
+    col_a.name = "id_a";
+    col_a.col_type = 4; // INT
+    col_a.is_nullable = false;
+    col_a.physical_pos = 1;
+    col_a.ordinal_position = 1;
+    col_a.col_length = 4;
+
+    IndexColumnDef col_b;
+    col_b.name = "id_b";
+    col_b.col_type = 16; // VARCHAR
+    col_b.is_nullable = false;
+    col_b.physical_pos = 2;
+    col_b.ordinal_position = 2;
+    col_b.col_length = 16;
+    col_b.mb_minlen = 1;
+    col_b.mb_maxlen = 1;
+
+    IndexColumnDef col_val;
+    col_val.name = "c_val";
+    col_val.col_type = 4; // INT
+    col_val.is_nullable = false;
+    col_val.physical_pos = 3;
+    col_val.ordinal_position = 3;
+    col_val.col_length = 4;
+
+    std::vector<IndexColumnDef> cols = {col_a, col_b, col_val};
+
+    // Lay out one leaf page manually
+    std::vector<uint8_t> page(PAGE_SIZE, 0);
+    be32(page, 4, 88);
+    be16(page, 24, 0x45BF); // FIL_PAGE_INDEX
+    std::memcpy(&page[INFIMUM_ORIGIN], "infimum", 8);
+    std::memcpy(&page[INFIMUM_ORIGIN + 21], "supremum", 8);
+
+    // Record: id_a=100 (4B, sign-flipped), id_b="key_abc" (7B), trx(6B)+roll(7B), c_val=999 (4B)
+    size_t cursor = INFIMUM_ORIGIN + 21 + 8;
+    size_t hdr_off = cursor + 1; // 1 byte varchar len before header
+    size_t origin = hdr_off + 5;
+    page[hdr_off - 1] = 7; // id_b length = 7
+
+    // id_a (INT 100 ^ 0x80000000)
+    be32(page, origin, 100 ^ 0x80000000u);
+    // id_b ("key_abc", 7 bytes)
+    std::memcpy(&page[origin + 4], "key_abc", 7);
+    // DB_TRX_ID (6B) + DB_ROLL_PTR (7B) starting at origin + 4 + 7 = origin + 11
+    for (int i = 0; i < 13; i++) page[origin + 11 + i] = 0xAA;
+    // c_val (INT 999 ^ 0x80000000) at origin + 11 + 13 = origin + 24
+    be32(page, origin + 24, 999 ^ 0x80000000u);
+
+    size_t rec_end = origin + 28;
+    write_rec_header(page, hdr_off, false, 2, 0);
+    // Point to supremum
+    const uint16_t supremum_origin = INFIMUM_ORIGIN + 8 + 13;
+    be16(page, hdr_off + 3, static_cast<uint16_t>(supremum_origin - origin));
+
+    // Page header
+    be16(page, 38, 2);
+    be16(page, 40, static_cast<uint16_t>(rec_end));
+    be16(page, 42, 3 | 0x8000);
+    be16(page, 54, 1);
+    be16(page, 64, 0); // leaf
+    be64(page, 66, 22);
+
+    // Infimum next
+    write_rec_header(page, 94, false, 0, static_cast<int16_t>(origin - INFIMUM_ORIGIN));
+    write_rec_header(page, 115, false, 1, 0);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(cols, false, 2); // 2 PK columns
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 1u);
+    ASSERT_EQ(records[0].fields.size(), 3u);
+    EXPECT_EQ(records[0].fields[0].int_value, 100);
+    EXPECT_EQ(records[0].fields[1].str_value, "key_abc");
+    EXPECT_EQ(records[0].fields[2].int_value, 999);
+}
+
+// ---------------------------------------------------------------------------
+// Off-page LOB pointer fail-closed guard
+//
+// A DYNAMIC/COMPACT record keeps only a 20-byte pointer when a LOB column
+// overflows, and this carving path never reassembles the external chain.
+// Exporting such a row would write the pointer bytes as the column value, so
+// the record must be dropped instead.
+// ---------------------------------------------------------------------------
+
+// id BIGINT pk + c_blob TINY_BLOB that is big: InnoDB uses the 2-byte length
+// prefix for BLOB/TEXT/JSON once the value exceeds 127 bytes (see
+// build_index_column), and the parser relies on that flag.
+std::vector<IndexColumnDef> make_blob_columns() {
+    IndexColumnDef pk;
+    pk.name = "id";
+    pk.col_type = 9;
+    pk.is_nullable = false;
+    pk.physical_pos = 1;
+    pk.ordinal_position = 1;
+    pk.col_length = 8;
+
+    IndexColumnDef blob;
+    blob.name = "c_blob";
+    blob.col_type = 24;              // TINY_BLOB
+    blob.is_nullable = true;
+    blob.physical_pos = 2;
+    blob.ordinal_position = 2;
+    blob.col_length = 255;
+    blob.mb_minlen = 1;
+    blob.mb_maxlen = 1;
+    blob.is_big = true;
+    blob.is_binary = true;
+    return {pk, blob};
+}
+
+// Leaf page whose c_blob column carries either a 200-byte inline payload or an
+// off-page pointer (encoded size 20000, past the COMPACT off-page threshold of
+// 17172). Length prefixes follow InnoDB's is_big rule: one byte up to 127, then
+// the (128 + len>>8, len&0xFF) two-byte encoding.
+std::vector<uint8_t> build_blob_leaf_page(const std::vector<int64_t>& pks,
+                                          bool off_page,
+                                          uint32_t blob_len = 200) {
+    std::vector<uint8_t> page(PAGE_SIZE, 0);
+    be32(page, 4, 88);
+    be32(page, 8, 0xFFFFFFFFu);
+    be32(page, 12, 0xFFFFFFFFu);
+    be64(page, 16, 3555714);
+    be16(page, 24, 0x45BF);          // FIL_PAGE_INDEX
+    be32(page, 34, 6);
+    std::memcpy(&page[INFIMUM_ORIGIN], "infimum", 8);
+    std::memcpy(&page[INFIMUM_ORIGIN + 21], "supremum", 8);
+
+    const size_t body_len = off_page ? 20 : blob_len;
+    const uint32_t encoded_size = off_page ? 20000u : blob_len;
+    std::vector<uint8_t> prefix;
+    if (encoded_size > 127) {
+        prefix.push_back(static_cast<uint8_t>(128 + (encoded_size >> 8)));
+        prefix.push_back(static_cast<uint8_t>(encoded_size & 0xFF));
+    } else {
+        prefix.push_back(static_cast<uint8_t>(encoded_size));
+    }
+
+    std::vector<size_t> origins;
+    size_t cursor = INFIMUM_ORIGIN + 21 + 8;
+    for (size_t r = 0; r < pks.size(); ++r) {
+        const size_t hdr_off = cursor + prefix.size() + 1;  // +1 null-bitmap byte
+        const size_t origin = hdr_off + 5;
+        page[hdr_off - 1] = 0x00;                           // c_blob is not NULL
+        for (size_t i = 0; i < prefix.size(); ++i) {
+            page[hdr_off - 2 - i] = prefix[i];              // byte1 nearest header
+        }
+        be64(page, origin, pk_storage(pks[r]));
+        for (int i = 0; i < 13; i++) page[origin + 8 + i] = static_cast<uint8_t>(0x20 + i);
+        for (size_t i = 0; i < body_len; i++) {
+            page[origin + 21 + i] = static_cast<uint8_t>(0xA0 + (i % 16));
+        }
+        write_rec_header(page, hdr_off, false, static_cast<uint16_t>(2 + r), 0);
+        origins.push_back(origin);
+        cursor = origin + 21 + body_len;
+    }
+    for (size_t r = 0; r + 1 < origins.size(); ++r) {
+        be16(page, origins[r] - 5 + 3, static_cast<uint16_t>(origins[r + 1] - origins[r]));
+    }
+    const uint16_t supremum_origin = INFIMUM_ORIGIN + 8 + 13;
+    be16(page, origins.back() - 5 + 3,
+         static_cast<uint16_t>(supremum_origin - origins.back()));
+
+    be16(page, 38, 2);
+    be16(page, 40, static_cast<uint16_t>(cursor));
+    be16(page, 42, static_cast<uint16_t>(pks.size() + 2) | 0x8000);
+    be16(page, 44, 0);
+    be16(page, 46, 0);
+    be16(page, 54, static_cast<uint16_t>(pks.size()));
+    be16(page, 64, 0);
+    be64(page, 66, 22);
+    write_rec_header(page, 94, false, 0, static_cast<int16_t>(origins[0] - INFIMUM_ORIGIN));
+    write_rec_header(page, 115, false, 1, 0);
+    be32(page, PAGE_SIZE - 4, 3555714 & 0xFFFFFFFFu);
+    return page;
+}
+
+TEST(OffPageFailClosed, DropsRecordWhoseLobStillPointsOffPage) {
+    auto page = build_blob_leaf_page({1, 2}, /*off_page=*/true);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_blob_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    EXPECT_TRUE(records.empty());
+    EXPECT_EQ(parser.overflow_pointer_records_dropped(), 2u);
+    EXPECT_EQ(parser.get_stats().overflow_pointer_records_dropped, 2u);
+}
+
+TEST(OffPageFailClosed, KeepsInlineLobRowsAtFullLength) {
+    auto page = build_blob_leaf_page({1, 2}, /*off_page=*/false);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_blob_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 2u);
+    ASSERT_EQ(records[0].fields.size(), 2u);
+    EXPECT_FALSE(records[0].fields[1].is_overflow);
+    // 200 bytes: an is_big column above 127 must take the two-byte length
+    // prefix, not truncate to 128.
+    EXPECT_EQ(records[0].fields[1].raw_bytes.size(), 200u);
+    EXPECT_EQ(records[1].fields[1].raw_bytes.size(), 200u);
+    EXPECT_EQ(parser.overflow_pointer_records_dropped(), 0u);
+}
+
+TEST(OffPageFailClosed, KeepsTrailingZeroLengthColumnAsEmpty) {
+    // The last column of these records has length 0, so the record ends exactly
+    // where that column starts.  A decode loop bounded by `pos < data_end` never
+    // visits it and the gap-filling default is NULL, which is how 48 empty
+    // c_longblob cells shipped as NULL while the sealed truth held ''.
+    auto page = build_blob_leaf_page({1, 2}, /*off_page=*/false, /*blob_len=*/0);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_blob_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 2u);
+    for (const auto& rec : records) {
+        ASSERT_EQ(rec.fields.size(), 2u);
+        EXPECT_FALSE(rec.fields[1].is_null) << "empty trailing column must not be NULL";
+        EXPECT_TRUE(rec.fields[1].raw_bytes.empty());
+        EXPECT_EQ(rec.fields[1].type,
+                  dbrecovery::innodb::IndexFieldValue::Type::BINARY_VAL);
+    }
+    EXPECT_EQ(parser.overflow_pointer_records_dropped(), 0u);
+}
+
+TEST(OffPageFailClosed, FormattersSuppressUnreconstructedPointerBytes) {
+    dbrecovery::innodb::IndexRecord record;
+    dbrecovery::innodb::IndexFieldValue field;
+    field.type = dbrecovery::innodb::IndexFieldValue::Type::OVERFLOW_PTR;
+    field.is_overflow = true;
+    record.fields.push_back(field);
+
+    EXPECT_TRUE(record.has_unreconstructed_overflow());
+    EXPECT_TRUE(record.to_csv_line().empty());
+    EXPECT_TRUE(record.to_sql_values().empty());
+}
+
 } // namespace

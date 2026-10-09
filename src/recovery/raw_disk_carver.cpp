@@ -1472,6 +1472,10 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
     // 转换为map格式
     for (const auto& rec : index_records) {
         if (rec.is_deleted && !config_.recover_deleted) continue;
+        // Fail closed: a LOB column that still points off-page carries only the
+        // 20-byte pointer. This path never reassembles the external chain, so
+        // emitting the row would fabricate the column from pointer bytes.
+        if (rec.has_unreconstructed_overflow()) continue;
 
         std::map<std::string, std::string> record;
         for (size_t i = 0; i < rec.fields.size() && i < columns.size(); i++) {
