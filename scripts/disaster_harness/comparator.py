@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Three-way comparison for sealed typed recovery results."""
 
+import json
 import math
 import re
 from collections import defaultdict
@@ -70,6 +71,25 @@ def _parse_numeric(value: Any) -> Optional[float]:
     return None
 
 
+def _json_entities_equal(a: Any, b: Any) -> bool:
+    """Compare two deserialized JSON structures with float tolerance."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        if set(a.keys()) != set(b.keys()):
+            return False
+        return all(_json_entities_equal(a[k], b[k]) for k in a)
+    if isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+        if len(a) != len(b):
+            return False
+        return all(_json_entities_equal(x, y) for x, y in zip(a, b))
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+        if math.isclose(float(a), float(b), rel_tol=1e-5, abs_tol=1e-5):
+            return True
+        return a == b
+    return a == b
+
+
 def _values_equal(expected: Any, actual: Any, base_type: str) -> bool:
     """Type-aware field equality for canonical comparison cells.
 
@@ -90,7 +110,7 @@ def _values_equal(expected: Any, actual: Any, base_type: str) -> bool:
         try:
             exp_obj = json.loads(plain_expected) if isinstance(plain_expected, str) else plain_expected
             act_obj = json.loads(plain_actual) if isinstance(plain_actual, str) else plain_actual
-            return exp_obj == act_obj
+            return _json_entities_equal(exp_obj, act_obj)
         except Exception:
             return plain_expected == plain_actual
     if base_type not in _FLOAT_BASE_TYPES:

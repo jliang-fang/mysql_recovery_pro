@@ -84,14 +84,23 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
         # The SQL exporter emits binary columns as UNHEX(...); the SQL parser
         # decodes those to raw bytes, which is already the canonical form.
         return bytes(raw_text)
-    if raw_text is None or (column_def.get("nullable", True) and raw_text in ("", "NULL")):
+    if raw_text is None:
         return None
-
     raw_type = str(column_def.get("type", column_def.get("data_type", ""))).lower()
     base_type = raw_type.split("(", 1)[0].strip()
     if " " in base_type:
         base_type = base_type.split()[0]
     unsigned = "unsigned" in raw_type
+
+    # For nullable columns, raw_text == "NULL" is always None.
+    # Empty string "" is None for all nullable columns except SET (where empty string represents empty set).
+    if column_def.get("nullable", True):
+        if raw_text == "NULL":
+            return None
+        if raw_text == "":
+            if base_type == "set":
+                return set()
+            return None
 
     # BIT fields are exported as decimal unsigned integers by the recovery
     # decoder.  Treat them as numeric rather than TEXT so canonical truth (which
@@ -109,7 +118,7 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
 
     # Nullable empty strings vs NULL:
     # If the column is numeric or date/time and cell is empty or 'NULL', treat as None if nullable
-    if raw_text == "" and column_def.get("nullable", True) and base_type not in ("varchar", "char", "text", "blob", "binary", "varbinary"):
+    if raw_text == "" and column_def.get("nullable", True) and base_type not in ("varchar", "char", "text", "blob", "binary", "varbinary", "set", "json"):
         return None
 
     if base_type in ("int", "tinyint", "smallint", "mediumint", "bigint", "integer"):
@@ -130,15 +139,16 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
     if base_type == "json":
         if raw_text == "" or raw_text == "NULL":
             return None
-        return raw_text.strip()
+        unescaped = _unescape_csv_text(raw_text) if "\\" in raw_text else raw_text
+        return unescaped.strip()
 
     if base_type == "set":
         if raw_text == "" and column_def.get("nullable", True):
             # Could be NULL or empty set. If empty text was decoded, it represents empty set.
-            return []
+            return set()
         if raw_text == "NULL":
             return None
-        return sorted(raw_text.split(",")) if raw_text else []
+        return set(raw_text.split(",")) if raw_text else set()
 
     if base_type == "date":
         if raw_text == "" or raw_text == "NULL":
@@ -168,7 +178,9 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
             sec_parts = parts[2].split(".")
             s = int(sec_parts[0])
             us = int(sec_parts[1].ljust(6, "0")[:6]) if len(sec_parts) > 1 else 0
-            return timedelta(hours=h, minutes=m, seconds=s, microseconds=us) * sign
+            if sign == -1 and (h != 0 or m != 0 or s != 0 or us != 0):
+                return -(timedelta(hours=h, minutes=m, seconds=s, microseconds=us))
+            return timedelta(hours=h, minutes=m, seconds=s, microseconds=us)
         except Exception:
             return raw_text
 
@@ -191,8 +203,6 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
     # renderer applies so the canonical value holds the original bytes.
     if isinstance(raw_text, str):
         val = _unescape_csv_text(raw_text) if "\\" in raw_text else raw_text
-        # If the column has a non-utf8 charset (e.g. latin1, ascii), decode the
-        # raw bytes represented by surrogateescape into the intended charset.
         col_charset = str(column_def.get("charset") or "").lower()
         if "latin1" in col_charset:
             try:
@@ -200,6 +210,15 @@ def _parse_csv_cell(raw_text: str, column_def: Dict[str, Any]) -> Any:
                 val = raw_b.decode("latin1")
             except Exception:
                 pass
+        else:
+            # For non-latin1 text (utf8/utf8mb4), if any surrogate escapes leaked from
+            # off-page binary pointer fragments, sanitize them to replacement character
+            # so canonical JSON serialization never crashes.
+            try:
+                val.encode("utf-8")
+            except UnicodeEncodeError:
+                raw_b = val.encode("utf-8", errors="surrogateescape")
+                val = raw_b.decode("utf-8", errors="replace")
         return val
     return raw_text
 
