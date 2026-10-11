@@ -19,7 +19,7 @@ from scripts.disaster_harness.manifest import canonical_json, sha256_bytes
 ALLOWED_DEVICE = "/dev/nvme0n2"
 TOKEN_VERSION = 1
 PREFLIGHT_VERSION = 1
-_DESTRUCTIVE_ACTIONS = frozenset({"setrw", "format", "mount", "drop", "truncate", "rm-rf", "corrupt", "unmount"})
+_DESTRUCTIVE_ACTIONS = frozenset({"setrw", "wipefs", "format", "mount", "drop", "truncate", "rm-rf", "corrupt", "unmount"})
 _HEX_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -201,7 +201,8 @@ def preflight(device_path: str, evidence_root: Path) -> dict[str, Any]:
     return _preflight_report(identity, evidence_root, target_mounts, evidence_mounts, holders, dependencies)
 
 
-def preflight_controlled_mount(device_path: str, evidence_root: Path, mount_point: Path) -> dict[str, Any]:
+def preflight_controlled_mount(device_path: str, evidence_root: Path, mount_point: Path,
+                               allowed_filesystems: tuple[str, ...] = ("ext4",)) -> dict[str, Any]:
     """Verify the sole expected ext4/RW mount for the restricted DROP smoke workflow."""
     identity, evidence_root, target_mounts, evidence_mounts, holders, dependencies = _preflight_facts(
         device_path, evidence_root
@@ -218,8 +219,8 @@ def preflight_controlled_mount(device_path: str, evidence_root: Path, mount_poin
         raise DeviceSafetyError("controlled mount source does not match the test device")
     if Path(target).resolve() != expected_target:
         raise DeviceSafetyError("controlled mount target does not match the configured mount point")
-    if filesystem != "ext4":
-        raise DeviceSafetyError("controlled mount must use ext4")
+    if filesystem not in allowed_filesystems:
+        raise DeviceSafetyError(f"controlled mount must use {' or '.join(allowed_filesystems)}")
     if "rw" not in options:
         raise DeviceSafetyError("controlled mount must be read-write")
     return _preflight_report(identity, evidence_root, target_mounts, evidence_mounts, holders, dependencies)

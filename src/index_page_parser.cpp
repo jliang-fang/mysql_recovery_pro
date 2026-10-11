@@ -1591,12 +1591,13 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
     }
 
     // Fail closed on off-page LOB pointers: the row only holds the 20-byte
-    // pointer, the external chain is never reassembled here, and the pointer
-    // bytes must never be shipped as the column value. Drop the record and
-    // count it as unrecoverable instead of writing a fabricated row.
+    // pointer. If caller asked to retain them for external reassembly, pass
+    // them through; otherwise drop the record.
     if (record.has_unreconstructed_overflow()) {
-        overflow_pointer_records_dropped_++;
-        return std::nullopt;
+        if (!retain_overflow_records_) {
+            overflow_pointer_records_dropped_++;
+            return std::nullopt;
+        }
     }
 
     return record;
@@ -1663,16 +1664,16 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         val.str_value.clear();
         if (val.raw_bytes.size() >= 20) {
             // InnoDB external BLOB pointer: space_id(4) page_no(4) offset(2)
-            // length(4) total_length(4), all little-endian.
-            auto le32 = [&val](size_t off) -> uint64_t {
-                return static_cast<uint64_t>(val.raw_bytes[off]) |
-                       (static_cast<uint64_t>(val.raw_bytes[off + 1]) << 8) |
-                       (static_cast<uint64_t>(val.raw_bytes[off + 2]) << 16) |
-                       (static_cast<uint64_t>(val.raw_bytes[off + 3]) << 24);
+            // flags(2) len_high(4) len_low(4), all big-endian in standard BTR_EXTERN_FIELD_REF.
+            auto be32 = [&val](size_t off) -> uint64_t {
+                return (static_cast<uint64_t>(val.raw_bytes[off]) << 24) |
+                       (static_cast<uint64_t>(val.raw_bytes[off + 1]) << 16) |
+                       (static_cast<uint64_t>(val.raw_bytes[off + 2]) << 8) |
+                       static_cast<uint64_t>(val.raw_bytes[off + 3]);
             };
-            val.overflow_space_id = static_cast<uint32_t>(le32(0));
-            val.overflow_page_no = static_cast<uint32_t>(le32(4));
-            val.overflow_real_size = le32(16);
+            val.overflow_space_id = static_cast<uint32_t>(be32(0));
+            val.overflow_page_no = static_cast<uint32_t>(be32(4));
+            val.overflow_real_size = (be32(12) << 32) | be32(16);
         }
     };
 
@@ -2499,6 +2500,11 @@ IndexFieldValue InnoDBIndexParser::decode_column(
                     uint32_t second = 63 - (63 & raw);
 
                     int pad = col.datetime_precision;
+                    // The stored magnitude is one microsecond *below* the displayed
+                    // negative value (two's-complement of the positive field), so the
+                    // decode adds 1 to the lowest non-fractional field.  With no
+                    // fractional bytes the carry lands on `second` and can overflow
+                    // 59→60 → minute → hour (this is the -838:59:58 case).
                     if (pad == 0 || field_size <= 3) {
                         second += 1;
                         if (second >= 60) {

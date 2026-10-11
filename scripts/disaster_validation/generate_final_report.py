@@ -203,6 +203,8 @@ def _raw_case_paths(evidence: Path) -> list[Path]:
             continue
         candidates.extend(case for case in sorted(root.glob("stage1-*/"))
                          if (case / "run_state.json").is_file())
+        candidates.extend(case for case in sorted(root.glob("real-*/"))
+                         if (case / "run_state.json").is_file())
         # The older live smoke run used a non-stage1 name.
         candidates.extend(case for case in sorted(root.glob("nvme*-*/"))
                          if (case / "run_state.json").is_file())
@@ -216,8 +218,41 @@ def collect_raw_media(evidence: Path) -> list[dict[str, Any]]:
         state = read_json(case / "run_state.json") or {}
         manifest = read_json(case / "manifest.json") or {}
         matrix = manifest.get("matrix") or state.get("matrix") or {}
-        comparison = (read_json(case / "reports" / "comparison.json") or
-                      manifest.get("comparison") or {})
+
+        # Stage 1 real-device runs seal one comparison per table as
+        # reports/comparison_<table>.json; a legacy single-table run uses the
+        # bare reports/comparison.json.  Aggregate across every per-table file
+        # and require *all* of them strict before scoring PASS, otherwise a
+        # multi-table run silently collapses to its first table or to {}.
+        per_table: dict[str, dict[str, Any]] = {}
+        for comp_path in sorted((case / "reports").glob("comparison_*.json")):
+            comp = read_json(comp_path)
+            if comp:
+                per_table[comp_path.stem.removeprefix("comparison_")] = comp
+        if per_table:
+            comparison = {
+                "expected_rows": sum((c.get("expected_rows") or 0) for c in per_table.values()),
+                "actual_rows": sum((c.get("actual_rows") or 0) for c in per_table.values()),
+                "correct_rows": sum((c.get("correct_rows") or 0) for c in per_table.values()),
+                "field_mismatches": sum(
+                    (len(c.get("field_mismatches", []))
+                     if isinstance(c.get("field_mismatches"), list)
+                     else int(c.get("field_mismatches") or 0)) for c in per_table.values()),
+                "false_positives": sum(
+                    len(c.get("false_positives", [])) for c in per_table.values()),
+                "false_negatives": sum(
+                    len(c.get("false_negatives", [])) for c in per_table.values()),
+                # Every table must be individually strict for the case to be.
+                "strict_pass": bool(per_table) and all(
+                    c.get("strict_pass") is True for c in per_table.values()),
+                "status": ("PASS" if all(c.get("strict_pass") is True for c in per_table.values())
+                           else "FAIL"),
+                "tables": per_table,
+            }
+        else:
+            comparison = (read_json(case / "reports" / "comparison.json") or
+                          manifest.get("comparison") or {})
+
         import_result = (read_json(case / "reports" / "fresh_import_result.json") or
                          read_json(case / "import-validation" / "fresh_import_result.json") or
                          manifest.get("import") or {})
@@ -276,8 +311,12 @@ def collect_raw_media(evidence: Path) -> list[dict[str, Any]]:
                     if isinstance(comparison.get("field_mismatches"), list)
                     else comparison.get("field_mismatches"),
                 "strict_pass": comparison.get("strict_pass"),
-                "false_negatives": len(comparison.get("false_negatives", [])),
-                "false_positives": len(comparison.get("false_positives", [])),
+                "false_negatives": len(comparison.get("false_negatives", []))
+                    if isinstance(comparison.get("false_negatives"), list)
+                    else int(comparison.get("false_negatives") or 0),
+                "false_positives": len(comparison.get("false_positives", []))
+                    if isinstance(comparison.get("false_positives"), list)
+                    else int(comparison.get("false_positives") or 0),
             },
             "fresh_import": import_result,
             "contract": {
@@ -290,9 +329,18 @@ def collect_raw_media(evidence: Path) -> list[dict[str, Any]]:
             },
             "invocation": invocation,
             "artifacts": artifacts,
+            "tables_compared": sorted(per_table),
+            "failing_tables": sorted(
+                table for table, comp in per_table.items()
+                if comp.get("strict_pass") is not True),
             "failure_reasons": [
                 reason for reason in (
-                    None if strict else "strict_comparison_failed",
+                    None if strict else (
+                        "strict_comparison_failed:"
+                        + ",".join(sorted(
+                            table for table, comp in per_table.items()
+                            if comp.get("strict_pass") is not True))
+                        if per_table else "strict_comparison_failed"),
                     None if imported else "fresh_import_failed",
                     None if contract else "missing_result_contract",
                 ) if reason
@@ -569,10 +617,20 @@ def _build_validation_gaps(phase_a, phase_b, corruption=(), raw_media=()) -> lis
         gaps.append("损坏矩阵未把丢失行逐行归因到被破坏页的 page→主键映射：可恢复行已逐字段"
                     "比对为零差异，但丢失行只按数量记录，不对空实例重导入主张完整 round-trip。")
     if raw_media:
+        any_pass = any(case.get("verdict") == "PASS" for case in raw_media)
         for case in raw_media:
             if case.get("verdict") != "PASS":
+                detail = ",".join(case.get("failure_reasons") or [])
+                tables = case.get("failing_tables") or []
+                if tables:
+                    detail = (detail + ";" if detail else "") + "tables=" + ",".join(tables)
+                comp = case.get("comparison") or {}
                 gaps.append("真实裸设备 Stage 1 已执行但未通过："
-                            f"{case.get('case')}，失败项={','.join(case.get('failure_reasons') or [])}。")
+                            f"{case.get('case')}，"
+                            f"恢复={comp.get('actual_rows')}/{comp.get('expected_rows')}，"
+                            f"失败项={detail}。")
+        if not any_pass:
+            gaps.append("真实裸设备 Stage 1 已执行的全部用例均未通过；尚无真实设备 PASS 证据。")
     else:
         gaps.append("真实裸设备（/dev/nvme0n2）Stage 1 尚无已执行证据；需单独授权后运行。")
     rows = max((c.get("rows_written") or 0) for c in phase_b) if phase_b else 0

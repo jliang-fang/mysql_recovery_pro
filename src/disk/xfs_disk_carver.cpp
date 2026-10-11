@@ -17,6 +17,7 @@
 #include "dbrecovery/catalog/schema_defs.hpp"
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/export/csv_cell.hpp"
+#include "dbrecovery/innodb/blob_scanner.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
 
 #include <chrono>
@@ -64,6 +65,7 @@ using dbrecovery::innodb::InnoDBIndexParser;
 constexpr uint16_t FIL_PAGE_INDEX = 0x45BF;
 constexpr uint16_t FIL_PAGE_SDI = 0x45BE;
 constexpr uint16_t FIL_PAGE_SDI_ZIP = 0x45BD;
+constexpr uint16_t FIL_PAGE_TYPE_BLOB_80 = 0x0018; // 24: Uncompressed BLOB in MySQL 8.0
 constexpr uint16_t FIL_PAGE_TYPE_BLOB = 0x45BD;   // Same as SDI_ZIP (BLOB page type)
 constexpr uint16_t FIL_PAGE_TYPE_ZBLOB = 0x45BA;  // Compressed BLOB page
 constexpr uint16_t FIL_PAGE_TYPE_ZBLOB2 = 0x45BB; // Compressed BLOB page v2
@@ -1793,7 +1795,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                 size_t effective_size = config_.page_size;
 
                 if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-                    page_type != FIL_PAGE_SDI_ZIP &&
+                    page_type != FIL_PAGE_SDI_ZIP && page_type != FIL_PAGE_TYPE_BLOB_80 &&
                     page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
                     page_type != FIL_PAGE_TYPE_ZBLOB2 &&
                     page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
@@ -1811,19 +1813,24 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                 }
 
                 if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
-                    page_type == FIL_PAGE_SDI_ZIP ||
+                    page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB_80 ||
                     page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
                     page_type == FIL_PAGE_TYPE_ZBLOB2) {
                     uint64_t index_id = 0;
                     if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
                         index_id = read_be<uint64_t>(effective_data, 66);
+                        if (!config_.target_index_ids.empty() &&
+                            std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) == config_.target_index_ids.end()) {
+                            continue;
+                        }
                     }
 
                     if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
                         index_id = 0xFFFFFF00 | page_type;
                     }
 
-                    if (page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+                    if (page_type == FIL_PAGE_TYPE_BLOB_80 ||
+                        page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
                         page_type == FIL_PAGE_TYPE_ZBLOB2) {
                         index_id = 0xFFFFFF00 | page_type;
                     }
@@ -1838,11 +1845,18 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     page_info.disk_offset = chunk_start + i;
                     page_info.page_type = page_type;
                     page_info.index_id = index_id;
-                    page_info.page_no = read_be<uint32_t>(effective_data, 8);
+                    page_info.page_no = read_be<uint32_t>(effective_data, 4);
                     page_info.data.resize(effective_size);
                     std::memcpy(page_info.data.data(), effective_data, effective_size);
 
+                    const bool is_blob_pg = (page_type == 0x0018 || page_type == FIL_PAGE_SDI_ZIP ||
+                                             page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+                                             page_type == FIL_PAGE_TYPE_ZBLOB2);
+
                     std::lock_guard<std::mutex> lock(result_mutex_);
+                    if (is_blob_pg) {
+                        last_result_.blob_pages_by_page_no[page_info.page_no] = page_info.data;
+                    }
                     last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
                     last_result_.pages_recovered++;
                     pages_found.fetch_add(1);
@@ -2308,7 +2322,7 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                     continue;
                 }
                 // Schema-aware parsing
-                auto records = parse_records_with_schema_xfs(page_info.data, *external_schema_);
+                auto records = parse_records_with_schema_xfs(page_info.data, *external_schema_, index_id, scan_result.blob_pages_by_page_no);
                 for (auto& record : records) {
                     std::string key;
                     for (const auto& col_name : ordered_column_names(*external_schema_)) {
@@ -2334,7 +2348,7 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
             result.total_records += all_records.size();
 
             // Export to CSV
-            std::string output_file = config_.output_dir + "/xfs_index_" +
+            std::string output_file = config_.output_dir + "/index_" +
                                       std::to_string(index_id) + ".csv";
             std::ofstream out(output_file);
 
@@ -2376,7 +2390,7 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
 
                         auto it = rec.find(col_name);
                         if (it != rec.end()) {
-                            out << dbrecovery::exporter::csv_cell_from_string(it->second, false);
+                            out << it->second;
                         } else {
                             out << "NULL";
                         }
@@ -2407,6 +2421,8 @@ XfsScanResult XfsDiskCarver::scan_and_recover(
     if (!scan_result.success) {
         return scan_result;
     }
+
+    scan_result.blob_pages_by_page_no = last_result_.blob_pages_by_page_no;
 
     return recover(scan_result, [&](double pct, const std::string& msg) {
         if (progress) progress(0.7 + pct * 0.3, msg);
@@ -2583,7 +2599,9 @@ static uint8_t mysql_type_to_innodb(uint32_t mysql_type) {
 
 std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_with_schema_xfs(
     const std::vector<uint8_t>& page_data,
-    const catalog::TableSchema& schema) {
+    const catalog::TableSchema& schema,
+    uint64_t target_index_id,
+    const std::map<uint32_t, std::vector<uint8_t>>& blob_pages) {
 
     std::vector<std::map<std::string, std::string>> records;
 
@@ -2621,49 +2639,50 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
             }
             return records;
         }
-        innodb::IndexColumnDef col_def = *converted;
-
-        // Set mb_maxlen based on charset
-        if (col.charset_id == 45 || col.charset_id == 46) {  // utf8mb4
-            col_def.mb_maxlen = 4;
-        } else if (col.charset_id == 33 || col.charset_id == 83) {  // utf8
-            col_def.mb_maxlen = 3;
-        } else {
-            col_def.mb_maxlen = 1;  // latin1 and others
-        }
-
-        // Mirror recovery_cli.hpp FRM semantics: is_big gates 2-byte var-size
-        // encoding; is_binary keeps CHAR-vs-BINARY (type 29) fixed-length.
-        // Type 27 is shared by BLOB and TEXT, so binary-ness must come from the
-        // collation (63 = binary); otherwise TEXT is hex-encoded.
-        if (col_def.col_type == 24 || col_def.col_type == 25 ||
-            col_def.col_type == 26 || col_def.col_type == 27 ||
-            col_def.col_type == 31) {
-            col_def.is_big = true;
-            if (col_def.col_type == 27) {
-                col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63);
-            }
-        } else if (col_def.col_type == 16 || col_def.col_type == 29) {
-            col_def.is_big = (col.column_length * col_def.mb_maxlen > 255);
-            // BINARY vs CHAR: both type 29; BINARY columns use charset-63 and
-            // resolve fixed-length via mb_maxlen==1, but mark explicitly when
-            // collation is binary and the column is not JSON.
-            col_def.is_binary = (col.charset_id == 63 || col.collation_id == 63);
-        }
-
-        columns.push_back(col_def);
+        columns.push_back(std::move(*converted));
     }
 
+    // Determine PK column count
+    std::set<std::string> pk_names;
+    for (const auto& idx : schema.indexes) {
+        if (idx.is_primary) {
+            for (const auto& cname : idx.columns) {
+                pk_names.insert(cname);
+            }
+        }
+    }
+
+    uint32_t n_pk_cols = 0;
+    if (!pk_names.empty()) {
+        for (const auto& [phys_pos, col] : sorted_cols) {
+            if (pk_names.count(col.name) > 0) {
+                n_pk_cols++;
+            } else {
+                break;
+            }
+        }
+    }
+    if (n_pk_cols == 0) {
+        for (const auto& [phys_pos, col] : sorted_cols) {
+            if ((col.flags & 1) != 0 || (col.col_flags & 1) != 0 || n_pk_cols == 0) {
+                n_pk_cols++;
+            } else {
+                break;
+            }
+        }
+    }
+    if (n_pk_cols == 0) n_pk_cols = 1;
+
     InnoDBIndexParser parser;
-    parser.set_columns(columns);
-    parser.set_recover_deleted(config_.recover_deleted);
+    parser.set_columns(columns, false, n_pk_cols);
+    if (target_index_id != 0) {
+        parser.set_target_index_id(target_index_id);
+    }
+    parser.set_recover_deleted(false);
     parser.set_bad_page_mode(2);
-    // Schema-aware export must only trust the on-page record chain, and only
-    // leaf pages carry user rows (interior pages hold node pointers).
     parser.set_strict(true);
-    // The carver does not bind the supplied schema to an authoritative PRIMARY
-    // INDEX_ID at this boundary. Keep chain-only decoding, but do not enable
-    // destructive order filtering for an index that could be secondary.
+    parser.set_retain_overflow_records(true);
+
     if (page_size >= 66) {
         const uint16_t level = (static_cast<uint16_t>(data[64]) << 8) | data[65];
         if (level != 0) return {};
@@ -2673,28 +2692,52 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
 
     for (const auto& rec : index_records) {
         if (rec.is_deleted && !config_.recover_deleted) continue;
-        // Fail closed: a LOB column that still points off-page carries only
-        // the 20-byte pointer; never export it as if it were column data.
-        if (rec.has_unreconstructed_overflow()) continue;
+
+        auto mutable_fields = rec.fields;
+        bool overflow_resolved = true;
+        if (rec.has_unreconstructed_overflow()) {
+            for (auto& fld : mutable_fields) {
+                if (!fld.is_overflow) continue;
+                uint32_t b_pg = fld.overflow_page_no;
+                uint64_t b_len = fld.overflow_real_size;
+                auto page_it = blob_pages.find(b_pg);
+                if (page_it != blob_pages.end()) {
+                    std::function<std::vector<uint8_t>(uint32_t)> reader =
+                        [&blob_pages](uint32_t pno) -> std::vector<uint8_t> {
+                            auto it = blob_pages.find(pno);
+                            return (it != blob_pages.end()) ? it->second : std::vector<uint8_t>{};
+                        };
+                    dbrecovery::innodb::BlobScanner b_scanner;
+                    auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
+                    if (!blob_bytes.empty() && (b_len == 0 || blob_bytes.size() >= b_len)) {
+                        if (b_len > 0 && blob_bytes.size() > b_len) {
+                            blob_bytes.resize(b_len);
+                        }
+                        fld.raw_bytes = std::move(blob_bytes);
+                        fld.is_overflow = false;
+                        fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
+                        fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                    } else {
+                        overflow_resolved = false;
+                        break;
+                    }
+                } else {
+                    overflow_resolved = false;
+                    break;
+                }
+            }
+        }
+
+        if (!overflow_resolved) continue;
 
         std::map<std::string, std::string> record;
-        for (size_t i = 0; i < columns.size(); i++) {
+        for (size_t i = 0; i < mutable_fields.size() && i < columns.size(); i++) {
             const auto& col = columns[i];
-            if (i >= rec.fields.size() || rec.fields[i].is_null) {
+            if (mutable_fields[i].is_null) {
                 record[col.name] = "NULL";
-                continue;
-            }
-            const auto& field = rec.fields[i];
-            const bool binary = col.is_binary ||
-                field.type == innodb::IndexFieldValue::Type::BINARY_VAL;
-            if (binary && !field.raw_bytes.empty()) {
-                record[col.name] = dbrecovery::exporter::hex_encode_bytes(field.raw_bytes);
-            } else if (field.type == innodb::IndexFieldValue::Type::INT_VAL) {
-                record[col.name] = std::to_string(field.int_value);
-            } else if (field.type == innodb::IndexFieldValue::Type::UINT_VAL) {
-                record[col.name] = std::to_string(field.uint_value);
             } else {
-                record[col.name] = field.str_value;
+                record[col.name] = dbrecovery::exporter::csv_column_value(
+                    mutable_fields[i], col.is_binary);
             }
         }
         if (!record.empty()) {

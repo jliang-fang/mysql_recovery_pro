@@ -3412,6 +3412,10 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 std::cout << "[INFO] Excluding system tables from recovery\n";
             }
 
+            if (!target_index_ids_str.empty()) {
+                xfs_config.signature_scan = false;
+            }
+
             xfs_carver.set_config(xfs_config);
             if (raw_block_source) {
                 const int source_fd = authorized_raw_device->duplicate_fd();
@@ -3525,23 +3529,12 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                 }
                 return 0;
             } else {
-                std::cerr << "[ERROR] XFS disk carving failed.\n";
+                std::cerr << "[ERROR] XFS disk carving failed. Falling back to raw disk carving.\n";
                 for (const auto& err : xfs_result.errors) {
                     std::cerr << "  - " << err << "\n";
+                    filesystem_fallback_errors.push_back("xfs: " + err);
                 }
-                {
-                    nlohmann::json details{
-                        {"mode", "disk_carving"}, {"filesystem", "xfs"},
-                        {"device_path", device_path},
-                        {"errors", xfs_result.errors}};
-                    if (!emit_result_contract(
-                            make_carving_contract(
-                                "xfs_disk_carving", 0, 0, 0, "NONE", "EVIDENCE_ONLY",
-                                "forensic_evidence", false, "xfs_scan_failed",
-                                "xfs disk carving failed"),
-                            details)) return 1;
-                }
-                return 1;
+                // Fall through to generic carving below
             }
         }
 

@@ -101,6 +101,7 @@ public:
         uint64_t frm_files_found = 0;
         double elapsed_seconds = 0.0;
         std::map<uint64_t, std::vector<std::vector<uint8_t>>> pages_by_index_id; // index_id -> pages
+        std::map<uint32_t, std::vector<uint8_t>> blob_pages_by_page_no;
         std::vector<FoundPage> all_found_pages; // 所有找到的页
         std::map<uint32_t, std::vector<uint8_t>> sdi_pages; // space_id -> SDI data
         std::vector<std::string> frm_files; // FRM文件数据
@@ -204,6 +205,7 @@ private:
     // 线程安全的页收集
     std::mutex pages_mutex_;
     std::map<uint64_t, std::vector<std::vector<uint8_t>>> collected_pages_;
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> blob_queue_;
 
     // PageTypeInferrer — enhanced page detection engine
     mutable innodb::PageTypeInferrer page_type_inferrer_{innodb::PageInferrerConfig{}};
@@ -289,7 +291,8 @@ public:
      */
     std::vector<std::map<std::string, std::string>> parse_records_with_schema(
         const std::vector<uint8_t>& page_data,
-        const catalog::TableSchema& schema);
+        const catalog::TableSchema& schema,
+        const std::map<uint32_t, std::vector<uint8_t>>& blob_pages = {});
 
     /**
      * @brief 启发式字段边界检测

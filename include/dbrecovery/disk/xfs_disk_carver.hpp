@@ -388,6 +388,7 @@ struct XfsScanResult {
     uint64_t checksum_rejected_pages = 0;
 
     std::map<uint64_t, std::vector<XfsPageInfo>> pages_by_index_id;
+    std::map<uint32_t, std::vector<uint8_t>> blob_pages_by_page_no;
     std::vector<XfsExtentInfo> recovered_extents;
     std::map<uint64_t, std::vector<std::map<std::string, std::string>>> records_by_index_id;
     std::vector<std::string> output_files;
@@ -524,7 +525,9 @@ private:
     // Schema-aware record parsing
     std::vector<std::map<std::string, std::string>> parse_records_with_schema_xfs(
         const std::vector<uint8_t>& page_data,
-        const catalog::TableSchema& schema);
+        const catalog::TableSchema& schema,
+        uint64_t target_index_id = 0,
+        const std::map<uint32_t, std::vector<uint8_t>>& blob_pages = {});
 };
 
 // ==================== Helper Functions ====================

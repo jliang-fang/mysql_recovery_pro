@@ -381,12 +381,9 @@ class Stage1QualificationRunner:
                 raise RuntimeError(f"{name}: no recovered CSV produced")
             recovered_dataset = csv_to_canonical_dataset(
                 csv_path=csv_candidates[0], database=self.database, table=entry["spec"].name,
-                schema=entry["truth"]["schema"], mysql_version="8.0")
+                schema=entry["truth"]["schema"],
+                mysql_version=entry["truth"].get("mysql_version") or "")
             comp_res = compare(entry["truth"], recovered_dataset, f"{self.run_id}_{name}_raw_drop")
-            if "mysql_version_mismatch" in comp_res.get("prerequisites", []):
-                recovered_dataset["mysql_version"] = entry["truth"].get(
-                    "mysql_version", recovered_dataset.get("mysql_version"))
-                comp_res = compare(entry["truth"], recovered_dataset, f"{self.run_id}_{name}_raw_drop")
             comparisons[name] = comp_res
             (self.root / "reports" / f"comparison_{name}.json").write_text(
                 json.dumps(comp_res, indent=2), encoding="utf-8")

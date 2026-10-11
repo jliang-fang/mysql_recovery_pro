@@ -302,6 +302,7 @@ struct Ext4ScanResult {
     uint64_t overflow_records_dropped = 0;
 
     std::map<uint64_t, std::vector<Ext4BlockInfo>> pages_by_index_id;
+    std::map<uint32_t, std::vector<uint8_t>> blob_pages_by_page_no;
     std::vector<Ext4InodeInfo> recovered_inodes;
     std::vector<std::string> errors;
 
@@ -365,6 +366,7 @@ private:
 
     // Thread-safe result collection queue
     std::queue<std::pair<uint64_t, Ext4BlockInfo>> result_queue_;
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> blob_queue_;
 
     // Read block group descriptor
     bool read_group_descriptor(int fd, uint32_t group_index, ext4_group_desc& desc) const;

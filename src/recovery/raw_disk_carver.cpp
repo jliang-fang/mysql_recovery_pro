@@ -9,6 +9,7 @@
 #include "dbrecovery/innodb/sdi_manager.hpp"
 #include "dbrecovery/innodb/mach_read.hpp"
 #include "dbrecovery/export/csv_cell.hpp"
+#include "dbrecovery/innodb/blob_scanner.hpp"
 #include "dbrecovery/utils/lz4_helper.hpp"
 #include "dbrecovery/salvage/evidence_serializer.hpp"
 #include "nlohmann/json.hpp"
@@ -184,6 +185,7 @@ bool RawDiskCarver::is_valid_page(const uint8_t* data, size_t page_size) {
             case FIL_PAGE_INDEX:        // 0x45BF - INDEX页
             case FIL_PAGE_SDI:          // 0x45BE - SDI页
             case FIL_PAGE_SDI_ZIP:      // 0x45BD - 压缩SDI页/BLOB页
+            case 0x0018:                // 0x18 = 24 - uncompressed BLOB in MySQL 8.0
             case FIL_PAGE_UNDO_LOG:     // 0x45B2 - Undo日志页
             case FIL_PAGE_COMPRESSED:   // 0x45B5 - 压缩页
             case FIL_PAGE_TYPE_ALLOCATED: // 0x0000 - 已分配
@@ -480,6 +482,10 @@ RawDiskCarver::ScanResult RawDiskCarver::scan(std::function<void(double, const s
                 result.pages_by_index_id[index_id].push_back(std::move(page));
             }
         }
+        for (auto& [pg_no, pdata] : blob_queue_) {
+            result.blob_pages_by_page_no.emplace(pg_no, std::move(pdata));
+        }
+        blob_queue_.clear();
     }
 
     // 统计各类页
@@ -604,6 +610,7 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             bool quick_valid = (ptype == FIL_PAGE_INDEX ||
                                ptype == FIL_PAGE_SDI ||
                                ptype == FIL_PAGE_SDI_ZIP ||
+                               ptype == 0x0018 ||
                                ptype == FIL_PAGE_UNDO_LOG ||
                                ptype == FIL_PAGE_COMPRESSED ||
                                ptype == FIL_PAGE_TYPE_ALLOCATED ||
@@ -699,6 +706,19 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                     }
 
                     pages_found_.fetch_add(1);
+                }
+            }
+
+            // Collect BLOB pages (0x18 = uncompressed BLOB in MySQL 8.0, 0x45BD = compressed/BLOB)
+            const bool is_blob = (ptype == 0x0018 || ptype == FIL_PAGE_SDI_ZIP ||
+                                  ptype == 0x45BA || ptype == 0x45BB);
+            if (is_blob) {
+                uint32_t blob_pg_no = extract_page_no(page_data, config_.page_size);
+                std::vector<uint8_t> blob_copy(config_.page_size);
+                std::memcpy(blob_copy.data(), page_data, config_.page_size);
+                {
+                    std::lock_guard<std::mutex> lock(pages_mutex_);
+                    blob_queue_.emplace_back(blob_pg_no, std::move(blob_copy));
                 }
             }
 
@@ -1000,7 +1020,7 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
                     continue;
                 }
                 // 使用schema-aware解析
-                auto records = parse_records_with_schema(page_data, *matched_schema);
+                auto records = parse_records_with_schema(page_data, *matched_schema, scan_result.blob_pages_by_page_no);
                 for (auto& record : records) {
                     std::string key;
                     key.reserve(128);
@@ -1378,7 +1398,8 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_sch
 
 std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_with_schema(
     const std::vector<uint8_t>& page_data,
-    const catalog::TableSchema& schema) {
+    const catalog::TableSchema& schema,
+    const std::map<uint32_t, std::vector<uint8_t>>& blob_pages) {
 
     std::vector<std::map<std::string, std::string>> records;
 
@@ -1466,21 +1487,55 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
     // chain; without strict mode parse_page falls back to brute-force scans
     // that fabricate plausible rows (the same defect class fixed in ext4).
     parser.set_strict(true);
+    parser.set_retain_overflow_records(true);
 
     auto index_records = parser.parse_page(data, page_size, 0);
 
     // 转换为map格式
     for (const auto& rec : index_records) {
         if (rec.is_deleted && !config_.recover_deleted) continue;
-        // Fail closed: a LOB column that still points off-page carries only the
-        // 20-byte pointer. This path never reassembles the external chain, so
-        // emitting the row would fabricate the column from pointer bytes.
-        if (rec.has_unreconstructed_overflow()) continue;
+
+        auto mutable_fields = rec.fields;
+        bool overflow_resolved = true;
+        if (rec.has_unreconstructed_overflow()) {
+            for (auto& fld : mutable_fields) {
+                if (!fld.is_overflow) continue;
+                uint32_t b_pg = fld.overflow_page_no;
+                uint64_t b_len = fld.overflow_real_size;
+                auto page_it = blob_pages.find(b_pg);
+                if (page_it != blob_pages.end()) {
+                    std::function<std::vector<uint8_t>(uint32_t)> reader =
+                        [&blob_pages](uint32_t pno) -> std::vector<uint8_t> {
+                            auto it = blob_pages.find(pno);
+                            return (it != blob_pages.end()) ? it->second : std::vector<uint8_t>{};
+                        };
+                    dbrecovery::innodb::BlobScanner b_scanner;
+                    auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
+                    if (!blob_bytes.empty() && (b_len == 0 || blob_bytes.size() >= b_len)) {
+                        if (b_len > 0 && blob_bytes.size() > b_len) {
+                            blob_bytes.resize(b_len);
+                        }
+                        fld.raw_bytes = std::move(blob_bytes);
+                        fld.is_overflow = false;
+                        fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
+                        fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                    } else {
+                        overflow_resolved = false;
+                        break;
+                    }
+                } else {
+                    overflow_resolved = false;
+                    break;
+                }
+            }
+        }
+
+        if (!overflow_resolved) continue;
 
         std::map<std::string, std::string> record;
-        for (size_t i = 0; i < rec.fields.size() && i < columns.size(); i++) {
+        for (size_t i = 0; i < mutable_fields.size() && i < columns.size(); i++) {
             const auto& col = columns[i];
-            if (rec.fields[i].is_null) {
+            if (mutable_fields[i].is_null) {
                 record[col.name] = "NULL";
             } else {
                 // Render through the shared cell encoder: binary columns become
@@ -1488,7 +1543,7 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
                 // put a NUL into the CSV row (a NUL makes the artifact
                 // unparseable and the round-trip comparison crash).
                 record[col.name] = dbrecovery::exporter::csv_column_value(
-                    rec.fields[i], col.is_binary);
+                    mutable_fields[i], col.is_binary);
             }
         }
         if (!record.empty()) {

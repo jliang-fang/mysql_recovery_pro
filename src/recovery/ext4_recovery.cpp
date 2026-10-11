@@ -11,6 +11,7 @@
 #include "dbrecovery/common/version_compat.hpp"
 #include "dbrecovery/catalog/schema_type_conversion.hpp"
 #include "dbrecovery/export/csv_cell.hpp"
+#include "dbrecovery/innodb/blob_scanner.hpp"
 
 #include <chrono>
 #include <cstring>
@@ -41,6 +42,7 @@ namespace ext4 {
 
 using dbrecovery::innodb::read_be;
 using dbrecovery::innodb::InnoDBIndexParser;
+using dbrecovery::innodb::FIL_PAGE_OFFSET;
 
 // InnoDB page constants
 constexpr uint16_t FIL_PAGE_INDEX = 0x45BF;
@@ -906,6 +908,10 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
             result.pages_by_index_id[index_id].push_back(std::move(block_info));
             result.pages_recovered++;
         }
+        for (auto& [pg_no, pdata] : blob_queue_) {
+            result.blob_pages_by_page_no.emplace(pg_no, std::move(pdata));
+        }
+        blob_queue_.clear();
         result.deleted_inodes_found = blocks_found_.load();
         result.total_blocks_scanned = blocks_scanned_.load();
         result.recovered_inodes = last_result_.recovered_inodes;
@@ -1082,7 +1088,8 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                     case 5:    // FIL_PAGE_IBUF_BITMAP
                     case 8:    // FIL_PAGE_TYPE_FSP_HDR
                     case 11:   // FIL_PAGE_TYPE_XDES
-                    case 0x45BD: // FIL_PAGE_TYPE_BLOB
+                    case 0x18: // FIL_PAGE_TYPE_BLOB (0x18 = 24, uncompressed BLOB in MySQL 8.0)
+                    case 0x45BD: // FIL_PAGE_TYPE_BLOB / FIL_PAGE_SDI_ZIP
                     case 0x45BF: // FIL_PAGE_INDEX
                     case 0x45BA: // FIL_PAGE_TYPE_ZBLOB (compressed BLOB)
                     case 0x45BB: // FIL_PAGE_TYPE_ZBLOB2 (compressed BLOB v2)
@@ -1095,6 +1102,13 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                 }
 
                 if (is_valid_type) {
+                    const bool is_blob_page = (page_type == 0x18 || page_type == 0x45BD ||
+                                               page_type == 0x45BA || page_type == 0x45BB);
+                    if (is_blob_page) {
+                        uint32_t blob_pg_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
+                        std::lock_guard<std::mutex> lock(result_mutex_);
+                        blob_queue_.emplace_back(blob_pg_no, page_data);
+                    }
                     // Try to read index_id from page (offset 66 for INDEX pages)
                     // For non-INDEX pages, use page_no (offset 4) as identifier
                     uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
@@ -1350,6 +1364,7 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
                                 case 5:    // FIL_PAGE_IBUF_BITMAP
                                 case 8:    // FIL_PAGE_TYPE_FSP_HDR
                                 case 11:   // FIL_PAGE_TYPE_XDES
+                                case 0x18: // FIL_PAGE_TYPE_BLOB (0x18 = 24, uncompressed BLOB in MySQL 8.0)
                                 case 0x45BD: // FIL_PAGE_TYPE_BLOB
                                 case 0x45BF: // FIL_PAGE_INDEX
                                 case 0x45BA: // FIL_PAGE_TYPE_ZBLOB
@@ -1361,6 +1376,13 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
                             }
 
                             if (is_valid_type) {
+                                const bool is_blob_page = (page_type == 0x18 || page_type == 0x45BD ||
+                                                           page_type == 0x45BA || page_type == 0x45BB);
+                                if (is_blob_page) {
+                                    uint32_t blob_pg_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
+                                    std::lock_guard<std::mutex> lock(result_mutex_);
+                                    blob_queue_.emplace_back(blob_pg_no, page_data);
+                                }
                                 uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
                                 if (index_id == 0 || index_id > 1000000000000) {
                                     uint32_t space_id = read_be<uint32_t>(page_data.data(), 34);
@@ -1513,6 +1535,8 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) !=
                 config_.target_index_ids.end();
 
+        const auto& blob_pages_by_page_no = scan_result.blob_pages_by_page_no;
+
         // A single page can be reachable twice on a raw source (live file plus
         // a write-ahead copy); byte-identical rows are collapsed so exported
         // row counts can match the source table.
@@ -1603,6 +1627,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     // record chain; brute-force scans fabricate plausible rows.
                     parser.set_strict(true);
                     parser.set_target_index_id(index_id);
+                    parser.set_retain_overflow_records(true);
                 }
                 auto records = parser.parse_page(page.data.data(), page.data.size(), page_no);
                 // The parser drops off-page-pointer rows itself; count them here
@@ -1614,16 +1639,49 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     if (rec.fields.empty() && rec.raw_data.empty()) continue;
                     // Skip records the parser itself marks as deleted history.
                     if (rec.is_deleted) continue;
-                    // Fail closed: a LOB column that still points off-page has
-                    // no payload in the record. Exporting it would write the
-                    // 20 pointer bytes as the column value, so the whole row
-                    // is dropped instead of being counted as recovered.
+                    // Attempt to reconstruct any off-page LOB columns using collected BLOB pages
+                    auto mutable_fields = rec.fields;
+                    bool overflow_resolved = true;
                     if (rec.has_unreconstructed_overflow()) {
+                        for (auto& fld : mutable_fields) {
+                            if (!fld.is_overflow) continue;
+                            uint32_t b_pg = fld.overflow_page_no;
+                            uint64_t b_len = fld.overflow_real_size;
+                            auto page_it = blob_pages_by_page_no.find(b_pg);
+                            if (page_it != blob_pages_by_page_no.end()) {
+                                std::function<std::vector<uint8_t>(uint32_t)> reader =
+                                    [&blob_pages_by_page_no](uint32_t pno) -> std::vector<uint8_t> {
+                                        auto it = blob_pages_by_page_no.find(pno);
+                                        return (it != blob_pages_by_page_no.end()) ? it->second : std::vector<uint8_t>{};
+                                    };
+                                dbrecovery::innodb::BlobScanner b_scanner;
+                                auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
+                                if (!blob_bytes.empty() && (b_len == 0 || blob_bytes.size() >= b_len)) {
+                                    if (b_len > 0 && blob_bytes.size() > b_len) {
+                                        blob_bytes.resize(b_len);
+                                    }
+                                    fld.raw_bytes = std::move(blob_bytes);
+                                    fld.is_overflow = false;
+                                    fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
+                                    fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                                } else {
+                                    overflow_resolved = false;
+                                    break;
+                                }
+                            } else {
+                                overflow_resolved = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Fail closed: if any LOB column still points off-page, drop the row
+                    if (!overflow_resolved) {
                         overflow_records_dropped++;
                         continue;
                     }
 
-                    if (use_schema_for_index && !rec.fields.empty()) {
+                    if (use_schema_for_index && !mutable_fields.empty()) {
                         // Schema-aware row: emit exactly one CSV field per declared
                         // column so the artifact always has index_columns.size()
                         // columns, and so embedded NUL bytes / commas cannot
@@ -1631,10 +1689,10 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                         std::string row;
                         for (size_t i = 0; i < index_columns.size(); i++) {
                             if (i > 0) row += ",";
-                            if (i >= rec.fields.size()) {
+                            if (i >= mutable_fields.size()) {
                                 continue;
                             }
-                            const auto& field = rec.fields[i];
+                            const auto& field = mutable_fields[i];
                             if (field.is_null) {
                                 row += "NULL";
                             } else {
@@ -1650,11 +1708,11 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     }
 
                     bool first_field = true;
-                    if (!rec.fields.empty()) {
+                    if (!mutable_fields.empty()) {
 
                         // If we have parsed fields, output them
-                        if (!rec.fields.empty()) {
-                            for (const auto& field : rec.fields) {
+                        if (!mutable_fields.empty()) {
+                            for (const auto& field : mutable_fields) {
                                 if (!first_field) out << ",";
                                 first_field = false;
 

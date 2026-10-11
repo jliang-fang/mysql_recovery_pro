@@ -732,6 +732,8 @@ public:
      * fabricate the column from pointer bytes. The whole record is dropped
      * and counted here instead.
      */
+    void set_retain_overflow_records(bool enable) { retain_overflow_records_ = enable; }
+
     uint64_t overflow_pointer_records_dropped() const {
         return overflow_pointer_records_dropped_;
     }
@@ -1029,6 +1031,9 @@ private:
     std::vector<uint32_t> offpage_physical_pos_;
     /// Records dropped by the off-page pointer fail-closed guard.
     uint64_t overflow_pointer_records_dropped_ = 0;
+    /// When true, records with off-page LOB pointers are returned to caller
+    /// for external chain reassembly instead of dropped immediately.
+    bool retain_overflow_records_ = false;
 
     uint64_t total_records_ = 0;
     uint64_t total_pages_ = 0;

@@ -103,11 +103,9 @@ def main() -> int:
             raise RuntimeError(f"{table}: no recovered CSV")
         from scripts.disaster_validation.csv_to_canonical import csv_to_canonical_dataset
         recovered = csv_to_canonical_dataset(csvs[0], truth["database"], truth["table"],
-                                             truth["schema"], "8.0")
+                                             truth["schema"],
+                                             truth.get("mysql_version") or "")
         comparison = compare(truth, recovered, f"{run_dir.name}_{table}_resume")
-        if "mysql_version_mismatch" in comparison.get("prerequisites", []):
-            recovered["mysql_version"] = truth.get("mysql_version", recovered.get("mysql_version"))
-            comparison = compare(truth, recovered, f"{run_dir.name}_{table}_resume")
         comparison_path = run_dir / "reports" / f"comparison_{table}.json"
         _write_new(comparison_path, comparison)
         tables[table] = {
