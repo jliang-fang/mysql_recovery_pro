@@ -425,10 +425,17 @@ inline std::vector<uint8_t> BlobScanner::read_first_blob_chain(
 
     std::vector<uint8_t> result;
 
-    // MySQL 5.7.44+ uses entry chain traversal
-    if (mysql_version_id > 50744) {
+    std::vector<uint8_t> probe_page = page_reader(first_page);
+    if (probe_page.size() < FIL_HEADER_SIZE + 8) {
+        return result;
+    }
+    const uint16_t probe_type = read_be<uint16_t>(probe_page.data(), FIL_PAGE_TYPE_ABS);
+
+    // Legacy 0x000A (FIL_PAGE_TYPE_BLOB = 10) pages use simple 8-byte header chain at offset 38..45
+    // Modern 0x0018 (FIL_PAGE_TYPE_BLOB_80 = 24) or >50744 without 0x000A uses LOB entry chain at offset 96
+    if (probe_type != 0x000A && (probe_type == 0x0018 || mysql_version_id > 50744)) {
         uint32_t current_page = first_page;
-        std::vector<uint8_t> first_page_data = page_reader(current_page);
+        std::vector<uint8_t> first_page_data = std::move(probe_page);
 
         if (first_page_data.size() < BLOB_ENTRY_HEADER_OFFSET + BLOB_ENTRY_HEADER_SIZE) {
             return result;

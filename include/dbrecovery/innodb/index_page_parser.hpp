@@ -1029,6 +1029,7 @@ private:
     /// BLOB pointer (record carries the 20-byte pointer, not the payload).
     /// Refilled for every record by read_null_and_varsizes().
     std::vector<uint32_t> offpage_physical_pos_;
+    std::map<uint32_t, uint32_t> offpage_inline_prefix_len_;
     /// Records dropped by the off-page pointer fail-closed guard.
     uint64_t overflow_pointer_records_dropped_ = 0;
     /// When true, records with off-page LOB pointers are returned to caller

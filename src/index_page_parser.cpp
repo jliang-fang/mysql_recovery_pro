@@ -1041,14 +1041,13 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                         uint32_t size = byte2 + (static_cast<uint32_t>(byte1 - 128) * 256);
 
                         // Check if this is an off-page blob pointer
-                        // DYNAMIC format: off_page_flag = 16384 (0x4000)
-                        // COMPACT format: off_page_flag = 17172 (0x4314)
-                        if (size >= off_page_flag_) {
-                            // Data is stored externally, inline is 20-byte pointer
-                            var_size_by_physical[col.physical_pos] = 20;  // blob pointer size
-                            // Remember which columns took this branch: the payload
-                            // itself is not in the record, so exporting the 20
-                            // pointer bytes as a value would fabricate data.
+                        // DYNAMIC format: off_page_flag = 16384 (0x4000) -> 20-byte pointer (+ optional inline prefix)
+                        // COMPACT format: size = 16384 + inline_prefix_len + 20 (typically 16384 + 768 + 20 = 17172)
+                        if (size >= OFF_PAGE_FLAG_DYNAMIC) {
+                            uint32_t inline_bytes = size - OFF_PAGE_FLAG_DYNAMIC;
+                            if (inline_bytes < 20) inline_bytes = 20;
+                            var_size_by_physical[col.physical_pos] = inline_bytes;
+                            offpage_inline_prefix_len_[col.physical_pos] = inline_bytes - 20;
                             if (std::find(offpage_physical_pos_.begin(),
                                           offpage_physical_pos_.end(),
                                           col.physical_pos) == offpage_physical_pos_.end()) {
@@ -1526,6 +1525,7 @@ std::optional<IndexRecord> InnoDBIndexParser::parse_user_record(
         field_size_guard_overflow_ = false;
         // Refilled by the read_null_and_varsizes() call immediately below.
         offpage_physical_pos_.clear();
+        offpage_inline_prefix_len_.clear();
         if (!is_compact) {
             // REDUNDANT's offset array also accounts for hidden clustered-index
             // system fields. The schema-only decoder cannot prove their exact
@@ -1663,13 +1663,15 @@ std::vector<IndexFieldValue> InnoDBIndexParser::extract_fields_with_schema(
         val.type = IndexFieldValue::Type::OVERFLOW_PTR;
         val.str_value.clear();
         if (val.raw_bytes.size() >= 20) {
-            // InnoDB external BLOB pointer: space_id(4) page_no(4) offset(2)
-            // flags(2) len_high(4) len_low(4), all big-endian in standard BTR_EXTERN_FIELD_REF.
-            auto be32 = [&val](size_t off) -> uint64_t {
-                return (static_cast<uint64_t>(val.raw_bytes[off]) << 24) |
-                       (static_cast<uint64_t>(val.raw_bytes[off + 1]) << 16) |
-                       (static_cast<uint64_t>(val.raw_bytes[off + 2]) << 8) |
-                       static_cast<uint64_t>(val.raw_bytes[off + 3]);
+            // InnoDB external BLOB pointer is ALWAYS the last 20 bytes of the inline field
+            // (preceded by 0 bytes in DYNAMIC format or 768 bytes of inline prefix in COMPACT/Antelope format):
+            // space_id(4) page_no(4) offset(2) flags(2) len_high(4) len_low(4), big-endian.
+            size_t ptr_base = val.raw_bytes.size() - 20;
+            auto be32 = [&val, ptr_base](size_t off) -> uint64_t {
+                return (static_cast<uint64_t>(val.raw_bytes[ptr_base + off]) << 24) |
+                       (static_cast<uint64_t>(val.raw_bytes[ptr_base + off + 1]) << 16) |
+                       (static_cast<uint64_t>(val.raw_bytes[ptr_base + off + 2]) << 8) |
+                       static_cast<uint64_t>(val.raw_bytes[ptr_base + off + 3]);
             };
             val.overflow_space_id = static_cast<uint32_t>(be32(0));
             val.overflow_page_no = static_cast<uint32_t>(be32(4));

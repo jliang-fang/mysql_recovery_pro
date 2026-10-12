@@ -65,6 +65,9 @@ using dbrecovery::innodb::InnoDBIndexParser;
 constexpr uint16_t FIL_PAGE_INDEX = 0x45BF;
 constexpr uint16_t FIL_PAGE_SDI = 0x45BE;
 constexpr uint16_t FIL_PAGE_SDI_ZIP = 0x45BD;
+constexpr uint16_t FIL_PAGE_TYPE_BLOB_5X = 0x000A; // 10: Uncompressed BLOB in MySQL 5.6/5.7
+constexpr uint16_t FIL_PAGE_TYPE_ZBLOB_5X = 0x000B; // 11: Compressed BLOB in MySQL 5.6/5.7
+constexpr uint16_t FIL_PAGE_TYPE_ZBLOB2_5X = 0x000C; // 12: Compressed BLOB2 in MySQL 5.6/5.7
 constexpr uint16_t FIL_PAGE_TYPE_BLOB_80 = 0x0018; // 24: Uncompressed BLOB in MySQL 8.0
 constexpr uint16_t FIL_PAGE_TYPE_BLOB = 0x45BD;   // Same as SDI_ZIP (BLOB page type)
 constexpr uint16_t FIL_PAGE_TYPE_ZBLOB = 0x45BA;  // Compressed BLOB page
@@ -367,6 +370,7 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
             result.total_inodes_scanned = inodes_scanned_.load();
             result.pages_recovered = last_result_.pages_recovered;
             result.pages_by_index_id = last_result_.pages_by_index_id;
+            result.blob_pages_by_page_no = last_result_.blob_pages_by_page_no;
             result.recovered_extents = last_result_.recovered_extents;
         }
     }
@@ -384,6 +388,7 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
         {
             std::lock_guard<std::mutex> lock(result_mutex_);
             result.pages_by_index_id = last_result_.pages_by_index_id;
+            result.blob_pages_by_page_no = last_result_.blob_pages_by_page_no;
             result.pages_recovered = last_result_.pages_recovered;
         }
 
@@ -406,6 +411,7 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
         {
             std::lock_guard<std::mutex> lock(result_mutex_);
             result.pages_by_index_id = last_result_.pages_by_index_id;
+            result.blob_pages_by_page_no = last_result_.blob_pages_by_page_no;
             result.pages_recovered = last_result_.pages_recovered;
         }
 
@@ -427,6 +433,7 @@ XfsScanResult XfsDiskCarver::scan(std::function<void(double, const std::string&)
         {
             std::lock_guard<std::mutex> lock(result_mutex_);
             result.pages_by_index_id = last_result_.pages_by_index_id;
+            result.blob_pages_by_page_no = last_result_.blob_pages_by_page_no;
             result.pages_recovered = last_result_.pages_recovered;
         }
 
@@ -1217,6 +1224,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         // Accept INDEX, SDI, BLOB, and ZBLOB pages
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
             page_type != FIL_PAGE_SDI_ZIP && page_type != FIL_PAGE_TYPE_BLOB_80 &&
+            page_type != FIL_PAGE_TYPE_BLOB_5X && page_type != FIL_PAGE_TYPE_ZBLOB_5X &&
+            page_type != FIL_PAGE_TYPE_ZBLOB2_5X &&
             page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
             page_type != FIL_PAGE_TYPE_ZBLOB2 &&
             page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
@@ -1227,6 +1236,21 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         if (!config_.target_space_ids.empty() &&
             std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
             continue;
+        }
+
+        // Extract page_no from FIL_PAGE_OFFSET (offset 4, 4 bytes)
+        uint32_t page_no = 0;
+        if (effective_size >= 8) {
+            page_no = read_be<uint32_t>(effective_data, 4);
+        }
+
+        const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_5X || page_type == FIL_PAGE_TYPE_ZBLOB_5X ||
+                                 page_type == FIL_PAGE_TYPE_ZBLOB2_5X || page_type == FIL_PAGE_TYPE_BLOB_80 ||
+                                 page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB ||
+                                 page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2);
+        if (is_blob_pg) {
+            std::lock_guard<std::mutex> lock(result_mutex_);
+            last_result_.blob_pages_by_page_no[page_no] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
         }
 
         // When target_index_ids is specified, only collect actual INDEX pages into pages_by_index_id
@@ -1253,23 +1277,8 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         }
 
         // For BLOB/ZBLOB pages, use pseudo index_id based on page type
-        if (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_TYPE_BLOB ||
-            page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2) {
-            index_id = 0xFFFF0000 | page_type;
-        }
-
-        // Extract page_no from FIL_PAGE_OFFSET (offset 4, 4 bytes)
-        uint32_t page_no = 0;
-        if (effective_size >= 8) {
-            page_no = read_be<uint32_t>(effective_data, 4);
-        }
-
-        const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_SDI_ZIP ||
-                                 page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
-                                 page_type == FIL_PAGE_TYPE_ZBLOB2);
         if (is_blob_pg) {
-            std::lock_guard<std::mutex> lock(result_mutex_);
-            last_result_.blob_pages_by_page_no[page_no] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
+            index_id = 0xFFFF0000 | page_type;
         }
 
         // Create page info
@@ -1401,16 +1410,16 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
         }
 
         // Scan each free extent for InnoDB pages
-        uint64_t ag_base = static_cast<uint64_t>(ag_index) * ag_blocks;
         for (const auto& [start_block, count] : free_extents) {
             if (should_stop_.load()) break;
 
-            // Scan at page-aligned offsets within this free extent
-            uint64_t extent_start = ag_base + start_block;
-            uint64_t extent_end = extent_start + count;
+            // Scan at block granularity within this free extent so tablespaces
+            // not aligned to page-size multiples inside the extent are recovered
+            uint64_t extent_start = start_block;
+            uint64_t extent_end = start_block + count;
 
             for (uint64_t fsblock = extent_start; fsblock + blocks_per_page <= extent_end;
-                 fsblock += blocks_per_page) {
+                 fsblock++) {
                 uint64_t disk_offset = fsblock * block_size;
                 std::vector<uint8_t> page_data(page_size);
 
