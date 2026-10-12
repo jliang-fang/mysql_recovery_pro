@@ -1216,10 +1216,21 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
 
         // Accept INDEX, SDI, BLOB, and ZBLOB pages
         if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-            page_type != FIL_PAGE_SDI_ZIP &&
+            page_type != FIL_PAGE_SDI_ZIP && page_type != FIL_PAGE_TYPE_BLOB_80 &&
             page_type != FIL_PAGE_TYPE_BLOB && page_type != FIL_PAGE_TYPE_ZBLOB &&
             page_type != FIL_PAGE_TYPE_ZBLOB2 &&
             page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
+            continue;
+        }
+
+        uint32_t page_space_id = (effective_size >= 38) ? read_be<uint32_t>(effective_data, 34) : 0;
+        if (!config_.target_space_ids.empty() &&
+            std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
+            continue;
+        }
+
+        // When target_index_ids is specified, only collect actual INDEX pages into pages_by_index_id
+        if (!config_.target_index_ids.empty() && page_type != FIL_PAGE_INDEX) {
             continue;
         }
 
@@ -1230,6 +1241,10 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
             if (index_id == 0) {
                 continue;  // Invalid index_id
             }
+            if (!config_.target_index_ids.empty() &&
+                std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) == config_.target_index_ids.end()) {
+                continue;
+            }
         }
 
         // For SDI pages, use pseudo index_id
@@ -1238,15 +1253,23 @@ std::vector<XfsPageInfo> XfsDiskCarver::parse_pages_from_extent(
         }
 
         // For BLOB/ZBLOB pages, use pseudo index_id based on page type
-        if (page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
-            page_type == FIL_PAGE_TYPE_ZBLOB2) {
+        if (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_TYPE_BLOB ||
+            page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2) {
             index_id = 0xFFFF0000 | page_type;
         }
 
-        // Extract page_no
+        // Extract page_no from FIL_PAGE_OFFSET (offset 4, 4 bytes)
         uint32_t page_no = 0;
-        if (effective_size >= 12) {
-            page_no = read_be<uint32_t>(effective_data, 8);
+        if (effective_size >= 8) {
+            page_no = read_be<uint32_t>(effective_data, 4);
+        }
+
+        const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_SDI_ZIP ||
+                                 page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+                                 page_type == FIL_PAGE_TYPE_ZBLOB2);
+        if (is_blob_pg) {
+            std::lock_guard<std::mutex> lock(result_mutex_);
+            last_result_.blob_pages_by_page_no[page_no] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
         }
 
         // Create page info
@@ -1423,19 +1446,48 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
 
                     // Accept BLOB and ZBLOB page types for comprehensive data recovery
                     if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
-                        page_type == FIL_PAGE_SDI_ZIP ||
+                        page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB_80 ||
                         page_type == FIL_PAGE_TYPE_BLOB || page_type == 0x45BD ||
                         page_type == FIL_PAGE_TYPE_ZBLOB || page_type == 0x45BA ||
                         page_type == FIL_PAGE_TYPE_ZBLOB2 || page_type == 0x45BB) {
+
+                        uint32_t page_space_id = (effective_size >= 38) ? read_be<uint32_t>(effective_data, 34) : 0;
+                        if (!config_.target_space_ids.empty() &&
+                            std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
+                            continue;
+                        }
+
+                        // When target_index_ids is specified, only collect actual INDEX pages into pages_by_index_id
+                        if (!config_.target_index_ids.empty() && page_type != FIL_PAGE_INDEX) {
+                            continue;
+                        }
+
                         uint64_t index_id = 0;
                         if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
                             index_id = read_be<uint64_t>(effective_data, 66);
+                            if (!config_.target_index_ids.empty() &&
+                                std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) == config_.target_index_ids.end()) {
+                                continue;
+                            }
                         }
                         if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
                             index_id = 0xFFFFFF00 | page_type;
                         }
-                        uint32_t page_no = (effective_size >= 12) ?
-                            read_be<uint32_t>(effective_data, 8) : 0;
+                        if (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_TYPE_BLOB ||
+                            page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2) {
+                            index_id = 0xFFFF0000 | page_type;
+                        }
+                        // Extract page_no from FIL_PAGE_OFFSET (offset 4, 4 bytes)
+                        uint32_t page_no = (effective_size >= 8) ?
+                            read_be<uint32_t>(effective_data, 4) : 0;
+
+                        const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_SDI_ZIP ||
+                                                 page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
+                                                 page_type == FIL_PAGE_TYPE_ZBLOB2);
+                        if (is_blob_pg) {
+                            std::lock_guard<std::mutex> lock(result_mutex_);
+                            last_result_.blob_pages_by_page_no[page_no] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
+                        }
 
                         if (index_id > 0 && index_id < 1000000000000ULL) {
                             XfsPageInfo page_info;
@@ -1819,6 +1871,11 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     uint32_t page_space_id = read_be<uint32_t>(effective_data, 34);
                     if (!config_.target_space_ids.empty() &&
                         std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
+                        continue;
+                    }
+
+                    // When target_index_ids is specified, only collect actual INDEX pages into pages_by_index_id
+                    if (!config_.target_index_ids.empty() && page_type != FIL_PAGE_INDEX) {
                         continue;
                     }
 
@@ -2310,6 +2367,7 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
             for (size_t index = 0; index < pages.size(); ++index) {
                 const auto& page_info = pages[index];
                 if (page_info.data.size() < config_.page_size) continue;
+                if (page_info.data.size() >= 66 && read_be<uint16_t>(page_info.data.data(), 64) != 0) continue;
                 const bool page_valid = dbrecovery::innodb::validate_page_checksum(
                     page_info.data.data(), config_.page_size, /*strict=*/false).is_valid;
                 checksum_batch.observe(page_valid);
@@ -2344,6 +2402,13 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                     uint32_t s_id = read_be<uint32_t>(page_info.data.data(), 34);
                     auto it = latest_page_idx.find(std::make_pair(s_id, p_no));
                     if (it != latest_page_idx.end() && it->second != page_index) {
+                        continue;
+                    }
+                }
+                // Only decode leaf pages (PAGE_LEVEL == 0)
+                if (page_info.data.size() >= 66) {
+                    const uint16_t page_level = read_be<uint16_t>(page_info.data.data(), 64);
+                    if (page_level != 0) {
                         continue;
                     }
                 }
