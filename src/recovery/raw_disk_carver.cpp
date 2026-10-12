@@ -673,8 +673,14 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 // index_id过滤逻辑 (支持TRUNCATE恢复)
                 bool should_collect = true;
 
+                uint32_t page_space_id = extract_space_id(page_data, config_.page_size);
+                if (!config_.target_space_ids.empty() &&
+                    std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
+                    should_collect = false;
+                }
+
                 // 如果指定了目标index_id，只收集这些
-                if (!config_.target_index_ids.empty()) {
+                if (should_collect && !config_.target_index_ids.empty()) {
                     should_collect = std::find(config_.target_index_ids.begin(),
                                               config_.target_index_ids.end(),
                                               index_id) != config_.target_index_ids.end();
@@ -1008,9 +1014,37 @@ RawDiskCarver::RecoveryResult RawDiskCarver::recover(
                 if (!page_valid) checksum_fails[index] = 1;
             }
         }
+        std::map<std::pair<uint32_t, uint32_t>, size_t> latest_page_idx;
+        if (matched_schema.has_value()) {
+            for (size_t index = 0; index < pages.size(); ++index) {
+                const auto& page_data = pages[index];
+                if (page_data.size() < config_.page_size || page_data.size() < 38) continue;
+                uint32_t p_no = read_be<uint32_t>(page_data.data(), 4);
+                uint32_t s_id = read_be<uint32_t>(page_data.data(), 34);
+                uint64_t lsn = read_be<uint64_t>(page_data.data(), 16);
+                auto key = std::make_pair(s_id, p_no);
+                auto it = latest_page_idx.find(key);
+                if (it == latest_page_idx.end()) {
+                    latest_page_idx[key] = index;
+                } else {
+                    uint64_t prev_lsn = read_be<uint64_t>(pages[it->second].data(), 16);
+                    if (lsn >= prev_lsn) {
+                        it->second = index;
+                    }
+                }
+            }
+        }
         for (size_t page_index = 0; page_index < pages.size(); ++page_index) {
             const auto& page_data = pages[page_index];
             if (matched_schema.has_value()) {
+                if (page_data.size() >= 38) {
+                    uint32_t p_no = read_be<uint32_t>(page_data.data(), 4);
+                    uint32_t s_id = read_be<uint32_t>(page_data.data(), 34);
+                    auto it = latest_page_idx.find(std::make_pair(s_id, p_no));
+                    if (it != latest_page_idx.end() && it->second != page_index) {
+                        continue;
+                    }
+                }
                 // Fail closed only on a checksum mismatch this batch proved
                 // meaningful: a page altered after it was written must not
                 // contribute a row that never existed.

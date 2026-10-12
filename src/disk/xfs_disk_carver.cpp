@@ -1816,6 +1816,12 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB_80 ||
                     page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
                     page_type == FIL_PAGE_TYPE_ZBLOB2) {
+                    uint32_t page_space_id = read_be<uint32_t>(effective_data, 34);
+                    if (!config_.target_space_ids.empty() &&
+                        std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
+                        continue;
+                    }
+
                     uint64_t index_id = 0;
                     if (page_type == FIL_PAGE_INDEX && effective_size >= 74) {
                         index_id = read_be<uint64_t>(effective_data, 66);
@@ -2310,9 +2316,37 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                 if (!page_valid) checksum_fails[index] = 1;
             }
         }
+        std::map<std::pair<uint32_t, uint32_t>, size_t> latest_page_idx;
+        if (use_schema) {
+            for (size_t index = 0; index < pages.size(); ++index) {
+                const auto& page_info = pages[index];
+                if (page_info.data.size() < config_.page_size || page_info.data.size() < 38) continue;
+                uint32_t p_no = read_be<uint32_t>(page_info.data.data(), 4);
+                uint32_t s_id = read_be<uint32_t>(page_info.data.data(), 34);
+                uint64_t lsn = read_be<uint64_t>(page_info.data.data(), 16);
+                auto key = std::make_pair(s_id, p_no);
+                auto it = latest_page_idx.find(key);
+                if (it == latest_page_idx.end()) {
+                    latest_page_idx[key] = index;
+                } else {
+                    uint64_t prev_lsn = read_be<uint64_t>(pages[it->second].data.data(), 16);
+                    if (lsn >= prev_lsn) {
+                        it->second = index;
+                    }
+                }
+            }
+        }
         for (size_t page_index = 0; page_index < pages.size(); ++page_index) {
             const auto& page_info = pages[page_index];
             if (use_schema) {
+                if (page_info.data.size() >= 38) {
+                    uint32_t p_no = read_be<uint32_t>(page_info.data.data(), 4);
+                    uint32_t s_id = read_be<uint32_t>(page_info.data.data(), 34);
+                    auto it = latest_page_idx.find(std::make_pair(s_id, p_no));
+                    if (it != latest_page_idx.end() && it->second != page_index) {
+                        continue;
+                    }
+                }
                 // Fail closed only on a checksum mismatch that this batch
                 // proved meaningful: a page altered after it was written must
                 // not contribute a row that never existed.

@@ -346,6 +346,7 @@ struct XfsConfig {
 
     // Index ID filtering
     std::vector<uint64_t> target_index_ids;    // only recover these index IDs
+    std::vector<uint32_t> target_space_ids;    // only recover these space IDs
     bool exclude_system_tables = false;         // skip mysql/performance_schema/information_schema
 };
 

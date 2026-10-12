@@ -1052,6 +1052,7 @@ inline int RecoveryCLI::run(int argc, char** argv) {
         parsed_mysql_version->version : dbrecovery::MySQLVersion::UNKNOWN;
 
     std::string target_index_ids_str = parser_.get_option("target-index-ids", "");
+    std::string target_space_ids_str = parser_.get_option("target-space-ids", "");
     bool exclude_system_tables = parser_.has_option("exclude-system-tables");
 
     // FRM file option for schema parsing
@@ -3407,6 +3408,17 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     std::cout << "\n";
                 }
             }
+            if (!target_space_ids_str.empty()) {
+                std::istringstream id_stream(target_space_ids_str);
+                std::string id_str;
+                while (std::getline(id_stream, id_str, ',')) {
+                    try {
+                        xfs_config.target_space_ids.push_back(static_cast<uint32_t>(std::stoul(id_str)));
+                    } catch (...) {
+                        std::cerr << "[WARN] Invalid target space ID: " << id_str << "\n";
+                    }
+                }
+            }
             xfs_config.exclude_system_tables = exclude_system_tables;
             if (exclude_system_tables) {
                 std::cout << "[INFO] Excluding system tables from recovery\n";
@@ -3571,6 +3583,15 @@ inline int RecoveryCLI::run(int argc, char** argv) {
                     } catch (...) {}
                 }
             }
+            if (!target_space_ids_str.empty()) {
+                std::istringstream iss(target_space_ids_str);
+                std::string id_str;
+                while (std::getline(iss, id_str, ',')) {
+                    try {
+                        ext4_config.target_space_ids.push_back(static_cast<uint32_t>(std::stoul(id_str)));
+                    } catch (...) {}
+                }
+            }
 
             ext4_recovery.set_config(ext4_config);
             if (raw_block_source) {
@@ -3719,6 +3740,13 @@ inline int RecoveryCLI::run(int argc, char** argv) {
             std::string id_str;
             while (std::getline(iss, id_str, ',')) {
                 try { config.target_index_ids.push_back(std::stoull(id_str)); } catch (...) {}
+            }
+        }
+        if (!target_space_ids_str.empty()) {
+            std::istringstream iss(target_space_ids_str);
+            std::string id_str;
+            while (std::getline(iss, id_str, ',')) {
+                try { config.target_space_ids.push_back(static_cast<uint32_t>(std::stoul(id_str))); } catch (...) {}
             }
         }
         carver.set_config(config);

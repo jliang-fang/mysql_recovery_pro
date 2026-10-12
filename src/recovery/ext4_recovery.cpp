@@ -1109,13 +1109,25 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                         std::lock_guard<std::mutex> lock(result_mutex_);
                         blob_queue_.emplace_back(blob_pg_no, page_data);
                     }
-                    // Try to read index_id from page (offset 66 for INDEX pages)
-                    // For non-INDEX pages, use page_no (offset 4) as identifier
-                    uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+                    uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
+                    if (!config_.target_space_ids.empty() &&
+                        std::find(config_.target_space_ids.begin(),
+                                  config_.target_space_ids.end(),
+                                  page_space_id) == config_.target_space_ids.end()) {
+                        continue;
+                    }
+
+                    // Try to read index_id from page (offset 66 for INDEX pages only)
+                    uint64_t index_id = (page_type == 0x45BF) ? read_be<uint64_t>(page_data.data(), 66) : 0;
                     if (index_id == 0 || index_id > 1000000000000) {
                         // For non-INDEX pages, use space_id/page_no as identifier
-                        uint32_t space_id = read_be<uint32_t>(page_data.data(), 34);
-                        index_id = space_id > 0 ? space_id : page_type;
+                        index_id = page_space_id > 0 ? page_space_id : page_type;
+                    }
+                    // When target_index_ids is specified, only collect actual INDEX pages
+                    // into pages_by_index_id so BLOB/FSP/INODE pages whose space_id or
+                    // payload happens to match a target index_id are not parsed as B-tree pages.
+                    if (!config_.target_index_ids.empty() && page_type != 0x45BF) {
+                        continue;
                     }
 
                     if (index_id > 0 && index_id < 1000000000000) {
@@ -1210,6 +1222,13 @@ void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std
                 // Only accept FIL_PAGE_INDEX (0x45BF) for allocated block scanning
                 // Allocated blocks with other page types are not useful for DELETE recovery
                 if (page_type == 0x45BF) {
+                    uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
+                    if (!config_.target_space_ids.empty() &&
+                        std::find(config_.target_space_ids.begin(),
+                                  config_.target_space_ids.end(),
+                                  page_space_id) == config_.target_space_ids.end()) {
+                        continue;
+                    }
                     uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
 
                     if (index_id > 0 && index_id < 1000000000000) {
@@ -1383,10 +1402,20 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
                                     std::lock_guard<std::mutex> lock(result_mutex_);
                                     blob_queue_.emplace_back(blob_pg_no, page_data);
                                 }
-                                uint64_t index_id = read_be<uint64_t>(page_data.data(), 66);
+                                uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
+                                if (!config_.target_space_ids.empty() &&
+                                    std::find(config_.target_space_ids.begin(),
+                                              config_.target_space_ids.end(),
+                                              page_space_id) == config_.target_space_ids.end()) {
+                                    continue;
+                                }
+
+                                uint64_t index_id = (page_type == 0x45BF) ? read_be<uint64_t>(page_data.data(), 66) : 0;
                                 if (index_id == 0 || index_id > 1000000000000) {
-                                    uint32_t space_id = read_be<uint32_t>(page_data.data(), 34);
-                                    index_id = space_id > 0 ? space_id : page_type;
+                                    index_id = page_space_id > 0 ? page_space_id : page_type;
+                                }
+                                if (!config_.target_index_ids.empty() && page_type != 0x45BF) {
+                                    continue;
                                 }
 
                                 if (index_id > 0 && index_id < 1000000000000) {
@@ -1577,10 +1606,42 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             }
         }
 
+        // Deduplicate physical page copies (doublewrite buffer / old freed copies)
+        // by keeping only the candidate with the highest LSN for each (space_id, page_no).
+        std::map<std::pair<uint32_t, uint32_t>, size_t> latest_page_idx;
+        if (use_schema_for_index) {
+            for (size_t index = 0; index < pages.size(); ++index) {
+                const auto& page = pages[index];
+                if (page.data.size() < config_.page_size || page.data.size() < 38) continue;
+                uint32_t p_no = read_be<uint32_t>(page.data.data(), 4);
+                uint32_t s_id = read_be<uint32_t>(page.data.data(), 34);
+                uint64_t lsn = read_be<uint64_t>(page.data.data(), 16);
+                auto key = std::make_pair(s_id, p_no);
+                auto it = latest_page_idx.find(key);
+                if (it == latest_page_idx.end()) {
+                    latest_page_idx[key] = index;
+                } else {
+                    uint64_t prev_lsn = read_be<uint64_t>(pages[it->second].data.data(), 16);
+                    if (lsn >= prev_lsn) {
+                        it->second = index;
+                    }
+                }
+            }
+        }
+
         // Parse each page and extract records
         for (size_t page_index = 0; page_index < pages.size(); ++page_index) {
             const auto& page = pages[page_index];
             if (page.data.size() < config_.page_size) continue;
+
+            if (use_schema_for_index && page.data.size() >= 38) {
+                uint32_t p_no = read_be<uint32_t>(page.data.data(), 4);
+                uint32_t s_id = read_be<uint32_t>(page.data.data(), 34);
+                auto it = latest_page_idx.find(std::make_pair(s_id, p_no));
+                if (it != latest_page_idx.end() && it->second != page_index) {
+                    continue;
+                }
+            }
 
             // With a declared schema only leaf pages (PAGE_LEVEL == 0) may be
             // decoded as rows. Interior pages hold node pointers, and decoding

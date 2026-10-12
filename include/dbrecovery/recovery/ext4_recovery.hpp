@@ -256,6 +256,7 @@ struct Ext4Config {
     bool verbose = false;
     uint64_t progress_interval_ms = 500;
     std::vector<uint64_t> target_index_ids;
+    std::vector<uint32_t> target_space_ids;
     bool exclude_system_tables = false;
 };
 

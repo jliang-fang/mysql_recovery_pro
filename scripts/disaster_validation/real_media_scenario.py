@@ -255,6 +255,8 @@ class RealMediaScenarioRunner:
             index_counts: dict[int, int] = {}
             with open(ibd_copy, "rb") as handle:
                 total_pages = handle.seek(0, 2) // self.page_size
+                handle.seek(34)
+                space_id = struct.unpack(">I", handle.read(4))[0]
                 for page in range(total_pages):
                     handle.seek(page * self.page_size + 24)
                     if struct.unpack(">H", handle.read(2))[0] == 0x45BF:
@@ -264,8 +266,9 @@ class RealMediaScenarioRunner:
             if not index_counts:
                 raise RuntimeError(f"No index pages found for {spec.name}")
             entry["clustered_index_id"] = max(index_counts.items(), key=lambda item: item[1])[0]
+            entry["space_id"] = space_id
             entry["ibd_copy"] = ibd_copy
-            print(f"[PERSIST] {spec.name}: clustered index ID {entry['clustered_index_id']}")
+            print(f"[PERSIST] {spec.name}: clustered index ID {entry['clustered_index_id']}, space ID {entry['space_id']}")
         run(["podman", "exec", self.container_name, "sync"], timeout=60)
         run(["sync"], timeout=60)
         self.run.transition("PERSISTED", {
@@ -328,6 +331,8 @@ class RealMediaScenarioRunner:
                 "--schema-file", str(schema_file),
                 "--target-index-ids", str(entry["clustered_index_id"]),
             ]
+            if entry.get("space_id") is not None:
+                carve_argv += ["--target-space-ids", str(entry["space_id"])]
             # Baseline leaves every tablespace allocated, so the scan must cover
             # allocated blocks rather than only freed ones.
             if self.scenario == "baseline":

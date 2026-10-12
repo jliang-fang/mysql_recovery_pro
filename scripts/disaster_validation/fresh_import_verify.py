@@ -359,9 +359,13 @@ def verify_case(case: Path, version: str, *, container_name: str | None = None) 
     container = container_name or f"fresh-import-{case.name}"
     if container_name is None:
         run(["podman", "rm", "-f", container], 60)
+    extra_flags = []
+    if version.startswith("5."):
+        extra_flags = ["--innodb-file-format=Barracuda", "--innodb-file-format-max=Barracuda",
+                       "--innodb-large-prefix=ON", "--explicit_defaults_for_timestamp=ON"]
     run(["podman", "run", "-d", "--name", container,
          "-v", f"{datadir}:/var/lib/mysql:Z",
-         "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes", f"localhost/mysql:{version}"], 300)
+         "-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes", f"localhost/mysql:{version}"] + extra_flags, 300)
 
     ready = False
     for _ in range(120):
