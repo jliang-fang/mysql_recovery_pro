@@ -610,6 +610,7 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
             bool quick_valid = (ptype == FIL_PAGE_INDEX ||
                                ptype == FIL_PAGE_SDI ||
                                ptype == FIL_PAGE_SDI_ZIP ||
+                               ptype == 0x000A || ptype == 0x000B || ptype == 0x000C ||
                                ptype == 0x0018 ||
                                ptype == FIL_PAGE_UNDO_LOG ||
                                ptype == FIL_PAGE_COMPRESSED ||
@@ -715,8 +716,9 @@ void RawDiskCarver::worker_thread(uint32_t worker_id,
                 }
             }
 
-            // Collect BLOB pages (0x18 = uncompressed BLOB in MySQL 8.0, 0x45BD = compressed/BLOB)
-            const bool is_blob = (ptype == 0x0018 || ptype == FIL_PAGE_SDI_ZIP ||
+            // Collect BLOB pages (0x0A..0x0C = 5.x BLOB/ZBLOB, 0x18 = uncompressed BLOB in MySQL 8.0, 0x45BD = compressed/BLOB)
+            const bool is_blob = (ptype == 0x000A || ptype == 0x000B || ptype == 0x000C ||
+                                  ptype == 0x0018 || ptype == FIL_PAGE_SDI_ZIP ||
                                   ptype == 0x45BA || ptype == 0x45BB);
             if (is_blob) {
                 uint32_t blob_pg_no = extract_page_no(page_data, config_.page_size);
@@ -1545,14 +1547,29 @@ std::vector<std::map<std::string, std::string>> RawDiskCarver::parse_records_wit
                         };
                     dbrecovery::innodb::BlobScanner b_scanner;
                     auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
-                    if (!blob_bytes.empty() && (b_len == 0 || blob_bytes.size() >= b_len)) {
-                        if (b_len > 0 && blob_bytes.size() > b_len) {
-                            blob_bytes.resize(b_len);
+                    if (!blob_bytes.empty()) {
+                        std::vector<uint8_t> full_payload;
+                        if (fld.raw_bytes.size() > 20) {
+                            full_payload.insert(full_payload.end(),
+                                                fld.raw_bytes.begin(),
+                                                fld.raw_bytes.end() - 20);
                         }
-                        fld.raw_bytes = std::move(blob_bytes);
-                        fld.is_overflow = false;
-                        fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
-                        fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                        full_payload.insert(full_payload.end(),
+                                            blob_bytes.begin(),
+                                            blob_bytes.end());
+                        uint64_t expected_total = (fld.raw_bytes.size() > 20 ? (fld.raw_bytes.size() - 20) : 0) + b_len;
+                        if (b_len == 0 || full_payload.size() >= expected_total) {
+                            if (expected_total > 0 && full_payload.size() > expected_total) {
+                                full_payload.resize(expected_total);
+                            }
+                            fld.raw_bytes = std::move(full_payload);
+                            fld.is_overflow = false;
+                            fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
+                            fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                        } else {
+                            overflow_resolved = false;
+                            break;
+                        }
                     } else {
                         overflow_resolved = false;
                         break;

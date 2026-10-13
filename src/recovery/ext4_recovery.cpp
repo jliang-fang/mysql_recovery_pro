@@ -1087,7 +1087,9 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                     case 2:    // FIL_PAGE_INODE
                     case 5:    // FIL_PAGE_IBUF_BITMAP
                     case 8:    // FIL_PAGE_TYPE_FSP_HDR
-                    case 11:   // FIL_PAGE_TYPE_XDES
+                    case 10:   // FIL_PAGE_TYPE_BLOB (0x0A, uncompressed BLOB in MySQL 5.6/5.7)
+                    case 11:   // FIL_PAGE_TYPE_XDES / ZBLOB
+                    case 12:   // FIL_PAGE_TYPE_ZBLOB2
                     case 0x18: // FIL_PAGE_TYPE_BLOB (0x18 = 24, uncompressed BLOB in MySQL 8.0)
                     case 0x45BD: // FIL_PAGE_TYPE_BLOB / FIL_PAGE_SDI_ZIP
                     case 0x45BF: // FIL_PAGE_INDEX
@@ -1102,7 +1104,8 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                 }
 
                 if (is_valid_type) {
-                    const bool is_blob_page = (page_type == 0x18 || page_type == 0x45BD ||
+                    const bool is_blob_page = (page_type == 10 || page_type == 11 || page_type == 12 ||
+                                               page_type == 0x18 || page_type == 0x45BD ||
                                                page_type == 0x45BA || page_type == 0x45BB);
                     if (is_blob_page) {
                         uint32_t blob_pg_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
@@ -1219,8 +1222,21 @@ void Ext4Recovery::scan_allocated_blocks(int fd, uint32_t group_index, const std
             if (page_data.size() >= 74) {
                 uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
 
-                // Only accept FIL_PAGE_INDEX (0x45BF) for allocated block scanning
-                // Allocated blocks with other page types are not useful for DELETE recovery
+                const bool is_blob_page = (page_type == 10 || page_type == 11 || page_type == 12 ||
+                                           page_type == 0x18 || page_type == 0x45BD ||
+                                           page_type == 0x45BA || page_type == 0x45BB);
+                if (is_blob_page) {
+                    uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
+                    if (config_.target_space_ids.empty() ||
+                        std::find(config_.target_space_ids.begin(),
+                                  config_.target_space_ids.end(),
+                                  page_space_id) != config_.target_space_ids.end()) {
+                        uint32_t blob_pg_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
+                        std::lock_guard<std::mutex> lock(result_mutex_);
+                        blob_queue_.emplace_back(blob_pg_no, page_data);
+                    }
+                }
+                // Only accept FIL_PAGE_INDEX (0x45BF) for allocated block scanning into index queues
                 if (page_type == 0x45BF) {
                     uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
                     if (!config_.target_space_ids.empty() &&
@@ -1382,7 +1398,9 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
                                 case 2:    // FIL_PAGE_INODE
                                 case 5:    // FIL_PAGE_IBUF_BITMAP
                                 case 8:    // FIL_PAGE_TYPE_FSP_HDR
-                                case 11:   // FIL_PAGE_TYPE_XDES
+                                case 10:   // FIL_PAGE_TYPE_BLOB (0x0A, uncompressed BLOB in MySQL 5.6/5.7)
+                                case 11:   // FIL_PAGE_TYPE_XDES / ZBLOB
+                                case 12:   // FIL_PAGE_TYPE_ZBLOB2
                                 case 0x18: // FIL_PAGE_TYPE_BLOB (0x18 = 24, uncompressed BLOB in MySQL 8.0)
                                 case 0x45BD: // FIL_PAGE_TYPE_BLOB
                                 case 0x45BF: // FIL_PAGE_INDEX
@@ -1395,7 +1413,8 @@ void Ext4Recovery::scan_deleted_inodes_safe(int fd, uint32_t group_index, const 
                             }
 
                             if (is_valid_type) {
-                                const bool is_blob_page = (page_type == 0x18 || page_type == 0x45BD ||
+                                const bool is_blob_page = (page_type == 10 || page_type == 11 || page_type == 12 ||
+                                                           page_type == 0x18 || page_type == 0x45BD ||
                                                            page_type == 0x45BA || page_type == 0x45BB);
                                 if (is_blob_page) {
                                     uint32_t blob_pg_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
@@ -1717,14 +1736,29 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                                     };
                                 dbrecovery::innodb::BlobScanner b_scanner;
                                 auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
-                                if (!blob_bytes.empty() && (b_len == 0 || blob_bytes.size() >= b_len)) {
-                                    if (b_len > 0 && blob_bytes.size() > b_len) {
-                                        blob_bytes.resize(b_len);
+                                if (!blob_bytes.empty()) {
+                                    std::vector<uint8_t> full_payload;
+                                    if (fld.raw_bytes.size() > 20) {
+                                        full_payload.insert(full_payload.end(),
+                                                            fld.raw_bytes.begin(),
+                                                            fld.raw_bytes.end() - 20);
                                     }
-                                    fld.raw_bytes = std::move(blob_bytes);
-                                    fld.is_overflow = false;
-                                    fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
-                                    fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                                    full_payload.insert(full_payload.end(),
+                                                        blob_bytes.begin(),
+                                                        blob_bytes.end());
+                                    uint64_t expected_total = (fld.raw_bytes.size() > 20 ? (fld.raw_bytes.size() - 20) : 0) + b_len;
+                                    if (b_len == 0 || full_payload.size() >= expected_total) {
+                                        if (expected_total > 0 && full_payload.size() > expected_total) {
+                                            full_payload.resize(expected_total);
+                                        }
+                                        fld.raw_bytes = std::move(full_payload);
+                                        fld.is_overflow = false;
+                                        fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
+                                        fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                                    } else {
+                                        overflow_resolved = false;
+                                        break;
+                                    }
                                 } else {
                                     overflow_resolved = false;
                                     break;

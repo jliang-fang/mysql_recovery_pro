@@ -1409,38 +1409,66 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
             }
         }
 
-        // Scan each free extent for InnoDB pages
+        // Scan each free extent for InnoDB pages using buffered chunk I/O
+        const size_t chunk_blocks = 1024; // 4 MB chunks
+        std::vector<uint8_t> chunk_buf(chunk_blocks * block_size);
         for (const auto& [start_block, count] : free_extents) {
             if (should_stop_.load()) break;
 
-            // Scan at block granularity within this free extent so tablespaces
-            // not aligned to page-size multiples inside the extent are recovered
             uint64_t extent_start = start_block;
             uint64_t extent_end = start_block + count;
+            if (extent_end < extent_start + blocks_per_page) continue;
 
-            for (uint64_t fsblock = extent_start; fsblock + blocks_per_page <= extent_end;
-                 fsblock++) {
-                uint64_t disk_offset = fsblock * block_size;
-                std::vector<uint8_t> page_data(page_size);
+            for (uint64_t chunk_start_blk = extent_start;
+                 chunk_start_blk + blocks_per_page <= extent_end && !should_stop_.load(); ) {
+                uint64_t rem_blocks = extent_end - chunk_start_blk;
+                uint64_t read_blocks = std::min<uint64_t>(rem_blocks, chunk_blocks);
+                if (read_blocks < blocks_per_page) break;
 
-                if (!bounded_pread(fd, source_size_, page_data.data(), page_size, disk_offset)) {
+                size_t read_bytes = static_cast<size_t>(read_blocks) * block_size;
+                uint64_t chunk_disk_offset = chunk_start_blk * block_size;
+                if (!bounded_pread(fd, source_size_, chunk_buf.data(), read_bytes, chunk_disk_offset)) {
+                    chunk_start_blk += (read_blocks > blocks_per_page) ? (read_blocks - blocks_per_page + 1) : 1;
                     continue;
                 }
 
-                blocks_scanned.fetch_add(1);
+                // If completely zeroed, skip this chunk quickly
+                bool all_zero = true;
+                const uint64_t* u64_ptr = reinterpret_cast<const uint64_t*>(chunk_buf.data());
+                size_t u64_count = read_bytes / sizeof(uint64_t);
+                for (size_t z = 0; z < u64_count; z += 64) { // check every 512 bytes
+                    if (u64_ptr[z] != 0 || u64_ptr[z + 2] != 0 || u64_ptr[z + 3] != 0) {
+                        all_zero = false;
+                        break;
+                    }
+                }
+                if (all_zero) {
+                    chunk_start_blk += (read_blocks > blocks_per_page) ? (read_blocks - blocks_per_page + 1) : 1;
+                    continue;
+                }
 
-                if (page_data.size() >= 26) {
-                    uint16_t page_type = read_be<uint16_t>(page_data.data(), FIL_PAGE_TYPE_ABS);
+                uint64_t max_sub_blk = read_blocks - blocks_per_page;
+                for (uint64_t sub_blk = 0; sub_blk <= max_sub_blk; ) {
+                    const uint8_t* raw_page = chunk_buf.data() + sub_blk * block_size;
+                    uint64_t disk_offset = (chunk_start_blk + sub_blk) * block_size;
+                    blocks_scanned.fetch_add(1);
 
-                    // Try compressed page detection
+                    // Quick check: LSN at offset 16 must be non-zero for valid InnoDB pages
+                    uint64_t lsn = read_be<uint64_t>(raw_page, 16);
+                    if (lsn == 0) {
+                        sub_blk++;
+                        continue;
+                    }
+
+                    uint16_t page_type = read_be<uint16_t>(raw_page, FIL_PAGE_TYPE_ABS);
+
+                    // Try compressed page detection only when page_type is compressed
                     std::vector<uint8_t> decompressed;
-                    const uint8_t* effective_data = page_data.data();
+                    const uint8_t* effective_data = raw_page;
                     size_t effective_size = page_size;
 
-                    if (page_type != FIL_PAGE_INDEX && page_type != FIL_PAGE_SDI &&
-                        page_type != FIL_PAGE_SDI_ZIP &&
-                        page_type != FIL_PAGE_COMPRESSED && page_type != FIL_PAGE_COMPRESSED_AND_ENCRYPTED) {
-                        auto decomp = try_decompress_page(page_data.data(), page_size);
+                    if (page_type == FIL_PAGE_COMPRESSED) {
+                        auto decomp = try_decompress_page(raw_page, page_size);
                         if (!decomp.empty() && decomp.size() >= FIL_PAGE_TYPE_ABS + 2) {
                             uint16_t decomp_type = read_be<uint16_t>(decomp.data(), FIL_PAGE_TYPE_ABS);
                             if (decomp_type == FIL_PAGE_INDEX || decomp_type == FIL_PAGE_SDI ||
@@ -1456,6 +1484,8 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                     // Accept BLOB and ZBLOB page types for comprehensive data recovery
                     if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
                         page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB_80 ||
+                        page_type == FIL_PAGE_TYPE_BLOB_5X || page_type == FIL_PAGE_TYPE_ZBLOB_5X ||
+                        page_type == FIL_PAGE_TYPE_ZBLOB2_5X ||
                         page_type == FIL_PAGE_TYPE_BLOB || page_type == 0x45BD ||
                         page_type == FIL_PAGE_TYPE_ZBLOB || page_type == 0x45BA ||
                         page_type == FIL_PAGE_TYPE_ZBLOB2 || page_type == 0x45BB) {
@@ -1463,11 +1493,26 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                         uint32_t page_space_id = (effective_size >= 38) ? read_be<uint32_t>(effective_data, 34) : 0;
                         if (!config_.target_space_ids.empty() &&
                             std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
+                            sub_blk++;
                             continue;
+                        }
+
+                        // Extract page_no from FIL_PAGE_OFFSET (offset 4, 4 bytes)
+                        uint32_t page_no = (effective_size >= 8) ?
+                            read_be<uint32_t>(effective_data, 4) : 0;
+
+                        const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_5X || page_type == FIL_PAGE_TYPE_ZBLOB_5X ||
+                                                 page_type == FIL_PAGE_TYPE_ZBLOB2_5X || page_type == FIL_PAGE_TYPE_BLOB_80 ||
+                                                 page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB ||
+                                                 page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2);
+                        if (is_blob_pg) {
+                            std::lock_guard<std::mutex> lock(result_mutex_);
+                            last_result_.blob_pages_by_page_no[page_no] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
                         }
 
                         // When target_index_ids is specified, only collect actual INDEX pages into pages_by_index_id
                         if (!config_.target_index_ids.empty() && page_type != FIL_PAGE_INDEX) {
+                            sub_blk += blocks_per_page;
                             continue;
                         }
 
@@ -1476,26 +1521,15 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                             index_id = read_be<uint64_t>(effective_data, 66);
                             if (!config_.target_index_ids.empty() &&
                                 std::find(config_.target_index_ids.begin(), config_.target_index_ids.end(), index_id) == config_.target_index_ids.end()) {
+                                sub_blk += blocks_per_page;
                                 continue;
                             }
                         }
                         if (page_type == FIL_PAGE_SDI || page_type == FIL_PAGE_SDI_ZIP) {
                             index_id = 0xFFFFFF00 | page_type;
                         }
-                        if (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_TYPE_BLOB ||
-                            page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2) {
-                            index_id = 0xFFFF0000 | page_type;
-                        }
-                        // Extract page_no from FIL_PAGE_OFFSET (offset 4, 4 bytes)
-                        uint32_t page_no = (effective_size >= 8) ?
-                            read_be<uint32_t>(effective_data, 4) : 0;
-
-                        const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_80 || page_type == FIL_PAGE_SDI_ZIP ||
-                                                 page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
-                                                 page_type == FIL_PAGE_TYPE_ZBLOB2);
                         if (is_blob_pg) {
-                            std::lock_guard<std::mutex> lock(result_mutex_);
-                            last_result_.blob_pages_by_page_no[page_no] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
+                            index_id = 0xFFFF0000 | page_type;
                         }
 
                         if (index_id > 0 && index_id < 1000000000000ULL) {
@@ -1514,9 +1548,14 @@ void XfsDiskCarver::scan_free_blocks(std::function<void(double, const std::strin
                                 last_result_.pages_recovered++;
                             }
                             pages_found.fetch_add(1);
+                            sub_blk += blocks_per_page;
+                            continue;
                         }
                     }
+                    sub_blk++;
                 }
+
+                chunk_start_blk += (read_blocks > blocks_per_page) ? (read_blocks - blocks_per_page + 1) : 1;
             }
         }
 
@@ -1875,12 +1914,24 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
 
                 if (page_type == FIL_PAGE_INDEX || page_type == FIL_PAGE_SDI ||
                     page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB_80 ||
+                    page_type == FIL_PAGE_TYPE_BLOB_5X || page_type == FIL_PAGE_TYPE_ZBLOB_5X ||
+                    page_type == FIL_PAGE_TYPE_ZBLOB2_5X ||
                     page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
                     page_type == FIL_PAGE_TYPE_ZBLOB2) {
                     uint32_t page_space_id = read_be<uint32_t>(effective_data, 34);
                     if (!config_.target_space_ids.empty() &&
                         std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), page_space_id) == config_.target_space_ids.end()) {
                         continue;
+                    }
+
+                    const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_5X || page_type == FIL_PAGE_TYPE_ZBLOB_5X ||
+                                             page_type == FIL_PAGE_TYPE_ZBLOB2_5X || page_type == 0x0018 ||
+                                             page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB ||
+                                             page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2);
+                    if (is_blob_pg) {
+                        uint32_t b_pno = read_be<uint32_t>(effective_data, 4);
+                        std::lock_guard<std::mutex> lock(result_mutex_);
+                        last_result_.blob_pages_by_page_no[b_pno] = std::vector<uint8_t>(effective_data, effective_data + effective_size);
                     }
 
                     // When target_index_ids is specified, only collect actual INDEX pages into pages_by_index_id
@@ -1901,9 +1952,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                         index_id = 0xFFFFFF00 | page_type;
                     }
 
-                    if (page_type == FIL_PAGE_TYPE_BLOB_80 ||
-                        page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
-                        page_type == FIL_PAGE_TYPE_ZBLOB2) {
+                    if (is_blob_pg) {
                         index_id = 0xFFFFFF00 | page_type;
                     }
 
@@ -1921,14 +1970,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     page_info.data.resize(effective_size);
                     std::memcpy(page_info.data.data(), effective_data, effective_size);
 
-                    const bool is_blob_pg = (page_type == 0x0018 || page_type == FIL_PAGE_SDI_ZIP ||
-                                             page_type == FIL_PAGE_TYPE_BLOB || page_type == FIL_PAGE_TYPE_ZBLOB ||
-                                             page_type == FIL_PAGE_TYPE_ZBLOB2);
-
                     std::lock_guard<std::mutex> lock(result_mutex_);
-                    if (is_blob_pg) {
-                        last_result_.blob_pages_by_page_no[page_info.page_no] = page_info.data;
-                    }
                     last_result_.pages_by_index_id[index_id].push_back(std::move(page_info));
                     last_result_.pages_recovered++;
                     pages_found.fetch_add(1);
@@ -2817,14 +2859,29 @@ std::vector<std::map<std::string, std::string>> XfsDiskCarver::parse_records_wit
                         };
                     dbrecovery::innodb::BlobScanner b_scanner;
                     auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
-                    if (!blob_bytes.empty() && (b_len == 0 || blob_bytes.size() >= b_len)) {
-                        if (b_len > 0 && blob_bytes.size() > b_len) {
-                            blob_bytes.resize(b_len);
+                    if (!blob_bytes.empty()) {
+                        std::vector<uint8_t> full_payload;
+                        if (fld.raw_bytes.size() > 20) {
+                            full_payload.insert(full_payload.end(),
+                                                fld.raw_bytes.begin(),
+                                                fld.raw_bytes.end() - 20);
                         }
-                        fld.raw_bytes = std::move(blob_bytes);
-                        fld.is_overflow = false;
-                        fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
-                        fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                        full_payload.insert(full_payload.end(),
+                                            blob_bytes.begin(),
+                                            blob_bytes.end());
+                        uint64_t expected_total = (fld.raw_bytes.size() > 20 ? (fld.raw_bytes.size() - 20) : 0) + b_len;
+                        if (b_len == 0 || full_payload.size() >= expected_total) {
+                            if (expected_total > 0 && full_payload.size() > expected_total) {
+                                full_payload.resize(expected_total);
+                            }
+                            fld.raw_bytes = std::move(full_payload);
+                            fld.is_overflow = false;
+                            fld.type = dbrecovery::innodb::IndexFieldValue::Type::STRING_VAL;
+                            fld.str_value = std::string(reinterpret_cast<const char*>(fld.raw_bytes.data()), fld.raw_bytes.size());
+                        } else {
+                            overflow_resolved = false;
+                            break;
+                        }
                     } else {
                         overflow_resolved = false;
                         break;

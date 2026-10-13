@@ -1045,7 +1045,11 @@ InnoDBIndexParser::FieldMetadata InnoDBIndexParser::read_null_and_varsizes(
                         // COMPACT format: size = 16384 + inline_prefix_len + 20 (typically 16384 + 768 + 20 = 17172)
                         if (size >= OFF_PAGE_FLAG_DYNAMIC) {
                             uint32_t inline_bytes = size - OFF_PAGE_FLAG_DYNAMIC;
-                            if (inline_bytes < 20) inline_bytes = 20;
+                            // Valid InnoDB inline lengths for external BLOBs are 20 (DYNAMIC)
+                            // or 20..788 (COMPACT/Antelope with up to 768-byte prefix).
+                            if (inline_bytes < 20 || inline_bytes > 788) {
+                                inline_bytes = 20;
+                            }
                             var_size_by_physical[col.physical_pos] = inline_bytes;
                             offpage_inline_prefix_len_[col.physical_pos] = inline_bytes - 20;
                             if (std::find(offpage_physical_pos_.begin(),
