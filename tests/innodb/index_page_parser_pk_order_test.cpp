@@ -247,6 +247,30 @@ TEST(PkOrderGuard, DropsLeadingRecordCorruptedAboveSuccessor) {
     EXPECT_EQ(parser.get_stats().key_order_violations_dropped, 1u);
 }
 
+TEST(PkOrderGuard, KeepsSignedBigintMinimumAtLeadingEdge) {
+    // INT64_MIN encodes to all-zero stored bytes.  It is the smallest valid
+    // signed BIGINT key and must survive the leading edge of a leaf chain.
+    std::vector<RecSpec> specs = {
+        {pk_storage(INT64_MIN), -10, "min"},
+        {pk_storage(-1), -1, "neg1"},
+        {pk_storage(1), 1, "one"},
+    };
+    auto page = build_leaf_page(specs, 22);
+
+    InnoDBIndexParser parser;
+    parser.set_columns(make_columns(), false, 1);
+    parser.set_strict(true);
+    parser.set_target_index_id(22);
+    parser.set_recover_deleted(false);
+
+    auto records = parser.parse_page(page.data(), page.size(), 88);
+    ASSERT_EQ(records.size(), 3u);
+    EXPECT_EQ(records[0].fields[0].int_value, INT64_MIN);
+    EXPECT_EQ(records[1].fields[0].int_value, -1);
+    EXPECT_EQ(records[2].fields[0].int_value, 1);
+    EXPECT_EQ(parser.key_order_violations_dropped(), 0u);
+}
+
 TEST(PkOrderGuard, KeepsMonotonicChain) {
     std::vector<RecSpec> specs = {
         {pk_storage(1), -1, "a1"},

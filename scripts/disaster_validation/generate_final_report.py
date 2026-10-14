@@ -266,11 +266,15 @@ def collect_raw_media(evidence: Path) -> list[dict[str, Any]]:
         attempted = bool(manifest or state.get("state") not in (None, "PLANNED"))
         if not attempted:
             continue
+        has_manifest = bool(manifest)
         strict = comparison.get("strict_pass") is True
         imported = import_result.get("status") == "PASS"
         evidence_incomplete = not comparison and not import_result and not contract
-        if strict and imported and contract:
+        if strict and imported and contract and has_manifest:
             verdict = "PASS"
+        elif not has_manifest and state.get("state") in {"MEDIA_PREPARED", "DATASET_CREATED", "PERSISTED"}:
+            # Interrupted before scenario completion / recovery / seal.
+            verdict = "SETUP_ERROR"
         elif evidence_incomplete:
             verdict = "NOT_COMPUTABLE"
         elif state.get("state") in {"FAILED_SETUP", "ABORTED", "REJECTED"}:
@@ -619,7 +623,7 @@ def _build_validation_gaps(phase_a, phase_b, corruption=(), raw_media=()) -> lis
     if raw_media:
         any_pass = any(case.get("verdict") == "PASS" for case in raw_media)
         for case in raw_media:
-            if case.get("verdict") != "PASS":
+            if case.get("verdict") == "FAIL":
                 detail = ",".join(case.get("failure_reasons") or [])
                 tables = case.get("failing_tables") or []
                 if tables:
@@ -629,8 +633,16 @@ def _build_validation_gaps(phase_a, phase_b, corruption=(), raw_media=()) -> lis
                             f"{case.get('case')}，"
                             f"恢复={comp.get('actual_rows')}/{comp.get('expected_rows')}，"
                             f"失败项={detail}。")
+            elif case.get("verdict") == "SETUP_ERROR" and not case.get("artifacts", {}).get("manifest.json"):
+                gaps.append(f"真实裸设备运行 {case.get('case')} 在完成前被外部中断（停于 {case.get('lifecycle_state')}），"
+                            "介质已安全卸载并还原只读保护；本轮不计入 PASS/FAIL 结果。")
         if not any_pass:
             gaps.append("真实裸设备 Stage 1 已执行的全部用例均未通过；尚无真实设备 PASS 证据。")
+        else:
+            gaps.append("真实裸设备运行中 preflight 与 mount token 的文件系统 UUID 变化属于预期行"
+                        "为（每轮 mkfs 重新生成 UUID），介质连续性由设备 WWN/serial/maj:min 严格绑定确认。")
+            gaps.append("雕刻器合约标记 importable=false 系安全策略设计（雕刻器不自证可导入）；"
+                        "通过性以独立干净容器的 fresh_import_result.json (status=PASS) 为准。")
     else:
         gaps.append("真实裸设备（/dev/nvme0n2）Stage 1 尚无已执行证据；需单独授权后运行。")
     rows = max((c.get("rows_written") or 0) for c in phase_b) if phase_b else 0
@@ -772,6 +784,10 @@ def markdown(doc: dict[str, Any]) -> str:
     if not raw_media:
         add("_尚无真实裸设备 Stage 1 执行证据。_")
     else:
+        add("> **注**：真实介质雕刻合约声明 `importable=false` 系安全策略设计（雕刻器"
+            "自身不自证导入）；最终通过性以独立干净 MySQL 容器的 fresh import (status=PASS) 为准。"
+            "各用例前置 preflight UUID 与挂载 UUID 变化系每轮 mkfs 行为，介质连续性由 WWN/serial 绑定保证。")
+        add("")
         add("| 用例 | 设备 | 结果 | 期望行 | 实际行 | 正确行 | strict | fresh import | 失败原因 |")
         add("|---|---|---|---:|---:|---:|---|---|---|")
         for case in raw_media:

@@ -86,6 +86,26 @@ class RealMediaScenarioRunner:
         assert self.run is not None
         return self.run.root
 
+    def _safe_teardown_environment(self) -> None:
+        """Best-effort cleanup of containers, mounts, and read-only lock restoration."""
+        try:
+            run(["podman", "rm", "-f", self.container_name], timeout=60)
+        except Exception:
+            pass
+        try:
+            run(["podman", "network", "rm", "-f", self.network_name], timeout=60)
+        except Exception:
+            pass
+        try:
+            if self.mount_point.is_dir():
+                run(["umount", "-f", str(self.mount_point)], timeout=60)
+        except Exception:
+            pass
+        try:
+            run(["blockdev", "--setro", self.device_path], timeout=30)
+        except Exception:
+            pass
+
     def _authorize_and_execute(self, action: str, argv: list[str],
                                controlled_mount: bool = False, timeout: int = 180) -> None:
         if controlled_mount:
@@ -131,6 +151,9 @@ class RealMediaScenarioRunner:
             if result.returncode != 0 or value not in {"0", "1"}:
                 raise RuntimeError(f"Unable to verify device read-only state at {label}: {result.stderr}")
             return value
+
+        # 0a. Idempotent cleanup before preflight
+        self._safe_teardown_environment()
 
         # 0. Set device RW
         print("[SETUP] Setting device RW...")
@@ -434,9 +457,15 @@ class RealMediaScenarioRunner:
         if overall_pass:
             self.run.transition("IMPORT_VALIDATED", {"status": "PASS"})
         self.run.transition("REPORTED", {"verdict": final_verdict})
-        seal = self.run.seal({"verdict": final_verdict, "comparisons": comparisons,
-                              "import": import_res, "contracts": contracts,
-                              "invocation": invocation})
+        seal = self.run.seal({
+            "verdict": final_verdict,
+            "qualification_status": final_verdict,
+            "matrix_status_note": "matrix.status=PLANNED 为矩阵定义状态；资格赛运行结果以顶层 verdict/state 与 qualification_status 为准",
+            "comparisons": comparisons,
+            "import": import_res,
+            "contracts": contracts,
+            "invocation": invocation,
+        })
 
         print(f"=== Real Media Run Complete! Verdict: {final_verdict} (Seal: {seal}) ===")
         return {

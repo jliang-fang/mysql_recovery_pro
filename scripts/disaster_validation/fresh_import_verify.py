@@ -435,21 +435,30 @@ def verify_case(case: Path, version: str, *, container_name: str | None = None) 
             import_dir.mkdir(exist_ok=True)
             ddl_name = f"{table_label}_ddl.sql" if table_label else "ddl.sql"
             (import_dir / ddl_name).write_text(ddl + "\n", encoding="utf-8")
-            create_db = run(["podman", "exec", container, "mysql", "-uroot",
-                             "-e", "CREATE DATABASE IF NOT EXISTS `recovered_import`;"], 120)
+            create_db = None
+            for _attempt in range(5):
+                create_db = run(["podman", "exec", container, "mysql", "-uroot",
+                                 "-e", "CREATE DATABASE IF NOT EXISTS `recovered_import`;"], 120)
+                if create_db.returncode == 0:
+                    break
+                time.sleep(2 * (_attempt + 1))
             if create_db.returncode != 0:
                 results["artifacts"][table_label or "database"] = {
                     "status": "FAIL", "reason": "cannot create import database",
                     "stderr": create_db.stderr.strip()[:400]}
                 continue
-            reset_table = run(["podman", "exec", container, "mysql", "-uroot", "-e",
-                               "DROP TABLE IF EXISTS `recovered_import`.`recovered_table`;"], 120)
-            # The DDL must be executed under a utf8mb4 connection: the client's
-            # default charset is latin1, and a CREATE TABLE sent without the flag
-            # reinterprets every non-ASCII ENUM/SET member as latin1 bytes, so a
-            # later utf8mb4 INSERT of the real value is rejected with ERROR 1265.
-            ddl_run = run(["podman", "exec", container, "mysql", "-uroot",
-                           "--default-character-set=utf8mb4", "-e", ddl], 120)
+
+            reset_table = None
+            ddl_run = None
+            for _attempt in range(5):
+                reset_table = run(["podman", "exec", container, "mysql", "-uroot", "-e",
+                                   "DROP TABLE IF EXISTS `recovered_import`.`recovered_table`;"], 120)
+                ddl_run = run(["podman", "exec", container, "mysql", "-uroot",
+                               "--default-character-set=utf8mb4", "-e", ddl], 120)
+                if reset_table.returncode == 0 and ddl_run.returncode == 0:
+                    break
+                time.sleep(2 * (_attempt + 1))
+
             if reset_table.returncode != 0 or ddl_run.returncode != 0:
                 failed = reset_table if reset_table.returncode != 0 else ddl_run
                 results["artifacts"][table_label or "ddl"] = {

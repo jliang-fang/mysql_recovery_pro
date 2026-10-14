@@ -106,6 +106,58 @@ class GenerateFinalReportTest(unittest.TestCase):
             self.assertEqual(cases[0]["output_sha256"], "b")
             self.assertIn("corruption_matrix", cases[0]["minimal_repro"])
 
+    def test_collect_raw_media_interrupted_run_is_setup_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "raw_nvme_qualification"
+            case = root / "real-57-xfs-rm-rf-100k-interrupted"
+            (case / "environment").mkdir(parents=True)
+            (case / "run_state.json").write_text(json.dumps({
+                "run_id": case.name, "state": "MEDIA_PREPARED",
+                "matrix": {"version": "5.7", "filesystem": "xfs", "scenario": "rm-rf",
+                           "dataset_profile": "100k", "page_size": 16384, "row_format": "DYNAMIC",
+                           "status": "PLANNED"},
+                "events": [{"state": "PLANNED"}, {"state": "PRECHECKED"}, {"state": "MEDIA_PREPARED"}]
+            }), encoding="utf-8")
+            cases = report.collect_raw_media(root)
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0]["verdict"], "SETUP_ERROR")
+            self.assertEqual(cases[0]["lifecycle_state"], "MEDIA_PREPARED")
+
+    def test_collect_raw_media_sealed_pass_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "raw_nvme_qualification"
+            case = root / "real-57-xfs-truncate-100k-test"
+            (case / "reports").mkdir(parents=True)
+            (case / "recovery-output" / "t1").mkdir(parents=True)
+            (case / "run_state.json").write_text(json.dumps({
+                "state": "SEALED", "matrix": {"version": "5.7", "filesystem": "xfs",
+                                              "scenario": "truncate", "dataset_profile": "100k",
+                                              "page_size": 16384, "row_format": "DYNAMIC",
+                                              "status": "PLANNED"}
+            }), encoding="utf-8")
+            (case / "reports" / "comparison_t1.json").write_text(json.dumps({
+                "expected_rows": 100000, "actual_rows": 100000, "correct_rows": 100000,
+                "strict_pass": True, "field_mismatches": [], "false_positives": [], "false_negatives": []
+            }), encoding="utf-8")
+            (case / "recovery-output" / "t1" / "result.json").write_text(json.dumps({
+                "classification": "structured_recovery", "structured_rows": 100000,
+                "export_success": True, "importable": False, "details": {"device_path": "/dev/nvme0n2"}
+            }), encoding="utf-8")
+            (case / "reports" / "fresh_import_result.json").write_text(json.dumps({
+                "status": "PASS"
+            }), encoding="utf-8")
+            (case / "manifest.json").write_text(json.dumps({
+                "state": "SEALED", "verdict": "PASS",
+                "matrix": {"version": "5.7", "filesystem": "xfs", "scenario": "truncate",
+                           "dataset_profile": "100k", "page_size": 16384, "row_format": "DYNAMIC",
+                           "status": "PLANNED"}
+            }), encoding="utf-8")
+            cases = report.collect_raw_media(root)
+            self.assertEqual(len(cases), 1)
+            self.assertEqual(cases[0]["verdict"], "PASS")
+            self.assertEqual(cases[0]["status"], "ATTEMPTED_PASS")
+            self.assertTrue(cases[0]["comparison"]["strict_pass"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -909,7 +909,16 @@ Ext4ScanResult Ext4Recovery::scan(std::function<void(double, const std::string&)
             result.pages_recovered++;
         }
         for (auto& [pg_no, pdata] : blob_queue_) {
-            result.blob_pages_by_page_no.emplace(pg_no, std::move(pdata));
+            auto it = result.blob_pages_by_page_no.find(pg_no);
+            if (it == result.blob_pages_by_page_no.end()) {
+                result.blob_pages_by_page_no.emplace(pg_no, std::move(pdata));
+            } else {
+                uint64_t cur_lsn = (pdata.size() >= 24) ? read_be<uint64_t>(pdata.data(), 16) : 0;
+                uint64_t old_lsn = (it->second.size() >= 24) ? read_be<uint64_t>(it->second.data(), 16) : 0;
+                if (cur_lsn >= old_lsn) {
+                    it->second = std::move(pdata);
+                }
+            }
         }
         blob_queue_.clear();
         result.deleted_inodes_found = blocks_found_.load();
@@ -1104,6 +1113,14 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                 }
 
                 if (is_valid_type) {
+                    uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
+                    if (!config_.target_space_ids.empty() &&
+                        std::find(config_.target_space_ids.begin(),
+                                  config_.target_space_ids.end(),
+                                  page_space_id) == config_.target_space_ids.end()) {
+                        continue;
+                    }
+
                     const bool is_blob_page = (page_type == 10 || page_type == 11 || page_type == 12 ||
                                                page_type == 0x18 || page_type == 0x45BD ||
                                                page_type == 0x45BA || page_type == 0x45BB);
@@ -1111,13 +1128,6 @@ void Ext4Recovery::scan_freed_blocks(int fd, uint32_t group_index, const std::ve
                         uint32_t blob_pg_no = read_be<uint32_t>(page_data.data(), FIL_PAGE_OFFSET);
                         std::lock_guard<std::mutex> lock(result_mutex_);
                         blob_queue_.emplace_back(blob_pg_no, page_data);
-                    }
-                    uint32_t page_space_id = read_be<uint32_t>(page_data.data(), 34);
-                    if (!config_.target_space_ids.empty() &&
-                        std::find(config_.target_space_ids.begin(),
-                                  config_.target_space_ids.end(),
-                                  page_space_id) == config_.target_space_ids.end()) {
-                        continue;
                     }
 
                     // Try to read index_id from page (offset 66 for INDEX pages only)
@@ -1589,6 +1599,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
         // a write-ahead copy); byte-identical rows are collapsed so exported
         // row counts can match the source table.
         std::set<std::string> seen_rows;
+        std::set<std::string> seen_pks;
 
         // Write header
         if (use_schema_for_index) {
@@ -1634,6 +1645,11 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                 if (page.data.size() < config_.page_size || page.data.size() < 38) continue;
                 uint32_t p_no = read_be<uint32_t>(page.data.data(), 4);
                 uint32_t s_id = read_be<uint32_t>(page.data.data(), 34);
+                if (!config_.target_space_ids.empty() &&
+                    std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), s_id) ==
+                        config_.target_space_ids.end()) {
+                    continue;
+                }
                 uint64_t lsn = read_be<uint64_t>(page.data.data(), 16);
                 auto key = std::make_pair(s_id, p_no);
                 auto it = latest_page_idx.find(key);
@@ -1656,6 +1672,11 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
             if (use_schema_for_index && page.data.size() >= 38) {
                 uint32_t p_no = read_be<uint32_t>(page.data.data(), 4);
                 uint32_t s_id = read_be<uint32_t>(page.data.data(), 34);
+                if (!config_.target_space_ids.empty() &&
+                    std::find(config_.target_space_ids.begin(), config_.target_space_ids.end(), s_id) ==
+                        config_.target_space_ids.end()) {
+                    continue;
+                }
                 auto it = latest_page_idx.find(std::make_pair(s_id, p_no));
                 if (it != latest_page_idx.end() && it->second != page_index) {
                     continue;
@@ -1688,10 +1709,11 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                 uint32_t page_no = static_cast<uint32_t>(page.disk_offset / config_.page_size);
 
                 // Detect MySQL version from page data
+                uint32_t version_int = 80000;
                 dbrecovery::MySQLVersion version = dbrecovery::MySQLVersionDetector::detect(
                     page.data.data(), page.data.size());
                 if (version != dbrecovery::MySQLVersion::UNKNOWN) {
-                    uint32_t version_int = dbrecovery::mysql_version_to_number(version);
+                    version_int = dbrecovery::mysql_version_to_number(version);
                     parser.set_mysql_version(version_int);
                 } else {
                     // Default to MySQL 8.0 if version cannot be detected
@@ -1735,7 +1757,7 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                                         return (it != blob_pages_by_page_no.end()) ? it->second : std::vector<uint8_t>{};
                                     };
                                 dbrecovery::innodb::BlobScanner b_scanner;
-                                auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, 80000);
+                                auto blob_bytes = b_scanner.read_first_blob_chain(reader, b_pg, version_int);
                                 if (!blob_bytes.empty()) {
                                     std::vector<uint8_t> full_payload;
                                     if (fld.raw_bytes.size() > 20) {
@@ -1777,6 +1799,19 @@ Ext4ScanResult Ext4Recovery::recover(const Ext4ScanResult& scan_result,
                     }
 
                     if (use_schema_for_index && !mutable_fields.empty()) {
+                        // Enforce Primary Key uniqueness for clustered index
+                        if (n_pk_cols > 0 && mutable_fields.size() >= n_pk_cols) {
+                            std::string pk_str;
+                            for (size_t k = 0; k < n_pk_cols; k++) {
+                                if (k > 0) pk_str += "\x1F";
+                                pk_str += dbrecovery::exporter::csv_column_value(
+                                    mutable_fields[k], index_columns[k].is_binary);
+                            }
+                            if (!seen_pks.insert(pk_str).second) {
+                                continue;  // Drop duplicate primary key from stale/historical pages
+                            }
+                        }
+
                         // Schema-aware row: emit exactly one CSV field per declared
                         // column so the artifact always has index_columns.size()
                         // columns, and so embedded NUL bytes / commas cannot

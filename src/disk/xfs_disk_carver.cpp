@@ -1925,7 +1925,7 @@ void XfsDiskCarver::signature_scan(std::function<void(double, const std::string&
                     }
 
                     const bool is_blob_pg = (page_type == FIL_PAGE_TYPE_BLOB_5X || page_type == FIL_PAGE_TYPE_ZBLOB_5X ||
-                                             page_type == FIL_PAGE_TYPE_ZBLOB2_5X || page_type == 0x0018 ||
+                                             page_type == FIL_PAGE_TYPE_ZBLOB2_5X || page_type == FIL_PAGE_TYPE_BLOB_80 ||
                                              page_type == FIL_PAGE_SDI_ZIP || page_type == FIL_PAGE_TYPE_BLOB ||
                                              page_type == FIL_PAGE_TYPE_ZBLOB || page_type == FIL_PAGE_TYPE_ZBLOB2);
                     if (is_blob_pg) {
@@ -2406,6 +2406,17 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
         // The same page can be reachable twice (live file plus write-ahead
         // copy), so byte-identical rows are collapsed before export.
         std::set<std::string> seen_rows;
+        std::set<std::string> seen_pks;
+        std::vector<std::string> pk_column_names;
+        if (external_schema_.has_value()) {
+            for (const auto& idx : external_schema_->indexes) {
+                if (idx.is_primary) {
+                    for (const auto& cname : idx.columns) {
+                        pk_column_names.push_back(cname);
+                    }
+                }
+            }
+        }
         // Calibrate the checksum validator against this index's pages first:
         // see ChecksumGateBatch. On an input whose page format the validator
         // does not model (MySQL 5.6/5.7 folded-LSN trailers), rejecting every
@@ -2474,6 +2485,18 @@ XfsScanResult XfsDiskCarver::recover(const XfsScanResult& scan_result,
                 // Schema-aware parsing
                 auto records = parse_records_with_schema_xfs(page_info.data, *external_schema_, index_id, scan_result.blob_pages_by_page_no);
                 for (auto& record : records) {
+                    if (!pk_column_names.empty()) {
+                        std::string pk_key;
+                        for (const auto& pk_name : pk_column_names) {
+                            auto it = record.find(pk_name);
+                            pk_key += (it == record.end()) ? "NULL" : it->second;
+                            pk_key.push_back('\x1F');
+                        }
+                        if (!seen_pks.insert(std::move(pk_key)).second) {
+                            continue; // Deduplicate duplicate primary key
+                        }
+                    }
+
                     std::string key;
                     for (const auto& col_name : ordered_column_names(*external_schema_)) {
                         auto it = record.find(col_name);
