@@ -1,147 +1,210 @@
-# MySQL Recovery Pro — User Guide & Engineering Practice Manual
+# MySQL Recovery Pro — User Guide
 
-## Table of Contents
-1. [Overview & Positioning](#1-overview--positioning)
-2. [Empirical Qualification & Key Benchmarks](#2-empirical-qualification--key-benchmarks)
-3. [Compilation & Dependencies](#3-compilation--dependencies)
-4. [Execution Modes & CLI Parameters](#4-execution-modes--cli-parameters)
-5. [Schema Definition & Index Binding Guidelines](#5-schema-definition--index-binding-guidelines)
-6. [Physical Block Device Safety Invariants](#6-physical-block-device-safety-invariants)
-7. [Forensic Contract Interpretation & Auditability](#7-forensic-contract-interpretation--auditability)
+This guide is the operational reference for MySQL Recovery Pro. It covers installation, input preparation, CLI modes, schema binding, output contracts, and evidence handling.
 
----
+> **Safety first:** never run a first recovery attempt against a mounted production filesystem. Acquire a sector image or use a verified read-only, unmounted source and write all outputs to another filesystem.
 
-## 1. Overview & Positioning
+## Contents
 
-**MySQL Recovery Pro** is an enterprise-grade forensic recovery engine engineered specifically for InnoDB storage architectures across **MySQL 5.6, 5.7, 8.0, 8.4 LTS, and 9.0 Innovation**.
+1. [Scope and verified support](#1-scope-and-verified-support)
+2. [Build and prerequisites](#2-build-and-prerequisites)
+3. [Choose a recovery mode](#3-choose-a-recovery-mode)
+4. [CLI reference](#4-cli-reference)
+5. [Schema and identifier binding](#5-schema-and-identifier-binding)
+6. [Output and independent validation](#6-output-and-independent-validation)
+7. [Safety checklist and troubleshooting](#7-safety-checklist-and-troubleshooting)
 
-The engine provides dual operational modes:
-- **Direct Tablespace Salvage**: Extraction from detached, corrupted, or truncated `.ibd` files.
-- **Physical Sector Carving**: Deep sector-level recovery directly from raw block devices (e.g., NVMe/SSD/HDD) following DROP, TRUNCATE, `rm -rf`, or severe filesystem damage.
+## 1. Scope and verified support
 
----
+The engine operates on InnoDB physical pages rather than an online SQL connection. It supports two primary inputs:
 
-## 2. Empirical Qualification & Key Benchmarks
+- a detached or damaged `.ibd` tablespace;
+- a disk image or raw block device containing deleted/freed tablespace pages.
 
-Qualified across a **200 GiB physical NVMe block device (`/dev/nvme0n2`)** under formal industrial and academic criteria:
+The completed qualification campaign covers MySQL 5.6, 5.7, 8.0, 8.4 LTS, and 9.0 Innovation, with ext4 and XFS filesystem scenarios. The dataset families include numeric, temporal, text/LOB, JSON, and composite-key columns. Qualification evidence is stored under `/app/mysql_recovery_artifacts` and is summarized in the [authoritative validation report](../../../mysql_recovery_artifacts/batch_authoritative/disaster_recovery_validation_report.md).
 
-- **Universal Engine Support**: Full qualification on **MySQL 5.6, 5.7, 8.0, 8.4 LTS, and 9.0 Innovation**;
-- **100% Zero-Loss Invariant**: Achieved **30/30 PASS (SEALED)** across ext4 and XFS for `DROP TABLE`, `TRUNCATE TABLE`, `rm -rf`, and `BASELINE` scenarios;
-- **Large-Scale Precision**: In 100k rows/table benchmark suites, achieved **1.0 Precision / 1.0 Recall, 0 field mismatches, 0 duplicate keys**;
-- **Full Clean-Instance Verification**: 100% of carved datasets passed fresh-instance re-import and round-trip comparison (`status: PASS`);
-- **Complex LOB & JSON Types**: Flawless reassembly of 5.4KB+ multi-chain external BLOBs, microsecond-precision timestamps, and native binary JSON trees.
+The validated result is a contract, not a row count. A clean result requires structural decoding, strict typed comparison, and—when structured export is claimed—independent fresh-instance import and read-back comparison.
 
----
+## 2. Build and prerequisites
 
-## 3. Compilation & Dependencies
+### Requirements
 
-### 3.1 Environment Requirements
-- Linux Kernel 5.4+ (RHEL 9 / Rocky Linux 9 / Ubuntu 22.04 LTS recommended)
-- Compiler: GCC/G++ 11.0+ or Clang 14.0+ (C++17/C++20 compliant)
-- Build System: CMake 3.20+
-- Dependencies: OpenSSL, zlib, liburing (optional for asynchronous block I/O)
+- Linux kernel 5.4 or later;
+- GCC/G++ 11+ or Clang 14+ with C++17 support;
+- CMake 3.20+;
+- OpenSSL and zlib development packages;
+- liburing is optional.
 
-### 3.2 Build Instructions
+### Build and local tests
+
 ```bash
-# Configure and compile in Release mode
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
-
-# Run test suite
 ctest --test-dir build --output-on-failure
 ```
 
----
+The local test suite validates parser and recovery components. It does not authorize operation on a real production device.
 
-## 4. Execution Modes & CLI Parameters
+## 3. Choose a recovery mode
 
-### 4.1 Direct Tablespace Mode (.ibd)
-For corrupted single tablespaces or damaged filesystem files:
+| Input or incident | Mode | Required preparation |
+|---|---|---|
+| Detached `.ibd` | Direct tablespace recovery | Preserve the original and work on a copy. |
+| `DROP TABLE` | `--disk-carving` or `.ibd` recovery | Identify `space_id` and clustered `index_id` if possible. |
+| `TRUNCATE TABLE` | `--disk-carving` | Stop all writes immediately. |
+| Deleted `.ibd` / `rm -rf` | `--disk-carving` | Prefer an image; later writes may overwrite pages. |
+| Damaged or truncated input | Bounded salvage | Expect rejected pages or evidence-only output. |
+
+### 3.1 Direct tablespace recovery
 
 ```bash
-./build/mysql_recovery_pro --ibd=/path/to/table.ibd \
-  --schema-file=/path/to/schema.json \
+./build/mysql_recovery_pro \
+  --ibd=/recovery/input/table.ibd \
+  --schema-file=/recovery/schema/table.json \
   --mysql-version=8.4 \
-  --output=/recovery/output \
-  --report-format=json,text,html \
-  --report-path=/recovery/output/recovery_report
+  --output=/recovery/output/table \
+  --report-format=json,text \
+  --report-path=/recovery/output/table/recovery_report
 ```
 
-### 4.2 Raw Block Device Carving Mode
-For `DROP TABLE`, `TRUNCATE TABLE`, `rm -rf`, or corrupted filesystem extents:
+### 3.2 Disk-image or block-device carving
+
+Start with a forensic image whenever possible:
 
 ```bash
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
+./build/mysql_recovery_pro \
+  --disk-carving \
+  --device-path=/recovery/media/disk.img \
   --filesystem=ext4 \
   --page-size=16384 \
-  --schema-file=/path/to/schema.json \
+  --schema-file=/recovery/schema/table.json \
   --target-index-ids=158 \
   --target-space-ids=2 \
-  --output=/recovery/output \
-  --result-json=/recovery/output/result.json
+  --output=/recovery/output/table \
+  --result-json=/recovery/output/table/result.json
 ```
 
-**Key Parameters**:
-- `--disk-carving`: Enables raw block device forensic scanning;
-- `--device-path`: Target raw device (`/dev/nvme0n2`, `/dev/sdb1`) or image file;
-- `--filesystem`: Filesystem awareness: `ext4` (block group bitmap parsing) or `xfs` (parallel allocation group scanning);
-- `--page-size`: InnoDB page size (`16384` default; supports `4096`, `8192`, `32768`, `65536`);
-- `--schema-file`: Path to external JSON schema descriptor (required for structured decoding);
-- `--target-index-ids`: Clustered index ID (essential for isolating target table rows from stale remnants);
-- `--target-space-ids`: Target tablespace space ID (filters out cross-tablespace page number collisions).
+For a real device, stop MySQL, unmount the filesystem, confirm the device identity, and apply the kernel read-only lock before starting:
 
----
+```bash
+sudo blockdev --setro /dev/<source-device>
+sudo blockdev --getro /dev/<source-device>  # expected: 1
+```
 
-## 5. Schema Definition & Index Binding Guidelines
+## 4. CLI reference
 
-JSON schema files provide exact physical column layout descriptors:
+The options below are the options used by the documented recovery paths. Run the built binary's help command for the complete feature inventory.
+
+| Option | Meaning |
+|---|---|
+| `--ibd=<path>` | Detached `.ibd`, image, or input tablespace path. |
+| `--disk-carving` | Enable physical disk/image carving. |
+| `--device-path=<path>` | Source image or raw device for carving. |
+| `--filesystem=ext4\|xfs` | Filesystem-aware candidate filtering. |
+| `--page-size=<bytes>` | InnoDB page size: 4096, 8192, 16384, 32768, or 65536 where supported. |
+| `--schema-file=<path>` | JSON schema for strict typed decoding. |
+| `--mysql-version=<version>` | Version hint such as `5.6`, `5.7`, `8.0`, `8.4`, or `9.0`. |
+| `--target-index-ids=<ids>` | Comma-separated clustered index IDs to retain. |
+| `--target-space-ids=<ids>` | Comma-separated tablespace IDs to retain. |
+| `--output=<dir>` | Separate output directory. |
+| `--result-json=<path>` | Machine-readable result contract. |
+| `--report-format=<fmt>` | Comma-separated `json`, `text`, and/or `html`. |
+| `--report-path=<path>` | Extensionless report base path. |
+
+Never infer success from process exit code alone. Inspect the result contract and independent comparison report.
+
+## 5. Schema and identifier binding
+
+A schema file describes the physical column order and decoding rules. `physical_pos` is the on-disk position; `ordinal_position` is the logical column order. The primary-key index is used for ordering and duplicate suppression.
 
 ```json
 {
-  "table_name": "t_orders",
+  "table_name": "orders",
   "columns": [
-    {"name": "id", "type": 9, "is_nullable": false, "is_unsigned": false, "char_length": 8, "physical_pos": 0, "ordinal_position": 0},
-    {"name": "order_code", "type": 16, "is_nullable": false, "is_unsigned": false, "char_length": 64, "physical_pos": 1, "ordinal_position": 1, "charset_id": 255},
-    {"name": "amount", "type": 21, "is_nullable": false, "is_unsigned": false, "char_length": 10, "physical_pos": 2, "ordinal_position": 2, "numeric_precision": 10, "numeric_scale": 2},
-    {"name": "created_at", "type": 19, "is_nullable": false, "is_unsigned": false, "char_length": 5, "physical_pos": 3, "ordinal_position": 3, "datetime_precision": 6},
-    {"name": "payload", "type": 27, "is_nullable": true, "is_unsigned": false, "char_length": 65535, "physical_pos": 4, "ordinal_position": 4, "charset_id": 255}
+    {"name": "id", "type": 9, "is_nullable": false,
+     "is_unsigned": false, "physical_pos": 0, "ordinal_position": 0},
+    {"name": "created_at", "type": 19, "is_nullable": false,
+     "physical_pos": 1, "ordinal_position": 1, "datetime_precision": 6},
+    {"name": "payload", "type": 27, "is_nullable": true,
+     "physical_pos": 2, "ordinal_position": 2, "char_length": 65535}
   ],
   "indexes": [
-    {"name": "PRIMARY", "is_primary": true, "is_unique": true, "columns": ["id"]}
+    {"name": "PRIMARY", "is_primary": true, "is_unique": true,
+     "columns": ["id"]}
   ]
 }
 ```
 
-- `type`: InnoDB internal storage type ID (9=BIGINT, 16=VARCHAR/VARBINARY, 19=DATETIME2, 20=TIME2, 21=NEWDECIMAL, 27=TEXT/BLOB, 31=JSON);
-- `physical_pos`: Zero-based column offset in on-disk physical storage;
-- `is_primary`: Designates primary key columns, enabling monotonic key order invariant checking and duplicate PK suppression.
+Common physical type IDs used in fixtures include:
 
----
+| ID | Physical type |
+|---:|---|
+| 9 | BIGINT |
+| 16 | VARCHAR/VARBINARY family |
+| 19 | DATETIME2 |
+| 20 | TIME2 |
+| 21 | NEWDECIMAL |
+| 27 | TEXT/BLOB |
+| 31 | Binary JSON |
 
-## 6. Physical Block Device Safety Invariants
+The `space_id` and clustered `index_id` filters are not cosmetic. They prevent stale pages from another table or an old allocation from becoming a false positive.
 
-To guarantee forensic integrity and prevent destructive writes:
+## 6. Output and independent validation
 
-1. **Kernel Read-Only Enforcement**:
-   The block device must be locked prior to execution:
-   ```bash
-   sudo blockdev --setro /dev/nvme0n2
-   ```
-2. **Unmounted Status Requirement**:
-   Target devices must not be mounted. Mounted devices are rejected by the safety gate to avoid write amplification and race conditions.
-3. **Hardware Identity Binding**:
-   Preflight verification binds the execution token to physical device attributes (Model, Serial, WWN, and Major:Minor).
+A normal output directory contains some or all of:
 
----
+- `result.json`: structured execution contract;
+- CSV/SQL output: emitted only when the decoder proves the contract is safe;
+- text/JSON/HTML report files;
+- `manifest.json` and `manifest.seal`: input, output, environment, and digest evidence;
+- comparison and fresh-import reports produced by the validation harness.
 
-## 7. Forensic Contract Interpretation & Auditability
+### Verdicts
 
-Upon completion, `result.json` records execution metrics adhering to **fail-closed principles**:
+| Verdict | Interpretation |
+|---|---|
+| `PASS` | Complete structured result passed strict comparison and the independent validation gate. |
+| `PASS_BOUNDED_STRUCTURED` | Intact data is structured correctly; damaged or missing regions are explicitly bounded. |
+| `PASS_EVIDENCE_ONLY` | Evidence is retained, but structured/importable export is intentionally refused. |
+| `UNSUPPORTED` | The requested physical combination is outside the validated scope. |
+| `SETUP_ERROR` | The fixture or environment stopped the run; it is not a product verdict. |
 
-- **`structured_rows`**: Number of cleanly decoded rows written to output;
-- **`overflow_records_dropped`**: Records dropped because an off-page LOB pointer could not be completely reassembled (strictly 0 in valid runs);
-- **`checksum_rejected_pages`**: Damaged pages rejected by the checksum gate;
-- **`importable: false`**:
-  **By-design forensic policy**. The engine does not self-attest importability (`reason: carving output requires independent validation before import`). Formal validation requires verification in an independent, clean-instance MySQL container via `fresh_import_verify.py`;
-- **`decoder_validated: false`**: Confirms data was salvaged via physical carving rather than read from an active DBMS instance.
+Important contract fields:
+
+- `structured_rows`: rows decoded under schema and structural checks;
+- `checksum_rejected_pages`: pages rejected by integrity gates;
+- `overflow_records_dropped`: rows whose external LOB could not be proven complete;
+- `importable: false`: intentional policy; the carving process does not self-certify importability;
+- `decoder_validated: false`: indicates physical carving rather than an online DBMS read.
+
+The final validation step is external: create a clean MySQL instance, apply the expected DDL, import the emitted data, read it back, and compare every field with the sealed truth set. A recovery report must not call a dataset importable without that boundary.
+
+## 7. Safety checklist and troubleshooting
+
+### Before scanning
+
+- [ ] MySQL is stopped and no process can write to the source.
+- [ ] The source filesystem is unmounted.
+- [ ] The source device model, serial, WWN, and major/minor identity are recorded.
+- [ ] A forensic image or read-only source is used.
+- [ ] Output, temporary files, and logs are on a different filesystem.
+- [ ] Schema, `space_id`, and clustered `index_id` are recorded.
+
+### If no rows are exported
+
+Check the page size, row format/version hint, schema physical order, target IDs, and checksum result. Evidence-only output is expected for encrypted or unsupported compressed layouts; it is safer than exporting shifted values.
+
+### If rows are missing
+
+Check `checksum_rejected_pages`, LOB overflow counters, media coverage, and whether blocks were overwritten after the incident. A missing row is not a field mismatch; the report must keep those quantities separate.
+
+### If fresh import fails
+
+Treat the result as unqualified until the schema, SQL/CSV escaping, character set, NULL handling, and comparison report are inspected. Do not “repair” the recovered data manually and then claim a clean recovery.
+
+## Related documents
+
+- [Disaster recovery field guide](DISASTER_RECOVERY_GUIDE.md)
+- [Implementation principles](IMPLEMENTATION_PRINCIPLES.md)
+- [Chinese user guide](../zh/USER_GUIDE_PRO.md)
+- [Authoritative validation report](../../../mysql_recovery_artifacts/batch_authoritative/disaster_recovery_validation_report.md)

@@ -1,240 +1,194 @@
-# MySQL 灾难恢复实战与物理取证指南
+# MySQL 灾难恢复实战指南
+
+本指南介绍事故发生后的第一响应流程，以及两条主要物理恢复路径：独立表空间解析和文件系统感知雕刻。原则只有一个：先保护源介质，再恢复；所有恢复结果在独立干净 MySQL 实例验证前都只能视为取证证据。
 
 ## 目录
-1. [执行原理与物理擦除机理](#1-执行原理与物理擦除机理)
-2. [TRUNCATE TABLE 恢复实战](#2-truncate-table-恢复实战)
-3. [DROP TABLE 恢复实战](#3-drop-table-恢复实战)
-4. [rm -rf 表空间文件删除恢复](#4-rm--rf-表空间文件删除恢复)
-5. [文件系统物理差异：ext4 vs XFS](#5-文件系统物理差异ext4-vs-xfs)
-6. [Schema 与索引约束引导恢复](#6-schema-与索引约束引导恢复)
-7. [MySQL 5.6 至 9.0 物理格式差异解析](#7-mysql-56-至-90-物理格式差异解析)
-8. [真实裸物理设备（/dev/nvme0n2）全矩阵测试实证](#8-真实裸物理设备devnvme0n2全矩阵测试实证)
-9. [物理损坏注入与 Fail-Closed 边界](#9-物理损坏注入与-fail-closed-边界)
 
----
+1. [事故响应与物理不变量](#1-事故响应与物理不变量)
+2. [通用准备流程](#2-通用准备流程)
+3. [恢复操作](#3-恢复操作)
+4. [文件系统感知雕刻](#4-文件系统感知雕刻)
+5. [Schema、SpaceID 与 IndexID](#5-schema-spaceid-与-indexid)
+6. [验证与证据封存](#6-验证与证据封存)
+7. [格式支持与 Fail-Closed 边界](#7-格式支持与-fail-closed-边界)
 
-## 1. 执行原理与物理擦除机理
+## 1. 事故响应与物理不变量
 
-当 MySQL 发生数据灾难（DROP、TRUNCATE、rm -rf）时，InnoDB 与操作系统的物理擦除遵循严格的计算机存储系统行为：
+`DROP TABLE`、`TRUNCATE TABLE` 和 `rm -rf` 会改变 InnoDB 与文件系统元数据，但不保证旧扇区立即被清零。只有在旧页仍可读取且结构仍可识别时，物理恢复才有意义。
 
-```
-[在线业务写入] ──► [Buffer Pool / Redo Log] ──► [磁盘扇区持久化]
-                                                       │
-                                   ┌───────────────────┴───────────────────┐
-                                   ▼                                       ▼
-                       【逻辑灾难：DROP / TRUNCATE】               【物理灾难：rm -rf】
-                                   │                                       │
-                      InnoDB 将 Pages 标记为 FREE             VFS 解除目录项 (dentry unlink)
-                      文件系统释放对应 Extent 块               Inode 计数归零，块位图置 0 (FREE)
-                                   │                                       │
-                                   └───────────────────┬───────────────────┘
-                                                       ▼
-                                          【物理扇区残留：数据并未擦除】
-                                                       │
-                                       ┌───────────────┴───────────────┐
-                                       ▼                               ▼
-                             [及时锁定: blockdev --setro]     [持续写入: 覆盖破坏]
-                                       │                               │
-                                       ▼                               ▼
-                             【物理扇区雕刻 100% 恢复】             【不可逆物理损坏】
+```text
+停止写入
+   │
+   ├── 制作扇区镜像，或锁定源设备为只读
+   ├── 卸载源文件系统
+   ├── 记录设备身份与证据哈希
+   └── 在另一文件系统中执行恢复
+           │
+           ├── 页/记录/Schema 严格校验
+           ├── 仅在安全时输出有界 CSV/SQL
+           └── 独立干净实例导入与逐字段比对
 ```
 
-1. **TRUNCATE TABLE 物理机理**：
-   - **MySQL 8.0+**：在数据字典服务（Data Dictionary）中执行类似原子 DDL，删除原有的 IBD 文件并重建新的同名表空间，分配全新的 `space_id`。旧表空间的数据页在文件系统层面被释放为 Free Blocks，但在物理扇区未被覆写前数据完整残留。
-   - **MySQL 5.6 / 5.7**：采用 **Fast Truncate** 模式，直接在表空间内部将所有属于旧索引树的页释放回 `PAGE_FREE` / Free Inode 链表。原 `.ibd` 内部页数据未被清零，物理介质扇区上完整残留。
-2. **DROP TABLE 物理机理**：
-   - 在 `innodb_file_per_table=ON` 模式下，DROP TABLE 导致 MySQL 关闭文件句柄并执行 `unlink()`。操作系统将 inode 标记为删除（`dtime > 0`），并将包含表空间数据的所有 Extents 标记为空闲，物理数据块完好保留在磁盘扇区中。
-3. **rm -rf 物理机理**：
-   - 直接删除正在运行或已停止的 `.ibd` 文件。仅在文件系统元数据层解绑目录项与 Inode，磁盘物理扇区的数据不会被同步归零。
-4. **关键准则**：
-   - **第一时间施加物理只读保护**：数据能否 100% 恢复，核心取决于灾难发生后是否杜绝了新的 I/O 写入。任何对该分区的写操作都会覆写残留扇区。
+### 不同事故的物理变化
 
----
+- **`TRUNCATE TABLE`**：可能创建新的表空间或走 fast-truncate 释放页路径；旧页在再次分配前可能仍然存在。
+- **`DROP TABLE`**：表空间文件和 Extent 被释放；物理块中可能仍残留旧页。
+- **`rm -rf`**：目录项和文件元数据被删除；后续分配可能覆盖释放块。
+- **持续写入**：Redo、日志回放、分配器活动和业务写入都会破坏证据。隔离前的每一次 I/O 都可能影响结果。
 
-## 2. TRUNCATE TABLE 恢复实战
+## 2. 通用准备流程
 
-### 2.1 紧急响应流程
+### 2.1 停止并隔离
 
 ```bash
-# 步骤 1：立即终止 MySQL 进程，杜绝任何后续写入
 sudo systemctl stop mysqld
-# 或强制终止
+# 只有在服务无法正常停止时才使用：
 sudo pkill -9 mysqld
 
-# 步骤 2：对灾难发生的数据分区施加内核级只读锁定
-sudo blockdev --setro /dev/nvme0n2
-
-# 步骤 3：安全卸载挂载点（杜绝文件系统日志回放污染）
+# 确认源设备未挂载后再进行镜像或雕刻。
+findmnt /dev/<source-device>
 sudo umount /mnt/data
 ```
 
-### 2.2 执行物理扇区结构化雕刻
+不要对源介质运行 `fsck`，不要以读写方式挂载，不要把恢复结果写回源设备，也不要直接使用损坏的数据目录启动 MySQL。
+
+### 2.2 优先制作取证镜像
+
+扇区镜像便于重复实验，也避免对原始介质产生竞争读写。案件记录中应保存镜像摘要、源设备身份、命令行、UTC 时间和 SHA-256。如果无法制作镜像，则使用已核实的只读设备：
 
 ```bash
-# 步骤 4：基于表结构与索引 ID 引导进行全盘物理扇区扫描与雕刻
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
+sudo blockdev --setro /dev/<source-device>
+sudo blockdev --getro /dev/<source-device>  # 预期：1
+```
+
+安全门还会检查设备身份和挂载状态。只读标志是必要条件，但不能替代设备身份核验。
+
+### 2.3 只读收集元数据
+
+保留最后已知的 MySQL 版本、行格式、页大小、库表名、Schema、`space_id`、clustered `index_id`，以及已经取得的 `.frm`/SDI 元数据。不要在存在可靠来源时凭空猜测这些值。
+
+## 3. 恢复操作
+
+### 3.1 独立 `.ibd` 恢复
+
+当表空间副本存在，即使尾部或部分页损坏，也可使用此路径：
+
+```bash
+./build/mysql_recovery_pro \
+  --ibd=/recovery/input/table.ibd \
+  --schema-file=/recovery/schema/table.json \
+  --mysql-version=8.4 \
+  --output=/recovery/output/table \
+  --report-format=json,text \
+  --report-path=/recovery/output/table/recovery_report
+```
+
+原始输入必须保持不变。如果文件被截断，解析器应识别完整页和不完整尾页；不要为了凑整文件长度而填充或修改输入。
+
+### 3.2 `DROP TABLE` 与 `TRUNCATE TABLE`
+
+对镜像文件或只读设备执行文件系统感知雕刻：
+
+```bash
+./build/mysql_recovery_pro \
+  --disk-carving \
+  --device-path=/recovery/media/disk.img \
   --filesystem=ext4 \
   --page-size=16384 \
-  --schema-file=/recovery/schema/t_orders.json \
+  --schema-file=/recovery/schema/table.json \
   --target-index-ids=158 \
   --target-space-ids=2 \
-  --output=/recovery/output/t_orders \
-  --result-json=/recovery/output/t_orders/result.json
+  --output=/recovery/output/table \
+  --result-json=/recovery/output/table/result.json
 ```
 
----
-
-## 3. DROP TABLE 恢复实战
-
-在 DROP TABLE 后，表空间对应的 `space_id` 与 clustered `index_id` 可以通过备份中的 `schema.json`、历史建表记录、或者离线扫描确定。
+XFS 镜像只需在确认输入后更改文件系统参数：
 
 ```bash
-# 步骤 1：确认磁盘处于只读锁定
-sudo blockdev --getro /dev/nvme0n2
-# 预期输出: 1
-
-# 步骤 2：执行 XFS / ext4 空间感知雕刻恢复
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
-  --filesystem=xfs \
-  --page-size=16384 \
-  --schema-file=/recovery/schema/t_customer.json \
-  --target-index-ids=162 \
-  --target-space-ids=3 \
-  --output=/recovery/output/t_customer \
-  --result-json=/recovery/output/t_customer/result.json
+--filesystem=xfs
 ```
 
----
+`DROP` 和 `TRUNCATE` 的元数据变化不同，但第一响应相同：停止写入、保护介质，并识别目标页集合。
 
-## 4. rm -rf 表空间文件删除恢复
+### 3.3 删除 `.ibd` / `rm -rf`
 
-当 `.ibd` 表空间文件被误删除时：
+如果服务仍在运行，不要先重启；先确认是否存在可独立复制的 deleted 文件句柄。如果文件不再打开，则对镜像或释放 Extent 进行雕刻。命令与上例相同，但必须使用正确的文件系统和目标标识。
 
-```bash
-# 步骤 1：如果 MySQL 进程仍在运行，尝试从 /proc/<pid>/fd/ 中提取句柄
-ls -l /proc/$(pgrep mysqld)/fd/ | grep "deleted"
-# 如果已停止，直接使用磁盘雕刻
+## 4. 文件系统感知雕刻
 
-# 步骤 2：针对已删除文件的块扫描（ext4 通过 scan_freed_blocks 检索空闲位图）
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
-  --filesystem=ext4 \
-  --page-size=16384 \
-  --schema-file=/recovery/schema/t_text.json \
-  --target-index-ids=164 \
-  --target-space-ids=4 \
-  --output=/recovery/output/t_text
+| 属性 | ext4 | XFS |
+|---|---|---|
+| 分配模型 | 块组和块位图 | 分配组和空闲空间树 |
+| 候选发现 | 释放块/Extent 过滤 | 分配组并行遍历和空闲空间遍历 |
+| 主要优势 | 快速筛选已解除链接的块 | 可并行扫描相互独立的 AG |
+| 主要注意事项 | 日志和分配器活动可能复用块 | Extent 复用和旧页必须经过严格页身份校验 |
+
+文件系统层只负责提出物理候选。InnoDB 层仍须校验页大小、页类型、SpaceID、IndexID、校验和、记录链、主键顺序、字段边界和外部 LOB 指针。
+
+## 5. Schema、SpaceID 与 IndexID
+
+Schema 是结构化输出的解码依据，应包含物理列位置、可空性、符号属性、长度/精度、字符集以及主键索引。`--target-space-ids` 和 `--target-index-ids` 在导出前约束候选页。
+
+最重要的防污染链路是：
+
+```text
+候选页
+  → 目标 SpaceID
+  → 目标 clustered IndexID
+  → 有效页和记录结构
+  → Schema 解码
+  → 主键保序与重复检查
+  → 输出合约
 ```
 
----
+对于外部字段，解码器区分 Barracuda 的 20 字节指针和 Antelope COMPACT 的“768 字节内联前缀 + 指针”布局。无法证明链完整时，必须拒绝或记录为不确定，不能静默截短。
 
-## 5. 文件系统物理差异：ext4 vs XFS
+## 6. 验证与证据封存
 
-MySQL Recovery Pro 深度融合了底层文件系统的元数据拓扑架构：
+### 6.1 检查结果合约
 
-| 评估维度 | ext4 文件系统 | XFS 文件系统 |
-| :--- | :--- | :--- |
-| **底层存储组织** | 线性 Block Groups，每个块组 128MB，含独立 Block Bitmap | 分配组 (Allocation Groups, AG)，支持高达 16+ 个 AG 并行 |
-| **删除行为特征** | Inode 记录 `dtime`，块位图置 0，Extent 树物理扇区连续残留 | Inode Free B+Tree 更新，Extent 释放回空间空闲 B+Tree |
-| **雕刻加速策略** | 块位图快速筛选 (`scan_freed_blocks`) + 块组多线程并发 | 遍历每个 AG 的 Free Inode B+Tree 与空闲 Extent 范围 |
-| **大对象处理** | Extent 线性寻址，物理连续性高 | 并行扫描各 AG 搜集 `0x000A`/`0x0018` 离页链 |
-| **200GB 介质扫描性能** | 约 70 ~ 95 秒（8 Workers 并行） | 约 60 ~ 85 秒（按 AG 并行多线程） |
+至少检查：
 
----
+- `structured_rows`；
+- `checksum_rejected_pages`；
+- `overflow_records_dropped`；
+- 重复和保序诊断；
+- `importable` 与 `decoder_validated`；
+- 输出文件摘要和 manifest 状态。
 
-## 6. Schema 与索引约束引导恢复
+`importable: false` 是设计要求，表示雕刻器没有自行证明输出可导入，不表示所有恢复行都无效。
 
-### 6.1 Schema 引导机制
-为了在物理扇区雕刻中实现 100% 精确的逐字段还原，引擎支持 JSON 格式的 Schema 描述输入。该描述可从历史备份、MySQL 8.0+ SDI 页面（`ibd2sdi`）或 MySQL 5.x FRM 文件导出。
+### 6.2 独立 fresh-import 验证
 
-示例 `schema.json`：
-```json
-{
-  "table_name": "t_orders",
-  "columns": [
-    {"name": "id", "type": 9, "is_nullable": false, "is_unsigned": false, "char_length": 8, "physical_pos": 0, "ordinal_position": 0},
-    {"name": "order_no", "type": 16, "is_nullable": false, "is_unsigned": false, "char_length": 64, "physical_pos": 1, "ordinal_position": 1, "charset_id": 255},
-    {"name": "details", "type": 27, "is_nullable": true, "is_unsigned": false, "char_length": 65535, "physical_pos": 2, "ordinal_position": 2, "charset_id": 255}
-  ],
-  "indexes": [
-    {"name": "PRIMARY", "is_primary": true, "is_unique": true, "columns": ["id"]}
-  ]
-}
-```
+合格的恢复运行应使用独立的干净 MySQL 实例：
 
-### 6.2 聚簇索引拓扑保序公理
-在 B+Tree 聚簇索引叶子节点物理页中，所有合法记录严格按照主键大小非降序链接：
-$$\text{Key}(r_1) < \text{Key}(r_2) < \dots < \text{Key}(r_n)$$
-当扇区被历史死页覆写导致假阳性碰撞时，引擎自动利用单调递增性断决并剔除逆序伪造记录。
+1. 创建预期 Schema；
+2. 不做人工编辑，直接导入恢复出的 SQL/CSV；
+3. 读回所有表，与封存真值进行逐字段类型比对；
+4. 记录期望行数、实际行数、字段错误、重复行和拒绝/缺失行；
+5. 将导入日志和结果 JSON 与恢复输出放在同一证据目录。
 
----
+进程退出码或“行数看起来正确”不能替代逐字段比较。
 
-## 7. MySQL 5.6 至 9.0 物理格式差异解析
+### 6.3 证据位置
 
-| 特性 / 版本 | MySQL 5.6 | MySQL 5.7 | MySQL 8.0 | MySQL 8.4 LTS | MySQL 9.0 |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **默认行格式** | COMPACT (Antelope) | DYNAMIC (Barracuda) | DYNAMIC | DYNAMIC | DYNAMIC |
-| **元数据存储** | `.frm` 文件 | `.frm` 文件 | 内部 SDI (0x45BD) | 内部 SDI (0x45BD) | 内部 SDI (0x45BD) |
-| **外部 LOB 结构** | 768B 前缀 + 20B 指针 (0x000A) | 0B 前缀 + 20B 指针 (0x0018) | 20B 指针 + LOB 树 | 20B 指针 + LOB 树 | 20B 指针 + LOB 树 |
-| **时间类型编码** | 5.64+ 支持 TIME2/DATETIME2 | TIME2 / DATETIME2 | TIME2 / DATETIME2 | TIME2 / DATETIME2 | TIME2 / DATETIME2 |
-| **JSON 二进制** | 不支持 | 原生支持 (type 31) | 原生支持 (type 31) | 原生支持 (type 31) | 原生支持 (type 31) |
+本仓库资格验证证据位于 `/app/mysql_recovery_artifacts`，README 中提供报告和 JSON 合约链接。普通代码克隆不会自动包含这些主机本地路径；复核时应单独复制或挂载证据目录。
 
----
+## 7. 格式支持与 Fail-Closed 边界
 
-## 8. 真实裸物理设备（/dev/nvme0n2）全矩阵测试实证
+已验证的结构化路径包含支持版本和测试矩阵中的 COMPACT/DYNAMIC 行格式与页大小。没有权威字段边界描述的 REDUNDANT、没有夹具验证解压后端的压缩表空间、没有密钥的加密/TDE 候选以及畸形页会进入 evidence-only 或 unsupported 路径。
 
-系统在物理 **200 GiB NVMe SSD（`/dev/nvme0n2`）** 上，完成了端到端真实物理扇区雕刻资格赛。全矩阵覆盖 5 个 MySQL 主版本、2 大主流 Linux 文件系统、4 类灾难场景，单轮 500,000 行（5.6 为 400,000 行），累计恢复验证超过 **15,000,000 行**。
+典型损坏结果会被明确限定：
 
-### 8.1 真实设备全矩阵验证结果汇总表
+- checksum/body 翻转会拒绝受影响页，不输出损坏字段；
+- `REC_NEXT` 断裂会受到边界保护，防止死循环和字段移位；
+- 尾部半页会在最后一个完整页处停止；
+- 无效压缩元数据或 TDE 候选不会生成可导入 SQL/CSV；
+- 不完整 BLOB 链会计为丢弃/不确定，不会静默截短。
 
-| MySQL 版本 | 文件系统 | 灾难场景 | 恢复行数 / 期望行数 | 恢复率 | 字段不符 (Mismatch) | 重复主键 | 干净容器重导入回环 | 状态 |
-| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **5.6** | ext4 | DROP | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | ext4 | TRUNCATE | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | ext4 | rm -rf | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | ext4 | BASELINE | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | XFS | DROP | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | XFS | TRUNCATE | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | XFS | rm -rf | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.6** | XFS | BASELINE | **400,000 / 400,000** | **100.00%** | **0** | **0** | **4/4 PASS** | **PASS** |
-| **5.7** | XFS | DROP | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **5.7** | XFS | TRUNCATE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **5.7** | XFS | rm -rf | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.0** | ext4 | DROP | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.0** | ext4 | TRUNCATE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.0** | ext4 | rm -rf | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.0** | ext4 | BASELINE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | ext4 | DROP | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | ext4 | TRUNCATE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | ext4 | rm -rf | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | ext4 | BASELINE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | XFS | DROP | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | XFS | TRUNCATE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | XFS | rm -rf | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **8.4 LTS** | XFS | BASELINE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | ext4 | DROP | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | ext4 | TRUNCATE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | ext4 | rm -rf | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | ext4 | BASELINE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | XFS | DROP | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | XFS | TRUNCATE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | XFS | rm -rf | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
-| **9.0** | XFS | BASELINE | **500,000 / 500,000** | **100.00%** | **0** | **0** | **5/5 PASS** | **PASS** |
+### 相关文档
 
----
-
-## 9. 物理损坏注入与 Fail-Closed 边界
-
-在实际取证中，系统执行严密的 **Fail-Closed（故障阻断）准则**：宁可放弃不确定行，也绝不输出结构移位或带有虚假主键的污染数据。
-
-在独立损坏测试矩阵（Corruption Matrix）中，针对 ext4 / XFS 进行了四类严苛的物理扇区篡改变异测试：
-1. **`checksum_body_flip`（单页内容位翻转）**：
-   - 结果：精准触发 ChecksumGateBatch 校验和门控；仅丢弃受损单页包含的物理记录（约 203 行），其余完好页面以 100% 精度还原（`PASS_BOUNDED_STRUCTURED`）。
-2. **`record_chain_break`（记录指针断裂）**：
-   - 结果：通过单向链表死循环防御与叶节点保序校验，隔绝受损链节，保证已恢复记录 100% 零误差。
-3. **`tail_truncate_partial_page`（介质截断/半页写入）**：
-   - 结果：自适应检测文件系统几何截断，平滑触发 `raw_disk_carving_fallback` 回退机制，实现 100% 结构化全量找回。
-4. **`tde_candidate` / 压缩表空间损坏**：
-   - 结果：安全门拒绝生成伪造的可导入 SQL（`importable=false, export_success=false`），安全归档为取证证据（`PASS_EVIDENCE_ONLY`）。
+- [用户操作指南](USER_GUIDE_PRO.md)
+- [技术原理与实现说明](IMPLEMENTATION_PRINCIPLES.md)
+- [English field guide](../en/DISASTER_RECOVERY_GUIDE.md)
+- [权威验证报告](../../../mysql_recovery_artifacts/batch_authoritative/disaster_recovery_validation_report.md)

@@ -43,3 +43,11 @@ memory/
 # vcpkg
 vcpkg/
 .aider*
+
+# Removed from repo (local only)
+Testing/
+docs/reports/
+docs/MYSQL9_NO_BACKUP_DISK_DISASTER_RECOVERY_RESEARCH.md
+docs/architecture_v2_blueprint.md
+tests/test_undo_log.cpp（需要创建）
+tests/unit/btree_parser_test.cpp (新建文件)

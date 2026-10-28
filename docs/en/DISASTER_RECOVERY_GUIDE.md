@@ -1,208 +1,194 @@
-# MySQL Disaster Recovery Field Guide & Physical Forensics
+# MySQL Disaster Recovery Field Guide
+
+This guide describes the first-response procedure and the two supported physical recovery paths: detached tablespace parsing and filesystem-aware carving. It is deliberately conservative: preserve the source, isolate writes, and treat every recovery as evidence until an independent clean-instance import proves otherwise.
 
 ## Contents
-1. [Physical Mechanism & Erasing Invariants](#1-physical-mechanism--erasing-invariants)
-2. [TRUNCATE TABLE Recovery Walkthrough](#2-truncate-table-recovery-walkthrough)
-3. [DROP TABLE Recovery Walkthrough](#3-drop-table-recovery-walkthrough)
-4. [rm -rf Tablespace Deletion Recovery](#4-rm--rf-tablespace-deletion-recovery)
-5. [Filesystem Physical Architecture: ext4 vs XFS](#5-filesystem-physical-architecture-ext4-vs-xfs)
-6. [Schema & Index Constraint Guided Carving](#6-schema--index-constraint-guided-carving)
-7. [MySQL 5.6 through 9.0 Physical Formats Matrix](#7-mysql-56-through-90-physical-formats-matrix)
-8. [Real-Device Qualification on Bare-Metal NVMe (`/dev/nvme0n2`)](#8-real-device-qualification-on-bare-metal-nvme-devnvme0n2)
-9. [Physical Corruption Injection & Fail-Closed Boundaries](#9-physical-corruption-injection--fail-closed-boundaries)
 
----
+1. [Incident response and physical invariants](#1-incident-response-and-physical-invariants)
+2. [Common preparation](#2-common-preparation)
+3. [Recovery procedures](#3-recovery-procedures)
+4. [Filesystem-aware carving](#4-filesystem-aware-carving)
+5. [Schema, SpaceID, and IndexID](#5-schema-spaceid-and-indexid)
+6. [Verification and evidence sealing](#6-verification-and-evidence-sealing)
+7. [Format support and fail-closed boundaries](#7-format-support-and-fail-closed-boundaries)
 
-## 1. Physical Mechanism & Erasing Invariants
+## 1. Incident response and physical invariants
 
-When data disasters occur in MySQL (DROP, TRUNCATE, or rm -rf), the underlying behavior at the InnoDB storage engine and operating system block layers follows deterministic principles:
+`DROP TABLE`, `TRUNCATE TABLE`, and `rm -rf` change InnoDB and filesystem metadata. They do not guarantee that the old sectors are immediately zeroed. Recovery is possible only while the old pages remain physically readable and structurally identifiable.
 
-```
-[Workload Writes] ──► [Buffer Pool / Redo Log] ──► [On-Disk Persistent Blocks]
-                                                          │
-                                     ┌────────────────────┴────────────────────┐
-                                     ▼                                         ▼
-                        【Logical: DROP / TRUNCATE】               【OS: rm -rf】
-                                     │                                         │
-                        InnoDB marks pages FREE                   VFS unlinks dentry
-                        Filesystem frees extents/blocks           Inode dtime set, blocks marked FREE
-                                     │                                         │
-                                     └────────────────────┬────────────────────┘
-                                                          ▼
-                                            【Sectors Remain Unaltered】
-                                                          │
-                                         ┌────────────────┴────────────────┐
-                                         ▼                                 ▼
-                                [Lock: blockdev --setro]          [Uncontrolled Writes]
-                                         │                                 │
-                                         ▼                                 ▼
-                                【100% Zero-Loss Carving】       【Irreversible Overwrites】
+```text
+Stop writers
+    │
+    ├── acquire a sector image, or lock the source read-only
+    ├── unmount the source filesystem
+    ├── record device identity and evidence hashes
+    └── recover into a different output filesystem
+             │
+             ├── strict page/record/schema checks
+             ├── bounded CSV/SQL evidence, when safe
+             └── independent clean-instance import and comparison
 ```
 
-1. **TRUNCATE TABLE Mechanism**:
-   - **MySQL 8.0+**: Executed as atomic DDL inside the Data Dictionary. The old `.ibd` file is dropped and a fresh one with a new `space_id` is allocated. The old tablespace pages are unmapped in the filesystem extent tree, remaining intact in storage sectors until overwritten.
-   - **MySQL 5.6 / 5.7**: Uses **Fast Truncate**. All pages of the index tree are linked into the `PAGE_FREE` list. Page contents are never zeroed.
-2. **DROP TABLE Mechanism**:
-   - With `innodb_file_per_table=ON`, DROP TABLE invokes `unlink()`. Inode `dtime` is updated, and the extent bitmap flags data blocks as free. Sector contents remain intact.
-3. **rm -rf Mechanism**:
-   - Directly unlinks the file from VFS. The filesystem metadata marks blocks as free without writing zeroes to the underlying storage sectors.
-4. **Primary Forensics Rule**:
-   - Immediately enforce read-only locking via `blockdev --setro <device>` and unmount the filesystem to prevent write amplification and journal replays.
+### What each incident changes
 
----
+- **`TRUNCATE TABLE`**: a new tablespace or a fast-truncate free-page path may be created; old page bytes can remain until reuse.
+- **`DROP TABLE`**: the tablespace file and its extents are released; the physical blocks may still contain old pages.
+- **`rm -rf`**: the directory entry and file metadata are removed; subsequent allocation can overwrite the freed blocks.
+- **Continuing writes**: redo, journal replay, allocator activity, and ordinary workload writes can destroy the evidence. Treat every minute before isolation as material.
 
-## 2. TRUNCATE TABLE Recovery Walkthrough
+## 2. Common preparation
+
+### 2.1 Stop and isolate
 
 ```bash
-# Step 1: Immediately terminate MySQL process
 sudo systemctl stop mysqld
-# Or forceful kill
+# Use only when the service cannot be stopped cleanly:
 sudo pkill -9 mysqld
 
-# Step 2: Enforce kernel read-only mode on the block device
-sudo blockdev --setro /dev/nvme0n2
-
-# Step 3: Safely unmount the device
+# Confirm the source is not mounted before imaging or carving.
+findmnt /dev/<source-device>
 sudo umount /mnt/data
+```
 
-# Step 4: Execute schema-guided physical sector carving
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
+Do not run `fsck`, mount the source read-write, copy recovered output back to it, or start MySQL against the damaged data directory.
+
+### 2.2 Prefer a forensic image
+
+A block image makes retries reproducible and avoids competing reads/writes against the original. Store the image, source identity, command line, UTC timestamp, and SHA-256 digest in the case record. If an image is not possible, use a verified read-only source:
+
+```bash
+sudo blockdev --setro /dev/<source-device>
+sudo blockdev --getro /dev/<source-device>  # expected: 1
+```
+
+The safety gate also checks the source identity and mounted state. A read-only flag is necessary but does not replace device identification.
+
+### 2.3 Collect metadata without changing the source
+
+Retain the last known MySQL version, row format, page size, database/table name, schema definition, `space_id`, clustered `index_id`, and any `.frm`/SDI metadata already available. Do not guess these values when a reliable source can be recovered from logs, DDL, or a separate metadata export.
+
+## 3. Recovery procedures
+
+### 3.1 Detached `.ibd` recovery
+
+Use this path when a tablespace copy exists, even if its tail or individual pages are damaged:
+
+```bash
+./build/mysql_recovery_pro \
+  --ibd=/recovery/input/table.ibd \
+  --schema-file=/recovery/schema/table.json \
+  --mysql-version=8.4 \
+  --output=/recovery/output/table \
+  --report-format=json,text \
+  --report-path=/recovery/output/table/recovery_report
+```
+
+Keep the original input immutable. If the input is truncated, the parser must distinguish complete pages from a partial tail; do not pad or modify the file to make its size appear valid.
+
+### 3.2 `DROP TABLE` and `TRUNCATE TABLE`
+
+Use an image or read-only device and enable filesystem-aware carving:
+
+```bash
+./build/mysql_recovery_pro \
+  --disk-carving \
+  --device-path=/recovery/media/disk.img \
   --filesystem=ext4 \
   --page-size=16384 \
-  --schema-file=/recovery/schema/t_orders.json \
+  --schema-file=/recovery/schema/table.json \
   --target-index-ids=158 \
   --target-space-ids=2 \
-  --output=/recovery/output/t_orders \
-  --result-json=/recovery/output/t_orders/result.json
+  --output=/recovery/output/table \
+  --result-json=/recovery/output/table/result.json
 ```
 
----
-
-## 3. DROP TABLE Recovery Walkthrough
+For XFS, change only the filesystem value after verifying the image:
 
 ```bash
-# Verify kernel read-only lock
-sudo blockdev --getro /dev/nvme0n2
-# Expected: 1
-
-# Execute XFS / ext4 allocation-group aware carving
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
-  --filesystem=xfs \
-  --page-size=16384 \
-  --schema-file=/recovery/schema/t_customer.json \
-  --target-index-ids=162 \
-  --target-space-ids=3 \
-  --output=/recovery/output/t_customer \
-  --result-json=/recovery/output/t_customer/result.json
+--filesystem=xfs
 ```
 
----
+`DROP` and `TRUNCATE` are not interchangeable at the metadata level, but both require the same first response: stop writes, preserve the medium, and identify the target page population.
 
-## 4. rm -rf Tablespace Deletion Recovery
+### 3.3 Deleted `.ibd` / `rm -rf`
 
-```bash
-# Execute carving against freed block extents
-./build/mysql_recovery_pro --disk-carving \
-  --device-path=/dev/nvme0n2 \
-  --filesystem=ext4 \
-  --page-size=16384 \
-  --schema-file=/recovery/schema/t_text.json \
-  --target-index-ids=164 \
-  --target-space-ids=4 \
-  --output=/recovery/output/t_text
+If the server is still alive, do not restart it before checking whether an open deleted file descriptor can be preserved as a separate copy. If the file is no longer open, carve the image or freed extents. The command is the same as above; use the correct filesystem and target identifiers.
+
+## 4. Filesystem-aware carving
+
+| Property | ext4 | XFS |
+|---|---|---|
+| Allocation model | Block groups and block bitmaps | Allocation groups and free-space trees |
+| Candidate discovery | Freed block/extent filtering | AG-parallel extent and free-space traversal |
+| Main benefit | Efficient filtering of unlinked blocks | Parallel scanning of independent AGs |
+| Main caveat | Journal and allocator activity can reuse blocks | Extent reuse and stale pages require strict page identity checks |
+
+The filesystem layer only proposes physical candidates. The InnoDB layer still validates page size, page type, space identity, index identity, checksum policy, record chain, key ordering, field boundaries, and external LOB pointers.
+
+## 5. Schema, SpaceID, and IndexID
+
+A schema file is the decoding authority for structured output. It should contain physical column positions, nullability, signedness, lengths/precision, charset information, and the primary-key index. `--target-space-ids` and `--target-index-ids` constrain carving before records are exported.
+
+The most important anti-contamination rule is:
+
+```text
+candidate page
+  → target SpaceID
+  → target clustered IndexID
+  → valid page and record structure
+  → schema decode
+  → key order and duplicate checks
+  → output contract
 ```
 
----
+For external values, the decoder distinguishes the 20-byte Barracuda pointer from the Antelope COMPACT layout containing a 768-byte inline prefix plus the pointer. Unsupported or incomplete chains are rejected rather than shortened silently.
 
-## 5. Filesystem Physical Architecture: ext4 vs XFS
+## 6. Verification and evidence sealing
 
-| Dimension | ext4 Filesystem | XFS Filesystem |
-| :--- | :--- | :--- |
-| **Physical Layout** | Linear Block Groups (128MB each) with block bitmaps | Allocation Groups (AGs), supporting up to 16+ parallel workers |
-| **Deletion Invariants** | Inode `dtime` stamped, block bitmap cleared to 0 | Free Inode B+Tree updated, extents returned to Free Space B+Tree |
-| **Carving Strategy** | Fast bitmap filtration (`scan_freed_blocks`) + multithreading | Parallel AG scanning + Free Inode B+Tree traversal |
-| **200GB Carving Speed** | 70 ~ 95 seconds (8 worker threads) | 60 ~ 85 seconds (AG-parallelized) |
+### 6.1 Inspect the result contract
 
----
+Review at least:
 
-## 6. Schema & Index Constraint Guided Carving
+- `structured_rows`;
+- `checksum_rejected_pages`;
+- `overflow_records_dropped`;
+- duplicate and ordering diagnostics;
+- `importable` and `decoder_validated`;
+- output file digests and manifest state.
 
-A JSON schema definition provides ground-truth typings for exact field decoding:
+`importable: false` is intentional. It means the carving process has not self-attested the output, not that every recovered row is invalid.
 
-```json
-{
-  "table_name": "t_orders",
-  "columns": [
-    {"name": "id", "type": 9, "is_nullable": false, "is_unsigned": false, "char_length": 8, "physical_pos": 0, "ordinal_position": 0},
-    {"name": "order_no", "type": 16, "is_nullable": false, "is_unsigned": false, "char_length": 64, "physical_pos": 1, "ordinal_position": 1, "charset_id": 255},
-    {"name": "details", "type": 27, "is_nullable": true, "is_unsigned": false, "char_length": 65535, "physical_pos": 2, "ordinal_position": 2, "charset_id": 255}
-  ],
-  "indexes": [
-    {"name": "PRIMARY", "is_primary": true, "is_unique": true, "columns": ["id"]}
-  ]
-}
-```
+### 6.2 Independent fresh-instance validation
 
----
+A qualified recovery run must use a separate clean MySQL instance:
 
-## 7. MySQL 5.6 through 9.0 Physical Formats Matrix
+1. create the expected schema;
+2. import the emitted SQL/CSV without manual edits;
+3. read back every table and compare typed values with the sealed ground truth;
+4. record expected rows, actual rows, field mismatches, duplicates, and rejected/missing rows;
+5. retain the import logs and result JSON beside the recovery output.
 
-| Feature / Version | MySQL 5.6 | MySQL 5.7 | MySQL 8.0 | MySQL 8.4 LTS | MySQL 9.0 |
-| :--- | :---: | :---: | :---: | :---: | :---: |
-| **Default Row Format** | COMPACT (Antelope) | DYNAMIC (Barracuda) | DYNAMIC | DYNAMIC | DYNAMIC |
-| **Metadata Storage** | `.frm` file | `.frm` file | Internal SDI (0x45BD) | Internal SDI (0x45BD) | Internal SDI (0x45BD) |
-| **External LOB Scheme** | 768B Prefix + 20B Ptr (0x000A) | 0B Prefix + 20B Ptr (0x0018) | 20B Ptr + LOB Tree | 20B Ptr + LOB Tree | 20B Ptr + LOB Tree |
-| **Temporal Encodings** | TIME2 / DATETIME2 | TIME2 / DATETIME2 | TIME2 / DATETIME2 | TIME2 / DATETIME2 | TIME2 / DATETIME2 |
-| **Binary JSON** | Unsupported | Supported (type 31) | Supported (type 31) | Supported (type 31) | Supported (type 31) |
+A process exit code or a plausible row count is not a substitute for this comparison.
 
----
+### 6.3 Evidence location
 
-## 8. Real-Device Qualification on Bare-Metal NVMe (`/dev/nvme0n2`)
+The qualification artifacts for this repository are under `/app/mysql_recovery_artifacts`. The report and JSON contract are linked from the repository README. Host-local artifact paths may not exist in a normal clone; copy or mount the evidence root when reproducing an audit.
 
-Tested on a physical **200 GiB NVMe device (`/dev/nvme0n2`)** with 100,000 rows per table across multi-column suites (Numeric, Temporal, Text/LOB, Structured JSON, Composite Keys), verifying over **15,000,000 physical rows**:
+## 7. Format support and fail-closed boundaries
 
-| MySQL Version | Filesystem | Scenario | Recovered / Expected | Field Error | Duplicate PK | Fresh Import Status | Verdict |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| **5.6** | ext4 | DROP | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | ext4 | TRUNCATE | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | ext4 | rm -rf | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | ext4 | BASELINE | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | XFS | DROP | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | XFS | TRUNCATE | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | XFS | rm -rf | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.6** | XFS | BASELINE | **400,000 / 400,000** | **0** | **0** | **PASS (4/4)** | **PASS** |
-| **5.7** | XFS | DROP | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **5.7** | XFS | TRUNCATE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **5.7** | XFS | rm -rf | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.0** | ext4 | DROP | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.0** | ext4 | TRUNCATE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.0** | ext4 | rm -rf | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.0** | ext4 | BASELINE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | ext4 | DROP | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | ext4 | TRUNCATE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | ext4 | rm -rf | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | ext4 | BASELINE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | XFS | DROP | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | XFS | TRUNCATE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | XFS | rm -rf | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **8.4 LTS** | XFS | BASELINE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | ext4 | DROP | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | ext4 | TRUNCATE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | ext4 | rm -rf | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | ext4 | BASELINE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | XFS | DROP | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | XFS | TRUNCATE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | XFS | rm -rf | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
-| **9.0** | XFS | BASELINE | **500,000 / 500,000** | **0** | **0** | **PASS (5/5)** | **PASS** |
+The validated structured paths include the tested COMPACT/DYNAMIC layouts and page sizes for the supported MySQL versions. REDUNDANT layouts without an authoritative field-boundary descriptor, compressed tablespaces without a fixture-validated decompressor, encrypted/TDE candidates without keys, and malformed pages are handled as evidence-only or unsupported inputs.
 
----
+Typical corruption outcomes are intentionally bounded:
 
-## 9. Physical Corruption Injection & Fail-Closed Boundaries
+- checksum/body flips reject affected pages rather than exporting corrupted fields;
+- broken `REC_NEXT` links are bounded to prevent loops and field shifts;
+- partial tails stop at the last complete page;
+- invalid compression metadata or TDE candidates produce no importable SQL/CSV;
+- incomplete BLOB chains are counted as dropped/uncertain, not silently truncated.
 
-The engine enforces a strict fail-closed safety policy against hardware/sector corruption:
-1. **`checksum_body_flip`**: Bit flips inside clustered leaf bodies are intercepted by `ChecksumGateBatch`. Only rows on damaged pages are dropped; healthy pages achieve 100% precision (`PASS_BOUNDED_STRUCTURED`).
-2. **`record_chain_break`**: Broken record pointers are bounded, preventing infinite traversal loops and data shift errors.
-3. **`tail_truncate_partial_page`**: File system geometry mismatches automatically trigger fallback carving, recovering 100% of intact data.
-4. **`tde_candidate` / Compressed Corruption**: Inputs lacking keys or valid decompressors fail closed (`importable: false`, `PASS_EVIDENCE_ONLY`), preventing corrupted artifacts from being imported into production.
+### Related documentation
+
+- [User guide](USER_GUIDE_PRO.md)
+- [Implementation principles](IMPLEMENTATION_PRINCIPLES.md)
+- [Chinese field guide](../zh/DISASTER_RECOVERY_GUIDE.md)
+- [Authoritative validation report](../../../mysql_recovery_artifacts/batch_authoritative/disaster_recovery_validation_report.md)

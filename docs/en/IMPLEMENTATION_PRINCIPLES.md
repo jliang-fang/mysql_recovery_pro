@@ -1,168 +1,198 @@
-# MySQL Recovery Pro — Implementation Principles & Theoretical Foundations
+# MySQL Recovery Pro — Implementation Principles
 
-## Table of Contents
-1. [Architecture & Layering](#1-architecture--layering)
-2. [InnoDB Physical Storage Layout & Structural Invariants](#2-innodb-physical-storage-layout--structural-invariants)
-3. [Core Algorithms & Mathematical Models](#3-core-algorithms--mathematical-models)
-4. [High-Precision Field Deserialization Engine](#4-high-precision-field-deserialization-engine)
-5. [Filesystem-Aware Physical Sector Carving](#5-filesystem-aware-physical-sector-carving)
-6. [Forensic Auditability & Fail-Closed Safety Gates](#6-forensic-auditability--fail-closed-safety-gates)
+This document explains the physical model used by MySQL Recovery Pro. It is an implementation and audit reference, not a promise that every theoretical path is enabled for every MySQL version. The tested support boundary is maintained in the [validation evidence report](../../../mysql_recovery_artifacts/batch_authoritative/disaster_recovery_validation_report.md).
 
----
+## Contents
 
-## 1. Architecture & Layering
+1. [Architecture and evidence boundary](#1-architecture-and-evidence-boundary)
+2. [InnoDB page and record layout](#2-innodb-page-and-record-layout)
+3. [Structural checks and conflict resolution](#3-structural-checks-and-conflict-resolution)
+4. [Typed field decoding and external LOBs](#4-typed-field-decoding-and-external-lobs)
+5. [Filesystem-aware carving](#5-filesystem-aware-carving)
+6. [Audit lifecycle and fail-closed policy](#6-audit-lifecycle-and-fail-closed-policy)
 
-MySQL Recovery Pro implements a decoupled, forensic-grade layered architecture:
+## 1. Architecture and evidence boundary
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        mysql_recovery_pro                              │
-├────────────────────────────────────────────────────────────────────────┤
-│ 1. Physical Media Safety & Forensics Gate (Kernel RO / WWN / Seal)      │
-├────────────────────────────────────────────────────────────────────────┤
-│ 2. Filesystem Extent Carving Layer (ext4 / XFS Allocation Trees)       │
-│    ├── ext4: Block Group Descriptors + Free Block Bitmap Parsing       │
-│    └── XFS : Allocation Group (AG) Multithreading + Free B+Trees       │
-├────────────────────────────────────────────────────────────────────────┤
-│ 3. InnoDB Page Engine (B+Tree & Page Parser)                           │
-│    ├── FIL Header / Page Header / Infimum-Supremum Chain Traversal     │
-│    ├── Monotonic Clustered Key Invariant Verification                  │
-│    ├── LSN Epoch & Doublewrite Buffer Conflict Resolution              │
-│    └── Polymorphic Checksum Gate (ChecksumGateBatch: Legacy / CRC32C)  │
-├────────────────────────────────────────────────────────────────────────┤
-│ 4. Field Deserialization & LOB Reassembly                              │
-│    ├── Compact / Dynamic Variable-Length Arrays & NULL Bitmaps         │
-│    ├── Antelope 788-Byte Prefix + 20-Byte Pointer Parsing              │
-│    ├── Barracuda 20-Byte Pointer + LOB Tree Reassembly                 │
-│    └── Temporal & Domain Sanity Checking (Out-of-Bounds Interception)  │
-├────────────────────────────────────────────────────────────────────────┤
-│ 5. Emission & Verification (CSV/SQL Stream / Fresh-Instance Import)   │
-└────────────────────────────────────────────────────────────────────────┘
+The recovery pipeline is deliberately layered:
+
+```text
+source safety and device identity
+            │
+filesystem candidate discovery (ext4 / XFS)
+            │
+InnoDB page identity and integrity gates
+            │
+record chain and clustered-key validation
+            │
+Schema-driven field decoding and LOB assembly
+            │
+CSV/SQL evidence contract + manifest
+            │
+independent clean-instance import and comparison
 ```
 
----
+The first five layers operate on physical evidence. The last layer is intentionally outside the decoder. This separation prevents a parser from certifying its own output as safe to import.
 
-## 2. InnoDB Physical Storage Layout & Structural Invariants
+## 2. InnoDB page and record layout
 
-### 2.1 Physical Page Topology (FIL Header & Trailer)
+For a page size `N`, the basic page shape is:
 
-InnoDB default page size is 16 KiB (16,384 bytes):
-
-| Byte Range | Length | Field Name | Physical Semantics & Forensic Purpose |
-| :--- | :---: | :--- | :--- |
-| `0..3` | 4B | `FIL_PAGE_SPACE_OR_CHKSUM` | Page checksum (or tablespace checksum) |
-| `4..7` | 4B | `FIL_PAGE_OFFSET` | Logical page number within tablespace |
-| `8..11` | 4B | `FIL_PAGE_PREV` | Predecessor page pointer at current B+Tree level |
-| `12..15` | 4B | `FIL_PAGE_NEXT` | Successor page pointer at current B+Tree level |
-| `16..23` | 8B | `FIL_PAGE_LSN` | Log Sequence Number of the last modification |
-| `24..25` | 2B | `FIL_PAGE_TYPE` | Type identifier: `0x45BF`(INDEX), `0x000A`(BLOB 5.x), `0x0018`(BLOB 8.x), `0x45BD`(SDI) |
-| `26..33` | 8B | `FIL_PAGE_FILE_FLUSH_LSN` | System tablespace Page 0 only; 0 on data pages |
-| `34..37` | 4B | `FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID` | Tablespace Space ID |
-| `38..page_size-9` | Variable | Page Body | Page Header (36B), Infimum, User Records, Supremum, Page Directory |
-| `page_size-8..page_size-1` | 8B | `FIL_PAGE_END_LSN_CHECKSUM` | Old-style checksum + lower 32 bits of LSN |
-
-### 2.2 Record Header & Variable-Length Storage Dialects
-
-InnoDB records expand in two directions from the record origin (`rec_origin`):
-- **Negative Direction (Record Header & Metadata, traversed backwards)**:
-  `[Variable Lengths (Reverse)] ── [NULL Bitmap (Big-Endian)] ── [5-Byte Header (origin - 5)]`
-- **Positive Direction (Record Data, traversed forward)**:
-  `[Primary Key] ── [DB_TRX_ID (6B)] ── [DB_ROLL_PTR (7B)] ── [User Columns]`
-
-#### Variable-Length Field Encoding (rem0rec Specification)
-For variable columns (`VARCHAR`, `BLOB`, `TEXT`, `VARBINARY`, multi-byte `CHAR`):
-1. If max possible byte length ($\text{col\_length} \times \text{mb\_maxlen}$) $\le 255$:
-   Encoded in **1 byte**, storing the exact physical byte length.
-2. If max possible byte length $> 255$:
-   - If actual length $< 128$: encoded in **1 byte** (high bit = 0);
-   - If actual length $\ge 128$: encoded in **2 bytes** (high bit = 1).
-   - **Off-Page Flag (`BTR_EXTERN_FIELD`, Bit 6)**:
-     If the column data is stored externally, Bit 6 (`0x40`) of the high byte is set.
-     The combined 2-byte value is:
-     $$\text{size} = \text{byte}_2 + (\text{byte}_1 - 128) \times 256$$
-     Since Bit 6 is set, $\text{size} \ge 16384$ ($0\text{x}4000$).
-     **The exact inline bytes stored in the clustered leaf page are strictly computed as**:
-     $$\text{inline\_bytes} = \text{size} - 16384$$
-     - In **DYNAMIC** row format: $\text{inline\_bytes} = 20$ (20-byte pointer only);
-     - In **COMPACT (Antelope)** format: $\text{inline\_bytes} = 788$ (768-byte inline prefix + 20-byte pointer).
-
----
-
-## 3. Core Algorithms & Mathematical Models
-
-### 3.1 Monotonic Key Ordering Invariant
-
-In InnoDB B+Tree clustered indexes, physical leaf records traversed via `REC_NEXT` must preserve strict lexicographical order:
-$$\forall i \in [1, k-1], \quad \text{Key}(r_i) < \text{Key}(r_{i+1})$$
-
-When carving across sectors containing remnants of stale tables or overwritten blocks, invalid record chains can emerge. MySQL Recovery Pro resolves ordering violations dynamically:
-
-```cpp
-// Sliding window resolution for B-tree key order violations
-for (size_t i = 1; i < records.size(); ++i) {
-    if (records[i].key <= records[i - 1].key) {
-        bool drop_prev_restores = (i < 2 || records[i].key > records[i - 2].key) &&
-                                  (i + 1 >= records.size() || records[i + 1].key > records[i].key);
-        bool drop_curr_restores = (i + 1 >= records.size() || records[i + 1].key > records[i - 1].key);
-        
-        if (drop_prev_restores && !drop_curr_restores) {
-            dropped[i - 1] = true;
-        } else if (drop_curr_restores && !drop_prev_restores) {
-            dropped[i] = true;
-        } else {
-            // Fail closed: drop both to guarantee zero corrupted records
-            dropped[i - 1] = true;
-            dropped[i] = true;
-        }
-    }
-}
+```text
+FIL header (38 bytes)
+  page checksum / space-or-checksum
+  page number
+  previous / next page
+  page LSN
+  page type
+  space ID
+page body
+  page header, infimum, records, supremum, directory
+FIL trailer (8 bytes)
 ```
 
-### 3.2 LSN Conflict Resolution (Doublewrite & Stale Pages)
-On media without TRIM, identical `(space_id, page_no)` tuples may appear across multiple block groups. The engine evaluates a strict partial order:
-$$\mathcal{P}_1 \succ \mathcal{P}_2 \iff (\text{LSN}_1 > \text{LSN}_2) \lor (\text{LSN}_1 = \text{LSN}_2 \land \text{N\_RECS}_1 > \text{N\_RECS}_2)$$
-This guarantees that only the newest persistent snapshot is parsed.
+Important FIL header fields are validated before records are decoded:
 
----
+| Offset | Size | Field | Recovery use |
+|---:|---:|---|---|
+| 0 | 4 | checksum or space/checksum | Integrity gate. |
+| 4 | 4 | page number | Page identity and duplicate resolution. |
+| 8 | 4 | previous page | Chain consistency. |
+| 12 | 4 | next page | Chain consistency. |
+| 16 | 8 | page LSN | Newer/older page conflict resolution. |
+| 24 | 2 | page type | INDEX, BLOB, SDI, and related layout selection. |
+| 34 | 4 | space ID | Cross-tablespace contamination filter. |
 
-## 4. High-Precision Field Deserialization Engine
+### 2.1 Compact/Dynamic record metadata
 
-1. **Integer Deserialization**:
-   InnoDB flips the sign bit for signed integers (`raw ^ (1ULL << (bits - 1))`) so that physical byte order matches numerical sort order. The engine reverses this mapping cleanly.
-2. **Fixed-Point Decimal (`NEWDECIMAL`)**:
-   Decimals are packed into 9-digit segments (4 bytes each). Negative numbers are fully bit-inverted; positive numbers have the sign bit inverted on the first segment.
-3. **Temporal2 Encodings (`TIME2`, `DATETIME2`, `TIMESTAMP2`)**:
-   - `TIME2`: 3-byte base time with $+8388608$ offset, followed by fractional bytes;
-   - `DATETIME2`: 5-byte packed date and time ($19\text{-bit months} + 5\text{-bit day} + 5\text{-bit hour} + 6\text{-bit minute} + 6\text{-bit second}$);
-   - `TIMESTAMP2`: 4-byte big-endian Unix timestamp + fractional bytes.
-   - **Domain Sanity Checks**:
-     Asserts $m \in [1, 12]$, $d \in [1, 31]$, $h \le 838$, $mi \le 59$, $s \le 59$. Any decoded record violating these bounds is rejected as structural corruption.
-4. **Binary JSON (Type 31)**:
-   Full parsing of MySQL 8.0/8.4/9.0 binary JSON documents (`JSON_TYPE_SMALL_OBJECT`, `JSON_TYPE_LARGE_ARRAY`, etc.), extracting keys, offsets, and nested hierarchies losslessly.
+For COMPACT and DYNAMIC records, variable-length metadata and the NULL bitmap are stored before the record data. The record data includes hidden InnoDB transaction fields and user columns. The decoder must account for the physical order rather than assuming the logical SQL order.
 
----
+For a variable-length field whose maximum byte length exceeds 255:
 
-## 5. Filesystem-Aware Physical Sector Carving
+- a short value can use one length byte;
+- a longer value uses two bytes;
+- the external-storage flag is part of the encoded value;
+- when the external flag is set, the inline byte count is derived from the encoded length, not guessed from the pointer alone.
 
-### 5.1 ext4 Extent & Block Group Carving
-- Reads superblock (`Superblock`) to confirm 4 KiB block size and 32,768 blocks per group;
-- Traverses `ext4_group_desc` to read `bg_block_bitmap`, mapping bits with value 0 (unlinked extents) into candidates;
-- Filters candidate pages against `target_space_ids` prior to enqueuing into BLOB and INDEX queues, preventing cross-tablespace contamination.
+The tested Antelope rule is:
 
-### 5.2 XFS Allocation Group (AG) Carving
-- Leverages XFS AG partitioning to distribute parallel workers across independent storage zones;
-- Each worker inspects `xfs_agf` (Free Space B+Tree) and `xfs_agi` (Free Inode B+Tree) to retrieve unlinked extents directly from physical sectors.
+```text
+inline_bytes = encoded_size - 16384 = 788
+              = 768-byte inline prefix + 20-byte BTR_EXTERN pointer
+```
 
----
+For DYNAMIC/Barracuda rows, the clustered record normally retains the 20-byte pointer and the payload is assembled from the external LOB chain.
 
-## 6. Forensic Auditability & Fail-Closed Safety Gates
+## 3. Structural checks and conflict resolution
 
-### 6.1 State Machine Lifecycle
-Recovery transitions deterministically through a verifiable lifecycle:
-$$\text{PLANNED} \longrightarrow \text{PRECHECKED} \longrightarrow \text{MEDIA\_PREPARED} \longrightarrow \text{TRUTH\_SEALED} \longrightarrow \text{PERSISTED} \longrightarrow \text{SCENARIO\_APPLIED} \longrightarrow \text{RECOVERY\_ATTEMPTED} \longrightarrow \text{IMPORT\_VALIDATED} \longrightarrow \text{REPORTED} \longrightarrow \text{SEALED}$$
+### 3.1 Clustered-key ordering
 
-- Every input, log, CSV, and validation result is recorded with its SHA-256 digest in `manifest.json`;
-- The run directory is sealed with `manifest.seal` binding to device hardware identity (WWN / Serial).
+Records linked through a clustered leaf page must be strictly ordered by the clustered key:
 
-### 6.2 Round-Trip Re-Import Validation Boundary
-Every carved dataset is piped into an independent clean-instance MySQL container. Recovery is granted **`PASS`** status only when DDL creation and SQL insertion succeed with zero errors, and read-back yields zero field mismatches against the canonical ground truth.
+\[
+K(r_1) < K(r_2) < \dots < K(r_n)
+\]
+
+Carving can encounter stale pages, foreign pages, or a single corrupted record. The implementation uses bounded local resolution and rejects ambiguous collisions. It never “fixes” an ordering violation by inventing a key or shifting fields.
+
+### 3.2 Space and index filtering
+
+A candidate page is eligible only when its physical identity matches the requested target:
+
+\[
+SpaceID(P) \in S_{target} \land IndexID(P) \in I_{target}
+\]
+
+This filter is applied before structured export so that old allocations and unrelated system tables do not contaminate the result set.
+
+### 3.3 Page and LSN conflicts
+
+The same `(space_id, page_no)` can appear more than once on media without TRIM or after allocator reuse. Candidates are compared using page identity, integrity state, LSN, and record evidence. A newer valid page outranks an older duplicate; equal-LSN ties are resolved conservatively rather than by arbitrary scan order.
+
+### 3.4 Checksum gate
+
+Checksum validation is a gate, not a warning. A page that cannot satisfy the applicable checksum/integrity policy is rejected from structured output. Corruption matrices therefore distinguish:
+
+- healthy structured rows;
+- bounded loss attributable to rejected pages;
+- evidence-only artifacts where no safe structured row can be claimed.
+
+## 4. Typed field decoding and external LOBs
+
+The schema-driven decoder handles the physical encodings exercised by the qualification fixtures:
+
+- signed and unsigned integer sort transformations;
+- packed `NEWDECIMAL` groups;
+- `TIME2`, `DATETIME2`, and `TIMESTAMP2` with fractional precision;
+- character and binary values with NULL/empty distinction;
+- ENUM/SET value mapping;
+- MySQL binary JSON trees;
+- inline and external TEXT/BLOB data.
+
+Temporal values are range-checked. Invalid month/day/hour/minute/second values are structural evidence of a bad boundary and are rejected rather than formatted as plausible timestamps.
+
+### 4.1 LOB chain assembly
+
+External values are reconstructed only when every pointer and fragment is consistent with the selected physical format:
+
+```text
+clustered record
+  └── 20-byte external pointer
+        ├── legacy 0x000A-style chain (5.x)
+        ├── compressed/legacy variants (evidence or supported path by fixture)
+        └── modern LOB entry/fragment chain (8.x/9.x)
+```
+
+Inline prefixes are preserved in their original order. Missing, cyclic, out-of-range, or truncated fragments are recorded as dropped/uncertain and never silently replaced with a shorter value.
+
+## 5. Filesystem-aware carving
+
+### 5.1 ext4
+
+The ext4 scanner reads filesystem geometry and block-group metadata, identifies candidate freed blocks/Extents, and passes physical page candidates into InnoDB identity filters. Journal replay and post-incident allocation can invalidate a candidate; filesystem discovery is therefore not proof of recoverability.
+
+### 5.2 XFS
+
+The XFS scanner partitions work by allocation group and consults AG metadata/free-space structures to locate candidate Extents. Parallelism changes discovery speed, not the validation rules. Every candidate still requires page identity, SpaceID/IndexID, checksum, record, and Schema checks.
+
+## 6. Audit lifecycle and fail-closed policy
+
+A sealed run follows a state progression similar to:
+
+```text
+PLANNED
+  → PRECHECKED
+  → MEDIA_PREPARED
+  → TRUTH_SEALED
+  → RECOVERY_ATTEMPTED
+  → CONTRACT_PERSISTED
+  → IMPORT_VALIDATED
+  → REPORTED
+  → SEALED
+```
+
+The exact lifecycle fields are recorded by the validation harness. Inputs, outputs, invocation metadata, and comparison results are hashed into the manifest; the seal binds the evidence to the recorded source identity.
+
+### 6.1 Contract semantics
+
+- `structured_recovery`: schema and physical checks allowed typed output;
+- `forensic_evidence`: physical evidence was found but structured export was refused;
+- `PASS_BOUNDED_STRUCTURED`: intact regions passed while damaged regions were explicitly bounded;
+- `PASS_EVIDENCE_ONLY`: refusal was the expected safe outcome;
+- `UNSUPPORTED`: the combination is outside the verified decoder boundary;
+- `importable: false`: the physical recovery tool does not self-attest importability.
+
+### 6.2 Independent re-import boundary
+
+The final qualification is performed by a separate clean MySQL instance. It creates the expected schema, imports the emitted data without manual repair, reads it back, and compares typed values against the sealed ground truth. A recovery tool must not convert a plausible row count into a PASS without this boundary.
+
+### 6.3 Conservative failure behavior
+
+The fail-closed rule is a correctness feature:
+
+- reject ambiguous field boundaries;
+- reject invalid checksums and impossible temporal values;
+- reject broken or incomplete external chains;
+- reject unsupported compression/encryption unless the required validated backend and keys exist;
+- preserve diagnostics and evidence for later analysis.
+
+For operational procedures and parameter details, see the [user guide](USER_GUIDE_PRO.md) and [field guide](DISASTER_RECOVERY_GUIDE.md).

@@ -1,171 +1,198 @@
-# MySQL Recovery Pro — 技术原理与深度实现说明
+# MySQL Recovery Pro — 技术原理与实现说明
+
+本文档说明 MySQL Recovery Pro 使用的物理模型，面向开发、审计和取证复核。它不是“所有理论路径都对所有版本开放”的承诺；当前已验证边界以[验证证据报告](../../../mysql_recovery_artifacts/batch_authoritative/disaster_recovery_validation_report.md)为准。
 
 ## 目录
-1. [系统架构与分层设计](#1-系统架构与分层设计)
-2. [InnoDB 物理存储布局与结构不变量](#2-innodb-物理存储布局与结构不变量)
-3. [核心算法与数学模型](#3-核心算法与数学模型)
-4. [全字段类型高精度反序列化](#4-全字段类型高精度反序列化)
-5. [文件系统物理感知与扇区雕刻](#5-文件系统物理感知与扇区雕刻)
-6. [工业级取证与 Fail-Closed 门控](#6-工业级取证与-fail-closed-门控)
 
----
+1. [架构与证据边界](#1-架构与证据边界)
+2. [InnoDB 页与记录布局](#2-innodb-页与记录布局)
+3. [结构校验与冲突消歧](#3-结构校验与冲突消歧)
+4. [字段解码与外部 LOB](#4-字段解码与外部-lob)
+5. [文件系统感知雕刻](#5-文件系统感知雕刻)
+6. [审计生命周期与 Fail-Closed 策略](#6-审计生命周期与-fail-closed-策略)
 
-## 1. 系统架构与分层设计
+## 1. 架构与证据边界
 
-MySQL Recovery Pro 采用高度解耦的工业级取证分层架构：
+恢复流水线按层次解耦：
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        mysql_recovery_pro                              │
-├────────────────────────────────────────────────────────────────────────┤
-│ 1. 物理介质安全与取证门控 (Kernel RO Lock / WWN Identity / Token Seal)   │
-├────────────────────────────────────────────────────────────────────────┤
-│ 2. 文件系统 Extent 雕刻层 (Filesystem Physical Extent Carving)          │
-│    ├── ext4: 块组描述符解析 (Group Descriptors) + 空闲位图过滤           │
-│    └── XFS : 分配组 (AG) 多线程并发 + Inode B+Tree / Free B+Tree 遍历  │
-├────────────────────────────────────────────────────────────────────────┤
-│ 3. InnoDB 物理页解析引擎 (InnoDB B+Tree & Page Engine)                  │
-│    ├── FIL Header / Page Header / Infimum-Supremum 链表追踪            │
-│    ├── 聚簇叶子节点拓扑保序验证 (Monotonic Clustered Key Ordering)      │
-│    ├── LSN 世代与双写缓冲去重 (Doublewrite & Snapshot Deduplication)   │
-│    └── 校验和多态批处理门控 (ChecksumGateBatch: Legacy / CRC32C)       │
-├────────────────────────────────────────────────────────────────────────┤
-│ 4. 字段反序列化与大对象拼接层 (Decoding & LOB Reassembly)                │
-│    ├── Compact / Dynamic 变长数组与 NULL 位图精准解码                  │
-│    ├── Antelope 788B 前缀 + 20B 指针反解 (size - 16384)                │
-│    ├── Barracuda 20B 指针 + LOB 索引树重组                             │
-│    └── 时间/数值合法性多维断言拦截 (Temporal & Domain Sanity Check)    │
-├────────────────────────────────────────────────────────────────────────┤
-│ 5. 输出与回环验证 (CSV/SQL Stream / Independent Fresh Re-import)       │
-└────────────────────────────────────────────────────────────────────────┘
+```text
+源介质安全与设备身份
+          │
+文件系统候选发现（ext4 / XFS）
+          │
+InnoDB 页身份和完整性门控
+          │
+记录链与聚簇主键校验
+          │
+Schema 引导的字段解码与 LOB 拼接
+          │
+CSV/SQL 证据合约 + manifest
+          │
+独立干净实例导入与比对
 ```
 
----
+前五层处理物理证据，最后一层明确置于解码器之外。这样可以避免解析器把自己的输出自证为“可安全导入”。
 
-## 2. InnoDB 物理存储布局与结构不变量
+## 2. InnoDB 页与记录布局
 
-### 2.1 物理页拓扑（FIL Header & Trailer）
+对于页大小 `N`，基本页结构如下：
 
-InnoDB 默认物理页大小为 16 KiB（16,384 字节）：
-
-| 偏移区间 | 长度 | 字段名称 | 物理语义与取证判定 |
-| :--- | :---: | :--- | :--- |
-| `0..3` | 4B | `FIL_PAGE_SPACE_OR_CHKSUM` | 页面校验和（或空间校验和） |
-| `4..7` | 4B | `FIL_PAGE_OFFSET` | 表空间内逻辑页号（Page Number） |
-| `8..11` | 4B | `FIL_PAGE_PREV` | B+Tree 同层前驱兄弟页号（叶子链表） |
-| `12..15` | 4B | `FIL_PAGE_NEXT` | B+Tree 同层后继兄弟页号（叶子链表） |
-| `16..23` | 8B | `FIL_PAGE_LSN` | 页面最近一次修改的日志序列号（64位无符号整数） |
-| `24..25` | 2B | `FIL_PAGE_TYPE` | 核心页类型：`0x45BF`(INDEX), `0x000A`(BLOB 5.x), `0x0018`(BLOB 8.x), `0x45BD`(SDI) |
-| `26..33` | 8B | `FIL_PAGE_FILE_FLUSH_LSN` | 仅在系统表空间 Page 0 有效；普通页通常为 0 |
-| `34..37` | 4B | `FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID` | 表空间唯一标识符（Space ID） |
-| `38..page_size-9` | 变长 | Page Body | 包含 Page Header(36B)、Infimum/Supremum、User Records、Page Directory |
-| `page_size-8..page_size-1` | 8B | `FIL_PAGE_END_LSN_CHECKSUM` | 老式校验和与 LSN 低 32 位折叠值 |
-
-### 2.2 记录头与变长物理存储方言
-
-InnoDB 记录从逻辑原点（`rec_origin`）向两个方向展开：
-- **低地址方向（Record Header & Metadata，逆向读取）**：
-  `[变长长度列表 (Reverse)] ── [NULL 位图 (Big-Endian)] ── [5字节记录头 (origin - 5)]`
-- **高地址方向（Record Data，正向读取）**：
-  `[主键字段] ── [DB_TRX_ID (6B)] ── [DB_ROLL_PTR (7B)] ── [其余用户列]`
-
-#### 变长字段长度物理编码算法（rem0rec 规范）
-对于变长列（VARCHAR、BLOB、TEXT、VARBINARY、多字节 CHAR）：
-1. 若列的最大物理可能长度（`col_length * mb_maxlen`）$\le 255$：
-   占用 **1 字节**，直接存储该列物理字节长度。
-2. 若列的最大物理可能长度 $> 255$：
-   - 若实际存储长度 $< 128$：占用 **1 字节**（最高位为 0）；
-   - 若实际存储长度 $\ge 128$：占用 **2 字节**。高字节最高位（Bit 7）必为 1。
-   - **离页标志位（BTR_EXTERN_FIELD, Bit 6）**：
-     若列存储在外部溢出页中，高字节的 Bit 6（`0x40`）被置为 1。
-     此时两字节组合计算为：
-     $$\text{size} = \text{byte}_2 + (\text{byte}_1 - 128) \times 256$$
-     由于 Bit 6 为 1，$\text{size} \ge 16384$（$0\text{x}4000$）。
-     **真实的内联字节数（Inline Bytes）由下式严格给出**：
-     $$\text{inline\_bytes} = \text{size} - 16384$$
-     - 在 **DYNAMIC** 格式下：$\text{inline\_bytes} = 20$（仅包含 20 字节指针）；
-     - 在 **COMPACT (Antelope)** 格式下：$\text{inline\_bytes} = 788$（768 字节前缀 + 20 字节外部指针）。
-
----
-
-## 3. 核心算法与数学模型
-
-### 3.1 聚簇索引叶子节点单调性断言（Monotonic Key Ordering Invariant）
-
-在关系数据库存储体系中，聚簇索引叶子节点的记录物理序列与逻辑键值之间存在严格的不变量：
-$$\forall i \in [1, k-1], \quad \text{Key}(r_i) < \text{Key}(r_{i+1})$$
-
-在物理扇区雕刻中，若某个物理页由损坏块、历史覆盖块拼接而成，记录链可能解码出伪造的主键。MySQL Recovery Pro 建立了基于双向窗口的判定算法：
-
-```cpp
-// 伪代码：聚簇索引单调性自适应断决
-for (size_t i = 1; i < records.size(); ++i) {
-    if (records[i].key <= records[i - 1].key) {
-        // 发现逆序违例，构建局部滑动窗口 [i-2, i-1, i, i+1]
-        bool drop_prev_restores = (i < 2 || records[i].key > records[i - 2].key) &&
-                                  (i + 1 >= records.size() || records[i + 1].key > records[i].key);
-        bool drop_curr_restores = (i + 1 >= records.size() || records[i + 1].key > records[i - 1].key);
-        
-        if (drop_prev_restores && !drop_curr_restores) {
-            dropped[i - 1] = true;
-        } else if (drop_curr_restores && !drop_prev_restores) {
-            dropped[i] = true;
-        } else {
-            // 无法确证，执行严格 Fail-Closed 双丢弃
-            dropped[i - 1] = true;
-            dropped[i] = true;
-        }
-    }
-}
+```text
+FIL Header（38 字节）
+  页校验和 / space-or-checksum
+  页号
+  前驱 / 后继页
+  页 LSN
+  页类型
+  Space ID
+Page Body
+  Page Header、Infimum、Records、Supremum、Directory
+FIL Trailer（8 字节）
 ```
 
-### 3.2 多版本冲突消歧（LSN Conflict Resolution）
-在未 TRIM 的固态介质上，同一 `(space_id, page_no)` 可能存在多次历史快照、双写缓冲区副本或已释放的旧块。系统建立全序冲突决议偏序集：
-$$\mathcal{P}_1 \succ \mathcal{P}_2 \iff (\text{LSN}_1 > \text{LSN}_2) \lor (\text{LSN}_1 = \text{LSN}_2 \land \text{N\_RECS}_1 > \text{N\_RECS}_2)$$
-在全局物理扫描阶段直接阻断老旧页面的无效展开。
+在解码记录前，先校验 FIL Header 的关键字段：
 
----
+| 偏移 | 长度 | 字段 | 取证用途 |
+|---:|---:|---|---|
+| 0 | 4 | checksum 或 space/checksum | 完整性门。 |
+| 4 | 4 | page number | 页身份与重复页消歧。 |
+| 8 | 4 | previous page | 链一致性。 |
+| 12 | 4 | next page | 链一致性。 |
+| 16 | 8 | page LSN | 新旧页冲突消歧。 |
+| 24 | 2 | page type | INDEX、BLOB、SDI 等布局选择。 |
+| 34 | 4 | Space ID | 跨表空间污染过滤。 |
 
-## 4. 全字段类型高精度反序列化
+### 2.1 COMPACT/DYNAMIC 记录元数据
 
-引擎提供工业级零拷贝内存解析器，支持 MySQL 5.6 至 9.0 定义的全部存储域：
+COMPACT 和 DYNAMIC 记录的变长元数据与 NULL 位图位于记录数据之前。记录数据还包含 InnoDB 隐藏事务字段和用户列。解码器必须依据物理排列解析，不能简单假设物理顺序等于 SQL 列顺序。
 
-1. **整数类型（Integer Serialization）**：
-   InnoDB 对所有有符号整数执行符号位反转存储（`raw ^ (1ULL << (bits - 1))`），使有符号整数在物理内存上的字典序与数值序完全对齐。反序列化时精准还原。
-2. **定点数类型（NEWDECIMAL）**：
-   按 9 位十进制数（4 字节）分段打包存储，最高段根据符号位执行掩码反转（正数最高位异或 `0x80`，负数按位全量取反）。
-3. **高精度时间类型（Temporal2 Encoding）**：
-   - `TIME2`：3 字节基础时间（基准偏移 $8388608$），根据微秒精度补入 1~3 字节小数；
-   - `DATETIME2`：5 字节打包年月日时分秒（$19\text{位月} + 5\text{位日} + 5\text{位时} + 6\text{位分} + 6\text{位秒}$），后接变长微秒；
-   - `TIMESTAMP2`：4 字节大端 Unix 时间戳 + 变长微秒。
-   - **严格域合法性检查（Domain Sanity Assertion）**：
-     在物理扇区雕刻时，解析器强制断言 $m \in [1, 12]$、$d \in [1, 31]$、$h \le 838$、$mi \le 59$、$s \le 59$，拦截任何由非结构化字符混淆导致的越界时间假阳性行。
-4. **原生二进制 JSON（Type 31）**：
-   完整实现 MySQL 8.0/8.4/9.0 二进制 JSON 文档规范（`JSON_TYPE_SMALL_OBJECT`, `JSON_TYPE_LARGE_ARRAY` 等），支持小端变长键值查找与多层嵌套树的无损还原。
+对于最大字节长度大于 255 的变长字段：
 
----
+- 短值可以使用一个长度字节；
+- 较长值使用两个字节；
+- 外部存储标志属于编码长度的一部分；
+- 设置外部标志时，内联字节数必须由编码长度推导，不能只看指针猜测。
 
-## 5. 文件系统物理感知与扇区雕刻
+已验证的 Antelope 规则为：
 
-### 5.1 ext4 块分配图拓扑雕刻
-- 物理范围：读取超级块（`Superblock`）确认块大小（4 KiB）与每组块数（32,768）；
-- 空闲扇区捕获：在 `scan_freed_blocks` 中遍历块组描述符（`ext4_group_desc`）定位各块组 `bg_block_bitmap`，将 bit 为 0 的已删除块连续映射为待检物理页；
-- 目标空间前置过滤：在收集 `blob_queue_` 及索引页时，前置校验 `FIL_PAGE_ARCH_LOG_NO_OR_SPACE_ID == target_space_id`，杜绝跨库扇区串扰。
+```text
+inline_bytes = encoded_size - 16384 = 788
+              = 768 字节内联前缀 + 20 字节 BTR_EXTERN 指针
+```
 
-### 5.2 XFS 分配组（Allocation Group）并行遍历
-- 针对百万级 IOPS 的企业级介质，利用 XFS 独立的 AG 架构划分并发工作单元；
-- 每个 Worker 独立处理一个 AG，解析 `xfs_agf`（空间空闲 B+Tree）与 `xfs_agi`（空闲 Inode B+Tree），高效召回已执行 `unlink` 但未清零的 Extent 物理空间。
+DYNAMIC/Barracuda 行通常在聚簇记录中保留 20 字节指针，再从外部 LOB 链拼接数据。
 
----
+## 3. 结构校验与冲突消歧
 
-## 6. 工业级取证与 Fail-Closed 门控
+### 3.1 聚簇主键保序
 
-### 6.1 密码学证据链与状态机
-整个恢复流程由确定的有限状态机严格驱动：
-$$\text{PLANNED} \longrightarrow \text{PRECHECKED} \longrightarrow \text{MEDIA\_PREPARED} \longrightarrow \text{TRUTH\_SEALED} \longrightarrow \text{PERSISTED} \longrightarrow \text{SCENARIO\_APPLIED} \longrightarrow \text{RECOVERY\_ATTEMPTED} \longrightarrow \text{IMPORT\_VALIDATED} \longrightarrow \text{REPORTED} \longrightarrow \text{SEALED}$$
+聚簇叶子页中通过记录链连接的记录必须严格按聚簇键递增：
 
-- 每轮运行的全部输入元数据、输出日志、CSV 导出及校验 JSON 均计算 SHA-256 哈希清单；
-- 终态生成包含设备物理指纹（WWN / Serial）的数字封印（`manifest.seal`），实现不可伪造的取证链条。
+\[
+K(r_1) < K(r_2) < \dots < K(r_n)
+\]
 
-### 6.2 独立容器重导入回环判决（Round-Trip Re-import Verification）
-任何物理扇区雕刻输出的结构化数据，均必须通过独立全新创建的干净目标版本 MySQL 容器进行 DDL 创建与全量 SQL 导入。只有当导入成功、无警告报错、且读回比对与真值实现逐行逐字段零差异时，资格赛方可判定为 **`PASS`**。
+物理雕刻可能遇到旧页、异表页或单条损坏记录。实现采用有界的局部判定，并拒绝无法消歧的碰撞；不会通过编造主键或移动字段来“修复”保序违例。
+
+### 3.2 SpaceID 与 IndexID 过滤
+
+候选页只有在物理身份匹配目标时才有资格继续处理：
+
+\[
+SpaceID(P) \in S_{target} \land IndexID(P) \in I_{target}
+\]
+
+该过滤在结构化导出前完成，用于阻止旧分配和无关系统表污染结果。
+
+### 3.3 页和 LSN 冲突
+
+在未执行 TRIM 或发生分配复用的介质上，同一 `(space_id, page_no)` 可能出现多个副本。系统依据页身份、完整性、LSN 和记录证据消歧：有效的新页优先于旧副本；相同 LSN 时采取保守策略，不按扫描顺序任意选择。
+
+### 3.4 校验和门
+
+校验和不是提示信息，而是结构化输出门。无法满足适用校验策略的页会被拒绝。损坏矩阵因此区分：
+
+- 健康的结构化行；
+- 可归因于被拒绝页的有界缺失；
+- 无法安全声明结构化行的 evidence-only 证据。
+
+## 4. 字段解码与外部 LOB
+
+Schema 引导解码器覆盖资格验证夹具中使用的物理编码：
+
+- 有符号/无符号整数排序变换；
+- 分段打包的 `NEWDECIMAL`；
+- 带小数精度的 `TIME2`、`DATETIME2`、`TIMESTAMP2`；
+- 字符/二进制值以及 NULL/空字符串区分；
+- ENUM/SET 值映射；
+- MySQL 二进制 JSON 树；
+- 内联和外部 TEXT/BLOB 数据。
+
+时间类型会执行范围校验。月份、日期、小时、分钟或秒越界说明字段边界可能错误，必须拒绝而不是格式化成看似合理的时间。
+
+### 4.1 LOB 链拼接
+
+只有当指针和片段都符合对应物理格式时才重建外部值：
+
+```text
+聚簇记录
+  └── 20 字节外部指针
+        ├── 旧版 0x000A 链（5.x）
+        ├── 压缩/旧版变体（按夹具结果进入支持或证据路径）
+        └── 现代 LOB entry/fragment 链（8.x/9.x）
+```
+
+内联前缀必须保持原始顺序。缺失、循环、越界或截断片段会被记录为丢弃/不确定，不能静默替换成较短值。
+
+## 5. 文件系统感知雕刻
+
+### 5.1 ext4
+
+ext4 扫描器读取文件系统几何信息和块组元数据，识别可能释放的块/Extent，再把物理页候选交给 InnoDB 身份过滤器。日志回放和事故后的重新分配都可能使候选无效；文件系统层发现本身不等于可恢复。
+
+### 5.2 XFS
+
+XFS 扫描器按分配组划分任务，并利用 AG 元数据与空闲空间结构查找候选 Extent。并行化只影响发现速度，不改变校验规则；每个候选仍需经过页身份、SpaceID/IndexID、校验和、记录和 Schema 校验。
+
+## 6. 审计生命周期与 Fail-Closed 策略
+
+封存运行通常遵循如下状态：
+
+```text
+PLANNED
+  → PRECHECKED
+  → MEDIA_PREPARED
+  → TRUTH_SEALED
+  → RECOVERY_ATTEMPTED
+  → CONTRACT_PERSISTED
+  → IMPORT_VALIDATED
+  → REPORTED
+  → SEALED
+```
+
+验证夹具记录实际生命周期字段。输入、输出、调用元数据和比对结果会写入 manifest 并计算摘要；封印将证据绑定到记录中的源设备身份。
+
+### 6.1 合约语义
+
+- `structured_recovery`：Schema 和物理校验允许输出类型化数据；
+- `forensic_evidence`：发现了物理证据，但拒绝结构化导出；
+- `PASS_BOUNDED_STRUCTURED`：完好区域通过，损坏区域被明确限定；
+- `PASS_EVIDENCE_ONLY`：拒绝导出是预期安全结果；
+- `UNSUPPORTED`：组合超出已验证解码边界；
+- `importable: false`：物理恢复工具不自行证明可导入。
+
+### 6.2 独立重导入边界
+
+最终资格判断由独立干净 MySQL 实例执行：创建预期 Schema，不做人工修复地导入恢复数据，读回并与封存真值逐字段比较。没有该边界，不能把看似合理的行数转化为 PASS。
+
+### 6.3 保守失败行为
+
+Fail-Closed 是正确性能力：
+
+- 拒绝不明确的字段边界；
+- 拒绝无效校验和与不可能的时间值；
+- 拒绝断裂或不完整的外部链；
+- 缺少已验证后端或密钥时拒绝压缩/加密数据；
+- 保存诊断和证据供后续分析。
+
+操作流程和参数说明见[用户操作指南](USER_GUIDE_PRO.md)与[灾难恢复实战指南](DISASTER_RECOVERY_GUIDE.md)。
